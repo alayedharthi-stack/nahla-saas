@@ -48,7 +48,8 @@ MAX_PROMOTIONS = 8
 # Read tools the registry declares beyond the names the merchant instructions
 # use. The model discovers them from their declarations; the instructions are
 # not edited. Each one is an owner decision recorded in the pilot runbook.
-PILOT_ONLY_TOOL_NAMES: Tuple[str, ...] = ("list_shareable_promotions",)
+PILOT_ONLY_TOOL_NAMES: Tuple[str, ...] = ("get_customer_addresses",
+                                          "list_shareable_promotions")
 
 _ORDER_PURPOSES = ("status", "shipment")
 
@@ -459,6 +460,80 @@ def _shipment_lookup(binding: LiveToolBinding) -> at.ToolFunction:
     return _guarded(binding, body)
 
 
+MAX_ADDRESSES = 8
+
+
+def _address_view(fact: Any) -> Optional[Dict[str, Any]]:
+    """One saved address, bounded, as the platform's own projection built it.
+
+    The platform already dropped the primary key, the content fingerprint and
+    the selection-operation reference before handing this over; this bounds the
+    strings and keeps the shape closed, so a field added upstream cannot reach
+    a customer-facing turn without somebody deciding it should.
+    """
+    if not isinstance(fact, Mapping):
+        return None
+    address = fact.get("address")
+    address = address if isinstance(address, Mapping) else {}
+    return {
+        "city": _text(address.get("city"), 120),
+        "district": _text(address.get("district"), 120),
+        "address_line": _text(address.get("address_line"), 300),
+        "country": _text(address.get("country"), 120),
+        "short_address_code": _text(address.get("short_address_code"), 32),
+        "maps_url": _text(address.get("maps_url"), 300),
+        # Where this row came from, kept distinct: a profile row imported from
+        # the store is not an address the customer confirmed on an order, and
+        # calling both "saved" is how the second silently becomes the first.
+        "source": _text(fact.get("source"), 64),
+        "selection_state": _text(fact.get("selection_state"), 32),
+        "selected": bool(fact.get("selected")),
+        "sufficient_for_delivery": bool(fact.get("sufficient")),
+        "missing_requirements": [_text(item, 64)
+                                 for item in list(fact.get("missing_requirements") or ())[:8]],
+    }
+
+
+def _customer_addresses(binding: LiveToolBinding) -> at.ToolFunction:
+    from core.customer_address_candidates import customer_address_facts_for_trusted_context
+
+    def body(arguments: Mapping[str, Any]) -> at.ToolResult:
+        context = binding.context
+        facts = customer_address_facts_for_trusted_context(
+            context.db,
+            tenant_id=int(context.tenant_id),
+            customer_id=getattr(context, "customer_id", None),
+        )
+        status = _text(facts.get("address_read_status"), 32)
+        saved = [view for view in (_address_view(f)
+                                   for f in list(facts.get("saved_addresses") or ())[:MAX_ADDRESSES])
+                 if view is not None]
+        prior = [view for view in (_address_view(f)
+                                   for f in list(facts.get("prior_order_addresses") or ())[:MAX_ADDRESSES])
+                 if view is not None]
+        selected = _address_view(facts.get("selected_delivery_address"))
+        return at.ToolResult(
+            # ``unavailable`` is said as itself. A reader that could not run is
+            # not a customer without an address, and collapsing the two is how
+            # an outage becomes "you have no address saved with us".
+            result={"status": "ok" if status == "available" else "unresolved",
+                    "address_read_status": status,
+                    "address_read_reason": _text(facts.get("address_read_reason"), 64),
+                    "address_resolution": _text(facts.get("address_resolution"), 64),
+                    "saved_addresses": saved,
+                    # Only the resolver's explicit selection. A candidate is
+                    # never promoted here: several saved addresses and no
+                    # choice means ask, not guess.
+                    "selected_delivery_address": selected,
+                    "prior_order_addresses": prior,
+                    "requires_explicit_selection": bool(facts.get("requires_explicit_selection")),
+                    "found": bool(saved or selected)},
+            evidence_refs=(),
+        )
+
+    return _guarded(binding, body)
+
+
 def _promotion_view(snapshot: Any) -> Dict[str, Any]:
     conditions = getattr(snapshot, "conditions", None)
     return {
@@ -626,6 +701,18 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
         "shipment",
         _shipment_lookup,
+    ),
+    (
+        "get_customer_addresses",
+        "Delivery addresses this platform holds for this customer: the saved inventory, "
+        "the one currently selected for delivery if any, and those proven to come from a "
+        "previously confirmed order. Says whether the read succeeded; a read reported as "
+        "unavailable means the addresses could not be read, which is not the same as the "
+        "customer having none. When several are saved and none is selected, the result "
+        "says an explicit selection is required and names no current address.",
+        {"type": "object", "properties": {}, "required": []},
+        "customer_addresses",
+        _customer_addresses,
     ),
     (
         "list_shareable_promotions",

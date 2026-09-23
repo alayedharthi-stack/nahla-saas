@@ -92,18 +92,21 @@ def run(binding: alt.LiveToolBinding, tool: str, arguments: Dict[str, Any], *,
 # ── The allowlist ────────────────────────────────────────────────────────────
 
 
-def test_the_registry_exposes_exactly_the_seven_read_tools(binding):
+def test_the_registry_exposes_exactly_the_eight_read_tools(binding):
     registry = alt.build_live_registry(binding)
     assert tuple(d.name for d in registry.definitions) == alt.LIVE_TOOL_NAMES
     assert alt.LIVE_TOOL_NAMES == ("search_products", "get_product_details", "search_merchant_knowledge",
                                    "resolve_customer_order", "get_order_details", "get_order_shipment",
-                                   "list_shareable_promotions")
+                                   "get_customer_addresses", "list_shareable_promotions")
 
 
 def test_every_tool_the_instructions_name_is_declared_by_the_registry(binding):
     """The instructions refer to six tools by name; the registry declares those
-    six plus the owner-approved read of shareable promotions, which the
-    instructions never mention and the model discovers from its declaration."""
+    six plus two owner-approved reads — shareable promotions and the customer's
+    saved addresses — which the instructions never mention and the model
+    discovers from their declarations. Keeping them out of the instructions is
+    deliberate: when to read an address, and whether to mention one, stays the
+    model's call rather than a step the prompt orders."""
     from modules.ai.commerce_agent_v2.pilot_instructions import INSTRUCTION_TOOL_NAMES
 
     declared = tuple(d.name for d in alt.build_live_registry(binding).definitions)
@@ -442,6 +445,68 @@ def test_an_order_lookup_keeps_the_status_label_and_the_selection_reason(binding
     assert observation.evidence_refs == ("order:summary:12",)
     assert observation.result["order"]["status_label"] == "تم الشحن"
     assert observation.result["selection_reason"] == "latest_open_order"
+
+
+def test_a_requested_order_that_is_not_this_customers_is_not_no_orders_at_all(binding, monkeypatch):
+    """Both are ``not_found``; only the reason separates them. A customer who
+    asked after a number that is not theirs has orders; one with an empty record
+    has none. Collapsing the two lets the agent tell a returning customer they
+    have never ordered — so the reason has to survive into the observation."""
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("not_found", selection_reason="explicit_order_number",
+                                      failure_reason="explicit_order_not_found_for_customer")))
+    asked = run(binding, "resolve_customer_order",
+                {"purpose": "status", "order_number": "A-999"}).result
+    assert asked["status"] == "not_found" and asked["found"] is False
+    assert asked["reason"] == "explicit_order_not_found_for_customer"
+
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("not_found", selection_reason=None,
+                                      failure_reason="no_orders_in_trusted_customer_record")))
+    empty = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert empty["status"] == "not_found" and empty["found"] is False
+    assert empty["reason"] == "no_orders_in_trusted_customer_record"
+
+    assert asked["reason"] != empty["reason"]
+
+
+def test_an_order_read_the_merchant_disabled_is_a_denial_not_an_absence(binding, monkeypatch):
+    """The unreadable case. A capability the merchant turned off says so; it
+    never reaches the model wearing the shape of a customer with no orders."""
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("denied", failure_reason="order_reads_disabled")))
+    body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert body["status"] == "denied" and body["found"] is False
+    assert body["reason"] == "order_reads_disabled"
+
+
+def test_with_several_orders_the_observation_says_which_one_and_why(binding, monkeypatch):
+    """«تعدد الطلبات». The platform picks; the observation carries the picked
+    order together with the rule that picked it, so the agent can name the order
+    it is answering about instead of implying the customer has only one."""
+    summary = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                       status="processing", status_label="قيد التجهيز")
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=summary, selection_reason="latest_open_order",
+                                      evidence=[Record("order:summary:31")])))
+    body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert body["order"]["order_id"] == 31
+    assert body["order"]["order_reference"] == "A-31"
+    assert body["selection_reason"] == "latest_open_order"
+
+
+def test_an_order_the_conversation_never_authorized_is_reported_as_not_found(binding, monkeypatch):
+    """`_load_authorized_order` refuses an id the turn never authorized, and the
+    details read turns that into `not_found`. What matters here is that the
+    refusal arrives as data the model can act on rather than as a tool error,
+    and that it carries no field of the order it declined to read."""
+    patch_impl(monkeypatch, "orders", "get_order_details_impl",
+               async_returning(result("not_found", failure_reason="authorized_order_missing")))
+    observation = run(binding, "get_order_details", {"order_id": 4_242})
+    assert observation.ok is True
+    assert observation.result == {"status": "not_found", "found": False,
+                                  "reason": "authorized_order_missing"}
+    assert observation.evidence_refs == ()
 
 
 def test_shipment_facts_keep_the_carrier_and_tracking_exactly_as_read(binding, monkeypatch):
@@ -798,3 +863,181 @@ def test_the_shipment_view_carries_nothing_about_the_recipient(binding, monkeypa
                       "address_url", "latitude", "longitude", "label_url", "label_pdf_path",
                       "cod_amount", "external_shipment_id", "extra_metadata"):
         assert forbidden not in blob and forbidden not in body
+
+
+# ── The addresses the platform actually holds ────────────────────────────────
+
+
+def _address_fact(**overrides):
+    fact = {"address": {"city": "الرياض", "district": "النخيل",
+                        "address_line": "شارع الملك عبدالعزيز", "country": "SA",
+                        "short_address_code": "RRRD1234", "maps_url": ""},
+            "source": "salla_customer_profile", "selection_state": "candidate",
+            "selected": False, "sufficient": True, "has_delivery_evidence": True,
+            "has_location_pin": False, "provenance_known": True,
+            "missing_requirements": []}
+    fact.update(overrides)
+    return fact
+
+
+class _AddressContext:
+    """The trusted context as the address read sees it: a session and the
+    identity the conversation established. Never an identity from arguments."""
+
+    def __init__(self, tenant_id: int = TENANT, customer_id: int = 4_100) -> None:
+        self.db = object()
+        self.tenant_id = tenant_id
+        self.customer_id = customer_id
+
+
+@pytest.fixture()
+def address_binding() -> alt.LiveToolBinding:
+    return alt.LiveToolBinding(context=_AddressContext(), link=LINK)
+
+
+def _patch_addresses(monkeypatch, facts):
+    monkeypatch.setattr("core.customer_address_candidates."
+                        "customer_address_facts_for_trusted_context",
+                        lambda db, *, tenant_id, customer_id: facts, raising=True)
+
+
+def _addresses(address_binding, monkeypatch, facts):
+    _patch_addresses(monkeypatch, facts)
+    return run(address_binding, "get_customer_addresses", {}).result
+
+
+def test_a_selected_address_is_the_one_the_resolver_selected(address_binding, monkeypatch):
+    selected = _address_fact(selection_state="selected", selected=True,
+                             source="order_confirmed_shipping")
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "available", "address_read_reason": "ok",
+        "address_resolution": "selected_address",
+        "saved_addresses": [selected], "selected_delivery_address": selected,
+        "prior_order_addresses": [selected], "requires_explicit_selection": False})
+    assert body["status"] == "ok" and body["found"] is True
+    assert body["selected_delivery_address"]["city"] == "الرياض"
+    assert body["selected_delivery_address"]["selected"] is True
+    assert body["requires_explicit_selection"] is False
+
+
+def test_several_candidates_and_no_choice_never_produce_a_current_address(address_binding, monkeypatch):
+    """«عند تعدد المرشحين غير المختارين… دون عنوان افتراضي ضمني». The inventory
+    is reported and the selection requirement is reported; what is not reported
+    is a guess about which one the customer meant."""
+    candidates = [_address_fact(), _address_fact(address={"city": "جدة", "district": "",
+                                                          "address_line": "", "country": "SA",
+                                                          "short_address_code": "", "maps_url": ""})]
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "available", "address_read_reason": "ok",
+        "address_resolution": "multiple_candidates",
+        "saved_addresses": candidates, "selected_delivery_address": None,
+        "prior_order_addresses": [], "requires_explicit_selection": True})
+    assert body["requires_explicit_selection"] is True
+    assert body["selected_delivery_address"] is None
+    assert len(body["saved_addresses"]) == 2
+    assert all(row["selected"] is False for row in body["saved_addresses"])
+
+
+def test_an_unreadable_address_source_is_never_reported_as_having_none(address_binding, monkeypatch):
+    """The distinction the handoff puts first: an exception is `unavailable`,
+    never silently converted to "no address". An outage must not reach the
+    customer as a fact about their account."""
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "unavailable",
+        "address_read_reason": "resolver_unavailable",
+        "address_resolution": None, "saved_addresses": [],
+        "selected_delivery_address": None, "prior_order_addresses": [],
+        "requires_explicit_selection": False})
+    assert body["status"] == "unresolved"
+    assert body["address_read_status"] == "unavailable"
+    assert body["address_read_reason"] == "resolver_unavailable"
+    assert body["found"] is False
+
+
+def test_a_customer_with_no_saved_address_says_exactly_that(address_binding, monkeypatch):
+    """And the other side of it: a read that ran and found nothing is
+    `available` with an empty inventory, which is a fact about the customer."""
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "available", "address_read_reason": "ok",
+        "address_resolution": "no_address", "saved_addresses": [],
+        "selected_delivery_address": None, "prior_order_addresses": [],
+        "requires_explicit_selection": False})
+    assert body["status"] == "ok" and body["address_read_status"] == "available"
+    assert body["address_resolution"] == "no_address" and body["found"] is False
+
+
+def test_a_prior_order_address_is_distinguishable_from_an_imported_candidate(address_binding, monkeypatch):
+    """Both are "saved"; only one was confirmed on an order. Calling every row a
+    prior order address is how an imported profile guess becomes a fact the
+    customer supposedly gave us."""
+    imported = _address_fact(source="salla_customer_profile")
+    confirmed = _address_fact(source="order_confirmed_shipping",
+                              address={"city": "جدة", "district": "", "address_line": "",
+                                       "country": "SA", "short_address_code": "", "maps_url": ""})
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "available", "address_read_reason": "ok",
+        "address_resolution": "multiple_candidates",
+        "saved_addresses": [imported, confirmed], "selected_delivery_address": None,
+        "prior_order_addresses": [confirmed], "requires_explicit_selection": True})
+    assert [row["source"] for row in body["saved_addresses"]] == [
+        "salla_customer_profile", "order_confirmed_shipping"]
+    assert len(body["prior_order_addresses"]) == 1
+    assert body["prior_order_addresses"][0]["city"] == "جدة"
+
+
+def test_the_address_view_carries_no_internal_control_values(address_binding, monkeypatch):
+    """The platform's projection already drops the primary key, the content
+    fingerprint and the selection-operation reference. The shape is closed here
+    too, so a field added upstream cannot reach a customer-facing turn without
+    somebody deciding it should."""
+    noisy = _address_fact(address_id=41, content_fingerprint="deadbeef",
+                          selection_operation_ref="op-99", latitude=24.7, longitude=46.6)
+    body = _addresses(address_binding, monkeypatch, {
+        "address_read_status": "available", "address_read_reason": "ok",
+        "address_resolution": "single_candidate", "saved_addresses": [noisy],
+        "selected_delivery_address": None, "prior_order_addresses": [],
+        "requires_explicit_selection": False})
+    assert set(body["saved_addresses"][0]) == {
+        "city", "district", "address_line", "country", "short_address_code", "maps_url",
+        "source", "selection_state", "selected", "sufficient_for_delivery",
+        "missing_requirements"}
+    blob = json.dumps(body, ensure_ascii=False)
+    for forbidden in ("address_id", "content_fingerprint", "selection_operation_ref",
+                      "latitude", "longitude"):
+        assert forbidden not in blob
+
+
+def test_the_read_is_scoped_to_this_conversations_tenant_and_customer(address_binding, monkeypatch):
+    """The tool passes the binding's identity and never accepts one as an
+    argument, so a model cannot ask for somebody else's addresses."""
+    seen = {}
+
+    def _capture(db, *, tenant_id, customer_id):
+        seen.update({"tenant_id": tenant_id, "customer_id": customer_id})
+        return {"address_read_status": "available", "address_read_reason": "ok",
+                "address_resolution": "no_address", "saved_addresses": [],
+                "selected_delivery_address": None, "prior_order_addresses": [],
+                "requires_explicit_selection": False}
+
+    monkeypatch.setattr("core.customer_address_candidates."
+                        "customer_address_facts_for_trusted_context", _capture, raising=True)
+
+    # The identity it does use is the binding's, on an ordinary call.
+    run(address_binding, "get_customer_addresses", {})
+    assert seen == {"tenant_id": TENANT, "customer_id": 4_100}
+
+    # And an identity offered as an argument never reaches the read at all: the
+    # declared schema takes no properties, so the call is refused before the
+    # body runs rather than having the argument quietly ignored.
+    seen.clear()
+    refused = run(address_binding, "get_customer_addresses",
+                  {"tenant_id": 999, "customer_id": 999})
+    assert refused.ok is False
+    assert seen == {}
+
+
+def test_the_address_tool_declares_itself_read_only(binding):
+    definition = next(d for d in alt.build_live_registry(binding).definitions
+                      if d.name == "get_customer_addresses")
+    assert definition.read_only is True
+    assert definition.input_schema["properties"] == {}
