@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "_comment": "Owner-approved exceptions to the agent file-ownership scope guard in backend/tests/test_trusted_context_shadow_wireup.py. Read from BASE only, and only for content the grant names: a branch can neither write itself a grant nor reuse an existing one for a different change. Same conventions as intelligence_exceptions.json beside it. This registry does not replace or relax the intelligence_exceptions / GOV-002 requirements; both apply.",
+  "_entry_shape": {
+    "exception_id": "stable id, referenced by the PR that uses it",
+    "exact_file_scope": ["one exact repository path per entry; never patterns"],
+    "base_content_sha256": "sha256 of the committed BASE blob BEFORE the approved change",
+    "authorized_content_sha256": ["one sha256 of the committed HEAD blob AFTER the approved change"],
+    "task_scope": "what the change is for, in prose, for a human reader",
+    "owner_approval_ref": "https link to the owner's approval",
+    "expires_at": "YYYY-MM-DD; a date the guard cannot parse is refused"
+  },
+  "_pending": {
+    "note": "The welcome-coupon economics grant for backend/services/coupon_generator.py is approved (see owner_approval_ref) but cannot be written yet: authorized_content_sha256 is derived from the implementation diff, which does not exist. It is added as a one-line entry once that diff is presented for review. Until then this registry grants nothing, which is what an empty exceptions list means.",
+    "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1115#issuecomment-5785545775",
+    "decision_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1115#issuecomment-5791097043",
+    "review_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1122#issuecomment-5791653456"
+  },
+  "exceptions": []
+}
