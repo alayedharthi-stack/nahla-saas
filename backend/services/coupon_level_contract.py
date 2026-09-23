@@ -118,6 +118,55 @@ def highest_allowed_at_or_below(level_id: str, allowed: Sequence[str]) -> Option
     return None
 
 
+def servable_levels(levels: Any, *, channel: str, policy_levels: Sequence[str]) -> List[str]:
+    """Every rung this merchant lets this channel hand out, in ladder order.
+
+    Each candidate is read on its own terms — its own ``enabled`` switch, its
+    own ``allowed_channels``, and for the assistant the store's AI policy list.
+    Nothing is inherited from the rung a customer's order history resolved,
+    because a rung the merchant closed must not lend its permissions to the one
+    served in its place.
+
+    A rung the merchant never configured is an absence, not a rung with default
+    permissions, so it is not servable. An empty policy list is no restriction
+    rather than a restriction to nothing: that is what the dashboard means by
+    leaving it unset, and it matches the gate the callers already apply.
+    """
+    permitted = {str(x).strip().lower() for x in (policy_levels or ())}
+    wanted_channel = str(channel or "").strip().lower()
+    out: List[str] = []
+    for entry in _as_level_list(levels):
+        candidate = str(entry.get("id") or "").strip().lower()
+        if candidate not in CANONICAL_COUPON_LEVEL_IDS:
+            continue
+        if not bool(entry.get("enabled", True)):
+            continue
+        channels = [str(c).strip().lower() for c in (entry.get("allowed_channels") or []) if c]
+        if channels and wanted_channel not in channels:
+            continue
+        if wanted_channel == "ai" and permitted and candidate not in permitted:
+            continue
+        out.append(candidate)
+    return [lid for lid in CANONICAL_COUPON_LEVEL_IDS if lid in set(out)]
+
+
+def policy_served_level(levels: Any, earned_level: Any, *, channel: str,
+                        policy_levels: Sequence[str]) -> Optional[str]:
+    """The one rung to serve a customer standing on ``earned_level``.
+
+    The single selection both halves of the platform use, so reading and
+    issuing can never disagree about which rung a customer is served: the
+    highest the merchant permits on this channel **at or below** what the order
+    history earned.
+
+    Never above it. A standing that could not be determined is not a standing,
+    and serves nothing — a failure to determine must never become a lower tier
+    handed out by default.
+    """
+    return highest_allowed_at_or_below(
+        earned_level, servable_levels(levels, channel=channel, policy_levels=policy_levels))
+
+
 def resolve_coupon_level_for_order_count(
     levels: Any,
     countable_orders: int,

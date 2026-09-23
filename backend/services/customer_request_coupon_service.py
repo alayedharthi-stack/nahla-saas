@@ -30,9 +30,9 @@ from services.coupon_salla_provider_state import (
     classify_salla_coupon_provider_state,
 )
 from services.coupon_level_contract import (
-    CANONICAL_COUPON_LEVEL_IDS,
     highest_allowed_at_or_below,
     resolve_coupon_level_for_order_count,
+    servable_levels,
 )
 from services.customer_intelligence import CustomerIntelligenceService
 from services.order_countability_policy import is_countable_order
@@ -254,29 +254,12 @@ def _servable_levels(
 ) -> List[str]:
     """Every rung this merchant will let this channel hand out, ladder order.
 
-    Each candidate is read on its own terms — its own switch, its own channel
-    list, and for the assistant the store's policy list. Nothing is inherited
-    from the rung the order history resolved, because a rung that was just
-    refused must not lend its permissions to the one served in its place.
+    Delegates to the platform's one selection contract so issuing and the
+    read-only promotions tool cannot disagree about which rung a customer is
+    served. Reading and issuing must answer to the same rule, or the assistant
+    offers one code and the platform hands over another.
     """
-    permitted = {str(x).strip().lower() for x in (policy_levels or ())}
-    out: List[str] = []
-    for candidate in CANONICAL_COUPON_LEVEL_IDS:
-        entry = _level_entry(block, candidate)
-        # ``_level_entry`` answers with a bare ``{"id": ...}`` placeholder for a
-        # rung the merchant never configured. That is an absence, not a rung
-        # with default permissions, so it is not servable.
-        if not (set(entry) - {"id"}):
-            continue
-        if not bool(entry.get("enabled", True)):
-            continue
-        channels = [str(c).lower() for c in (entry.get("allowed_channels") or []) if c]
-        if channels and channel not in channels:
-            continue
-        if channel == "ai" and permitted and candidate not in permitted:
-            continue
-        out.append(candidate)
-    return out
+    return servable_levels(block.get("levels"), channel=channel, policy_levels=policy_levels)
 
 
 def _global_defaults(block: Mapping[str, Any]) -> Dict[str, Any]:

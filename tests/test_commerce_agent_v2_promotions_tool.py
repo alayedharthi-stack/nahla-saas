@@ -111,9 +111,24 @@ def unknown(reason: str = cer.REASON_IDENTITY_NOT_ESTABLISHED,
                                 entitled_levels=(), reason=reason)
 
 
+def _normalised_levels() -> Any:
+    """The merchant's ladder as the dashboard saves it, shipped defaults."""
+    from backend.routers.coupons import DEFAULT_COUPON_LEVELS, _normalise_levels
+
+    rows = []
+    for row in _normalise_levels(DEFAULT_COUPON_LEVELS):
+        item = dict(row)
+        # The walk is asked about rungs the assistant may serve, so every rung
+        # is open on this channel here; the store policy under test is the
+        # ``allowed_levels`` list each case passes.
+        item["allowed_channels"] = ["ai", "campaign", "autopilot"]
+        rows.append(item)
+    return rows
+
+
 def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionTruthResult,
         *, limit: int = tool.MAX_PROMOTIONS, policy: Any = None,
-        entitlement: Optional[cer.LevelEntitlement] = None) -> Any:
+        entitlement: Optional[cer.LevelEntitlement] = None, levels: Any = None) -> Any:
     """Run the tool with the resolver, the merchant policy and the entitlement
     replaced by doubles. ``policy`` may be a dict, or an exception instance the
     policy read raises. ``entitlement`` defaults to a customer who reached every
@@ -137,8 +152,14 @@ def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionT
         return entitlement if entitlement is not None else entitled("vip")
 
     monkeypatch.setattr(tool, "resolve_shareable_promotions", resolver)
+    def read_block(db: Any, tenant_id: int) -> Dict[str, Any]:
+        if isinstance(levels, BaseException):
+            raise levels
+        return {"levels": _normalised_levels() if levels is None else levels}
+
     monkeypatch.setattr(tool, "resolve_level_entitlement", read_entitlement)
     monkeypatch.setattr(generator, "_get_ai_policy", read_policy)
+    monkeypatch.setattr(generator, "_get_coupon_dashboard_block", read_block)
     outcome = asyncio.run(tool.list_shareable_promotions_impl(context, limit=limit))
     return outcome, calls
 
@@ -282,21 +303,36 @@ def test_a_rung_this_customer_has_not_reached_never_leaves_the_records(monkeypat
 
 
 def test_both_gates_must_open_and_either_one_can_close(monkeypatch) -> None:
-    """The store's policy and the customer's standing are separate questions.
-    A store that allows gold does not make this conversation gold, and a gold
-    customer does not override a store that keeps gold off the assistant."""
+    """The store's policy and the customer's standing are separate questions,
+    and each answers a different one.
+
+    The policy says which rungs the assistant may ever mention in this store.
+    The standing says how far up the ladder this customer has come. Neither
+    overrides the other, and the rung actually served is the highest the policy
+    permits *at or below* the standing.
+    """
     facts = truth(shareable=_ladder_facts())
     allowed_but_unearned, _ = run(Context(), monkeypatch, facts,
                                   policy={**DEFAULT_POLICY, "allowed_levels": ["gold"]},
                                   entitlement=entitled("bronze"))
+    # A store that allows gold does not make this conversation gold. Upward is
+    # the direction the gate must never move, and it still does not.
     assert [p.code for p in allowed_but_unearned.promotions] == ["WELCOME10"]
 
     earned_but_unallowed, _ = run(Context(), monkeypatch, facts,
                                   policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
                                   entitlement=entitled("gold"))
-    assert [p.code for p in earned_but_unallowed.promotions] == ["WELCOME10"]
-    # A gold customer whose store keeps gold from the assistant reaches no
-    # coupon rung at all — not a consolation rung further down the ladder.
+    # Downward is different, and this is the owner's decision of 2026-09-23:
+    # a gold customer in a store that keeps gold from the assistant is a silver
+    # customer *on this channel*, not a customer with nothing. Silver is what
+    # the store said the assistant may give, so silver is what they get — one
+    # rung, the best permitted, never bronze beside it and never gold.
+    assert [p.code for p in earned_but_unallowed.promotions] == ["SILVER15", "WELCOME10"]
+    assert earned_but_unallowed.withheld == {tool.WITHHELD_LEVEL_NOT_ALLOWED: 1,
+                                             tool.WITHHELD_LEVEL_NOT_SERVED: 1}
+    # And their standing is untouched: serving silver demotes nobody.
+    assert earned_but_unallowed.entitlement["resolved_level"] == "gold"
+    assert earned_but_unallowed.entitlement["served_level"] == "silver"
 
 
 def test_a_customer_who_could_not_be_classified_still_sees_what_was_never_about_class(monkeypatch) -> None:
@@ -728,6 +764,173 @@ def test_a_kept_result_still_reports_what_was_held_back_beside_it(monkeypatch) -
     result, _ = run(context, monkeypatch, truth(shareable=facts), entitlement=entitled("bronze"))
     assert result.status == "ok" and [p.code for p in result.promotions] == ["OPEN10"]
     assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 6}
+
+
+# ── The rung a store may serve, when the earned one is closed ────────────────
+#
+# Reproduced from production. Tenant 1, customer 66, conversation 9, turn 26,
+# 2026-09-23 18:30:50 UTC, on the deployed 5bd70210:
+#
+#   [PROMOTION_PROJECTION] tenant=1 customer=yes considered=8 kept=0
+#   withheld=level_not_allowed_by_store_policy:2,level_not_earned_by_customer:6
+#   standing=entitled_by_order_count level=gold determined=True
+#
+# A gold customer, gold closed to the assistant, and six lower-rung codes the
+# store *does* allow — and the customer left with nothing. The issuance service
+# already walks down to the best permitted rung; this tool did not, so reading
+# and issuing disagreed about who the customer is on this channel.
+
+
+def test_the_production_incident_a_gold_customer_and_a_store_that_closed_gold(monkeypatch) -> None:
+    """The shape that reached the customer: considered many, kept none.
+
+    Two gold codes the store keeps from the assistant, six silver ones it
+    allows. Standing is gold, so under exact-rung matching the silver codes are
+    "not earned" — by a customer who has earned more than silver.
+    """
+    facts = [coupon_fact(promotion_id=100 + i, code=f"GOLD{i}", coupon_level="gold") for i in range(2)]
+    facts += [coupon_fact(promotion_id=110 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(6)]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
+                    entitlement=entitled("gold", orders=7))
+    assert result.status == "ok", "a store that allows silver has something for a gold customer"
+    assert [p.code for p in result.promotions] == [f"SILVER{i}" for i in range(6)]
+    # The two gold codes are still refused, by the gate that really refused them.
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_ALLOWED: 2}
+    # And the customer is still gold. Serving silver does not demote anyone.
+    assert result.entitlement["resolved_level"] == "gold"
+    assert result.entitlement["served_level"] == "silver"
+
+
+def test_serving_a_lower_rung_never_becomes_serving_every_lower_rung(monkeypatch) -> None:
+    """One rung, still. The highest the store permits at or below the earned one.
+
+    This is the failure the entitlement module was written to prevent: a gold
+    customer seeing bronze, silver and gold codes at once. Walking down must
+    not reopen it.
+    """
+    facts = [coupon_fact(promotion_id=120, code="BRONZE5", coupon_level="bronze"),
+             coupon_fact(promotion_id=121, code="SILVER20", coupon_level="silver")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
+                    entitlement=entitled("gold", orders=7))
+    assert [p.code for p in result.promotions] == ["SILVER20"]
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_SERVED: 1}
+
+
+def test_an_intermediate_blocked_rung_is_stepped_over_not_stopped_at(monkeypatch) -> None:
+    """Silver closed, bronze open: the walk continues rather than giving up."""
+    facts = [coupon_fact(promotion_id=130, code="SILVER20", coupon_level="silver"),
+             coupon_fact(promotion_id=131, code="BRONZE5", coupon_level="bronze")]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze"]},
+                    entitlement=entitled("gold", orders=7))
+    assert [p.code for p in result.promotions] == ["BRONZE5"]
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_ALLOWED: 1}
+    assert result.entitlement["served_level"] == "bronze"
+
+
+def test_the_walk_never_goes_upward(monkeypatch) -> None:
+    """A bronze customer in a store that allows only gold still gets nothing.
+
+    Walking down serves less than was earned. Walking up would invent an
+    entitlement, which is the failure the whole gate exists to prevent.
+    """
+    result, _ = run(Context(), monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=140, code="GOLD50", coupon_level="gold")]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["gold"]},
+                    entitlement=entitled("bronze", orders=1))
+    assert result.status == "not_found" and result.promotions == []
+    assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 1}
+    assert result.entitlement["resolved_level"] == "bronze"
+    assert result.entitlement["served_level"] == ""
+
+
+def test_a_disabled_merchant_policy_still_denies_before_any_rung_is_chosen(monkeypatch) -> None:
+    """The store switch comes first. No walk, no list, and the reason says so."""
+    result, _ = run(Context(), monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=150, code="SILVER20", coupon_level="silver")]),
+                    policy={**DEFAULT_POLICY, "enabled": False},
+                    entitlement=entitled("gold", orders=7))
+    assert result.status == "denied"
+    assert result.failure_reason == "merchant_ai_coupon_policy_disabled"
+    assert result.promotions == []
+
+
+def test_a_standing_that_could_not_be_read_serves_no_rung_at_all(monkeypatch) -> None:
+    """An unreadable history entitles nothing, and walking down from nothing
+    reaches nothing. A failure to determine never becomes a lower tier."""
+    for reason in (cer.REASON_IDENTITY_NOT_ESTABLISHED, cer.REASON_ORDER_HISTORY_NOT_SEARCHABLE,
+                   cer.REASON_ORDER_HISTORY_UNREADABLE, cer.REASON_CUSTOMER_RECORD_UNAVAILABLE):
+        result, _ = run(Context(), monkeypatch,
+                        truth(shareable=[coupon_fact(promotion_id=160, code="SILVER20",
+                                                     coupon_level="silver")]),
+                        policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
+                        entitlement=unknown(reason))
+        assert result.status == "not_found", reason
+        assert result.withheld == {tool.WITHHELD_LEVEL_NOT_EARNED: 1}, reason
+        assert result.entitlement["served_level"] == "", reason
+
+
+def test_walking_down_never_reaches_another_customer_s_personal_code(monkeypatch) -> None:
+    """Tenant and personal isolation are untouched by which rung is served."""
+    facts = [coupon_fact(promotion_id=170, code="HERS", coupon_level="silver",
+                         customer_bound=True, bound_customer_id=99),
+             coupon_fact(promotion_id=171, code="MINE", coupon_level="silver",
+                         customer_bound=True, bound_customer_id=41)]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"]},
+                    entitlement=entitled("gold", orders=7))
+    assert [p.code for p in result.promotions] == ["MINE"]
+    assert result.withheld == {tool.WITHHELD_PERSONAL_TO_ANOTHER: 1}
+
+
+def test_the_served_rung_does_not_excuse_the_store_s_expiry_minimum(monkeypatch) -> None:
+    """Every other gate still runs on the rung that gets served."""
+    now = _fixed_now(monkeypatch)
+    facts = [coupon_fact(promotion_id=180, code="TONIGHT", coupon_level="silver",
+                         expires_at=(now + timedelta(hours=2)).isoformat()),
+             coupon_fact(promotion_id=181, code="NEXTWEEK", coupon_level="silver",
+                         expires_at=(now + timedelta(days=7)).isoformat())]
+    result, _ = run(Context(), monkeypatch, truth(shareable=facts),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze", "silver"],
+                            "min_remaining_hours": 24},
+                    entitlement=entitled("gold", orders=7))
+    assert [p.code for p in result.promotions] == ["NEXTWEEK"]
+    assert result.withheld == {tool.WITHHELD_EXPIRING_TOO_SOON: 1}
+
+
+def test_reading_and_issuing_choose_the_same_rung(monkeypatch) -> None:
+    """Parity. The tool and the issuance service must not disagree about which
+    rung a customer is served, or the assistant offers one code and the
+    platform hands over another."""
+    from services.coupon_level_contract import policy_served_level
+
+    levels = _normalised_levels()
+    for earned, allowed, expected in (("gold", ["bronze", "silver"], "silver"),
+                                      ("gold", ["bronze"], "bronze"),
+                                      ("vip", ["bronze", "gold"], "gold"),
+                                      ("gold", ["gold", "silver"], "gold"),
+                                      ("bronze", ["gold"], None)):
+        assert policy_served_level(levels, earned, channel="ai", policy_levels=allowed) == expected
+        result, _ = run(Context(), monkeypatch,
+                        truth(shareable=[coupon_fact(promotion_id=190, code="X",
+                                                     coupon_level=expected or "gold")]),
+                        policy={**DEFAULT_POLICY, "allowed_levels": allowed},
+                        entitlement=entitled(earned, orders=7))
+        assert result.entitlement["served_level"] == (expected or ""), (earned, allowed)
+
+
+def test_a_generic_two_rung_store_serves_below_the_earned_rung_too(monkeypatch) -> None:
+    """Platform-wide: a plain catalogue store, nothing like the shipped ladder."""
+    result, _ = run(Context(), monkeypatch,
+                    truth(shareable=[coupon_fact(promotion_id=200, code="GEN5",
+                                                 coupon_level="bronze")]),
+                    policy={**DEFAULT_POLICY, "allowed_levels": ["bronze"]},
+                    entitlement=entitled("silver", orders=5))
+    assert [p.code for p in result.promotions] == ["GEN5"]
+    assert result.entitlement["resolved_level"] == "silver"
+    assert result.entitlement["served_level"] == "bronze"
 
 
 def test_an_unreadable_source_still_reports_the_gates_that_ran_before_it_failed(monkeypatch) -> None:

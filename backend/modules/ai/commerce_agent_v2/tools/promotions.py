@@ -59,6 +59,7 @@ from modules.ai.commerce_agent_v2.output import (
     PromotionSnapshot,
 )
 from services.coupon_entitlement_read import LevelEntitlement, resolve_level_entitlement
+from services.coupon_level_contract import CANONICAL_COUPON_LEVEL_IDS, policy_served_level
 from services.native_ai_coupon_eligibility import NATIVE_AI_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,9 @@ WITHHELD_UNUSABLE_RECORD = "unusable_record"
 WITHHELD_PERSONAL_TO_ANOTHER = "personal_to_another_customer"
 WITHHELD_LEVEL_NOT_ALLOWED = "level_not_allowed_by_store_policy"
 WITHHELD_LEVEL_NOT_EARNED = "level_not_earned_by_customer"
+# Permitted by the store and not above this customer's standing, but not the
+# one rung being served. A gold customer served silver still sees one rung.
+WITHHELD_LEVEL_NOT_SERVED = "level_not_served_for_customer"
 WITHHELD_NOT_PUBLISHED = "not_published_for_general_use"
 WITHHELD_EXPIRING_TOO_SOON = "expiring_before_store_minimum"
 # The conditions a projection carries but has not evaluated. Named rather than
@@ -162,8 +166,23 @@ def _merchant_published_generally(fact: Dict[str, Any]) -> bool:
     return bool(fact.get("merchant_authored"))
 
 
+def _is_above_standing(level: str, entitlement: LevelEntitlement) -> bool:
+    """Whether a rung sits above what this customer's order history earned.
+
+    A standing that could not be determined puts every rung above it: a failure
+    to determine entitles nothing, and must never read as a lower tier handed
+    out by default.
+    """
+    earned = str(getattr(entitlement, "resolved_level", "") or "").strip().lower()
+    if earned not in CANONICAL_COUPON_LEVEL_IDS or level not in CANONICAL_COUPON_LEVEL_IDS:
+        return True
+    return (CANONICAL_COUPON_LEVEL_IDS.index(level)
+            > CANONICAL_COUPON_LEVEL_IDS.index(earned))
+
+
 def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
              allowed_levels: Optional[List[str]], entitlement: LevelEntitlement,
+             served_level: Optional[str] = None,
              withheld: Optional[Dict[str, int]] = None,
              ) -> Optional[Tuple[PromotionSnapshot, EvidenceRecord]]:
     """One resolver fact as a snapshot plus its evidence record, or ``None``
@@ -220,8 +239,15 @@ def _project(fact: Dict[str, Any], *, customer_id: Optional[int],
         if allowed_levels is not None and level not in allowed_levels:
             _refuse(WITHHELD_LEVEL_NOT_ALLOWED)
             return None
-        if not entitlement.entitles(level):
-            _refuse(WITHHELD_LEVEL_NOT_EARNED)
+        if level != (served_level or ""):
+            # One rung reaches a conversation, and it is the rung the platform
+            # would actually serve: the highest the merchant permits at or
+            # below what this customer earned. Above their standing is not
+            # theirs; at or below it but not the served rung would put two
+            # rungs' codes in front of one customer, which is the failure the
+            # entitlement module exists to prevent.
+            _refuse(WITHHELD_LEVEL_NOT_EARNED if _is_above_standing(level, entitlement)
+                    else WITHHELD_LEVEL_NOT_SERVED)
             return None
         level_eligibility = LEVEL_ENTITLED
     elif _merchant_published_generally(fact):
@@ -344,6 +370,19 @@ def _merchant_policy(context: CommerceAgentContext) -> Dict[str, Any]:
     return _get_ai_policy(context.db, int(context.tenant_id))
 
 
+def _merchant_levels(context: CommerceAgentContext) -> Any:
+    """The merchant's saved coupon ladder, through the platform's own accessor.
+
+    Read for one purpose: each rung's own ``enabled`` switch and
+    ``allowed_channels``, so the rung chosen for a customer honours the gates
+    the merchant set on it. Read-only, like everything else here — the
+    generator is another scope's file and this runtime does not change it.
+    """
+    from services.coupon_generator import _get_coupon_dashboard_block  # noqa: PLC0415
+
+    return (_get_coupon_dashboard_block(context.db, int(context.tenant_id)) or {}).get("levels")
+
+
 async def list_shareable_promotions_impl(
     context: CommerceAgentContext,
     *,
@@ -387,6 +426,26 @@ async def list_shareable_promotions_impl(
     # order landing mid-turn cannot make one rung's code appear beside
     # another's. Never raises — an unreadable history entitles nothing.
     entitlement = resolve_level_entitlement(context.db, int(context.tenant_id), customer_id)
+    # The one rung this store would actually serve this customer: the highest
+    # it permits at or below what the order history earned. The issuance
+    # service selects with the same contract, so what the assistant may mention
+    # and what the platform would hand over cannot drift apart.
+    #
+    # Their standing is untouched by it. A gold customer in a store that keeps
+    # gold from the assistant is still gold; silver is only what this channel
+    # may offer them today.
+    try:
+        served_level = policy_served_level(
+            _merchant_levels(context), entitlement.resolved_level,
+            channel="ai", policy_levels=allowed_levels or ())
+    except Exception as exc:  # noqa: BLE001 - an unreadable ladder narrows, never widens
+        # Without the ladder the per-rung gates cannot be honoured, so the
+        # selection falls back to the rung actually earned. That withholds more
+        # than the walk would, never less: a read failure must not hand out a
+        # rung the merchant may have closed.
+        logger.info("[PROMOTION_PROJECTION] tenant=%s level_ladder_unreadable=%s",
+                    int(context.tenant_id), type(exc).__name__)
+        served_level = entitlement.resolved_level
     truth = resolve_shareable_promotions(context.db, int(context.tenant_id), limit=bounded,
                                          customer_id=customer_id)
     min_hours = _min_remaining_hours(policy)
@@ -405,7 +464,8 @@ async def list_shareable_promotions_impl(
                 withheld[WITHHELD_EXPIRING_TOO_SOON] = withheld.get(WITHHELD_EXPIRING_TOO_SOON, 0) + 1
                 continue
             projected = _project(fact, customer_id=customer_id, allowed_levels=allowed_levels,
-                                 entitlement=entitlement, withheld=withheld)
+                                 entitlement=entitlement, served_level=served_level,
+                                 withheld=withheld)
             if projected is None:
                 continue
             snapshot, record = projected
@@ -416,18 +476,21 @@ async def list_shareable_promotions_impl(
                 break
     outcome = str(getattr(truth, "query_outcome", "") or "")
     partial = outcome == PROMOTION_PARTIAL_FAILURE
-    entitlement_view = entitlement.as_dict()
+    # The standing and the rung served are reported side by side: they differ
+    # exactly when the store's policy capped this customer, and never silently.
+    entitlement_view = {**entitlement.as_dict(), "served_level": served_level or ""}
     # One line that answers "why did nothing reach me?" without a person having
     # to reconstruct it from a transcript. The merchant's records said how many
     # promotions were live; this says how many survived each gate and which
     # gate took the rest. No code, no customer identifier, no secret.
     logger.info(
         "[PROMOTION_PROJECTION] tenant=%s customer=%s considered=%d kept=%d "
-        "withheld=%s standing=%s level=%s determined=%s",
+        "withheld=%s standing=%s level=%s served=%s determined=%s",
         int(context.tenant_id), "yes" if customer_id is not None else "none",
         considered, len(snapshots),
         ",".join(f"{reason}:{count}" for reason, count in sorted(withheld.items())) or "none",
-        entitlement.reason, entitlement.resolved_level or "none", entitlement.determined,
+        entitlement.reason, entitlement.resolved_level or "none", served_level or "none",
+        entitlement.determined,
     )
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
@@ -445,6 +508,7 @@ async def list_shareable_promotions_impl(
 
 __all__ = ["GENERAL_AUTHORIZED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS", "MAX_PROMOTIONS",
            "MERCHANT_AUTHORED_SOURCE_TYPES", "WITHHELD_EXPIRING_TOO_SOON",
-           "WITHHELD_LEVEL_NOT_ALLOWED", "WITHHELD_LEVEL_NOT_EARNED", "WITHHELD_NOT_PUBLISHED",
+           "WITHHELD_LEVEL_NOT_ALLOWED", "WITHHELD_LEVEL_NOT_EARNED",
+           "WITHHELD_LEVEL_NOT_SERVED", "WITHHELD_NOT_PUBLISHED",
            "WITHHELD_PERSONAL_TO_ANOTHER", "WITHHELD_UNUSABLE_RECORD",
            "list_shareable_promotions_impl"]

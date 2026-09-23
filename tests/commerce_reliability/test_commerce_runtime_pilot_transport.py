@@ -709,3 +709,71 @@ def test_a_deduplicated_card_is_still_an_identified_acceptance():
         return True
 
     assert _card_answer(post_wa) == ("ok", "wamid.PRIOR", 200)
+
+
+# ── Why a turn was text-only ─────────────────────────────────────────────────
+#
+# Production turns 24 and 25 (tenant 1, conversation 9, 2026-09-23 18:30) each
+# reported `delivery_kind=text, choice_rows=0` and nothing else. That is the
+# outcome, not the reason: a model that never asked for a selector and one that
+# asked and had it withheld — an unobserved product, a missing photo, a
+# plain-http link — produce byte-identical summaries. The loop decides both and
+# records them; these prove they reach the turn report, so the next live round
+# is self-diagnosing instead of needing a transcript.
+
+
+def _report_for(events):
+    """A TurnReport built the way `_after_loop` builds one, from loop events."""
+    import dataclasses
+
+    from core.commerce_runtime import agent_contracts as ac
+
+    made = [ac.LoopEvent(step_no=i, kind=kind, detail=detail)
+            for i, (kind, detail) in enumerate(events, start=1)]
+    accepted = next((e for e in reversed(made) if e.kind == "reply_accepted"), None)
+    detail = dict(getattr(accepted, "detail", None) or {})
+    return dataclasses.replace(
+        entry.TurnReport(reason="handled", tenant_id=1, conversation_id=9),
+        choices_outcome=str(detail.get("choices") or "") or None,
+        card_outcome=str(detail.get("card") or "") or None,
+    )
+
+
+def test_a_text_only_turn_says_the_model_never_asked_for_either_shape():
+    report = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
+                                              "card": "not_requested"})])
+    assert report.choices_outcome == "not_requested"
+    assert report.card_outcome == "not_requested"
+    fields = report.as_log_fields()
+    assert fields["choices_outcome"] == "not_requested" and fields["card_outcome"] == "not_requested"
+
+
+def test_a_withheld_card_is_told_apart_from_a_card_never_asked_for():
+    """The distinction the production summaries could not make."""
+    from core.commerce_runtime import reply_card as rcard
+
+    asked_and_withheld = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
+                                                          "card": rcard.NO_IMAGE})])
+    never_asked = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
+                                                   "card": rcard.NOT_REQUESTED})])
+    assert asked_and_withheld.choice_rows == never_asked.choice_rows == 0
+    assert asked_and_withheld.card_outcome == rcard.NO_IMAGE
+    assert never_asked.card_outcome == rcard.NOT_REQUESTED
+    assert asked_and_withheld.card_outcome != never_asked.card_outcome
+
+
+def test_each_card_withhold_reason_survives_to_the_log_line():
+    from core.commerce_runtime import reply_card as rcard
+
+    for reason in (rcard.NOT_OBSERVED, rcard.NO_IMAGE, rcard.NO_LINK,
+                   rcard.INSECURE_LINK, rcard.NO_LABEL, rcard.SELECTOR_PREFERRED):
+        report = _report_for([("reply_accepted", {"kind": "text", "choices": "not_requested",
+                                                  "card": reason})])
+        assert report.as_log_fields()["card_outcome"] == reason
+
+
+def test_a_turn_with_no_accepted_reply_claims_no_reason_at_all():
+    """A loop that never accepted a reply has nothing to say about its shape,
+    and says nothing rather than reporting a reason it did not reach."""
+    report = _report_for([("verification_failed", {"problems": ["card_without_evidence"]})])
+    assert report.choices_outcome is None and report.card_outcome is None
