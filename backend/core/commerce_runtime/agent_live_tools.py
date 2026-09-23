@@ -441,7 +441,18 @@ def _shipment_lookup(binding: LiveToolBinding) -> at.ToolFunction:
                                  "shipment_status_label": getattr(shipment, "shipment_status_label", None),
                                  "carrier": getattr(shipment, "carrier", None),
                                  "tracking_number": getattr(shipment, "tracking_number", None),
-                                 "tracking_url": getattr(shipment, "tracking_url", None)}},
+                                 "tracking_url": getattr(shipment, "tracking_url", None),
+                                 # The carrier's last scan, and the two times
+                                 # kept apart: when the carrier says it
+                                 # happened, and when we last managed to ask.
+                                 # Answering "where is my order" with the
+                                 # second is how a stale shipment sounds fresh.
+                                 "data_source": _text(getattr(shipment, "data_source", ""), 64) or None,
+                                 "latest_event_status": _text(getattr(shipment, "latest_event_status", ""), 200) or None,
+                                 "latest_event_note": _text(getattr(shipment, "latest_event_note", ""), 200) or None,
+                                 "latest_event_location": _text(getattr(shipment, "latest_event_location", ""), 200) or None,
+                                 "latest_event_at": _text(getattr(shipment, "latest_event_at", ""), 64) or None,
+                                 "last_verified_at": _text(getattr(shipment, "last_verified_at", ""), 64) or None}},
             evidence_refs=_refs(getattr(result, "evidence", None) or ()),
         )
 

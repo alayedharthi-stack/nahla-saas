@@ -9,6 +9,7 @@ of sharing a database session with a thread nobody is waiting for.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any, Dict, List
@@ -709,3 +710,91 @@ def test_the_view_carries_what_was_seen_beside_what_was_counted(binding, monkeyp
     view = run(binding, "list_shareable_promotions", {}).result["entitlement"]
     assert view["countable_orders"] == 0 and view["determined"] is True
     assert view["orders_seen"] == 6 and view["orders_not_counted"] == 6
+
+
+# ── The carrier's last scan, and the two times that must not merge ───────────
+
+
+def _shipment(**overrides):
+    fields = {"order_id": 12, "evidence_ref": "order:shipment:12", "order_reference": "A-12",
+              "shipment_status": "in_transit", "shipment_status_label": "في الطريق",
+              "carrier": "Aramex", "tracking_number": "TRK-1", "tracking_url": None,
+              "data_source": None, "latest_event_status": None, "latest_event_note": None,
+              "latest_event_location": None, "latest_event_at": None, "last_verified_at": None}
+    fields.update(overrides)
+    return Snapshot(**fields)
+
+
+def _shipment_body(binding, monkeypatch, shipment):
+    patch_impl(monkeypatch, "orders", "get_order_shipment_impl",
+               async_returning(result("ok", shipment=shipment,
+                                      evidence=[Record("order:shipment:12")])))
+    return run(binding, "get_order_shipment", {"order_id": 12}).result["shipment"]
+
+
+def test_the_carriers_last_scan_reaches_the_model_with_its_own_time(binding, monkeypatch):
+    """«آخر حدث متاح وموقعه ووقته ومصدره». What the carrier reported, as the
+    carrier reported it."""
+    body = _shipment_body(binding, monkeypatch, _shipment(
+        data_source="salla", latest_event_status="out_for_delivery",
+        latest_event_note="مع المندوب", latest_event_location="الرياض",
+        latest_event_at="2026-09-23T09:15:00+03:00",
+        last_verified_at="2026-09-23T11:40:00+00:00"))
+    assert body["latest_event_status"] == "out_for_delivery"
+    assert body["latest_event_note"] == "مع المندوب"
+    assert body["latest_event_location"] == "الرياض"
+    assert body["latest_event_at"] == "2026-09-23T09:15:00+03:00"
+    assert body["data_source"] == "salla"
+
+
+def test_when_the_carrier_last_moved_is_never_when_we_last_asked(binding, monkeypatch):
+    """The distinction the handoff insists on. A shipment that has not moved for
+    two days but was checked a minute ago must not read as fresh: the event time
+    and the verification time stay two fields, and neither substitutes."""
+    body = _shipment_body(binding, monkeypatch, _shipment(
+        latest_event_status="in_transit",
+        latest_event_at="2026-09-21T06:00:00+03:00",
+        last_verified_at="2026-09-23T11:59:00+00:00"))
+    assert body["latest_event_at"] == "2026-09-21T06:00:00+03:00"
+    assert body["last_verified_at"] == "2026-09-23T11:59:00+00:00"
+    assert body["latest_event_at"] != body["last_verified_at"]
+
+
+def test_a_verification_with_no_event_reports_no_event(binding, monkeypatch):
+    """Having checked is not having news. A successful refresh that returned no
+    scan leaves the event fields absent rather than borrowing the check's time."""
+    body = _shipment_body(binding, monkeypatch, _shipment(
+        last_verified_at="2026-09-23T11:59:00+00:00"))
+    assert body["last_verified_at"] == "2026-09-23T11:59:00+00:00"
+    assert body["latest_event_at"] is None
+    assert body["latest_event_status"] is None and body["latest_event_location"] is None
+
+
+def test_a_missing_location_stays_missing(binding, monkeypatch):
+    """«عدم اختراع حدث أو موقع مفقود». A scan the carrier sent without a place
+    has no place — not the delivery address, not the merchant's city."""
+    body = _shipment_body(binding, monkeypatch, _shipment(
+        latest_event_status="in_transit", latest_event_at="2026-09-22T10:00:00+03:00"))
+    assert body["latest_event_status"] == "in_transit"
+    assert body["latest_event_location"] is None
+
+
+def test_the_shipment_view_carries_nothing_about_the_recipient(binding, monkeypatch):
+    """The platform row holds a name, a phone, an address, coordinates, label
+    paths and an internal shipment id. None of them is a tracking fact, and the
+    projection is an allowlist so a later column cannot arrive by accident."""
+    body = _shipment_body(binding, monkeypatch, _shipment(
+        latest_event_status="delivered", latest_event_location="جدة",
+        latest_event_at="2026-09-23T08:00:00+03:00"))
+    assert set(body) == {
+        "order_id", "evidence_ref", "order_reference", "shipment_status",
+        "shipment_status_label", "carrier", "tracking_number", "tracking_url",
+        "data_source", "latest_event_status", "latest_event_note",
+        "latest_event_location", "latest_event_at", "last_verified_at"}
+    # ``shipment_status_label`` is a status word, so the check is on the
+    # platform row's own field names rather than on substrings.
+    blob = json.dumps(body, ensure_ascii=False)
+    for forbidden in ("recipient_name", "recipient_phone", "address_type", "address_text",
+                      "address_url", "latitude", "longitude", "label_url", "label_pdf_path",
+                      "cod_amount", "external_shipment_id", "extra_metadata"):
+        assert forbidden not in blob and forbidden not in body

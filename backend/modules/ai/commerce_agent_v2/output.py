@@ -282,6 +282,16 @@ class OrderShipmentSnapshot(BaseModel):
     carrier: str | None = None
     tracking_number: str | None = None
     tracking_url: str | None = None
+    # The carrier's own last scan, as the platform stored it. ``latest_event_at``
+    # is when the carrier says it happened; ``last_verified_at`` is when we last
+    # succeeded in asking. Answering "where is my order" with the second is how
+    # a stale shipment sounds fresh, so they never merge into one field.
+    data_source: str | None = None
+    latest_event_status: str | None = None
+    latest_event_note: str | None = None
+    latest_event_location: str | None = None
+    latest_event_at: str | None = None
+    last_verified_at: str | None = None
     evidence_ref: str
 
     @field_validator("tracking_url")
