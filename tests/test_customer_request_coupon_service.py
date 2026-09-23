@@ -1206,58 +1206,103 @@ def test_native_pool_all_invalid_terminates_pool_empty() -> None:
 # ── The result never describes terms the coupon does not carry ───────────────
 
 
-def _bronze_levels_like(*, max_uses: int):
-    """The merchant's ladder with bronze's cap set explicitly, AI-reachable."""
-    rows = _levels(include_ai_for=("bronze",))
-    for row in rows:
-        if row["id"] == "bronze":
-            row["max_uses"] = max_uses
-    return rows
+WELCOME_RULE = {
+    "id": "first_purchase", "enabled": True, "discount_type": "percentage",
+    "discount_value": 15, "validity_days": 1, "max_uses": 1, "min_order_amount": 0,
+}
 
 
-def test_the_result_reports_the_terms_the_issued_coupon_actually_has() -> None:
-    """The reviewer's replay, kept as a test on the head it caught.
+def _welcome_store(db_kwargs: Optional[dict] = None):
+    """The reviewer's scenario, persisted rather than implied.
 
-    An earlier attempt at the merchant's first-purchase welcome fed the rule's
-    minimum into the issuance result while the *code* handed to the customer
-    still carried the pool row's. The reply would then have been grounded in a
-    minimum the coupon does not honour — worse than promising nothing, because
-    the customer acts on it at checkout. Whatever the welcome eventually
-    shapes, it shapes the coupon or it shapes nothing.
-
-    The scenario is the reviewer's: bronze capped at 50 uses, store minimum
-    100, a saved first-purchase rule offering 15% / one day / one use /
-    minimum 0, and an ordinary bronze pool row carrying the store's terms.
+    Bronze explicitly 5% / 720h / 50 uses, store minimum 100, and the complete
+    welcome rule saved as the dashboard saves it — all five fields, not an
+    ``enabled`` flag. The distinction that makes this a regression at all is
+    **zero countable orders plus the saved rule**: that is the one path the
+    withdrawn overlay ran on, and a test that resolves a rung by standing never
+    reaches it.
     """
-    db, tenant_id, _engine = _make_db(
-        first_purchase=True,
-        levels=_bronze_levels_like(max_uses=50),
-        global_defaults={"min_order_amount": 100},
-    )
-    customer = _add_customer(db, tenant_id, PHONE_A)
-    _add_orders(db, tenant_id, PHONE_A, countable=1)
+    levels = _levels(include_ai_for=("bronze",))
+    for row in levels:
+        if row["id"] == "bronze":
+            row.update({"discount_default": 5, "validity_hours": 720, "max_uses": 50})
+    engine_kwargs = {
+        "levels": levels,
+        "global_defaults": {"min_order_amount": 100},
+        **(db_kwargs or {}),
+    }
+    db, tenant_id, engine = _make_db(**engine_kwargs)
+    # ``_make_db``'s ``first_purchase`` flag saves only {id, enabled}; the rule
+    # has to carry its economics or the overlay under test never fires.
+    settings = db.query(TenantSettings).filter(TenantSettings.tenant_id == tenant_id).one()
+    meta = dict(settings.extra_metadata or {})
+    dash = dict(meta.get("coupons_dashboard") or {})
+    dash["rules"] = [dict(WELCOME_RULE)]
+    meta["coupons_dashboard"] = dash
+    settings.extra_metadata = meta
+    flag_modified(settings, "extra_metadata")
+    db.commit()
+    return db, tenant_id, engine
+
+
+def _welcome_pool_row(db, tenant_id: int):
+    """The code a new customer actually receives: the store's terms, not the
+    welcome's. 5% for 30 days, minimum 100, fifty uses."""
     coupon = _add_pool_coupon(
-        db, tenant_id, "NHBRZ", "bronze",
+        db, tenant_id, "NHWEL", "bronze",
         expires_at=datetime.now(timezone.utc) + timedelta(days=30),
         extra={"min_order_amount": 100, "usage_limit": 50},
     )
+    coupon.discount_value = "5"
+    db.commit()
+    db.refresh(coupon)
+    return coupon
+
+
+def test_a_welcome_result_reports_the_terms_the_issued_coupon_actually_has() -> None:
+    """The reviewer's replay, as a permanent regression that can actually fail.
+
+    A customer with a searchable phone and **zero** countable orders, a merchant
+    whose saved welcome rule offers 15% / one day / one use / minimum 0, and a
+    bronze pool row carrying the store's 5% / 30 days / minimum 100 / fifty uses.
+
+    The withdrawn overlay fed the rule's minimum into the result while that row
+    was what the customer received, so the reply would have been grounded in a
+    minimum the code does not honour — worse than promising nothing, because
+    the customer acts on it at checkout. Whatever the welcome eventually shapes,
+    it shapes the coupon or it shapes nothing.
+
+    Verified to FAIL against the withdrawn implementation (`a75d4088`) and pass
+    here; the earlier version of this test passed on both and so proved nothing.
+    """
+    db, tenant_id, _engine = _welcome_store()
+    customer = _add_customer(db, tenant_id, PHONE_A)          # searchable, no orders
+    coupon = _welcome_pool_row(db, tenant_id)
 
     issued = _issue(db, tenant_id, customer.id)
-    assert issued.issued is True and issued.code == "NHBRZ"
+    assert issued.issued is True and issued.code == "NHWEL"
+    assert issued.countable_orders == 0                        # the welcome branch ran
+    assert issued.resolved_level == "bronze"
     db.refresh(coupon)
 
     stored_minimum = float(coupon.extra_metadata["min_order_amount"])
-    assert issued.min_order_amount == stored_minimum, (
-        "the result must not advertise a minimum the code does not carry")
-    assert issued.restrictions["max_uses"] == 50
-    # The discount and expiry are read from that same row, so all of them agree.
-    assert issued.discount_value == str(coupon.discount_value)
 
-    # The second turn reuses the same assignment, and must describe it the same.
-    again = _issue(db, tenant_id, customer.id)
-    assert again.reason_code == "reused_existing_assignment" and again.code == "NHBRZ"
-    assert again.min_order_amount == stored_minimum
-    assert again.restrictions["max_uses"] == 50
+    def _instant(raw):
+        """The row and the result may differ in tzinfo after a SQLite round
+        trip; what must agree is the moment, not its spelling."""
+        value = datetime.fromisoformat(raw) if isinstance(raw, str) else raw
+        return None if value is None else (
+            value if value.tzinfo else value.replace(tzinfo=timezone.utc))
+
+    expected_expiry = _instant(coupon.expires_at)
+    for label, result in (("first allocation", issued),
+                          ("reuse", _issue(db, tenant_id, customer.id))):
+        assert result.min_order_amount == stored_minimum, f"{label}: minimum"
+        assert result.discount_value == str(coupon.discount_value), f"{label}: discount"
+        assert _instant(result.expires_at) == expected_expiry, f"{label}: expiry"
+        assert result.restrictions["max_uses"] == 50, f"{label}: cap"
+        assert result.code == "NHWEL", label
+    assert _issue(db, tenant_id, customer.id).reason_code == "reused_existing_assignment"
 
 
 def test_the_usage_cap_in_the_result_is_the_rungs_not_the_rows() -> None:
@@ -1269,11 +1314,14 @@ def test_the_usage_cap_in_the_result_is_the_rungs_not_the_rows() -> None:
     regression — it reads identically on the deployed base — and closing it
     belongs with the issuance-matching work, where every selector is in scope.
     """
-    db, tenant_id, _engine = _make_db(levels=_bronze_levels_like(max_uses=1))
+    levels = _levels(include_ai_for=("bronze",))
+    for row in levels:
+        if row["id"] == "bronze":
+            row["max_uses"] = 1
+    db, tenant_id, _engine = _make_db(levels=levels)
     customer = _add_customer(db, tenant_id, PHONE_A)
     _add_orders(db, tenant_id, PHONE_A, countable=1)
-    coupon = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze",
-                              extra={"usage_limit": 50})
+    coupon = _add_pool_coupon(db, tenant_id, "NHBRZ", "bronze", extra={"usage_limit": 50})
 
     issued = _issue(db, tenant_id, customer.id)
     assert issued.issued is True
