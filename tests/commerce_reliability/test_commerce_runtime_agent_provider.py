@@ -763,3 +763,86 @@ def test_a_genuine_no_argument_call_is_still_a_runnable_request(anthropic_double
     result = provider.step(request())
     assert isinstance(result, ac.ProviderToolRequests)
     assert dict(result.requests[0].arguments) == {}
+
+
+# ── The capability declaration ────────────────────────────────────────────────
+#
+# What these prove: the declaration states what the tool accepts, and states the
+# relationship between the text and each structured shape the way the platform
+# actually implements it.
+#
+# What they CANNOT prove — and nothing offline can: that a model reading the
+# corrected declaration will choose to ask for a selector or a card. That is a
+# non-deterministic decision and its only evidence is a live A/B on the real
+# path, measured on ``choices_outcome`` / ``card_outcome``. These cases exist so
+# the contract cannot silently drift back, not to stand in for that round.
+
+_OMITTED_ALWAYS = "omit this whenever the text answers on its own"
+
+
+def _declarations() -> dict:
+    """The three model-facing strings, lowercased, keyed by what they declare."""
+    schema = ap.REPLY_TOOL_SCHEMA
+    return {
+        "tool": ap.REPLY_TOOL_DESCRIPTION.lower(),
+        "choices": schema["properties"]["choices"]["description"].lower(),
+        "card": schema["properties"]["card"]["description"].lower(),
+    }
+
+
+def test_the_declaration_names_both_structured_shapes_the_tool_accepts():
+    """The defect the Tenant 1 round exposed: the tool's own description
+    advertised the selector and never mentioned the card, while the pilot
+    instructions mention neither. A declaration that names one of two accepted
+    shapes is an incomplete statement of the interface."""
+    tool = _declarations()["tool"]
+    assert "selector" in tool
+    assert "card" in tool
+
+
+def test_no_shape_is_gated_on_a_condition_the_platform_always_satisfies():
+    """``reply_card`` states the answer 'already stood on its own prose, which
+    is why a card is an affordance over it rather than a part of it'. Telling
+    the model to omit the shape *because* the text stands on its own therefore
+    names a condition that is true on every turn, and asks for the shape to be
+    omitted every time."""
+    for where, text in _declarations().items():
+        assert _OMITTED_ALWAYS not in text, where
+
+
+def test_each_shape_declares_itself_an_addition_over_the_text_not_a_replacement():
+    """The relationship the implementation actually has, stated where the model
+    can read it."""
+    declarations = _declarations()
+    for where in ("choices", "card"):
+        assert "addition over the text" in declarations[where], where
+        assert "never a replacement" in declarations[where], where
+        assert "never required" in declarations[where] or "is never required" in declarations[where]
+    assert "addition over the text" in declarations["tool"]
+    assert "never a replacement" in declarations["tool"]
+
+
+def test_the_declaration_still_says_nothing_about_when_to_reach_for_either():
+    """Deliberately unstated, and guarded so it stays that way. Telling the
+    model which customer turn deserves a selector would be routing the
+    conversation from the platform, which is exactly what this contract must
+    not do — the correction restores the truth about the interface and leaves
+    the judgement where it was."""
+    for where, text in _declarations().items():
+        for rule in ("when the customer", "if the customer", "use this when",
+                     "always offer", "you should offer", "whenever the customer"):
+            assert rule not in text, f"{where}: {rule!r} would be a usage rule"
+
+
+def test_the_accepted_shape_itself_is_untouched_by_the_correction():
+    """Description-only. A model that already asked correctly under the old
+    declaration sends exactly the same arguments under the new one."""
+    schema = ap.REPLY_TOOL_SCHEMA
+    assert set(schema["properties"]) == {"text", "evidence_refs", "claims_commerce_facts",
+                                         "choices", "card"}
+    assert schema["properties"]["choices"]["required"] == ["product_ids"]
+    assert schema["properties"]["card"]["required"] == ["product_id", "button_label"]
+    assert set(schema["properties"]["choices"]["properties"]) == {"product_ids", "button"}
+    assert set(schema["properties"]["card"]["properties"]) == {"product_id", "button_label"}
+    for optional in ("choices", "card"):
+        assert optional not in schema["required"]
