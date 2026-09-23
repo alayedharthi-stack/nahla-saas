@@ -391,6 +391,7 @@ def _send_card_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
                     int(tenant_id), db,
                     header_image_url=image_url,
                     keep_textual_url=True,
+                    _result_sink=sink,
                 ))
             finally:
                 seen = observed_wire_text(int(tenant_id), recipient)
