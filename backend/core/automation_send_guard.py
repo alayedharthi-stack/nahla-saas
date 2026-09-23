@@ -219,6 +219,53 @@ def log_automation_blocked(
     )
 
 
+def evaluate_campaign_send(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    blocked_path: str,
+) -> AutomationBlockDecision:
+    """Safety gate for merchant-launched, approved-template campaigns.
+
+    Store AI modes control automatic replies, not the merchant's campaign.
+    Explicit recipient pause and blocklist still apply, including paused
+    sibling conversations. Quota and campaign consent checks remain at their
+    existing owners. Never fall through to send if a safety read fails.
+    """
+    convo = None
+    try:
+        from core.ai_disabled_gate import (  # noqa: PLC0415
+            _find_conversations_for_phone,
+            disabled_reason_for_conversation,
+        )
+
+        blocked, _ = is_internal_or_blocked(db, tenant_id, customer_phone)
+        if blocked:
+            decision = AutomationBlockDecision(True, REASON_BLOCKED_NUMBER)
+        else:
+            conversations = _find_conversations_for_phone(db, tenant_id, customer_phone)
+            convo = next(
+                (row for row in conversations if disabled_reason_for_conversation(row)),
+                None,
+            )
+            decision = AutomationBlockDecision(
+                convo is not None, REASON_AI_DISABLED if convo is not None else "",
+            )
+    except Exception:  # noqa: BLE001 — campaign safety failures must fail closed
+        logger.exception("[CAMPAIGN_SAFETY] recipient check failed tenant_id=%s", tenant_id)
+        decision = AutomationBlockDecision(True, "campaign_safety_unavailable")
+
+    if decision.block:
+        log_automation_blocked(
+            reason=decision.reason, tenant_id=tenant_id,
+            customer_id=getattr(convo, "customer_id", None),
+            conversation_id=getattr(convo, "id", None),
+            phone=customer_phone, message_type="template", blocked_path=blocked_path,
+        )
+    return decision
+
+
 def evaluate_automation_send(
     db: Session,
     *,
