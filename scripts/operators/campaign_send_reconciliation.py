@@ -38,27 +38,43 @@ absence of a receipt never counts as "not delivered". Log-only runs cannot see
 delivery receipts, so they report ``delivery_evidence: unavailable`` and never
 fill the two delivered categories.
 
-A failure is only "all_failed" when it is *proven*: an explicit rejection
-code, and a known attempt history that covers every attempt the row
-counted. The pre-ledger dispatcher overwrote a row's error on each retry
-and wrote ambiguous codes (``watchdog_timeout``, ``exception``,
-``no_message_id``) for requests that may have been accepted — those stay
-``uncertain``.
+Attempt history. Every attempt the recipient's row counted
+(``attempt_count``) must be accounted for exactly once before a category
+may say "every attempt failed" or "delivered once". Identities: a ledger
+row is ``(send_log_id, attempt_no)``; an accepted copy is its wamid; the
+summary row stands for the LAST attempt only — and when the ledger has an
+attempt, the summary is that ledger attempt again (the ledger copies its
+code onto the row), never a second one. An attempt is proven unsent only by
+a ledger ``rejected`` / ``not_sent`` state or, for a legacy row, by a
+positive rejection code from ``PROVEN_REJECTION_CODES`` — a code merely
+absent from a list of ambiguous ones proves nothing. Earlier legacy
+attempts whose outcome was overwritten stay unknown, with or without
+copies. Exported log lines carry no attempt identity and never add proof.
 
 Every recipient also carries ``has_proven_delivery`` / ``delivered_copies``,
 independent of its category, and a ``resend_proposal``. A recipient with any
 delivered/read copy is excluded from a resend whatever its other copies say.
 The proposal is input to a human decision, never an authorisation.
 
-Sources and completeness (database mode)
-────────────────────────────────────────
-All reads happen in one ``REPEATABLE READ, READ ONLY`` transaction (one
-consistent snapshot). Each source is reported as ``complete``, ``absent``
-or ``error``. A missing ledger table is only tolerated with
-``--allow-missing-ledger`` (a database from before the ledger deploy); any
-other read failure — permissions, schema drift, a dropped connection —
-aborts the run with exit code 2. ``decision_eligible`` is true only when
-every source is complete and the schema preflight passed; log-only runs are
+Sources, attribution and completeness (database mode)
+──────────────────────────────────────────────────────
+All reads happen in one ``REPEATABLE READ, READ ONLY`` transaction. Each
+source is ``complete``, ``absent`` or ``error``: the table exists, the role
+can SELECT it (checked up front, so an empty lookup set cannot hide a
+missing grant) and every query ran to completion. A missing ledger table is
+tolerated only with ``--allow-missing-ledger``; any other read failure
+aborts with exit code 2.
+
+Query completion is not attribution. Copies are discovered from every
+campaign association — ledger attempts, the summary row, campaign
+``message_events`` (placed through their conversation's customer),
+``message_delivery_events`` linked to the campaign's rows, and accept lines
+from ``--log-json`` — before receipts are read for the whole wamid set.
+Campaign-scoped evidence that cannot be tied to exactly one recipient is
+counted under ``attribution`` and makes the report ineligible; an
+unapplied inbox receipt that may belong to a recipient keeps that
+recipient unresolved. ``decision_eligible`` needs complete sources,
+complete attribution and a passed ``--check-schema``; log-only runs are
 never decision-eligible.
 
 Usage
@@ -111,19 +127,36 @@ class Copy:
 
 
 @dataclass
+class LedgerAttempt:
+    """One ``campaign_send_attempts`` row. ``(send_log_id, attempt_no)`` is
+    its identity; the recipient keeps them keyed by ``attempt_no``."""
+    attempt_no: int
+    state: str
+    wamid: Optional[str] = None
+    error_code: Optional[str] = None
+
+
+@dataclass
 class Recipient:
     phone: str
     copies: Dict[str, Copy] = field(default_factory=dict)
+    # The ``campaign_send_logs`` summary row. It describes the recipient's
+    # LAST attempt only; ``log_attempts`` counts every attempt that reached
+    # the request phase (an abandoned claim is subtracted again).
+    has_log_row: bool = False
     log_status: Optional[str] = None
     log_attempts: int = 0
-    # Count of pre-accept failure observations and the codes they carried
-    # (explicit Meta rejections or the legacy dispatcher's stored code).
-    pre_accept_failures: int = 0
-    pre_accept_codes: List[str] = field(default_factory=list)
-    uncertain_attempts: int = 0
-    # Attempt-ledger rows that prove no message left (rejected / not_sent /
-    # abandoned). They resolve legacy ambiguity for the attempts they cover.
-    ledger_unsent_attempts: int = 0
+    log_error_code: Optional[str] = None
+    log_failed_at: bool = False
+    ledger: Dict[int, LedgerAttempt] = field(default_factory=dict)
+    # Observations without an attempt identity (exported log lines). They
+    # are shown, never counted as proof: they may describe an attempt the
+    # summary row or the ledger already describes.
+    observed_codes: List[str] = field(default_factory=list)
+    uncertain_observations: int = 0
+    # Evidence that may belong to this recipient but could not be placed
+    # (e.g. an unapplied inbox receipt for an unknown wamid).
+    unresolved_evidence: List[str] = field(default_factory=list)
 
     def copy(self, wamid: str) -> Copy:
         c = self.copies.get(wamid)
@@ -131,64 +164,115 @@ class Recipient:
             c = self.copies[wamid] = Copy(wamid=wamid)
         return c
 
+    def ledger_counted(self) -> bool:
+        return any(a.state not in LEDGER_NOT_COUNTED_STATES for a in self.ledger.values())
 
-# Codes the pre-ledger dispatcher stored when the request may have been
-# accepted (or when nothing identifies what happened). Never proof of a
-# failure on their own.
-AMBIGUOUS_FAILURE_CODES = frozenset({
-    "", "unknown", "exception", "watchdog_timeout", "watchdog_revive",
-    "no_message_id", "send_outcome_unknown", "internal_error",
+
+# Positive rejection evidence: canonical ``meta_errors`` keys that the
+# dispatcher stores only when Meta returned an explicit error body for the
+# request (or a local guard refused it before any request). A code that is
+# not listed here — ``watchdog_timeout``, ``exception``, ``no_message_id``,
+# ``unknown``, ``service_unavailable`` (5xx), ``retry_exhausted`` (the real
+# error was overwritten), a new or misspelt string — proves nothing.
+PROVEN_REJECTION_CODES = frozenset({
+    "automation_blocked", "not_on_whatsapp", "invalid_phone", "invalid_payload",
+    "out_of_24h_window", "user_not_opted_in", "marketing_blocked",
+    "client_payment_blocked", "rate_limit", "spam_rate_limit",
+    "template_param_mismatch", "template_not_found", "template_paused",
+    "template_disabled", "policy_violation", "account_locked", "media_error",
+    "auth_error", "recipient_quality_low", "blocked_by_user",
+    "country_restricted", "transport_not_sent",
 })
 
+# Ledger states that prove the attempt produced no message. ``abandoned`` is
+# not an attempt at all: the claim was released before the request phase
+# and the row's counter was decremented again.
+LEDGER_UNSENT_STATES = frozenset({"rejected", "not_sent"})
+LEDGER_NOT_COUNTED_STATES = frozenset({"abandoned"})
 
-def _is_ambiguous_code(code: Optional[str]) -> bool:
-    return (code or "").strip().lower() in AMBIGUOUS_FAILURE_CODES
+
+def is_proven_rejection_code(code: Optional[str]) -> bool:
+    return (code or "").strip().lower() in PROVEN_REJECTION_CODES
 
 
-def proven_unsent(r: Recipient) -> bool:
-    """Every attempt this recipient counted is proven to have produced no
-    message: covered by ledger ``not sent`` rows, or by explicit (non-
-    ambiguous) rejection codes whose number covers the attempt counter."""
-    attempts = max(int(r.log_attempts or 0), 1)
-    if r.ledger_unsent_attempts >= attempts:
-        return True
-    codes = [c for c in r.pre_accept_codes]
-    if not codes or any(_is_ambiguous_code(c) for c in codes):
-        return False
-    # The legacy row keeps only its last error: earlier attempts' outcomes
-    # were overwritten, so a counter above what we saw is incomplete history.
-    return len(codes) + r.ledger_unsent_attempts >= attempts
+@dataclass
+class History:
+    """Every attempt the summary row counted, each accounted for once."""
+    complete: bool
+    unknown_attempts: int = 0
+    unsent_codes: List[str] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+
+
+def attempt_history(r: Recipient) -> History:
+    """Account for each counted attempt exactly once.
+
+    Attempt identities: a ledger row is ``(send_log_id, attempt_no)``; an
+    accepted copy is its wamid; the summary row stands for the recipient's
+    last attempt. Ledger attempts always follow the legacy ones, so the
+    summary describes a legacy attempt only when there is no counted ledger
+    attempt — otherwise it is the ledger's last attempt again and adds
+    nothing. Exported log lines carry no identity and never add coverage.
+    """
+    if not r.has_log_row:
+        return History(False, reasons=["attempt count unknown (no send-log row)"])
+    reasons: List[str] = []
+    unsent: List[str] = []
+    unknown = 0
+    counted = [a for _, a in sorted(r.ledger.items())
+               if a.state not in LEDGER_NOT_COUNTED_STATES]
+    for a in counted:
+        if a.state in LEDGER_UNSENT_STATES:
+            unsent.append(a.error_code or a.state)
+        elif not (a.state == "accepted" and a.wamid and a.wamid in r.copies):
+            unknown += 1                      # claimed / request_started / uncertain
+    legacy_n = int(r.log_attempts or 0) - len(counted)
+    ledger_wamids = {a.wamid for a in counted if a.wamid}
+    legacy_copies = [w for w in r.copies if w not in ledger_wamids]
+    legacy_rejection = (
+        not counted and legacy_n >= 1
+        and (r.log_status or "").lower() == "failed"
+        and not r.log_failed_at               # not a post-accept failure
+        and is_proven_rejection_code(r.log_error_code)
+    )
+    covered = len(legacy_copies) + (1 if legacy_rejection else 0)
+    if legacy_n < 0:
+        reasons.append("ledger attempts exceed the row's attempt counter")
+    elif covered > legacy_n:
+        reasons.append("more outcomes than counted attempts (counter unreliable)")
+    else:
+        unknown += legacy_n - covered         # earlier attempts left no evidence
+    if legacy_rejection:
+        unsent.append((r.log_error_code or "").strip().lower())
+    if r.uncertain_observations:
+        reasons.append("ambiguous attempt observed in logs")
+    reasons.extend(r.unresolved_evidence)
+    return History(complete=not reasons and unknown == 0, unknown_attempts=unknown,
+                   unsent_codes=unsent, reasons=reasons)
 
 
 def classify(r: Recipient, *, delivery_evidence: bool) -> str:
     copies = list(r.copies.values())
-    status = (r.log_status or "").lower()
-    if not copies:
-        if status.startswith("skipped_"):
-            return "excluded"
-        if status in ("sending", "uncertain") or r.uncertain_attempts:
-            return "uncertain"
-        if status == "failed" or r.pre_accept_failures or r.pre_accept_codes:
-            return "all_failed" if proven_unsent(r) else "uncertain"
-        if status in ("", "queued") and r.log_attempts == 0:
-            return "not_started"
-        return "uncertain"
-    if r.uncertain_attempts or status in ("sending", "uncertain"):
-        # An attempt beyond the known copies may exist.
-        return "uncertain" if len(copies) < 2 else "accepted_multiple_unproven"
     delivered = [c for c in copies if c.has_delivery]
     if len(delivered) >= 2:
         return "delivered_multiple"
-    if all(c.failed and not c.has_delivery for c in copies):
-        return "all_failed"
-    if len(copies) >= 2:
-        if len(delivered) == 1 and all(c.failed for c in copies if not c.has_delivery):
-            return "delivered_once"
-        return "accepted_multiple_unproven"
-    # exactly one copy
+    h = attempt_history(r)
+    status = (r.log_status or "").lower()
+    if h.complete and not copies and not h.unsent_codes and not r.ledger_counted():
+        # The row never counted an attempt.
+        if status.startswith("skipped_"):
+            return "excluded"
+        if status in ("", "queued"):
+            return "not_started"
+        return "uncertain"
+    if not h.complete:
+        # An attempt without evidence may be another accepted copy.
+        return "accepted_multiple_unproven" if len(copies) >= 2 else "uncertain"
+    if any(not c.has_delivery and not c.failed for c in copies):
+        return "accepted_multiple_unproven" if len(copies) >= 2 else "uncertain"
     if delivered:
-        return "delivered_once"
-    return "uncertain"
+        return "delivered_once"               # every other attempt proven failed
+    return "all_failed"
 
 
 def _load_meta_errors():
@@ -208,16 +292,14 @@ def _load_meta_errors():
 
 
 def _retryable_rejection(code: str) -> bool:
-    """A pre-accept rejection Meta invites us to retry (rate limit,
-    temporary unavailability, a transport error before connecting)."""
-    me = _load_meta_errors()
+    """A proven rejection Meta invites us to retry (rate limit, a transport
+    failure before any connection). Exact canonical keys only."""
     key = (code or "").strip().lower()
-    if me is None or not key:
+    if key not in PROVEN_REJECTION_CODES:
         return False
-    if key not in me.ERRORS:
-        key = me.classify_meta_error(code=code, message=code).key
-    entry = me.ERRORS.get(key)
-    return bool(entry and entry.retryable) and not _is_ambiguous_code(key)
+    me = _load_meta_errors()
+    entry = me.ERRORS.get(key) if me is not None else None
+    return bool(entry and entry.retryable)
 
 
 def resend_proposal(r: Recipient, category: str) -> str:
@@ -235,7 +317,7 @@ def resend_proposal(r: Recipient, category: str) -> str:
         # Meta accepted and then declined delivery (spam limit, ecosystem
         # engagement, experiment, undeliverable): a restriction, not a retry.
         return "excluded_meta_restriction"
-    codes = r.pre_accept_codes or []
+    codes = attempt_history(r).unsent_codes
     if codes and all(_retryable_rejection(c) for c in codes):
         return "retry_review_candidate"
     return "excluded_meta_restriction"
@@ -279,6 +361,17 @@ def iter_log_messages(paths: Iterable[str]) -> Iterable[str]:
                 yield msg
 
 
+def collect_log_wamids(paths: List[str], *, campaign_id: int) -> Dict[str, str]:
+    """wamid → phone for every campaign-scoped accept line, so the database
+    pass reads their receipts in the same snapshot (and attributes them)."""
+    out: Dict[str, str] = {}
+    for msg in iter_log_messages(paths):
+        m = _SENT_RE.search(msg)
+        if m and int(m.group(1)) == campaign_id:
+            out[m.group(3)] = norm_phone(m.group(2))
+    return out
+
+
 def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id: int,
                log_paths: List[str], failed_tsv: List[str],
                infer_from_failures: bool = False) -> Dict[str, Any]:
@@ -302,14 +395,14 @@ def apply_logs(recipients: Dict[str, Recipient], *, campaign_id: int, tenant_id:
         m = _META_ERR_RE.search(msg)
         if m and int(m.group(1)) == campaign_id:
             r = recipients.setdefault(norm_phone(m.group(3)), Recipient(norm_phone(m.group(3))))
-            r.pre_accept_failures += 1
-            r.pre_accept_codes.append(m.group(2))
+            # No attempt identity: shown, never counted as proof.
+            r.observed_codes.append(m.group(2))
             meta["pre_accept_errors"] += 1
             continue
         m = _EXC_RE.search(msg)
         if m and int(m.group(1)) == campaign_id:
             recipients.setdefault(norm_phone(m.group(2)), Recipient(norm_phone(m.group(2)))) \
-                .uncertain_attempts += 1
+                .uncertain_observations += 1
             meta["exceptions"] += 1
             continue
         m = _FAILED_RE.search(msg)
@@ -363,10 +456,13 @@ class SourceError(RuntimeError):
 
 
 # (name, table, required) — ledger tables become optional only with
-# ``--allow-missing-ledger``.
+# ``--allow-missing-ledger``. ``conversations`` / ``customers`` carry the
+# association of a ``message_events`` row to its recipient.
 DB_SOURCES = (
     ("campaign_send_logs", "campaign_send_logs", True),
     ("message_events", "message_events", True),
+    ("conversations", "conversations", True),
+    ("customers", "customers", True),
     ("message_delivery_events", "message_delivery_events", True),
     ("campaign_send_attempts", "campaign_send_attempts", "ledger"),
     ("campaign_status_event_inbox", "campaign_status_event_inbox", "ledger"),
@@ -391,7 +487,12 @@ LEDGER_INDEXES = {
 }
 
 
-def _chunks(items: List[str], n: int = 1000) -> Iterable[List[str]]:
+def _chunks(items: List[Any], n: int = 1000) -> Iterable[List[Any]]:
+    """Batches of ``items``; an empty list still yields one (empty) batch so
+    the query runs — and proves read access — even with nothing to look up."""
+    if not items:
+        yield []
+        return
     for i in range(0, len(items), n):
         yield items[i:i + n]
 
@@ -408,6 +509,35 @@ def _table_exists(conn: Any, table: str) -> bool:
     return conn.execute(text("SELECT to_regclass(:t) IS NOT NULL"), {"t": table}).scalar()
 
 
+def _can_select(conn: Any, table: str) -> bool:
+    from sqlalchemy import text  # noqa: PLC0415
+    return bool(conn.execute(text("SELECT has_table_privilege(:t, 'SELECT')"),
+                             {"t": table}).scalar())
+
+
+def _apply_status(c: Copy, status: Optional[str], reason: Optional[str] = None) -> None:
+    st = (status or "").lower()
+    if st == "read":
+        c.read = c.delivered = True
+    elif st == "delivered":
+        c.delivered = True
+    elif st == "failed":
+        c.failed = True
+        c.failed_reason = c.failed_reason or (reason or "")[:120] or None
+
+
+def _apply_event_flags(c: Copy, md: Dict[str, Any]) -> None:
+    c.read |= bool(md.get("_status_read"))
+    c.delivered |= bool(md.get("_status_delivered")) or c.read
+    if md.get("_status_failed"):
+        c.failed = True
+        c.failed_reason = c.failed_reason or str(md.get("delivery_error") or "")[:120] or None
+
+
+def _event_wamid(md: Dict[str, Any]) -> Optional[str]:
+    return md.get("wa_message_id") or (md.get("provider_send") or {}).get("wamid") or None
+
+
 def schema_preflight(conn: Any, *, campaign_id: int, tenant_id: int) -> Dict[str, Any]:
     """Post-deploy checks in the same snapshot: the four ledger tables and
     their required indexes, the campaign's status, its lease and any
@@ -415,7 +545,8 @@ def schema_preflight(conn: Any, *, campaign_id: int, tenant_id: int) -> Dict[str
     from sqlalchemy import text  # noqa: PLC0415
     tables = {t: bool(_table_exists(conn, t)) for t in LEDGER_TABLES}
     present = {r[0] for r in conn.execute(text(
-        "SELECT indexname FROM pg_indexes WHERE tablename = ANY(:t)"
+        "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() "
+        "AND tablename = ANY(:t)"
     ), {"t": list(LEDGER_TABLES)}).all()}
     missing_idx = sorted(i for t, idxs in LEDGER_INDEXES.items() for i in idxs if i not in present)
     camp = conn.execute(text(
@@ -455,19 +586,41 @@ def schema_preflight(conn: Any, *, campaign_id: int, tenant_id: int) -> Dict[str
 
 def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: int,
                    tenant_id: int, allow_missing_ledger: bool = False,
-                   check_schema: bool = False) -> Dict[str, Any]:
+                   check_schema: bool = False,
+                   seed_wamids: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Read every evidence source in one read-only snapshot.
 
-    Returns ``{"sources": {name: {...status...}}, ...}``. Raises
-    ``SourceError`` (with the partial source table attached) when a
-    required source is missing or any read fails, so a caller can never
-    mistake an incomplete read for a complete report.
+    Query completion and attribution are reported separately:
+
+    * ``sources[name].status`` — the table was present, readable and every
+      query against it ran to completion (``complete``), or not;
+    * ``attribution`` — campaign-scoped evidence that could not be tied to
+      exactly one of this campaign's recipients. Nothing campaign-scoped is
+      dropped silently: it is counted here and makes the report ineligible.
+
+    Copies are discovered from every campaign association (ledger attempts,
+    the summary row, campaign ``message_events``, ``message_delivery_events``
+    linked to the campaign's send-log rows, ``seed_wamids`` from exported
+    logs), then receipts are read for the complete wamid set, repeating
+    until no new wamid appears.
+
+    Raises ``SourceError`` (with the partial source table attached) when a
+    required source is missing, unreadable or any read fails.
     """
     from sqlalchemy import create_engine, text  # noqa: PLC0415
 
     engine = create_engine(url)
     meta: Dict[str, Any] = {"sources": {}}
     src = meta["sources"]
+    attribution = {
+        "campaign_events_unattributed": 0,
+        "campaign_events_unattributed_with_receipts": 0,
+        "campaign_events_without_wamid": 0,
+        "attribution_conflicts": 0,
+        "log_wamids_unattributed": 0,
+        "synthetic_failure_events": 0,
+        "recipients_with_pending_inbox_candidates": 0,
+    }
     current = None
     try:
         with engine.connect() as conn:
@@ -479,141 +632,257 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
                 raise SystemExit(f"campaign {campaign_id} does not belong to tenant {tenant_id}")
 
             for name, table, required in DB_SOURCES:
-                if _table_exists(conn, table):
-                    src[name] = {"status": "pending"}
-                elif required == "ledger" and allow_missing_ledger:
-                    src[name] = {"status": "absent", "allowed": True}
-                else:
+                if not _table_exists(conn, table):
+                    if required == "ledger" and allow_missing_ledger:
+                        src[name] = {"status": "absent", "allowed": True}
+                        continue
                     src[name] = {"status": "absent", "allowed": False}
                     raise SourceError(f"required source {name} is missing")
+                if not _can_select(conn, table):
+                    src[name] = {"status": "error",
+                                 "error": "InsufficientPrivilege: no SELECT on " + table}
+                    raise SourceError(f"source {name} is not readable")
+                src[name] = {"status": "pending", "rows": 0}
+            has_attempts = src["campaign_send_attempts"]["status"] == "pending"
+            has_inbox = src["campaign_status_event_inbox"]["status"] == "pending"
 
-            # 1. Recipient rows. The row's delivery columns describe the
-            #    wamid it holds (the last one written, pre-ledger).
+            # wamid → recipient phone, from authoritative associations only.
+            wamid_owner: Dict[str, str] = {}
+
+            def claim(wamid: str, phone: str) -> bool:
+                prev = wamid_owner.get(wamid)
+                if prev is not None and prev != phone:
+                    attribution["attribution_conflicts"] += 1
+                    return False
+                wamid_owner[wamid] = phone
+                recipients[phone].copy(wamid)
+                return True
+
+            # 1. Recipient rows (the campaign's audience). The row's delivery
+            #    columns describe the wamid it holds (the last one written).
             current = "campaign_send_logs"
             rows = _read(conn,
-                "SELECT customer_phone_e164, status, attempt_count, provider_message_id, "
+                "SELECT id, customer_phone_e164, status, attempt_count, provider_message_id, "
                 "error_code, delivered_at, read_at, failed_at "
                 "FROM campaign_send_logs WHERE tenant_id = :t AND campaign_id = :c",
                 {"t": tenant_id, "c": campaign_id})
-            for phone, status, attempts, wamid, err, dl, rd, fl in rows:
-                r = recipients.setdefault(norm_phone(phone), Recipient(norm_phone(phone)))
+            log_phone: Dict[int, str] = {}
+            for log_id, phone, status, attempts, wamid, err, dl, rd, fl in rows:
+                p = norm_phone(phone)
+                log_phone[int(log_id)] = p
+                r = recipients.setdefault(p, Recipient(p))
+                r.has_log_row = True
                 r.log_status = status
                 r.log_attempts = int(attempts or 0)
-                if status == "failed" and not wamid:
-                    r.pre_accept_failures = max(r.pre_accept_failures, 1)
-                    r.pre_accept_codes.append((err or "").strip())
-                if wamid:
-                    c = r.copy(wamid)
+                r.log_error_code = (err or "").strip() or None
+                r.log_failed_at = fl is not None
+                if wamid and claim(wamid, p):
+                    c = r.copies[wamid]
                     c.read |= rd is not None
                     c.delivered |= dl is not None or rd is not None
                     if fl is not None and dl is None and rd is None:
                         c.failed = True
-                        c.failed_reason = c.failed_reason or (err or "")[:120]
-            src[current] = {"status": "complete", "rows": len(rows)}
-            wamid_to_phone = {w: p for p, r in recipients.items() for w in r.copies}
+                        c.failed_reason = c.failed_reason or (err or "")[:120] or None
+            src[current].update(status="complete", rows=len(rows))
+            campaign_phones = set(log_phone.values())
 
-            # 2. Attempt ledger (every request since the ledger deploy).
-            if src["campaign_send_attempts"]["status"] == "pending":
+            # 2. Attempt ledger, keyed by (send_log_id, attempt_no).
+            attempt_ids: List[int] = []
+            if has_attempts:
                 current = "campaign_send_attempts"
                 atts = _read(conn,
-                    "SELECT customer_phone_e164, provider_message_id, state, delivered_at, "
-                    "read_at, failed_at, post_accept_error_code, error_code "
+                    "SELECT id, send_log_id, attempt_no, state, provider_message_id, error_code, "
+                    "delivered_at, read_at, failed_at, post_accept_error_code "
                     "FROM campaign_send_attempts WHERE tenant_id = :t AND campaign_id = :c",
                     {"t": tenant_id, "c": campaign_id})
-                for phone, wamid, state, dl, rd, fl, perr, err in atts:
-                    r = recipients.setdefault(norm_phone(phone), Recipient(norm_phone(phone)))
-                    if state in ("uncertain", "claimed", "request_started"):
-                        r.uncertain_attempts += 1
-                    elif state in ("rejected", "not_sent", "abandoned"):
-                        r.ledger_unsent_attempts += 1
-                    if wamid:
-                        c = r.copy(wamid)
+                for att_id, log_id, no, state, wamid, err, dl, rd, fl, perr in atts:
+                    attempt_ids.append(int(att_id))
+                    p = log_phone.get(int(log_id))
+                    if p is None:
+                        attribution["attribution_conflicts"] += 1
+                        continue
+                    r = recipients[p]
+                    r.ledger[int(no)] = LedgerAttempt(int(no), state, wamid, err)
+                    if wamid and claim(wamid, p):
+                        c = r.copies[wamid]
                         c.read |= rd is not None
                         c.delivered |= dl is not None or rd is not None
                         if fl is not None:
                             c.failed = True
                             c.failed_reason = c.failed_reason or perr
-                        wamid_to_phone[wamid] = norm_phone(phone)
-                src[current] = {"status": "complete", "rows": len(atts)}
+                src[current].update(status="complete", rows=len(atts))
 
-            # 3. One outbound message_events row per accepted copy, with
-            #    the webhook's receipt flags for that copy's wamid.
+            # 3. Copies named by exported logs (campaign-scoped accept lines).
+            for wamid, phone in sorted((seed_wamids or {}).items()):
+                p = norm_phone(phone)
+                if p not in campaign_phones or not claim(wamid, p):
+                    attribution["log_wamids_unattributed"] += 1
+
+            # 4. Campaign message_events: one outbound row per accepted copy.
+            #    Attributed by wamid if already owned, else by the row's own
+            #    conversation → customer, which must be one campaign recipient.
             current = "message_events"
+            seen_events: set = set()
+            unattributed: Dict[str, Copy] = {}
             events = _read(conn,
-                "SELECT metadata FROM message_events WHERE tenant_id = :t "
-                "AND direction = 'outbound' AND event_type = 'campaign' "
-                "AND (metadata->>'campaign_id') = :c",
+                "SELECT me.id, me.metadata, cu.phone, cu.normalized_phone, "
+                "conv.metadata->>'customer_phone' "
+                "FROM message_events me "
+                "LEFT JOIN conversations conv ON conv.id = me.conversation_id "
+                "AND conv.tenant_id = me.tenant_id "
+                "LEFT JOIN customers cu ON cu.id = conv.customer_id AND cu.tenant_id = me.tenant_id "
+                "WHERE me.tenant_id = :t AND me.direction = 'outbound' "
+                "AND me.event_type = 'campaign' AND (me.metadata->>'campaign_id') = :c",
                 {"t": tenant_id, "c": str(campaign_id)})
-            unmatched = 0
-            for (md,) in events:
+            for ev_id, md, cu_phone, cu_norm, conv_phone in events:
+                seen_events.add(int(ev_id))
                 md = md or {}
-                wamid = md.get("wa_message_id") or (md.get("provider_send") or {}).get("wamid")
+                wamid = _event_wamid(md)
                 if not wamid:
-                    unmatched += 1
+                    attribution["campaign_events_without_wamid"] += 1
                     continue
-                phone = wamid_to_phone.get(wamid) or _phone_from_wamid(wamid)
-                if not phone:
-                    unmatched += 1
+                candidates = {norm_phone(x) for x in (cu_phone, cu_norm, conv_phone) if x}
+                matches = candidates & campaign_phones
+                owner_p = wamid_owner.get(wamid)
+                if owner_p is None and len(matches) == 1:
+                    owner_p = next(iter(matches))
+                    claim(wamid, owner_p)
+                elif owner_p is not None and matches and owner_p not in matches:
+                    attribution["attribution_conflicts"] += 1
+                if owner_p is None:
+                    c = unattributed.setdefault(wamid, Copy(wamid=wamid))
+                    _apply_event_flags(c, md)
                     continue
-                r = recipients.setdefault(phone, Recipient(phone))
-                c = r.copy(wamid)
-                wamid_to_phone[wamid] = phone
-                c.read |= bool(md.get("_status_read"))
-                c.delivered |= bool(md.get("_status_delivered")) or c.read
-                if md.get("_status_failed"):
-                    c.failed = True
-                    c.failed_reason = c.failed_reason or str(md.get("delivery_error") or "")[:120]
-            src[current] = {"status": "complete", "rows": len(events),
-                            "rows_without_wamid_or_phone": unmatched}
+                _apply_event_flags(recipients[owner_p].copies[wamid], md)
+            src[current].update(status="complete", rows=len(events))
 
-            # 4. Append-only per-status events (raw Meta code preserved).
-            #    Looked up by the wamids now known for this campaign.
-            known = sorted(wamid_to_phone)
+            # 5. message_delivery_events linked to this campaign's send-log
+            #    rows (a copy whose wamid was overwritten on the row is still
+            #    linked when its receipt matched the row at the time).
             current = "message_delivery_events"
-            mde = 0
-            for chunk in _chunks(known):
-                for wamid, status, raw_code, err in _read(conn,
-                        "SELECT wamid, status, raw_code, error_code FROM message_delivery_events "
-                        "WHERE tenant_id = :t AND wamid = ANY(:w)", {"t": tenant_id, "w": chunk}):
-                    mde += 1
-                    c = recipients[wamid_to_phone[wamid]].copy(wamid)
-                    st = (status or "").lower()
-                    if st == "read":
-                        c.read = c.delivered = True
-                    elif st == "delivered":
-                        c.delivered = True
-                    elif st == "failed":
-                        c.failed = True
-                        c.failed_reason = c.failed_reason or (raw_code or err or "")
-            src[current] = {"status": "complete", "rows": mde}
+            seen_mde: set = set()
+            for chunk in _chunks(sorted(log_phone)):
+                for mde_id, wamid, status, raw_code, err, log_id in _read(conn,
+                        "SELECT id, wamid, status, raw_code, error_code, campaign_send_log_id "
+                        "FROM message_delivery_events WHERE tenant_id = :t "
+                        "AND campaign_send_log_id = ANY(:ids)", {"t": tenant_id, "ids": chunk}):
+                    seen_mde.add(int(mde_id))
+                    if (wamid or "").startswith("synth:"):
+                        attribution["synthetic_failure_events"] += 1
+                        recipients[log_phone[int(log_id)]].uncertain_observations += 1
+                        continue
+                    if claim(wamid, log_phone[int(log_id)]):
+                        _apply_status(recipients[wamid_owner[wamid]].copies[wamid],
+                                      status, raw_code or err)
+                    src[current]["rows"] += 1
 
-            # 5. Ledger webhook inbox (events for known wamids; pending ones
-            #    are receipts not yet attached to an attempt).
-            if src["campaign_status_event_inbox"]["status"] == "pending":
+            # 6. Receipts for the complete wamid set, until it stops growing.
+            read_wamids: set = set()
+            seen_inbox: set = set()
+            first = True
+            while True:
+                pending = sorted((set(wamid_owner) | set(unattributed)) - read_wamids)
+                if not pending and not first:
+                    break
+                for chunk in _chunks(pending):
+                    current = "message_delivery_events"
+                    for mde_id, wamid, status, raw_code, err in _read(conn,
+                            "SELECT id, wamid, status, raw_code, error_code "
+                            "FROM message_delivery_events WHERE tenant_id = :t "
+                            "AND wamid = ANY(:w)", {"t": tenant_id, "w": chunk}):
+                        if int(mde_id) in seen_mde:
+                            continue
+                        seen_mde.add(int(mde_id))
+                        src[current]["rows"] += 1
+                        c = (recipients[wamid_owner[wamid]].copies[wamid] if wamid in wamid_owner
+                             else unattributed[wamid])
+                        _apply_status(c, status, raw_code or err)
+                    current = "message_events"
+                    for ev_id, md in _read(conn,
+                            "SELECT id, metadata FROM message_events WHERE tenant_id = :t "
+                            "AND direction = 'outbound' AND ((metadata->>'wa_message_id') = ANY(:w) "
+                            "OR (metadata->'provider_send'->>'wamid') = ANY(:w))",
+                            {"t": tenant_id, "w": chunk}):
+                        if int(ev_id) in seen_events:
+                            continue
+                        seen_events.add(int(ev_id))
+                        src[current]["rows"] += 1
+                        wamid = _event_wamid(md or {})
+                        c = (recipients[wamid_owner[wamid]].copies[wamid] if wamid in wamid_owner
+                             else unattributed.get(wamid))
+                        if c is not None:
+                            _apply_event_flags(c, md or {})
+                    if has_inbox:
+                        current = "campaign_status_event_inbox"
+                        for ib_id, wamid, status in _read(conn,
+                                "SELECT id, provider_message_id, status "
+                                "FROM campaign_status_event_inbox WHERE provider_message_id = ANY(:w)",
+                                {"w": chunk}):
+                            if int(ib_id) in seen_inbox:
+                                continue
+                            seen_inbox.add(int(ib_id))
+                            src[current]["rows"] += 1
+                            c = (recipients[wamid_owner[wamid]].copies[wamid]
+                                 if wamid in wamid_owner else unattributed[wamid])
+                            _apply_status(c, status)
+                read_wamids |= set(pending)
+                first = False
+            if has_inbox:
+                # Receipts stored against this campaign's attempts.
                 current = "campaign_status_event_inbox"
-                inbox = pending = 0
-                for chunk in _chunks(known):
-                    for wamid, status, applied in _read(conn,
-                            "SELECT provider_message_id, status, applied_at IS NOT NULL "
-                            "FROM campaign_status_event_inbox WHERE provider_message_id = ANY(:w)",
-                            {"w": chunk}):
-                        inbox += 1
-                        pending += 0 if applied else 1
-                        c = recipients[wamid_to_phone[wamid]].copy(wamid)
-                        st = (status or "").lower()
-                        if st == "read":
-                            c.read = c.delivered = True
-                        elif st == "delivered":
-                            c.delivered = True
-                        elif st == "failed":
-                            c.failed = True
-                src[current] = {"status": "complete", "rows": inbox, "pending_unapplied": pending}
-
+                for chunk in _chunks(attempt_ids):
+                    for ib_id, wamid, status in _read(conn,
+                            "SELECT id, provider_message_id, status FROM campaign_status_event_inbox "
+                            "WHERE attempt_id = ANY(:a)", {"a": chunk}):
+                        if int(ib_id) in seen_inbox:
+                            continue
+                        seen_inbox.add(int(ib_id))
+                        src[current]["rows"] += 1
+                        if wamid in wamid_owner:
+                            _apply_status(recipients[wamid_owner[wamid]].copies[wamid], status)
+                        else:
+                            attribution["attribution_conflicts"] += 1
+                # Unapplied receipts for wamids nobody knows yet, addressed to
+                # one of this campaign's recipients. The inbox has no tenant,
+                # so this cannot be bounded to the campaign: the recipient is
+                # kept unresolved rather than guessed.
+                digits = sorted({p.lstrip("+") for p in campaign_phones})
+                flagged: set = set()
+                for chunk in _chunks(digits):
+                    for (rid,) in _read(conn,
+                            "SELECT DISTINCT recipient_id FROM campaign_status_event_inbox "
+                            "WHERE applied_at IS NULL AND attempt_id IS NULL "
+                            "AND recipient_id = ANY(:d) AND NOT (provider_message_id = ANY(:w))",
+                            {"d": chunk, "w": sorted(read_wamids)}):
+                        p = norm_phone(rid)
+                        if p in recipients and p not in flagged:
+                            flagged.add(p)
+                            recipients[p].unresolved_evidence.append(
+                                "unapplied inbox receipt for an unknown wamid")
+                attribution["recipients_with_pending_inbox_candidates"] = len(flagged)
+                src[current]["status"] = "complete"
+            for name in ("message_events", "conversations", "customers", "message_delivery_events"):
+                src[name]["status"] = "complete"
             current = None
+
+            attribution["campaign_events_unattributed"] = len(unattributed)
+            attribution["campaign_events_unattributed_with_receipts"] = sum(
+                1 for c in unattributed.values() if c.has_delivery or c.failed)
+            attribution["unattributed_with_delivery_evidence"] = sum(
+                1 for c in unattributed.values() if c.has_delivery)
+            attribution["wamids_read"] = len(read_wamids)
+            blocking = [k for k in ("campaign_events_unattributed", "campaign_events_without_wamid",
+                                    "attribution_conflicts", "log_wamids_unattributed")
+                        if attribution[k]]
+            attribution["complete"] = not blocking
+            attribution["blocking"] = blocking
+            meta["attribution"] = attribution
+            meta["_wamids_read"] = read_wamids
             if check_schema:
                 meta["preflight"] = schema_preflight(conn, campaign_id=campaign_id, tenant_id=tenant_id)
     except SourceError as exc:
         meta["error"] = str(exc)
+        meta.pop("_wamids_read", None)
         raise SourceError(json.dumps(meta, ensure_ascii=False, default=str)) from exc
     except SystemExit:
         raise
@@ -622,24 +891,11 @@ def apply_database(recipients: Dict[str, Recipient], *, url: str, campaign_id: i
             src[current] = {"status": "error",
                             "error": f"{type(exc).__name__}: {str(exc).splitlines()[0][:200]}"}
         meta["error"] = f"read failed in {current or 'setup'}"
+        meta.pop("_wamids_read", None)
         raise SourceError(json.dumps(meta, ensure_ascii=False, default=str)) from exc
     finally:
         engine.dispose()
     return meta
-
-
-def _phone_from_wamid(wamid: str) -> Optional[str]:
-    """Cloud API wamids embed the recipient: base64 of a small protobuf
-    whose first field is the phone digits."""
-    import base64  # noqa: PLC0415
-    try:
-        raw = wamid.split(".", 1)[1]
-        blob = base64.b64decode(raw + "=" * (-len(raw) % 4))
-        n = blob[2]
-        digits = blob[3:3 + n].decode()
-        return norm_phone(digits) if digits.isdigit() else None
-    except (IndexError, ValueError, UnicodeDecodeError):
-        return None
 
 
 # ── Report ───────────────────────────────────────────────────────────────
@@ -660,10 +916,13 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
     messages = {"accepted": 0, "delivered_or_read": 0, "read": 0,
                 "failed_after_accept": 0, "no_receipt": 0}
     proven_delivery = 0
+    incomplete_history = 0
     per = []
     for phone, r in recipients.items():
         cat = classify(r, delivery_evidence=delivery_evidence)
         counts[cat] += 1
+        hist = attempt_history(r)
+        incomplete_history += 0 if hist.complete else 1
         delivered_copies = sum(1 for c in r.copies.values() if c.has_delivery)
         if delivered_copies:
             proven_delivery += 1
@@ -688,7 +947,11 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
                 "resend_proposal": proposal,
                 "failed_reasons": sorted({c.failed_reason for c in r.copies.values()
                                           if c.failed_reason}),
-                "pre_accept_codes": sorted({c for c in r.pre_accept_codes if c}),
+                "history_complete": hist.complete,
+                "unknown_attempts": hist.unknown_attempts,
+                "history_reasons": hist.reasons,
+                "proven_unsent_codes": hist.unsent_codes,
+                "observed_log_codes": sorted({c for c in r.observed_codes if c}),
             })
     accepted_hist: Dict[int, int] = defaultdict(int)
     for r in recipients.values():
@@ -706,6 +969,7 @@ def build_report(recipients: Dict[str, Recipient], *, delivery_evidence: bool,
         "recipients_total": len(recipients),
         "recipients_by_category": counts,
         "recipients_with_proven_delivery": proven_delivery,
+        "recipients_with_incomplete_history": incomplete_history,
         "resend_proposal": proposals,
         "recipients_by_accepted_copies": dict(sorted(accepted_hist.items())),
         "messages": messages,
@@ -752,13 +1016,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     reasons: List[str] = []
     use_db = bool(args.database_url) and not args.no_database
     db_complete = False
+    wamids_read: Optional[set] = None
     if use_db:
+        seeds = collect_log_wamids(args.log_json, campaign_id=args.campaign_id) \
+            if args.log_json else {}
         try:
             db_meta = apply_database(
                 recipients, url=args.database_url,
                 campaign_id=args.campaign_id, tenant_id=args.tenant_id,
                 allow_missing_ledger=args.allow_missing_ledger,
-                check_schema=args.check_schema,
+                check_schema=args.check_schema, seed_wamids=seeds,
             )
         except SourceError as exc:
             try:
@@ -773,11 +1040,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             _write(report, args.out, False)
             print("FATAL: evidence source incomplete — no reconciliation produced", file=sys.stderr)
             return 2
+        wamids_read = db_meta.pop("_wamids_read")
         sources["database"] = db_meta
         statuses = {n: v.get("status") for n, v in db_meta["sources"].items()}
         db_complete = all(st == "complete" for st in statuses.values())
         if not db_complete:
             reasons.append("database sources not all complete: " + json.dumps(statuses))
+        attr = db_meta["attribution"]
+        if not attr["complete"]:
+            reasons.append("campaign evidence not attributed to one recipient: "
+                           + ", ".join(f"{k}={attr[k]}" for k in attr["blocking"]))
         pre = db_meta.get("preflight")
         if args.check_schema and pre and not pre.get("schema_ok"):
             reasons.append("ledger schema incomplete")
@@ -793,6 +1065,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     if not sources:
         ap.error("give --database-url/DATABASE_URL or --log-json files")
+    if wamids_read is not None:
+        # A copy added after the snapshot was read has unread receipts.
+        late = sum(1 for r in recipients.values() for w in r.copies if w not in wamids_read)
+        sources["database"]["attribution"]["copies_added_after_reads"] = late
+        if late:
+            reasons.append(f"{late} copies found after the database reads (receipts unread)")
     report = build_report(
         recipients, delivery_evidence=use_db and db_complete, sources=sources,
         emit_recipients=args.emit_recipients,
