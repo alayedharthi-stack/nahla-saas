@@ -189,12 +189,23 @@ def _classify(db: Any, *, phone_number_id: str, recipient: str) -> Tuple[str, An
         return UNDECIDABLE, None, f"guard_error:{type(exc).__name__}"
 
     if decision.reason in {pilot_guard.PILOT_DISABLED, pilot_guard.TENANT_NOT_ALLOWLISTED,
+                           pilot_guard.TENANT_DENYLISTED,
                            pilot_guard.RECIPIENT_MISSING,
                            pilot_guard.RECIPIENT_UNNORMALIZABLE,
                            pilot_guard.RECIPIENT_NOT_ALLOWLISTED,
+                           # The merchant's own AI setting, once it is the
+                           # authority: a store that admits nobody, or admits
+                           # only its own test numbers, has *decided* about this
+                           # traffic. It keeps the behaviour it has today, and
+                           # the webhook's own gate suppresses it there.
+                           pilot_guard.STORE_AI_DISABLED,
+                           pilot_guard.STORE_AI_TEST_MODE_NOT_ALLOWED,
+                           pilot_guard.STORE_AI_REFUSED,
                            pilot_guard.CONNECTION_NOT_VERIFIED}:
         return OUT_OF_SCOPE, None, decision.reason
-    if decision.reason == pilot_guard.GUARD_ERROR:
+    # ...whereas settings nobody could read decide nothing. Acknowledging this
+    # as accepted would drop work that may well be the runtime's.
+    if decision.reason in {pilot_guard.GUARD_ERROR, pilot_guard.STORE_GATE_UNAVAILABLE}:
         return UNDECIDABLE, None, decision.reason
     normalized = decision.recipient or pilot_guard.normalize_recipient(recipient)
     if not normalized:

@@ -27,9 +27,11 @@ Two properties hold by construction:
 
 * **Completed work is still refused.** A turn with a terminal answers ``None``
   here, so its duplicates are dropped exactly as they are today.
-* **Nothing outside the pilot is affected.** While the pilot is off, or for a
-  tenant or recipient it is not configured for, the answer is ``None`` without
-  a single query.
+* **Nothing outside the runtime's own scope is affected.** While it is off, or
+  for a tenant or recipient it is not configured for, the answer is ``None``
+  without a single query. Under ``store_gated`` and ``global`` the scope is the
+  tenant that owns the connection, and the answer is still ``None`` unless this
+  runtime admitted a turn for this exact inbound identity.
 """
 from __future__ import annotations
 
@@ -59,6 +61,37 @@ class TooManyTenants(ValueError):
         self.count = int(count)
         super().__init__(f"{count} tenants configured; at most "
                          f"{MAX_TENANTS_CONSIDERED} are inspected")
+
+
+def _connection_owner_tenants(phone_number_id: Any) -> list:
+    """The one tenant whose verified connection owns this number, or ``[]``.
+
+    Used where there is no allowlist to walk. A failed lookup answers ``[]`` and
+    the caller drops the duplicate exactly as the platform does today — the same
+    outcome an empty allowlist already produced, so an unreadable connection
+    never becomes a *wider* answer than a readable one.
+    """
+    try:
+        from database.session import SessionLocal  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 - no session, no candidates
+        logger.warning("[COMMERCE_RUNTIME_RECOVERY] session factory unavailable error=%s",
+                       type(exc).__name__)
+        return []
+    session = None
+    try:
+        session = SessionLocal()
+        scope = pg.resolve_pilot_scope(session, phone_number_id=phone_number_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable scope names no tenant
+        logger.warning("[COMMERCE_RUNTIME_RECOVERY] connection owner lookup failed error=%s",
+                       type(exc).__name__)
+        return []
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("[COMMERCE_RUNTIME_RECOVERY] session close failed")
+    return [int(scope.tenant_id)] if scope.resolved else []
 
 
 def _scoped_tenants(tenant_ids: Any = None) -> list:
@@ -259,22 +292,45 @@ def duplicate_carries_unfinished_work(
     """Whether a duplicate the platform is about to drop must be let through.
 
     Asked at the deduplication boundary, where the tenant has not necessarily
-    been resolved yet. The candidate tenants are therefore the pilot's own
-    allowlist — which is also what makes this ownership-checked: a message can
-    only ever be let through for a tenant and a recipient the pilot is
+    been resolved yet. In ``pilot`` mode the candidate tenants are the pilot's
+    own allowlist — which is also what makes this ownership-checked: a message
+    can only ever be let through for a tenant and a recipient the pilot is
     explicitly configured for, and never for anything else on the platform.
+
+    Once the merchant's own setting is the authority there is no operator
+    recipient list, and in ``global`` no allowlist either, so the candidate is
+    the single tenant whose verified connection owns the number. Ownership is
+    then checked by the thing that actually establishes it: only a turn this
+    runtime **admitted** for this exact inbound identity is ever returned, and
+    an admission is not something an allowlist could have granted or withheld.
     """
     try:
         # Draining counts: handing back is exactly when unfinished work must
         # still be reachable. Only a fully disabled pilot stops recovering.
         if not pg.pilot_owns_open_work() or not pg.pilot_model():
             return None
-        tenants = _scoped_tenants()
+        if pg.store_gate_decides_recipient():
+            # Once the merchant's own setting decides who may be spoken to,
+            # neither an operator recipient list nor an allowlist enumeration is
+            # the right pre-filter, and in ``global`` there is no list to
+            # enumerate at all: the connection row names the one tenant that can
+            # own this number, which is narrower than any list would have been.
+            #
+            # The recipient is deliberately **not** re-checked against the store
+            # gate here. What is being asked is whether this runtime already
+            # admitted a turn for this exact inbound identity, and an admission
+            # is stronger evidence of ownership than a setting read now — a
+            # merchant who switches AI off between admission and the retry must
+            # not thereby strand a turn the customer is already owed an answer
+            # or an honest record for.
+            tenants = _connection_owner_tenants(phone_number_id)
+        else:
+            tenants = _scoped_tenants()
+            recipients = pg.recipient_allowlist()
+            normalized = pg.normalize_recipient(customer_phone)
+            if not recipients or not normalized or normalized not in recipients:
+                return None
         if not tenants:
-            return None
-        recipients = pg.recipient_allowlist()
-        normalized = pg.normalize_recipient(customer_phone)
-        if not recipients or not normalized or normalized not in recipients:
             return None
     except TooManyTenants as too_many:
         # Fail closed and loudly: with an oversized allowlist this cannot say
