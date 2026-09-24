@@ -142,6 +142,7 @@ def test_incident_rca_isolates_the_window_and_its_history(pgdb, capsys):
     assert hist["table_accepted_in_window"] == {
         "new_recipients": 6, "with_prior_accepted": 3, "with_prior_delivered": 3,
         "with_prior_read": 2, "with_prior_uncertain": 1, "with_prior_request_started": 0,
+        "with_prior_legacy_attempt": 1,                    # B's pre-ledger row
         "unresolved_evidence": 0, "clean": 2, "duplicate_incident": 4}
 
 
@@ -317,3 +318,43 @@ def test_a_copy_naming_two_recipients_leaves_neither_clean(pgdb, capsys):
     _, _, out = _run(url, capsys)
     by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
     assert 6 in by["unresolved_evidence"] and 6 not in by.get("clean", [])
+
+
+# ── Independent review: B1 unaccounted legacy attempts, B2 leftover wamid ──
+
+
+@pg
+@pytest.mark.parametrize("where", ["other_spelling", "same_row"])
+def test_an_unaccounted_legacy_attempt_is_never_clean(pgdb, capsys, where):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        if where == "other_spelling":
+            _log_row(c, 12, A.lstrip("+"), "failed", 1, err="watchdog_timeout")   # legacy watchdog
+        else:
+            _sql(c, "UPDATE campaign_send_logs SET attempt_count = 2 WHERE id = 1")
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 1 in by["legacy_attempt"] and 1 not in by.get("clean", [])
+
+
+@pg
+def test_a_wamid_on_the_claimed_row_that_no_window_attempt_made_is_a_prior_copy(pgdb, capsys):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _sql(c, "UPDATE campaign_send_logs SET provider_message_id = 'w.legacy' WHERE id = 1")
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 1 in by["accepted"] and 1 not in by.get("clean", [])
+
+
+@pg
+def test_a_prior_copy_stored_in_arabic_indic_digits_is_matched(pgdb, capsys):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _attempt(c, log_id=8, phone="٠٥٠٠٠٠٠٤٠١", n=6, state="accepted", at=BEFORE, campaign=10,
+                 accepted=True, wamid="w.arabic")
+    _, _, out = _run(url, capsys)
+    assert 1 in out["history_before_window"]["send_log_ids_by_strongest_evidence"]["accepted"]
