@@ -97,7 +97,6 @@ export interface CampaignsListLabels {
     dispatchNow: string
     dispatching: string
     dispatchTitle: string
-    ignoreFreqCap: string
     delete: string
     copyTechnicalErrorTitle: string
     errorCopied: string
@@ -260,7 +259,6 @@ export interface CampaignsListLabels {
       freqCapRow: string
       diagnoseFailed: string
       dispatchConfirm: string
-      dispatchConfirmFreqCap: string
       dispatchStarted: string
       dispatchSkipped: string
       dispatchFailed: string
@@ -591,7 +589,6 @@ const REPORT_EN: CampaignsListLabels['diagnostics']['report'] = {
   freqCapRow: '   • {phone}: last success {at} ({campaign})',
   diagnoseFailed: 'Could not run diagnostics: {msg}',
   dispatchConfirm: 'Sending for campaign "{name}" will start in the background.\n\nRecipients already sent will not be sent again.',
-  dispatchConfirmFreqCap: '\n\n⚠️ «Ignore frequency cap for this campaign» is enabled — this run will include customers who received a successful marketing message recently (testing only).',
   dispatchStarted: '⏳ Sending started in the background — monitoring progress…',
   dispatchSkipped: 'Dispatch was skipped.',
   dispatchFailed: '❌ Could not start sending: {msg}',
@@ -636,7 +633,6 @@ const REPORT_AR: CampaignsListLabels['diagnostics']['report'] = {
   freqCapRow: '   • {phone}: آخر نجاح {at} ({campaign})',
   diagnoseFailed: 'تعذر تشغيل التشخيص: {msg}',
   dispatchConfirm: 'سيتم تشغيل الإرسال للحملة "{name}" الآن في الخلفية.\n\nلن يُعاد إرسال أي مستلم تم إرساله مسبقاً.',
-  dispatchConfirmFreqCap: '\n\n⚠️ تم تفعيل «تجاهل حد التكرار لهذه الحملة» — ستُرسل هذه الجولة حتى للعملاء الذين تلقّوا رسالة تسويقية ناجحة مؤخراً (استخدام للاختبار).',
   dispatchStarted: '⏳ بدأ الإرسال في الخلفية — جاري متابعة التقدّم…',
   dispatchSkipped: 'تم تجاوز الإرسال.',
   dispatchFailed: '❌ تعذر تشغيل الإرسال: {msg}',
@@ -752,7 +748,6 @@ export const campaignsListEn: CampaignsListLabels = {
     dispatchNow: 'Send now',
     dispatching: 'Sending…',
     dispatchTitle: 'Start sending manually now',
-    ignoreFreqCap: 'Ignore frequency cap for this campaign',
     delete: 'Delete',
     copyTechnicalErrorTitle: 'Copy technical error for support',
     errorCopied: '📋 Technical error copied to clipboard',
@@ -994,7 +989,6 @@ export const campaignsListAr: CampaignsListLabels = {
     dispatchNow: 'إرسال الآن',
     dispatching: 'جاري…',
     dispatchTitle: 'تشغيل الإرسال يدوياً الآن',
-    ignoreFreqCap: 'تجاهل حد التكرار لهذه الحملة',
     delete: 'حذف',
     copyTechnicalErrorTitle: 'نسخ الخطأ التقني للدعم',
     errorCopied: '📋 تم نسخ الخطأ التقني إلى الحافظة',

@@ -2156,11 +2156,6 @@ async def debug_campaign(
             _frequency_cap_evidence_for_phones,
         )
         cap_days_cfg = MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS
-        bypass_flag = bool(
-            str((campaign.template_variables or {}).get(
-                "_bypass_frequency_cap") or ""
-            ).strip().lower() in ("true", "1", "yes")
-        )
         capped_rows = (
             db.query(CampaignSendLog)
               .filter(
@@ -2173,7 +2168,6 @@ async def debug_campaign(
         )
         if not capped_rows:
             return {
-                "bypassed":                     bypass_flag,
                 "cap_days":                     int(cap_days_cfg),
                 "capped_count":                 0,
                 "frequency_cap_source_rows":    [],
@@ -2203,7 +2197,6 @@ async def debug_campaign(
                 ),
             })
         return {
-            "bypassed":                     False,
             "cap_days":                     int(cap_days_cfg),
             "capped_count":                 len(capped_rows),
             "frequency_cap_source_rows":    src_rows,
@@ -2214,7 +2207,6 @@ async def debug_campaign(
     frequency_cap_audit = _safe(
         "frequency_cap_audit", _frequency_cap_audit,
     ) or {
-        "bypassed":                     False,
         "cap_days":                     MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS,
         "capped_count":                 0,
         "frequency_cap_source_rows":    [],
@@ -2452,13 +2444,7 @@ async def debug_campaign(
                 "لم تُكتب أي صفوف في سجل الإرسال. تحقق من اتصال واتساب "
                 "ومن أن العملاء يملكون أرقاماً مطبَّعة (normalized_phone)."
             )
-    if frequency_cap_audit.get("bypassed"):
-        hints.append(
-            "حد التكرار (frequency cap) متجاوز لهذه الحملة — كل عميل "
-            "في الجمهور سيُرسل له حتى لو وصلته رسالة سابقة خلال نافذة "
-            "الحد. ⚠️ استخدم هذا الوضع للاختبار فقط."
-        )
-    elif (frequency_cap_audit.get("capped_count") or 0) > 0:
+    if (frequency_cap_audit.get("capped_count") or 0) > 0:
         cap_d = int(frequency_cap_audit.get("cap_days") or MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS)
         ls_at = frequency_cap_audit.get("last_successful_sent_at")
         ls_cid = frequency_cap_audit.get("last_successful_campaign_id")
@@ -2474,7 +2460,6 @@ async def debug_campaign(
             f"حد التكرار التسويقي (خلال آخر {cap_d} يوماً، وبناءً على "
             "رسائل وصلت إلى Meta بنجاح فقط)."
             + tail
-            + " إذا كنت تختبر، فعّل «تجاهل حد التكرار لهذه الحملة» عند الإرسال."
         )
     # Hint: every failure is an UNKNOWN Meta error → support needs
     # to look at the raw payload bucket to fingerprint a new code.
@@ -2633,10 +2618,9 @@ async def debug_campaign(
         # caused it. Treats ``has_whatsapp=null`` as unknown (would
         # have been sent to Meta), NOT as a blocker.
         "sample_excluded_before_send": sample_excluded_before_send,
-        # NEW: frequency-cap audit trail. ``bypassed`` is true when
-        # the merchant explicitly set _bypass_frequency_cap on the
-        # campaign. ``source_rows`` traces every capped phone to the
-        # last successful campaign that "burned" the cap.
+        # NEW: frequency-cap audit trail. ``source_rows`` traces every
+        # capped phone to the last successful campaign that "burned"
+        # the cap.
         "frequency_cap":             frequency_cap_audit,
         # NEW: raw Meta request/response fingerprints captured on
         # failure (especially when the classifier returned
@@ -2657,18 +2641,35 @@ async def debug_campaign(
     }
 
 
+_FALSE_QUERY_VALUES = ("", "false", "0", "no", "off")
+
+
+def _requests_frequency_cap_bypass(value: object, request: Optional[Request] = None) -> bool:
+    """True when a (stale) client sends ``bypass_frequency_cap`` with any
+    value that is not a clear "false" — every repeated occurrence counts.
+    The ``Query`` default seen by direct calls is not a request."""
+    values: List[object] = [value]
+    params = getattr(request, "query_params", None)
+    if params is not None:
+        values += list(params.getlist("bypass_frequency_cap"))
+    for v in values:
+        if isinstance(v, bool):
+            if v:
+                return True
+        elif isinstance(v, str) and v.strip().lower() not in _FALSE_QUERY_VALUES:
+            return True
+    return False
+
+
 @router.post("/campaigns/{campaign_id}/dispatch-now")
 async def dispatch_campaign_now(
     campaign_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    bypass_frequency_cap: bool = Query(
-        False,
-        description=(
-            "إذا كانت true، تُتخطّى حماية حد التكرار لهذا الإرسال فقط "
-            "(يُخزَّن في الحملة ثم يُزال تلقائياً بعد قرار الحد)."
-        ),
-    ),
+    # Removed capability. Kept only so a stale client that still sends
+    # ``?bypass_frequency_cap=true`` is refused explicitly (HTTP 400)
+    # instead of being silently accepted; the value is never honoured.
+    bypass_frequency_cap: Optional[str] = Query(None, include_in_schema=False),
 ):
     """Kick the campaign dispatcher for one campaign in the background.
 
@@ -2716,6 +2717,23 @@ async def dispatch_campaign_now(
     ).first()
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # The frequency cap is mandatory for every merchant dispatch. A request
+    # asking to bypass it is refused before anything changes.
+    if _requests_frequency_cap_bypass(bypass_frequency_cap, request):
+        logger.warning(
+            "[campaigns.dispatch-now] tenant=%d campaign=%d refused: "
+            "bypass_frequency_cap is no longer supported",
+            tenant_id, campaign_id,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "frequency_cap_bypass_removed",
+                "message": "bypass_frequency_cap is no longer supported; "
+                           "the frequency cap applies to every dispatch.",
+            },
+        )
 
     if (campaign.status or "").lower() == "completed" and (campaign.sent_count or 0) > 0:
         # Avoid wasting a Meta API call on a campaign that already
@@ -2775,17 +2793,11 @@ async def dispatch_campaign_now(
     rescheduled_count = 0
     revived_zombies = 0
     try:
-        from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
         from services.campaign_dispatcher import (  # noqa: PLC0415
             reschedule_failed_for_retry, _revive_zombie_sending,
         )
         # Explicit merchant resume lifts a pending stop / pause.
         _ledger.clear_stop(db, campaign_id=campaign_id)
-        if bypass_frequency_cap:
-            tv = dict(campaign.template_variables or {})
-            tv["_bypass_frequency_cap"] = "true"
-            campaign.template_variables = tv
-            flag_modified(campaign, "template_variables")
         # Resolve ``sending`` rows a crashed prior run left behind:
         # provably-unsent ones go back to the queue, possibly-sent ones
         # become ``uncertain`` (never re-sent automatically).
@@ -2805,9 +2817,8 @@ async def dispatch_campaign_now(
 
     logger.info(
         "[campaigns.dispatch-now] tenant=%d campaign=%d status=%s "
-        "audience_count=%s bypass_frequency_cap=%s — kicking background dispatch task",
+        "audience_count=%s — kicking background dispatch task",
         tenant_id, campaign_id, campaign.status, campaign.audience_count,
-        bypass_frequency_cap,
     )
 
     # Fire-and-forget: same helper the immediate-launch path uses.
@@ -2835,17 +2846,11 @@ async def dispatch_campaign_now(
         "بدأ الإرسال في الخلفية. حدّث الصفحة بعد لحظات لرؤية "
         "تقدّم العدّادات، أو اضغط 'تشخيص' لمراجعة الحالة فوراً."
     )
-    if bypass_frequency_cap:
-        msg += (
-            " تم تجاهل حد التكرار لهذا الإرسال فقط — سيُستأنف الحماية "
-            "تلقائياً في الإرسال التالي."
-        )
     return {
         "campaign_id": campaign_id,
         "ok":          True,
         "kicked":      True,
         "status":      campaign.status,
-        "bypass_frequency_cap": bypass_frequency_cap,
         # Surface the bookkeeping so the merchant sees "تمت إعادة
         # جدولة N محاولات فاشلة" + "تم تحرير N صف عالق" in the
         # diagnostic panel.
@@ -3538,7 +3543,7 @@ async def _prepare_waves_async(campaign_id: int, wave_plan: Any) -> None:
         )
         db.commit()
 
-        _apply_frequency_cap(db, campaign.tenant_id, campaign.id, bypass=False)
+        _apply_frequency_cap(db, campaign.tenant_id, campaign.id)
         db.commit()
 
         # Re-fetch the campaign in case freshness matters; then
