@@ -27,6 +27,7 @@ What is proven
 * every refusal — forged, replayed, expired, another conversation's, another
   tenant's — is named to the model and becomes no page, no search, no product
   selection;
+* a tap the channel redelivers is the same finished turn: its page is sent once;
 * a verified tap on a row the platform composed resolves and becomes a Card;
 * a focused answer, a comparison and a narrowed search are never expanded into
   the catalogue, whatever words the model gives;
@@ -219,7 +220,8 @@ class Shop:
     def turn(self, conversation: int, model: LiteralModel, *, question: str = "Show me",
              metadata: Optional[Dict[str, Any]] = None, tenant: Optional[int] = None,
              statements: Optional[List[str]] = None,
-             max_steps: int = 3) -> Tuple[entry.TurnReport, Transport]:
+             max_steps: int = 3, message_id: Optional[str] = None,
+             expect_sent: bool = True) -> Tuple[entry.TurnReport, Transport]:
         """One real turn, then its reply persisted the way the pilot persists it."""
         tenant = tenant or self.tenant_a
         connection = self.connection_a if tenant == self.tenant_a else self.connection_b
@@ -231,12 +233,14 @@ class Shop:
                 conversation_id=conversation, connection_ref=f"wa:{connection}",
                 connection_id=str(connection), customer_id=customer,
                 normalized_customer_phone=PHONE,
-                provider_message_id="wamid.in." + uuid.uuid4().hex,
+                provider_message_id=message_id or "wamid.in." + uuid.uuid4().hex,
                 inbound_text=question, inbound_metadata=dict(metadata or {}),
                 transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
                 budget=ac.LoopBudget(max_steps=max_steps, max_tool_calls=4, tool_timeout_seconds=10.0,
                                      provider_timeout_seconds=15.0, deadline_seconds=45.0),
                 context_preamble={"channel": "whatsapp"}, anthropic_provider=model)
+        if not expect_sent:
+            return report, transport
         assert report.dispatch_status == dd.SENT_ACCEPTED, report
         self._record(conversation, tenant, report, transport)
         return report, transport
@@ -371,11 +375,13 @@ def _rows(payload: Mapping[str, Any]) -> Tuple[List[int], Optional[Dict[str, Any
 
 def _tap_more(shop: Shop, conversation: int, more_row: Mapping[str, Any], *,
               statements: Optional[List[str]] = None,
-              model: Optional[LiteralModel] = None) -> Tuple[entry.TurnReport, Transport, LiteralModel]:
+              model: Optional[LiteralModel] = None, message_id: Optional[str] = None,
+              expect_sent: bool = True) -> Tuple[entry.TurnReport, Transport, LiteralModel]:
     model = model or answer()
     report, transport = shop.turn(
         conversation, model, question=str(more_row["title"]), statements=statements,
-        metadata={"list_reply_id": more_row["id"], "list_reply_title": more_row["title"]})
+        metadata={"list_reply_id": more_row["id"], "list_reply_title": more_row["title"]},
+        message_id=message_id, expect_sent=expect_sent)
     return report, transport, model
 
 
@@ -579,6 +585,31 @@ def test_an_expired_token_opens_nothing(shop: Shop):
     report, transport, model = _tap_more(shop, conversation, more, statements=statements)
     _assert_refused(report, transport, model, statements, nav.EXPIRED)
     assert shop.token_row(nav.token_from_row_id(more["id"]))["consumed_at"] is None
+
+
+def test_a_redelivered_more_tap_sends_its_page_once(shop: Shop):
+    """The channel delivers the same tap twice. The second is the same turn,
+    already finished: nothing is sent, the model is not asked, and no token is
+    spent or minted by it."""
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    token = nav.token_from_row_id(more["id"])
+    message_id = "wamid.in.redelivered." + uuid.uuid4().hex
+    report, transport, _model = _tap_more(shop, conversation, more, message_id=message_id)
+    page_two, next_more, _button = _rows(transport.sent[0])
+    assert page_two == shop.products[SHIRTS][9:18] and next_more is not None
+    rows_after_page = shop.tokens_for(conversation)
+
+    model = answer()
+    again, resent, _model = _tap_more(shop, conversation, more, model=model, message_id=message_id,
+                                      expect_sent=False)
+    assert again.duplicate_inbound is True and again.turn_id == report.turn_id
+    assert again.reason == entry.ALREADY_TERMINAL
+    assert resent.sent == [] and model.calls == []
+    assert shop.tokens_for(conversation) == rows_after_page, "nothing minted twice"
+    assert shop.token_row(token)["consumed_by_turn_id"] == report.turn_id
+    assert shop.token_row(nav.token_from_row_id(next_more["id"]))["consumed_at"] is None
 
 
 def test_another_conversations_token_opens_nothing_here_and_stays_theirs(shop: Shop):

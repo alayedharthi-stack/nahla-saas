@@ -670,3 +670,41 @@ def test_cleanup_has_an_owner_the_application_starts():
     source = (REPO_ROOT / "backend/main.py").read_text(encoding="utf-8")
     assert 'from core.commerce_runtime.navigation import run_navigation_sweep_scheduler' in source
     assert '_start("commerce_runtime_navigation_sweep", _f_navigation_sweep' in source
+
+
+def test_the_sweep_is_registered_unconditionally_beside_every_other_scheduler():
+    """Where in startup the registration sits, not only that its text exists.
+
+    It is a direct statement of the same body that registers every other
+    scheduler, after the one switch that disables them all
+    (``NAHLA_DISABLE_SCHEDULERS``), under no condition of its own; and the
+    factory it queues calls the loop with no arguments — the application's
+    engine and the production intervals.
+    """
+    tree = ast.parse((REPO_ROOT / "backend/main.py").read_text(encoding="utf-8"))
+    owner = next(node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and any(isinstance(inner, ast.FunctionDef) and inner.name == "_start"
+                         for inner in node.body))
+
+    def starts(statement: ast.stmt) -> str:
+        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                and getattr(statement.value.func, "id", "") == "_start"
+                and statement.value.args and isinstance(statement.value.args[0], ast.Constant)):
+            return str(statement.value.args[0].value)
+        return ""
+
+    positions = {starts(statement): index for index, statement in enumerate(owner.body)
+                 if starts(statement)}
+    switch = next(index for index, statement in enumerate(owner.body)
+                  if isinstance(statement, ast.If)
+                  and getattr(statement.test, "id", "") == "_skip_schedulers")
+    assert "commerce_runtime_navigation_sweep" in positions, "registered under a condition of its own"
+    assert positions["commerce_runtime_navigation_sweep"] > switch
+    assert "webhook_dispatcher" in positions, "the other schedulers are registered in the same body"
+    factory = next(statement for statement in owner.body
+                   if isinstance(statement, ast.FunctionDef) and statement.name == "_f_navigation_sweep")
+    (returned,) = [node for node in ast.walk(factory) if isinstance(node, ast.Return)]
+    assert isinstance(returned.value, ast.Call)
+    assert returned.value.func.id == "run_navigation_sweep_scheduler"
+    assert not returned.value.args and not returned.value.keywords

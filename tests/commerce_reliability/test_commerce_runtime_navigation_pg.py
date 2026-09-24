@@ -432,6 +432,55 @@ def test_the_scheduler_the_application_registers_runs_the_sweep(navdb: Nav):
     assert navdb.peek(navdb.tenant_a, conversation, token).status == nav.NOT_FOUND
 
 
+def test_the_application_registration_path_runs_the_sweep_on_the_application_engine(
+        navdb: Nav, monkeypatch):
+    """The path production takes, end to end, with only the waits shortened.
+
+    ``core.runtime_perf.schedule_with_delay`` queues the same no-argument
+    factory ``main.py`` queues; the loop resolves the application's own engine
+    (``database.session.engine``, pointed at this database) and its own batch
+    and retention bounds; the task is held in the application's background
+    registry, which is what cancels it at shutdown. One tick removes a row past
+    retention, and cancelling the task ends it.
+    """
+    import database.session as app_session
+    from core.background_tasks import get_background_task, register_background_task
+    from core.runtime_perf import schedule_with_delay
+
+    conversation = navdb.conversation(navdb.tenant_a)
+    old = navdb.open(navdb.tenant_a, conversation, list(range(3101, 3131)))
+    _age(navdb, old, expired_days_ago=9)
+    live = navdb.open(navdb.tenant_a, conversation, list(range(3201, 3231)))
+    monkeypatch.setattr(app_session, "engine", navdb.engine)
+    monkeypatch.setitem(nav.run_navigation_sweep_scheduler.__kwdefaults__, "first_delay_seconds", 0.0)
+    removed_before = nav.scheduler_state()["removed"]
+
+    def _f_navigation_sweep():     # exactly as main.py writes it
+        from core.commerce_runtime.navigation import run_navigation_sweep_scheduler  # noqa: PLC0415
+        return run_navigation_sweep_scheduler()
+
+    async def boot() -> None:
+        task = schedule_with_delay(_f_navigation_sweep, name="commerce_runtime_navigation_sweep",
+                                   delay_seconds=0)
+        register_background_task("commerce_runtime_navigation_sweep", task)
+        try:
+            assert get_background_task("commerce_runtime_navigation_sweep") is task
+            for _ in range(400):
+                if nav.scheduler_state()["removed"] > removed_before:
+                    break
+                await asyncio.sleep(0.05)
+            assert not task.done(), "the loop keeps running between ticks"
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(boot())
+    assert nav.scheduler_state()["removed"] >= removed_before + 1
+    assert navdb.peek(navdb.tenant_a, conversation, old).status == nav.NOT_FOUND
+    assert navdb.peek(navdb.tenant_a, conversation, live).status == nav.RESOLVED
+
+
 # ── The revision applies and steps back on its own ───────────────────────────
 
 

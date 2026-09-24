@@ -255,6 +255,91 @@ relation is compared **by definition** (`database/runtime_schema_guarantees.py`,
 lifted from `0111` with one foreign-key correction that a case pins) and an
 incompatible one — including the #1143 draft's shape — stops the upgrade.
 
+### Production rollout (for the owner's authorization; nothing here has run)
+
+The code is dormant without the relation, so code and schema go in separate,
+separately verifiable steps. Never `alembic upgrade head` (`0111` and `0092`
+are independent heads), and never from the application's startup.
+
+1. **Preconditions.** #1145 green on its final head, including
+   `trusted-context-layer1` once the `store_knowledge.py` owner exception
+   (#1148) is approved and on `main`; the owner's authorization for merge,
+   deploy and this migration.
+2. **Read-only pre-check** on the intended database, after the normal backup:
+   ```sql
+   SELECT version_num FROM alembic_version;                                -- must include 0112
+   SELECT to_regclass('public.commerce_runtime_navigation_snapshots');      -- must be NULL
+   ```
+   Without `0112`, stop: `upgrade 0113` would also apply `0112`, which has its
+   own rollout (`salla-shipment-tracking-migration-rollout.md`). A relation
+   already present is compared by definition and the upgrade refuses anything
+   but this exact shape.
+3. **Deploy the code.** Pagination stays off: no candidate read, no
+   `more_results`, declarations byte-for-byte unchanged, a "More" tap
+   `unavailable`, the sweep a no-op. Verify deployment SUCCESS and its SHA.
+4. **Migrate:** `alembic upgrade 0113`, run the way `0112` was. Measured on
+   PostgreSQL 16 from `{0111, 0112}`: 0.13 s, to `{0111, 0113}`. It creates one
+   empty relation; its two foreign keys take a brief `SHARE ROW EXCLUSIVE` lock
+   on `tenants` and `commerce_runtime_conversations` while they are added
+   (empty table, nothing to validate). Verify `alembic_version` includes `0113`
+   and the relation exists.
+5. **Restart the service.** The schema probe is cached per process; paging
+   starts with the new process. Verify the log line
+   `[Scheduler] commerce_runtime_navigation_sweep queued`.
+6. **Acceptance** through the real path, in an authorized test channel only.
+
+**Rollback**, each step independent:
+
+* *Behaviour, keeping the data:* redeploy the previous deployment. Earlier
+  code never reads the relation.
+* *Schema:* `alembic downgrade 0113@-1` (0.05 s; back to `{0111, 0112}`), then
+  restart. It drops the relation and so discards unfinished browses and
+  nothing else. A process still running with the probe cached finds the store
+  gone: a tap is `unavailable`, and a reply whose navigation cannot be written
+  is reserved again without it — the refused-store path the PostgreSQL suite
+  proves — until the restart.
+* *Re-apply* is the same `alembic upgrade 0113` (proven up → down → up).
+
+The exact DDL, as PostgreSQL reports it after the upgrade:
+
+```sql
+CREATE TABLE public.commerce_runtime_navigation_snapshots (
+    id bigint NOT NULL,                                   -- sequence-owned
+    token character varying(64) NOT NULL,
+    series character varying(64) NOT NULL,
+    tenant_id integer NOT NULL,
+    namespace character varying(16) NOT NULL,
+    conversation_id bigint NOT NULL,
+    minted_by_turn_id bigint NOT NULL,
+    origin_turn_id bigint NOT NULL,
+    origin_call_id character varying(128) NOT NULL,
+    search_method character varying(64) NOT NULL,
+    query_digest character varying(64) NOT NULL,
+    product_ids jsonb NOT NULL,
+    complete boolean NOT NULL,
+    page_offset integer NOT NULL,
+    page_size integer NOT NULL,
+    more_label character varying(24) NOT NULL,
+    button_label character varying(20) NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    consumed_at timestamp with time zone,
+    consumed_by_turn_id bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_commerce_runtime_navigation_consumed CHECK ((consumed_at IS NULL) = (consumed_by_turn_id IS NULL)),
+    CONSTRAINT ck_commerce_runtime_navigation_namespace CHECK (namespace IN ('live', 'shadow')),
+    CONSTRAINT ck_commerce_runtime_navigation_offset CHECK (page_offset >= 1 AND page_offset < jsonb_array_length(product_ids)),
+    CONSTRAINT ck_commerce_runtime_navigation_page_size CHECK (page_size >= 1 AND page_size < 10),
+    CONSTRAINT ck_commerce_runtime_navigation_products CHECK (jsonb_typeof(product_ids) = 'array'
+        AND jsonb_array_length(product_ids) >= 1 AND jsonb_array_length(product_ids) <= 50),
+    CONSTRAINT ck_commerce_runtime_navigation_words CHECK (char_length(more_label) >= 1 AND char_length(button_label) >= 1)
+);
+-- PRIMARY KEY (id); UNIQUE (series, page_offset); UNIQUE (token)
+CREATE INDEX ix_commerce_runtime_navigation_expiry ON commerce_runtime_navigation_snapshots (expires_at);
+-- FOREIGN KEY (conversation_id, tenant_id, namespace)
+--     REFERENCES commerce_runtime_conversations (id, tenant_id, namespace)
+-- FOREIGN KEY (tenant_id) REFERENCES tenants (id)
+```
+
 ## Lifecycle and cleanup
 
 | stage | policy |
