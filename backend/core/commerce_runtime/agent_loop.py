@@ -53,6 +53,7 @@ from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import presentation_policy as pp
 from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.ledgers import LedgerRepository
@@ -94,6 +95,7 @@ class AgentLoop:
     def run_turn(self, *, tenant_id: int, namespace: Any, conversation_id: int, turn_id: int,
                  token: c.OwnershipToken, provider: Any,
                  cancelled: Optional[Callable[[], bool]] = None,
+                 presentation: Optional[pp.PresentationContext] = None,
                  _fault_before_commit: Optional[Callable[[], None]] = None,
                  _fault_after_tool_debit: Optional[Callable[[], None]] = None) -> ac.LoopOutcome:
         tenant_id, ns, conversation_id, token = self._foundation._scoped(tenant_id, namespace, conversation_id, token)
@@ -118,7 +120,8 @@ class AgentLoop:
             )
             scope = at.ToolScope(tenant_id=tenant_id, namespace=ns, conversation_id=conversation_id, turn_id=turn_id)
             session.capabilities = self._capabilities(provider)
-            draft = self._reason(provider, context, scope, session, cancelled, _fault_after_tool_debit)
+            draft = self._reason(provider, context, scope, session, cancelled, _fault_after_tool_debit,
+                                 presentation=presentation)
             return self._accept(session, draft, fault_before_commit=_fault_before_commit)
         except _Stop as stop:
             return self._stop(session, stop)
@@ -127,7 +130,8 @@ class AgentLoop:
 
     def _reason(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope, session: "_Session",
                 cancelled: Optional[Callable[[], bool]],
-                fault_after_tool_debit: Optional[Callable[[], None]] = None) -> ac.ReplyDraft:
+                fault_after_tool_debit: Optional[Callable[[], None]] = None,
+                presentation: Optional[pp.PresentationContext] = None) -> ac.ReplyDraft:
         while True:
             session.check_cancelled(cancelled)
             # F1: the attempt is debited durably, under ownership and revision
@@ -155,16 +159,7 @@ class AgentLoop:
                     # payload states the merchant's values and never the
                     # model's. The text is carried through untouched, and a
                     # selector that cannot be offered whole simply is not.
-                    draft, choices = rc.finalize(draft, session.observations)
-                    # A card is the same split for the shape that follows a
-                    # choice rather than offering one. The selector wins when
-                    # both were asked for: a customer who still has to choose
-                    # is not helped by one product's photo.
-                    draft, card = rcard.finalize(draft, session.observations,
-                                                 selector_offered=choices == rc.OFFERED)
-                    session.record("reply_accepted",
-                                   {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind,
-                                    "choices": choices, "card": card})
+                    draft = self._shape_reply(draft, scope, session, presentation)
                     return draft
                 session.record("verification_failed", {"problems": [p.code for p in problems]})
                 if not session.steps_left():
@@ -274,6 +269,81 @@ class AgentLoop:
                             "error_code": observation.error_code,
                             "evidence_refs": list(observation.evidence_refs),
                             **({"recovery_repeat": True} if recovery else {})})
+
+    def _shape_reply(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
+                     presentation: Optional[pp.PresentationContext]) -> ac.ReplyDraft:
+        """Give the verified answer the shape the platform decides it takes.
+
+        The whole presentation boundary, in one place, so there is one path to
+        read and one path to test: decide the shape from structured provenance,
+        read a tapped product if one was selected, then compose the structured
+        payloads. Called only after ``verify_reply_draft`` passed, so nothing
+        here is a truth decision.
+
+        The model's text is not touched on any branch. What changes is only
+        which structured payload the reply carries, and the reason is recorded
+        either way so a production turn's shape is auditable from the log alone.
+        """
+        shape = pp.decide(draft=draft, observations=session.observations,
+                          definitions=self._registry.definitions, presentation=presentation)
+        shape = self._hydrate(shape, scope, session)
+        # A requested selector stands down only for a card that will actually
+        # be there. Asked of the composer itself, before anything is changed, so
+        # a customer whose tapped product turns out to have no photo still gets
+        # the selector the model offered rather than neither shape.
+        withhold = ""
+        if shape.withhold_selector:
+            composed, _reason = rcard.card(draft, session.observations,
+                                           determined_product_id=shape.determined_product_id)
+            withhold = rc.TAP_ANSWERED_FIRST if composed is not None else ""
+        draft, choices = rc.finalize(draft, session.observations, withhold=withhold)
+        # A card is the same split for the shape that follows a choice rather
+        # than offering one. The selector wins when both are on the table: a
+        # customer who still has to choose is not helped by one product's photo.
+        draft, card = rcard.finalize(
+            draft, session.observations, selector_offered=choices == rc.OFFERED,
+            determined_product_id=shape.determined_product_id)
+        # A determination that failed closed never reached ``card`` with a
+        # product, so it has no reason of its own to carry. Name it here, on the
+        # payload production persists, or the turn reads as one that simply
+        # never wanted a card.
+        draft = rcard.note_withheld(draft, pp.withheld_reason(shape))
+        session.record("reply_accepted",
+                       {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind,
+                        "choices": choices, "card": card,
+                        "shape": shape.kind, "shape_reason": shape.reason})
+        return draft
+
+    def _hydrate(self, shape: pp.Shape, scope: at.ToolScope, session: "_Session") -> pp.Shape:
+        """Read the product a verified tap selected, through the tools' own contract.
+
+        A tap is the most explicit product selection the channel allows, so the
+        card that follows it must not depend on the model having happened to
+        look the product up. The platform therefore reads it itself — by running
+        the registry's own ``get_product_details`` under this turn's scope, so
+        tenant isolation, the product-identity guard, the merchant's current
+        catalogue and the evidence reference all come with it. None of that is
+        restated here; this call *is* the contract.
+
+        It is not debited against the model's tool budget and does not need to
+        be: it is the platform's own read, at most one per turn, made after the
+        model has already finished, and it is read-only — a re-entry that makes
+        it again changes nothing. A read that fails is not a failure of the
+        turn: ``after_hydration`` fails the *card* closed with a named reason
+        and the answer goes out as text.
+        """
+        request = pp.hydration_request(shape)
+        if request is None or pp.already_read(shape, session.observations):
+            return pp.after_hydration(shape, session.observations)
+        wait = session.wait_for(session.limits.tool_timeout_seconds)
+        observation = self._registry.execute(scope, request, timeout_seconds=wait)
+        session.observations.append(observation)
+        session.record("platform_hydration",
+                       {"tool": observation.tool_name, "ok": observation.ok,
+                        "error_code": observation.error_code,
+                        "product_id": shape.product_id,
+                        "evidence_refs": list(observation.evidence_refs)})
+        return pp.after_hydration(shape, session.observations)
 
     @staticmethod
     def _provider_stop(result: ac.ProviderResult) -> _Stop:

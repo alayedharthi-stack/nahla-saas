@@ -67,7 +67,10 @@ def test_the_photo_and_the_link_come_from_this_turns_observation() -> None:
     final, reason = rcard.finalize(draft(23), [lookup(DRESS)], selector_offered=False)
     assert reason == rcard.OFFERED and final.kind == lc.DeliveryKind.RICH.value
     card = rcard.payload_card(final.payload)
-    assert card == {"image_url": IMAGE, "button_url": LINK, "button_label": "اطلب الآن"}
+    # The identity travels with the card: the suppression rule and the pilot log
+    # both need to know which product a delivered card actually showed.
+    assert card == {"image_url": IMAGE, "button_url": LINK, "button_label": "اطلب الآن",
+                    "product_id": 23}
 
 
 def test_the_models_text_is_carried_through_untouched() -> None:

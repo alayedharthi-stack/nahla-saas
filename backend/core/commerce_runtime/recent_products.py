@@ -76,6 +76,13 @@ CHOICE_ROW_IDS_KEY = "choice_row_ids"
 # from rather than to any list this conversation still holds.
 PROVIDER_MESSAGE_ID_KEY = "provider_message_id"
 
+# The product of the card an outbound reply actually **delivered**. Written only
+# when the provider accepted the send and identified it, exactly as the row ids
+# beside it are, and for the same reason: a reserved payload that carried a card
+# the provider refused is not a card the customer saw. Recent-card suppression
+# rests on this and on nothing else.
+CARD_PRODUCT_ID_KEY = "card_product_id"
+
 _OUTBOUND_DIRECTIONS = ("out", "outbound", "internal_e2e_outbound")
 
 # Closed reasons, for the pilot log and for tests.
@@ -127,6 +134,10 @@ class ShownProducts:
     # carried them. A tap that names its message is resolved against that one
     # list; the flat set above is the fallback for a tap that names none.
     offered_by_message: Mapping[str, Tuple[int, ...]] = dataclasses.field(default_factory=dict)
+    # The product of the most recent card this conversation actually delivered,
+    # within the same lapse. ``None`` means no card was delivered recently —
+    # never "a card was delivered for some product we could not name".
+    last_card_product_id: Optional[int] = None
 
     def rows_offered_in(self, provider_message_id: Any) -> Tuple[int, ...]:
         """The rows one named reply carried, or nothing if it carried none."""
@@ -170,6 +181,22 @@ def _row_product_ids_offered(metadata: Any) -> List[int]:
         if product_id is not None and product_id not in out:
             out.append(product_id)
     return out
+
+
+def _card_product_delivered(metadata: Any) -> Optional[int]:
+    """The product of the card a stored reply delivered, or ``None``.
+
+    Read from the key the send path writes only on an accepted send, so the
+    answer is "this reply put this card on the wire", never "this reply's
+    payload once held a card".
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    try:
+        product_id = int(metadata.get(CARD_PRODUCT_ID_KEY) or 0)
+    except (TypeError, ValueError):
+        return None
+    return product_id if product_id > 0 else None
 
 
 def _product_ids_cited(metadata: Any) -> List[int]:
@@ -260,10 +287,20 @@ def products_shown_earlier(
     by_message: Dict[str, Tuple[int, ...]] = {}
     newest_citation: Optional[int] = None
     cited_anything = False
+    last_card: Optional[int] = None
     for row in rows:
         metadata = getattr(row, "extra_metadata", None)
         cited = _product_ids_cited(metadata)
         offered_here = _row_product_ids_offered(metadata)
+        delivered_card = _card_product_delivered(metadata)
+        if delivered_card is not None and last_card is None:
+            # Rows arrive newest first, so the first card found is the most
+            # recent one, and only that one can be "the card we just sent".
+            # It is held to the same lapse as everything else: a card from
+            # last week is not a repeat, it is a new answer.
+            card_age = _age_seconds(moment, getattr(row, "created_at", None))
+            if card_age is None or card_age <= lapse:
+                last_card = delivered_card
         if not cited and not offered_here:
             continue
         # A reply whose timestamp cannot be read is not evidence of staleness;
@@ -296,19 +333,19 @@ def products_shown_earlier(
     offered_map: Dict[str, Tuple[int, ...]] = dict(by_message)
     if not cited_anything:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
-                             offered_by_message=offered_map)
+                             offered_by_message=offered_map, last_card_product_id=last_card)
     if not current:
         return ShownProducts(products=(), reason=LAPSED, offered_as_rows=rows_offered,
-                             offered_by_message=offered_map,
+                             offered_by_message=offered_map, last_card_product_id=last_card,
                              seconds_since_last_product_shown=newest_citation)
 
     products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=current)
     if not products:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
-                             offered_by_message=offered_map,
+                             offered_by_message=offered_map, last_card_product_id=last_card,
                              seconds_since_last_product_shown=newest_citation)
     return ShownProducts(products=tuple(products), reason=CARRIED, offered_as_rows=rows_offered,
-                         offered_by_message=offered_map,
+                         offered_by_message=offered_map, last_card_product_id=last_card,
                          seconds_since_last_product_shown=newest_citation)
 
 
@@ -352,7 +389,7 @@ def _scalar(value: Any) -> Optional[str]:
 
 
 __all__ = [
-    "BROWSING_CONTEXT_LAPSE_SECONDS", "CHOICE_ROW_IDS_KEY", "CARRIED",
+    "BROWSING_CONTEXT_LAPSE_SECONDS", "CARD_PRODUCT_ID_KEY", "CHOICE_ROW_IDS_KEY", "CARRIED",
     "PROVIDER_MESSAGE_ID_KEY", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
     "NO_EARLIER_REPLY", "NO_PRODUCTS_CITED", "PRODUCT_REF_PREFIX", "ShownProduct",
     "ShownProducts", "UNAVAILABLE", "products_shown_earlier",
