@@ -3406,7 +3406,9 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                     .replace('{key}', campaign.throttle.key)
                     .replace('{minutes}', String(campaign.throttle.window_minutes))
                     .replace('{time}', formatUtcTime(campaign.throttle.clears_at, lang))
-                : health.throttleCleared}
+                : campaign.throttle_checked
+                  ? health.throttleCleared
+                  : (health.pauseReasons[pauseReason || ''] || campaign.pause_reason_ar || pauseReason)}
             </p>
           )}
           {lifecycleKey === 'paused' && pauseReason && (
@@ -3679,7 +3681,11 @@ export default function Campaigns() {
     try {
       const updated = await campaignsApi.updateStatus(id, status)
       setCampaigns(cs => cs.map(c => c.id === updated.id ? updated : c))
-    } catch { /* ignore */ }
+    } catch (e) {
+      // A refused resume (e.g. 409 provider_throttled) carries the reason
+      // and when it can proceed — show it instead of doing nothing.
+      if (e instanceof Error && e.message) window.alert(e.message)
+    }
   }
 
   const handleDelete = async (id: number) => {

@@ -114,7 +114,8 @@ def test_the_breaker_says_exactly_when_it_clears(dbf):
     db.close()
     # 30 counted, threshold 25: below it once the 6 oldest have left the window.
     assert (st["key"], st["count"], st["threshold"]) == ("marketing_blocked", 30, 25)
-    assert datetime.fromisoformat(st["clears_at"]) == first + timedelta(seconds=5) + \
+    # The window includes its lower bound: the count drops one tick later.
+    assert datetime.fromisoformat(st["clears_at"]) == first + timedelta(seconds=6) + \
         ledger.POST_ACCEPT_BREAKER_WINDOW
 
 
@@ -192,6 +193,7 @@ def test_a_delivery_block_is_shown_as_one_not_as_wait_a_minute(dbf, fake_meta, w
     assert payload["last_error_key"] != "rate_limit"
     assert "انتظر دقيقة" not in (payload["last_error_ar"] or "")
     assert "131049" in payload["pause_reason_ar"]
+    assert payload["throttle"]["key"] == "marketing_blocked" and payload["throttle_checked"] is True
 
 
 def test_negative_control_the_meta_classifier_misreads_the_internal_token():
@@ -285,3 +287,115 @@ def test_the_same_run_with_the_fix_is_paused_not_completed(dbf, fake_meta, world
     world.dispatch(dbf, ids.campaign_id)
     assert _status(dbf, ids.campaign_id) == "paused"
     assert _lease(dbf, ids.campaign_id).reason == ledger.PAUSE_PROVIDER_RATE_LIMITED
+
+
+# ── Review fixes: only a real rate limit auto-resumes; capacity first ────
+
+
+def test_a_repeated_non_rate_limit_error_stops_for_the_merchant(dbf, fake_meta, world):
+    """25 × a retryable service error (131000) is not proven temporary: the
+    run pauses for the merchant and the scheduler never resumes it."""
+    ids = _seed(dbf, phones=PHONES)
+    meta = fake_meta(FakeMeta({p: ["reject:131000:Something went wrong"] for p in PHONES[:25]}))
+    world.dispatch(dbf, ids.campaign_id)
+    assert _status(dbf, ids.campaign_id) == "paused"
+    assert _lease(dbf, ids.campaign_id).reason == ledger.PAUSE_PROVIDER_REPEATED_ERROR
+    calls = len(meta.calls)
+    _cap._age_window(dbf, hours=1)
+    assert [a for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == []
+    assert len(meta.calls) == calls
+    payload = _cap._lifecycle(dbf, ids.campaign_id)
+    assert payload["lifecycle"] == "paused"
+    assert payload["last_error_ar"] and "same_code_circuit_breaker" not in payload["last_error_ar"]
+    assert payload["pause_reason_ar"] == rc_labels()["provider_repeated_error"]
+
+
+def rc_labels():
+    import routers.campaigns as rc
+    return rc.PAUSE_REASON_LABELS_AR
+
+
+@pytest.mark.parametrize("bucket,reason", [
+    ("rate_limit", "provider_rate_limited"),
+    ("spam_rate_limit", "provider_throttling"),
+    ("service_unavailable", "provider_repeated_error"),
+])
+def test_a_breaker_token_is_labelled_by_its_bucket_never_shown_raw(bucket, reason):
+    import routers.campaigns as rc
+    c = Campaign(id=1, tenant_id=1, name="x", status="paused", template_variables={
+        "_dispatch_errors": f"dispatch_aborted:same_code_circuit_breaker:{bucket}@25"})
+    out = rc._campaign_to_dict(c, execution={"worker_running": False})
+    assert out["last_error_ar"] == rc.PAUSE_REASON_LABELS_AR[reason]
+
+
+def test_negative_control_every_retryable_code_as_a_rate_limit_auto_resumes(
+        dbf, fake_meta, world, monkeypatch):
+    """What the first version did: any retryable code earned a timed backoff."""
+    monkeypatch.setattr(ledger, "RATE_LIMIT_BUCKETS",
+                        frozenset({"rate_limit", "service_unavailable"}))
+    ids = _seed(dbf, phones=PHONES)
+    fake_meta(FakeMeta({p: ["reject:131000:Something went wrong"] for p in PHONES[:25]}))
+    world.dispatch(dbf, ids.campaign_id)
+    assert _lease(dbf, ids.campaign_id).reason == ledger.PAUSE_PROVIDER_RATE_LIMITED
+
+
+def _backoff_due_now(Session, cid):
+    """The rate-limit backoff has passed, without moving any send."""
+    db = Session()
+    c = db.get(Campaign, cid)
+    w = dict(ledger.capacity_wait(c), next_eligible_at=(_now() - timedelta(minutes=1)).isoformat())
+    ledger.store_capacity_wait(c, w)
+    db.commit()
+    db.close()
+
+
+def test_a_backoff_that_finds_the_limit_full_waits_for_capacity_then_requeues(
+        dbf, fake_meta, world):
+    ids = _seed(dbf, phones=PHONES)
+    meta = fake_meta(FakeMeta({p: ["reject:130429:Rate limit hit"] for p in PHONES[3:28]}))
+    world.dispatch(dbf, ids.campaign_id)
+    assert _lease(dbf, ids.campaign_id).reason == ledger.PAUSE_PROVIDER_RATE_LIMITED
+    world.budget(3)                                      # the 3 accepted fill the share
+    _backoff_due_now(dbf, ids.campaign_id)
+    acts = world.resume(dbf)
+    assert acts[0]["action"] == "still_full" and "requeued_rate_limited" not in acts[0]
+    c = _cap._campaign(dbf, ids.campaign_id)
+    assert c.pause_reason == ledger.PAUSE_MESSAGING_LIMIT            # lease and record agree
+    assert c.wait["reason"] == ledger.PAUSE_MESSAGING_LIMIT and c.wait["requeue_rate_limited"]
+    assert _cap._lifecycle(dbf, ids.campaign_id)["lifecycle"] == "waiting_for_capacity"
+    _cap._age_window(dbf, hours=25)                      # the window rolls: room again
+    acts = world.resume(dbf)
+    assert acts[0]["action"] == "resumed" and acts[0]["requeued_rate_limited"] == 25
+    db = dbf()
+    accepted = [a.customer_phone_e164 for a in db.query(CampaignSendAttempt)
+                .filter(CampaignSendAttempt.state == ledger.ATTEMPT_ACCEPTED)]
+    db.close()
+    assert len(accepted) == len(set(accepted)) == 6      # 3 earlier + this window's 3
+    assert all(meta.calls.count(p) <= 2 for p in PHONES)
+
+
+def test_negative_control_a_capacity_record_under_a_rate_limit_lease_is_stranded(
+        dbf, fake_meta, world):
+    """The first version wrote a capacity record but left the lease
+    ``provider_rate_limited``: neither reason authorises the other."""
+    ids = _seed(dbf, phones=PHONES)
+    fake_meta(FakeMeta({p: ["reject:130429:Rate limit hit"] for p in PHONES[3:28]}))
+    world.dispatch(dbf, ids.campaign_id)
+    db = dbf()
+    ledger.record_capacity_wait(db.get(Campaign, ids.campaign_id), None,
+                                now=_now() - timedelta(hours=1))
+    db.commit()
+    db.close()
+    assert world.resume(dbf)[0]["action"] == "needs_merchant_resume"
+
+
+def test_a_per_run_spam_breaker_is_never_shown_as_cleared(dbf, fake_meta, world):
+    """131048 at send time trips a per-run breaker with no sliding window:
+    the page must show the reason, not "cleared"."""
+    ids = _seed(dbf, phones=PHONES[:8])
+    fake_meta(FakeMeta({p: ["reject:131048:Spam rate limit hit"] for p in PHONES[:8]}))
+    world.dispatch(dbf, ids.campaign_id)
+    assert _lease(dbf, ids.campaign_id).reason == ledger.PAUSE_PROVIDER_THROTTLING
+    payload = _cap._lifecycle(dbf, ids.campaign_id)
+    assert payload["lifecycle"] == "provider_throttled"
+    assert payload["throttle"] is None and payload["throttle_checked"] is False

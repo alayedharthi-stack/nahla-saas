@@ -150,6 +150,10 @@ PAUSE_PROVIDER_THROTTLING = "provider_throttling"
 # limit (codes 4 / 17 / 32 / 130429): a temporary backoff that the
 # scheduler continues on its own — unlike post-accept delivery blocks.
 PAUSE_PROVIDER_RATE_LIMITED = "provider_rate_limited"
+# Only Meta's per-minute limit earns a timed backoff; any other retryable
+# code repeating (unknown, service errors, …) stops for the merchant.
+RATE_LIMIT_BUCKETS = frozenset({"rate_limit"})
+PAUSE_PROVIDER_REPEATED_ERROR = "provider_repeated_error"
 RATE_LIMIT_BACKOFF_BASE = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MINUTES", 5))
 RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MAX_MINUTES", 60))
 # A run that ends for no recorded reason while recipients are still queued
@@ -1752,6 +1756,15 @@ def record_capacity_wait(campaign: Any, budget: Optional[MessagingBudget], *,
     return wait
 
 
+def store_capacity_wait(campaign: Any, wait: Dict[str, Any]) -> None:
+    """Write back a (modified) wait record (stage only; caller commits)."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    tv = dict(campaign.template_variables or {})
+    tv[CAPACITY_WAIT_KEY] = dict(wait)
+    campaign.template_variables = tv
+    flag_modified(campaign, "template_variables")
+
+
 def clear_capacity_wait(campaign: Any) -> None:
     from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     tv = dict(campaign.template_variables or {})
@@ -1781,7 +1794,9 @@ def record_rate_limit_wait(campaign: Any, *, detail: str,
     from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     now = now or utcnow()
     prev = capacity_wait(campaign) or {}
-    attempt = int(prev.get("attempt", 0)) + 1 if prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED else 1
+    # A stale record left from an earlier backoff can only lengthen this
+    # one (never shorten it or re-send anything) — the safe direction.
+    attempt =int(prev.get("attempt", 0)) + 1 if prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED else 1
     delay = min(RATE_LIMIT_BACKOFF_BASE * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_MAX)
     wait = {
         "reason": PAUSE_PROVIDER_RATE_LIMITED,
@@ -1878,7 +1893,10 @@ def post_accept_throttle_status(db: Session, scope_key: Optional[str], *,
     # Below the threshold once count - k < threshold, i.e. after the
     # (count - threshold + 1) oldest have left the window.
     k = max(1, len(times) - threshold + 1)
-    clears_at = times[k - 1] + POST_ACCEPT_BREAKER_WINDOW if len(times) >= k else now
+    # The window includes its lower bound, so the count drops only just
+    # after this instant.
+    clears_at = (times[k - 1] + POST_ACCEPT_BREAKER_WINDOW + timedelta(seconds=1)
+                 if len(times) >= k else now)
     return {"key": key, "count": count, "threshold": threshold,
             "window_minutes": int(POST_ACCEPT_BREAKER_WINDOW.total_seconds() // 60),
             "clears_at": clears_at.isoformat()}

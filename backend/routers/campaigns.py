@@ -371,6 +371,7 @@ PAUSE_REASON_LABELS_AR: Dict[str, str] = {
     "messaging_limit_reached": "بلغت الحملة حد المراسلة لدى Meta — تنتظر توفر السعة",
     "provider_rate_limited": "طلبت Meta إبطاء الإرسال مؤقتًا — يُستأنف تلقائيًا بعد مهلة",
     "provider_throttling": "Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال",
+    "provider_repeated_error": "تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة",
     "marketing_blocked": (
         "Meta أوقفت تسليم الرسائل التسويقية لعدد كبير من المستلمين (131049) — "
         "توقف الإرسال حمايةً لجودة الرقم"
@@ -416,10 +417,17 @@ def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str,
     for c in campaigns:
         ex = exec_by_id.get(c.id)
         if (c.status or "").lower() == "paused" and ex and ex.get("pause_reason") == "provider_throttling":
-            try:
-                ex["throttle"] = _campaign_throttle(db, c)
-            except Exception:  # noqa: BLE001, silent-ok — display only; the label still shows the reason
-                ex["throttle"] = None
+            # Only the post-accept breaker is a sliding window whose
+            # clearing can be read back; a per-run breaker (spam at send
+            # time) has no window, so "cleared" would be a false claim.
+            ex["throttle"] = None
+            ex["throttle_checked"] = False
+            if str(ex.get("pause_detail") or "").startswith("post_accept"):
+                try:
+                    ex["throttle"] = _campaign_throttle(db, c)
+                    ex["throttle_checked"] = True
+                except Exception:  # noqa: BLE001, silent-ok — display only; the label still shows the reason
+                    ex["throttle"] = None
     return [
         _campaign_to_dict(
             c, canonical_stats=stats_by_id.get(c.id),
@@ -464,7 +472,14 @@ def _campaign_to_dict(
     if last_error and last_error.startswith(("dispatch_paused:", "dispatch_aborted:",
                                             "dispatch_skipped:")):
         token = last_error.split(":", 1)[1]
-        last_error_ar = PAUSE_REASON_LABELS_AR.get(token.split(":", 1)[0]) or last_error
+        head = token.split(":", 1)[0]
+        if head == "same_code_circuit_breaker":
+            # ``same_code_circuit_breaker:<bucket>@<n>`` — the bucket says
+            # which pause it was.
+            bucket = token.split(":", 1)[1].split("@", 1)[0] if ":" in token else ""
+            head = {"rate_limit": "provider_rate_limited",
+                    "spam_rate_limit": "provider_throttling"}.get(bucket, "provider_repeated_error")
+        last_error_ar = PAUSE_REASON_LABELS_AR.get(head) or "توقف الإرسال لسبب داخلي — يحتاج مراجعة"
     elif last_error:
         try:
             from services.meta_errors import (  # noqa: PLC0415
@@ -658,6 +673,10 @@ def _campaign_to_dict(
         # resume can proceed (None when it has cleared).
         "throttle": (execution or {}).get("throttle") if lifecycle in (
             "marketing_delivery_blocked", "provider_throttled") else None,
+        # True only when the live post-accept window was read: the UI may
+        # say "cleared" only then.
+        "throttle_checked": bool((execution or {}).get("throttle_checked")) if lifecycle in (
+            "marketing_delivery_blocked", "provider_throttled") else False,
         "pause_reason_ar": (
             PAUSE_REASON_LABELS_AR.get(
                 "marketing_blocked" if lifecycle == "marketing_delivery_blocked"
@@ -1025,15 +1044,15 @@ async def update_campaign_status(
 
     was_not_active = campaign.status != "active"
     from services import campaign_send_ledger as _ledger  # noqa: PLC0415
-    if body.status == "active" and was_not_active:
-        _throttle = _campaign_throttle(db, campaign)
-        if _throttle is not None:
-            # Same as dispatch-now: a resume now would stop at once.
-            raise HTTPException(status_code=409, detail={
-                "error": "provider_throttled", **_throttled_refusal(_throttle)})
     # Without the ledger tables no worker can run at all, so a pause needs
     # nothing more than the status change below.
     if _ledger.ledger_available(db):
+        if body.status == "active" and was_not_active:
+            _throttle = _campaign_throttle(db, campaign)
+            if _throttle is not None:
+                # Same as dispatch-now: a resume now would stop at once.
+                raise HTTPException(status_code=409, detail={
+                    "error": "provider_throttled", **_throttled_refusal(_throttle)})
         if body.status == "paused":
             # Safe stop: the live worker (if any) finishes its in-flight
             # request and starts no new one.

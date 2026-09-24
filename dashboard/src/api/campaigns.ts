@@ -223,6 +223,9 @@ export interface CampaignRecord {
   capacity_wait?: CampaignCapacityWait | null
   /** Present while a post-accept breaker is tripped; null once cleared. */
   throttle?: CampaignThrottle | null
+  /** True only when the live post-accept window was read (so a null
+   *  ``throttle`` really means cleared). */
+  throttle_checked?: boolean
   created_at: string | null
   launched_at: string | null
   /** Wave/Batch — `immediate` for legacy / small campaigns,
