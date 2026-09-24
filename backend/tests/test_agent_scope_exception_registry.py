@@ -218,6 +218,43 @@ def test_merging_this_registry_grants_nothing_today() -> None:
     assert payload["exceptions"] == []
 
 
+def test_entries_awaiting_owner_approval_are_complete_and_approve_nothing() -> None:
+    """A proposal names everything the owner decides on — the file, both blobs,
+    the task, the expiry — and carries no approval of its own: the approval
+    link is the owner's to add, and only when the entry moves into
+    ``exceptions``. An entry cannot be proposed and granted at once."""
+    import datetime  # noqa: PLC0415
+
+    payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
+    awaiting = (payload.get("_awaiting_owner_approval") or {}).get("entries") or []
+    granted_ids = {entry["exception_id"] for entry in payload["exceptions"]}
+    for entry in awaiting:
+        assert entry["exception_id"] not in granted_ids, entry["exception_id"]
+        assert entry.get("owner_approval_ref") is None, entry["exception_id"]
+        for field in ("exception_id", "task_scope", "expires_at"):
+            assert isinstance(entry.get(field), str) and entry[field].strip(), field
+        datetime.datetime.strptime(entry["expires_at"], "%Y-%m-%d")
+        assert len(entry["exact_file_scope"]) == 1
+        assert (REPO_ROOT / entry["exact_file_scope"][0]).exists()
+        for digest in [entry["base_content_sha256"], *entry["authorized_content_sha256"]]:
+            assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+        assert len(entry["authorized_content_sha256"]) == 1
+
+
+def test_an_entry_awaiting_owner_approval_grants_nothing(tmp_path: Path) -> None:
+    """Through the real guard: an entry for exactly this change, on BASE and
+    complete in every field — even an approval link — but waiting rather than
+    in ``exceptions``, leaves the path protected. The refusal is the scope
+    violation itself, not a registry the guard could not read."""
+    entry = _valid_entry(authorized_content_sha256=[_sha256(AUTHORISED_BODY)])
+    run = _guarded_repo(tmp_path, {"_awaiting_owner_approval": {"entries": [entry]},
+                                   "exceptions": []})
+    _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
+    with pytest.raises(AssertionError) as refused:
+        _run_guard(tmp_path)
+    assert not isinstance(refused.value, ScopeExceptionRegistryMalformed)
+
+
 def test_the_guard_still_protects_every_path_no_exception_names() -> None:
     """The ban is narrowed by exact path and not lifted. Nothing the registry
     does not name may move, and the markers still cover the siblings."""

@@ -16,5 +16,26 @@
     "decision_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1115#issuecomment-5791097043",
     "review_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1122#issuecomment-5791653456"
   },
+  "_awaiting_owner_approval": {
+    "note": "Complete entries proposed for the owner's decision. They grant nothing: the guard reads only \"exceptions\", and only from BASE. On the owner's approval an entry moves into \"exceptions\" unchanged except for owner_approval_ref, which becomes the https link to that approval, in its own reviewed commit. An entry the owner declines is removed. A change to either blob after an entry was written invalidates its digests, and a new entry is proposed instead.",
+    "entries": [
+      {
+        "exception_id": "AGENT-SCOPE-1145-CATALOG-SEARCH-ORDER",
+        "exact_file_scope": [
+          "backend/core/store_knowledge.py"
+        ],
+        "base_content_sha256": "181b4a45ce3471ef55b999fb45d1b7f045c441597155f0705b5ba2025a8c00c0",
+        "authorized_content_sha256": [
+          "38483be4f46ccda419e44f2b07eba7bd32dea9197b1929ce33b9ed8e0794b362"
+        ],
+        "task_scope": "PR #1145, commerce runtime catalogue pagination. One total catalogue search order (in_stock DESC, id) on every search path: the full-text path returns rows in the order it selected them instead of heap order, and the ILIKE and Arabic-normalised paths gain id as the tie-breaker. One shared search strategy (_search_steps) for the existing row search and a new ids-only candidate read (search_product_candidates, reading cap+1 to prove exhaustion), plus get_by_ids and top_product_candidates for the general browse. Match predicates, limits and callers are unchanged; the order of the rows every existing caller receives, and which of several tied rows a limit keeps, become deterministic.",
+        "owner_approval_ref": null,
+        "expires_at": "2026-10-31",
+        "proposed_in": "https://github.com/alayedharthi-stack/nahla-saas/pull/1145",
+        "base_blob": "origin/main:backend/core/store_knowledge.py at 5b71d5178f17f5b083eefbda67fa6d5807217533",
+        "authorized_blob": "claude/eager-feynman-yoiaw7:backend/core/store_knowledge.py, unchanged since 2795a615989b013155c3defd8a42e908855a2c8b"
+      }
+    ]
+  },
   "exceptions": []
 }
