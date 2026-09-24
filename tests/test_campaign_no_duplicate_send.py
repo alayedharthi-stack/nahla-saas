@@ -780,3 +780,64 @@ def test_negative_control_a_count_max_id_cache_hides_in_place_changes(dbf, fake_
         db.close()
     _, r2 = _claim_pair(dbf, ids, X, Y, mutate)
     assert r2.reason == "claimed"                          # the hidden copy: a duplicate
+
+
+# ── Independent review: A1 non-ASCII digits, A2 event's own recipient, A3 ──
+
+
+@pytest.mark.parametrize("spelling", ["٠٥٠٠٠٠١١١١", "+٩٦٦٥٠٠٠٠١١١١", "۰۵۰۰۰۰۱۱۱۱",
+                                      "+966５０００٠١١١١"],
+                         ids=["arabic-indic-local", "arabic-indic-intl", "persian", "mixed-fullwidth"])
+def test_a_sent_copy_stored_in_non_ascii_digits_blocks(dbf, fake_meta, spelling):
+    """The identity reads Arabic-Indic / Persian / fullwidth digits; the SQL
+    prefilter used to drop them before the identity ever saw them."""
+    from services.recipient_identity import canonical_recipient
+    assert canonical_recipient(spelling) == X
+    ids = _seed_rows(dbf, [X, spelling], statuses={1: "sent"})
+    db = dbf()
+    other = db.query(CampaignSendLog).filter(CampaignSendLog.campaign_id == ids.campaign_id,
+                                             CampaignSendLog.customer_phone_e164 == spelling).one()
+    other.provider_message_id, other.sent_at, other.attempt_count = "w.legacy", _now(), 1
+    db.commit()
+    db.close()
+    meta = fake_meta(FakeMeta())
+    _dispatch(dbf, ids)
+    assert meta.calls == []
+    assert _row(dbf, ids.campaign_id, X) == (ledger.LOG_SKIPPED_SEND_GUARD, "row_accepted")
+
+
+def test_a_copys_own_recorded_recipient_places_it(dbf, fake_meta):
+    """No wamid; the conversation is Y's; the event itself records X as the
+    number it was sent to. X must not be sent (it is a conflict with Y)."""
+    ids = _seed(dbf, phones=[X, Y, Z])
+    conv_id, _ = _conv_for(dbf, ids, Y)
+    db = dbf()
+    db.add(MessageEvent(tenant_id=ids.tenant_id, conversation_id=conv_id, direction="outbound",
+                        event_type="campaign", created_at=_now() - timedelta(days=1),
+                        extra_metadata={"campaign_id": ids.campaign_id, "customer_phone": X,
+                                        "phone": X}))
+    db.commit()
+    db.close()
+    meta = fake_meta(FakeMeta())
+    _dispatch(dbf, ids)
+    assert meta.calls == [Z]
+    assert _row(dbf, ids.campaign_id, X)[1] == "message_events_conflict"
+
+
+def test_any_error_while_reading_evidence_rolls_back_and_pauses(dbf, fake_meta, monkeypatch):
+    """Not only database errors: nothing half-written (no 'sending' row
+    without an attempt), no send, the run pauses."""
+    def broken(db, ctx):
+        raise AttributeError("'str' object has no attribute 'get'")
+    monkeypatch.setattr(ledger, "PRIOR_SEND_CHECKS", (broken,))
+    ids = _seed(dbf, phones=[X])
+    meta = fake_meta(FakeMeta())
+    asyncio.run(_run(dbf, ids, _conn()))
+    assert meta.calls == []
+    db = dbf()
+    row = db.query(CampaignSendLog).filter(CampaignSendLog.campaign_id == ids.campaign_id).one()
+    assert (row.status, int(row.attempt_count or 0)) == ("queued", 0)
+    assert db.query(CampaignSendAttempt).count() == 0
+    assert db.get(CampaignDispatchLease, ids.campaign_id).pause_reason == \
+        ledger.PAUSE_EVIDENCE_UNREADABLE
+    db.close()

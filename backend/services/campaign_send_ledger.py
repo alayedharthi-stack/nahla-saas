@@ -54,7 +54,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import and_, func, or_, update
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import (
@@ -428,15 +428,20 @@ PROVEN_NOT_ACCEPTED_STATES = frozenset({ATTEMPT_REJECTED, ATTEMPT_NOT_SENT, ATTE
 _ROW_MAY_HAVE_REACHED_META = frozenset({"sending", "sent", "delivered", "read", "uncertain"})
 
 
-def _digits_sql(db: Session, col: str) -> str:
-    """SQL for the digits of ``col`` (only a prefilter; the match itself is
-    ``recipient_identity.may_be_recipient``)."""
+def _suffix_prefilter_sql(db: Session, col: str) -> str:
+    """SQL condition that keeps every row whose ``col`` may be the recipient
+    (``:tail`` = the recipient's last digits) — a superset; the match itself
+    is ``recipient_identity.may_be_recipient``. On PostgreSQL an ASCII value
+    is narrowed by its ASCII digits, and any value with a non-ASCII
+    character (Arabic-Indic / Persian / fullwidth digits, …) is always kept
+    for Python to decide. On SQLite the Python digit function is used."""
     if db.get_bind().dialect.name == "postgresql":
-        return f"regexp_replace(coalesce({col}, ''), '[^0-9]', '', 'g')"
+        return (f"(regexp_replace(coalesce({col}, ''), '[^0-9]', '', 'g') LIKE :tail "
+                f"OR coalesce({col}, '') ~ '[^\x01-\x7F]')")
     from services.recipient_identity import digits  # noqa: PLC0415
     db.connection().connection.dbapi_connection.create_function(
         "nahla_digits", 1, digits, deterministic=True)
-    return f"nahla_digits({col})"
+    return f"nahla_digits({col}) LIKE :tail"
 
 
 def _lock_recipient(db: Session, campaign_id: int, canonical: str) -> None:
@@ -459,7 +464,7 @@ def _recipient_rows(db: Session, ctx: Dict[str, Any], table: str, cols: str) -> 
     from services.recipient_identity import may_be_recipient  # noqa: PLC0415
     rows = db.execute(text(
         f"SELECT customer_phone_e164, {cols} FROM {table} WHERE campaign_id = :c "
-        f"AND {_digits_sql(db, 'customer_phone_e164')} LIKE :tail"),
+        f"AND {_suffix_prefilter_sql(db, 'customer_phone_e164')}"),
         {"c": ctx["campaign_id"], "tail": f"%{ctx['suffix']}"}).all()
     return [r[1:] for r in rows if may_be_recipient(r[0], ctx["canonical"])]
 
@@ -570,8 +575,11 @@ def _build_copy_index(db: Session, ctx: Dict[str, Any]) -> _CopyIndex:
             except ValueError:
                 md = None
         md = md if isinstance(md, dict) else {}
-        wamid = md.get("wa_message_id") or (md.get("provider_send") or {}).get("wamid")
-        linked = [x for x in (cu_phone, cu_norm, cv_phone) if x]
+        ps = md.get("provider_send")
+        wamid = md.get("wa_message_id") or (ps.get("wamid") if isinstance(ps, dict) else None)
+        # The event's own record of whom it was sent to counts as a link too.
+        linked = [x for x in (cu_phone, cu_norm, cv_phone, md.get("customer_phone"),
+                              md.get("phone")) if x]
         owned = sorted(owners.get(wamid, ())) if wamid else []
         linked_ids = {canonical_recipient(x) for x in linked} - {None}
         owned_ids = {canonical_recipient(x) for x in owned} - {None}
@@ -617,7 +625,7 @@ def _check_delivery_events(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
             "SELECT sl.customer_phone_e164, mde.status FROM message_delivery_events mde "
             "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id "
             "WHERE sl.campaign_id = :c AND mde.wamid NOT LIKE 'synth:%' "
-            f"AND {_digits_sql(db, 'sl.customer_phone_e164')} LIKE :tail"),
+            f"AND {_suffix_prefilter_sql(db, 'sl.customer_phone_e164')}"),
             {"c": ctx["campaign_id"], "tail": f"%{ctx['suffix']}"}).all():
         if may_be_recipient(phone, ctx["canonical"]):
             return f"delivery_event_{status}"
@@ -740,9 +748,10 @@ def claim_recipient(
     try:
         why = prior_send_evidence(db, campaign_id=campaign_id, tenant_id=tenant_id,
                                   log_id=log_id, phone=phone_key)
-    except SQLAlchemyError as exc:
-        # A source that cannot be read is never permission to send: the
-        # claim is refused, the row stays queued, and the run stops.
+    except Exception as exc:  # noqa: BLE001, silent-ok — refused and logged; the run pauses on it
+        # A source that cannot be read — or any error while reading it — is
+        # never permission to send: the claim is rolled back (the row stays
+        # queued, nothing half-written), refused, and the run stops.
         db.rollback()
         logger.error("[campaign_ledger] campaign=%d row=%d evidence unreadable: %s",
                      campaign_id, log_id, type(exc).__name__)
