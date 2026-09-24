@@ -473,6 +473,14 @@ def _campaign_to_dict(
             lifecycle = "stalled"
     elif raw_status == "paused":
         lifecycle = "paused"
+        # Meta's shared messaging limit, not the merchant: the campaign
+        # continues on its own once capacity returns.
+        if (
+            execution is not None
+            and execution.get("pause_reason") == "messaging_limit_reached"
+            and not execution.get("stop_requested")
+        ):
+            lifecycle = "waiting_for_capacity"
     elif raw_status == "draft":
         lifecycle = "draft"
     else:
@@ -569,6 +577,12 @@ def _campaign_to_dict(
         # Is a worker really running? (lease-backed, not the status column)
         "execution": execution,
         "pause_reason": (execution or {}).get("pause_reason") if raw_status == "paused" else None,
+        "capacity_wait": (
+            {k: (tpl_vars.get("_capacity_wait") or {}).get(k) for k in (
+                "next_eligible_at", "next_eligible_exact", "used_24h", "budget", "limit",
+                "limit_source")}
+            if lifecycle == "waiting_for_capacity" else None
+        ),
         "clicked_count": c.clicked_count,
         "converted_count": c.converted_count,
         "created_at": c.created_at.isoformat() if c.created_at else None,

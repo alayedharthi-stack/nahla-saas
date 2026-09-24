@@ -553,6 +553,61 @@ async def run_campaign_wave_scheduler() -> None:
         await asyncio.sleep(_WAVE_POLL_SECONDS)
 
 
+_CAPACITY_POLL_SECONDS = int(os.getenv("CAMPAIGN_CAPACITY_POLL_SECONDS", "60"))
+_capacity_resume_state: Dict[str, Any] = {
+    "started_at": None, "last_tick_at": None, "last_tick_ok": None,
+    "last_tick_error": None, "ticks_total": 0, "ticks_failed": 0, "resumed": 0,
+}
+
+
+def get_capacity_resume_state() -> Dict[str, Any]:
+    return dict(_capacity_resume_state)
+
+
+async def run_campaign_capacity_resume_scheduler() -> None:
+    """Continue campaigns that Meta's shared messaging limit paused, once
+    capacity returns. The state lives in the database, so a restart or
+    deploy never loses a waiting campaign — the next tick picks it up.
+    See ``campaign_dispatcher.resume_capacity_waiting``."""
+    await asyncio.sleep(20)
+    _capacity_resume_state["started_at"] = datetime.now(timezone.utc)
+    logger.info("[Campaign Capacity Resume] Started — polling every %ss", _CAPACITY_POLL_SECONDS)
+    while True:
+        _capacity_resume_state["last_tick_at"] = datetime.now(timezone.utc)
+        _capacity_resume_state["ticks_total"] += 1
+        try:
+            await _resume_capacity_waiting_campaigns()
+            _capacity_resume_state["last_tick_ok"] = True
+            _capacity_resume_state["last_tick_error"] = None
+        except Exception as exc:  # noqa: BLE001
+            _capacity_resume_state["last_tick_ok"] = False
+            _capacity_resume_state["last_tick_error"] = repr(exc)[:400]
+            _capacity_resume_state["ticks_failed"] += 1
+            logger.error("[Campaign Capacity Resume] Error: %s", exc, exc_info=True)
+        await asyncio.sleep(_CAPACITY_POLL_SECONDS)
+
+
+async def _resume_capacity_waiting_campaigns() -> None:
+    import sys as _sys, os as _os  # noqa: PLC0415
+    _backend = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), ".."))
+    _db_dir = _os.path.abspath(_os.path.join(_backend, "..", "database"))
+    for _p in (_backend, _db_dir):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+    from core.database import SessionLocal  # noqa: PLC0415
+    from services.campaign_dispatcher import resume_capacity_waiting  # noqa: PLC0415
+
+    db = SessionLocal()
+    try:
+        actions = await resume_capacity_waiting(db)
+        for a in actions:
+            if a.get("action", "").startswith("resumed"):
+                _capacity_resume_state["resumed"] += 1
+                logger.info("[Campaign Capacity Resume] %s", a)
+    finally:
+        db.close()
+
+
 async def _dispatch_due_waves() -> None:
     """One pass of the wave scheduler.
 

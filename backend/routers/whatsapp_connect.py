@@ -1639,6 +1639,31 @@ import os as _os  # noqa: PLC0415
 _META_TIER_STALE_HOURS = int(_os.environ.get("NAHLA_META_TIER_STALE_HOURS", "6"))
 
 
+_PORTFOLIO_RESOLVE_RETRY_SECONDS = 3600
+_portfolio_resolve_attempted: dict = {}
+
+
+async def _ensure_portfolio_id(conn: Any, ctx: Any, tenant_id: int) -> bool:
+    """Store the business portfolio that owns this connection's WABA in
+    ``business_manager_id`` when it is missing — the shared messaging
+    budget is scoped by it (``bm:``); without it campaign sends fail closed.
+    Retries at most hourly per tenant. Returns True when a value was stored
+    (the caller commits)."""
+    import time as _time  # noqa: PLC0415
+    if getattr(conn, "business_manager_id", None) or getattr(conn, "meta_business_account_id", None):
+        return False
+    last = _portfolio_resolve_attempted.get(tenant_id)
+    if last is not None and _time.monotonic() - last < _PORTFOLIO_RESOLVE_RETRY_SECONDS:
+        return False
+    _portfolio_resolve_attempted[tenant_id] = _time.monotonic()
+    from services.whatsapp_platform.service import fetch_meta_portfolio_id  # noqa: PLC0415
+    pid = await fetch_meta_portfolio_id(conn, ctx, tenant_id=tenant_id)
+    if not pid:
+        return False
+    conn.business_manager_id = pid
+    return True
+
+
 async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:
     """Fetch Meta tier from Graph API if cached data is missing or stale."""
     import logging as _log  # noqa: PLC0415
@@ -1653,11 +1678,18 @@ async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:
         last = conn.meta_tier_updated_at
         if last and last.tzinfo is None:
             last = last.replace(tzinfo=tz.utc)
-        if last and (now - last).total_seconds() < _META_TIER_STALE_HOURS * 3600:
+        fresh = bool(last and (now - last).total_seconds() < _META_TIER_STALE_HOURS * 3600)
+        missing_portfolio = not (conn.business_manager_id or conn.meta_business_account_id)
+        if fresh and not missing_portfolio:
             return
 
         ctx = get_token_context(conn)
         if not ctx.token:
+            return
+        if missing_portfolio and await _ensure_portfolio_id(conn, ctx, tenant_id):
+            db.commit()
+            _logger.info("[WA tier] tenant=%s business portfolio resolved", tenant_id)
+        if fresh:
             return
 
         from services.whatsapp_platform.service import fetch_meta_phone_tier  # noqa: PLC0415
@@ -1702,6 +1734,8 @@ async def refresh_meta_tier(
     if not ctx.token:
         return {"updated": False, "reason": "no_token"}
 
+    _portfolio_resolve_attempted.pop(tenant_id, None)   # explicit refresh: try now
+    portfolio_resolved = await _ensure_portfolio_id(conn, ctx, tenant_id)
     tier_data = await fetch_meta_phone_tier(conn, ctx, tenant_id=tenant_id)
     diagnostics = (tier_data or {}).get("_diagnostics") or []
     fresh_tier   = (tier_data or {}).get("messaging_limit")
@@ -1724,6 +1758,9 @@ async def refresh_meta_tier(
     return {
         "updated":          updated,
         "messaging_limit":  conn.meta_messaging_limit,
+        "messaging_limit_source": (tier_data or {}).get("messaging_limit_source"),
+        "portfolio_resolved": portfolio_resolved,
+        "portfolio_known": bool(conn.business_manager_id or conn.meta_business_account_id),
         "quality_rating":   conn.meta_quality_rating,
         "provider":         (getattr(conn, "provider", None) or "meta"),
         # Surfacing the diagnostics empowers merchants to verify

@@ -124,6 +124,9 @@ MESSAGING_LIMIT_MAX_AGE_HOURS = _env_int("NAHLA_META_LIMIT_MAX_AGE_HOURS", 24)
 # automation templates this ledger does not count.
 CAMPAIGN_BUDGET_PERCENT = _env_int("NAHLA_CAMPAIGN_LIMIT_BUDGET_PERCENT", 90)
 MESSAGING_WINDOW = timedelta(hours=24)
+# How often a campaign waiting for capacity is re-checked when the exact
+# moment a slot frees is unknown (e.g. usage from outside the ledger).
+CAPACITY_RECHECK_INTERVAL = timedelta(minutes=_env_int("NAHLA_CAPACITY_RECHECK_MINUTES", 15))
 # Post-accept throttling breaker (Meta says: stop sending from this number).
 POST_ACCEPT_BREAKER_WINDOW = timedelta(
     minutes=_env_int("NAHLA_CAMPAIGN_POST_ACCEPT_WINDOW_MINUTES", 15),
@@ -1170,12 +1173,17 @@ def parse_messaging_tier(raw: Any) -> Optional[int]:
 class MessagingBudget:
     scope_key: Optional[str]
     limit: Optional[int]           # None = unlimited
-    limit_source: str              # meta_fresh | meta_stale_fallback | unknown_fallback | unlimited
+    limit_source: str              # meta_fresh | meta_stale_fallback | unknown_fallback | unlimited | portfolio_unknown
     budget: Optional[int]          # campaign share of the limit
     used: int = 0
     tier_raw: Optional[str] = None
     tier_updated_at: Optional[str] = None
     contacted_phones: set = field(default_factory=set)
+    # When the next slot frees up: the moment ``used`` drops below
+    # ``budget`` as counted recipients age out of the 24h window (None
+    # when there is room now, or nothing to wait for).
+    next_slot_at: Optional[datetime] = None
+    window_since: Optional[datetime] = None
 
     @property
     def remaining(self) -> Optional[int]:
@@ -1195,6 +1203,8 @@ class MessagingBudget:
             "scope_key": self.scope_key, "limit": self.limit, "limit_source": self.limit_source,
             "budget": self.budget, "used_24h": self.used, "remaining": self.remaining,
             "tier_raw": self.tier_raw, "tier_updated_at": self.tier_updated_at,
+            "next_slot_at": self.next_slot_at.isoformat() if self.next_slot_at else None,
+            "window_since": self.window_since.isoformat() if self.window_since else None,
         }
 
 
@@ -1259,43 +1269,174 @@ def messaging_budget(db: Session, conn: Any, *, now: Optional[datetime] = None) 
         tier_raw, tier_at = stale_raw, None
 
     budget = max(0, (limit * max(0, min(100, CAMPAIGN_BUDGET_PERCENT))) // 100)
+    if not (scope or "").startswith("bm:"):
+        # Meta's limit is shared by every WABA and number in the business
+        # portfolio. Without the portfolio identity a narrower (WABA /
+        # number) budget could let two WABAs of one portfolio each admit
+        # their own share — so nothing is admitted until it is known (the
+        # tier sync resolves it from Meta; the campaign waits meanwhile).
+        source, budget = "portfolio_unknown", 0
     since = now - MESSAGING_WINDOW
-    phones = set()
-    if scope:
-        phones = {
-            r[0] for r in (
-                db.query(CampaignSendAttempt.customer_phone_e164)
-                .filter(
-                    CampaignSendAttempt.messaging_scope_key == scope,
-                    CampaignSendAttempt.state.in_(tuple(BUDGET_STATES)),
-                    func.coalesce(CampaignSendAttempt.request_started_at,
-                                  CampaignSendAttempt.claimed_at) >= since,
-                )
-                .distinct()
-                .all()
+    usage = messaging_usage(db, scope, conns, since=since)
+    last_seen = {p: max((v["ts"] for v in rows if v["ts"] is not None), default=None)
+                 for p, rows in usage.items()}
+    used = len(last_seen)
+    next_slot = None
+    if budget is not None and used >= budget and last_seen:
+        # The (used - budget + 1)-th oldest recipient to age out frees
+        # the first slot.
+        expiries = sorted(t for t in last_seen.values() if t is not None)
+        k = used - budget
+        if k < len(expiries):
+            next_slot = expiries[k] + MESSAGING_WINDOW
+    return MessagingBudget(scope, limit, source, budget, used=used,
+                           tier_raw=tier_raw, tier_updated_at=tier_at,
+                           contacted_phones=set(last_seen), next_slot_at=next_slot,
+                           window_since=since)
+
+
+def scope_key_aliases(scope: Optional[str], conns: List[Any]) -> List[str]:
+    """Every scope key an attempt of these connections may have been
+    recorded under: the scope itself plus each connection's portfolio,
+    WABA and number keys — so a connection whose portfolio was resolved
+    later still counts the attempts it recorded under a narrower key."""
+    keys = {scope} if scope else set()
+    for c in conns:
+        for prefix, attr in (("bm", "business_manager_id"), ("bm", "meta_business_account_id"),
+                             ("waba", "whatsapp_business_account_id"),
+                             ("phone", "phone_number_id")):
+            v = str(getattr(c, attr, "") or "").strip()
+            if v:
+                keys.add(f"{prefix}:{v}"[:160])
+    return sorted(keys)
+
+
+def messaging_usage(db: Session, scope: Optional[str], conns: List[Any], *,
+                    since: datetime) -> Dict[str, List[Dict[str, Any]]]:
+    """Recipient phones that may have taken one of Meta's unique-user
+    slots since ``since``, each with the evidence that counted it.
+
+    Meta limits the unique users a business *delivers* business-initiated
+    messages to in a moving 24h window. What we can see:
+
+    * ledger attempts (``source='attempt'``) in the scope that may have
+      produced a message — started, accepted or uncertain. An accepted
+      attempt Meta later reported failed, with no delivered/read receipt,
+      did not reach the user and does not count;
+    * send-log rows of every tenant with a number in the scope
+      (``source='send_log'``) for sends the ledger does not cover — rows
+      from before the attempt ledger. Their ``failed_at`` cannot be tied
+      to one copy (a duplicate may have been delivered), so they always
+      count; a row whose ``sent_at`` comes from its own ledger attempts is
+      left to the ledger.
+    """
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    keys = scope_key_aliases(scope, conns)
+    if keys:
+        rows = (
+            db.query(CampaignSendAttempt.customer_phone_e164, CampaignSendAttempt.campaign_id,
+                     CampaignSendAttempt.tenant_id, CampaignSendAttempt.state,
+                     CampaignSendAttempt.request_started_at, CampaignSendAttempt.claimed_at,
+                     CampaignSendAttempt.failed_at, CampaignSendAttempt.delivered_at,
+                     CampaignSendAttempt.read_at)
+            .filter(
+                CampaignSendAttempt.messaging_scope_key.in_(keys),
+                CampaignSendAttempt.state.in_(tuple(BUDGET_STATES)),
+                func.coalesce(CampaignSendAttempt.request_started_at,
+                              CampaignSendAttempt.claimed_at) >= since,
             )
-        }
-    # Recipient rows of every tenant whose number is in this scope —
-    # covers sends made before the attempt ledger existed.
+            .all()
+        )
+        for phone, cid, tid, state, started, claimed, failed, dl, rd in rows:
+            if (state == ATTEMPT_ACCEPTED and failed is not None
+                    and dl is None and rd is None):
+                continue                      # Meta said it never reached the user
+            out.setdefault(phone, []).append({
+                "source": "attempt", "campaign_id": cid, "tenant_id": tid,
+                "ts": _naive(started or claimed),
+            })
     tenant_ids = {int(t) for t in (getattr(c, "tenant_id", None) for c in conns) if t}
     if tenant_ids:
-        phones.update(
-            r[0] for r in (
-                db.query(CampaignSendLog.customer_phone_e164)
-                .filter(
-                    CampaignSendLog.tenant_id.in_(tenant_ids),
-                    or_(
-                        CampaignSendLog.sent_at >= since,
-                        and_(CampaignSendLog.status.in_((LOG_UNCERTAIN, "sending")),
-                             CampaignSendLog.updated_at >= since),
-                    ),
-                )
-                .distinct()
-                .all()
+        logs = (
+            db.query(CampaignSendLog.id, CampaignSendLog.customer_phone_e164,
+                     CampaignSendLog.campaign_id, CampaignSendLog.tenant_id,
+                     CampaignSendLog.status, CampaignSendLog.sent_at, CampaignSendLog.updated_at)
+            .filter(
+                CampaignSendLog.tenant_id.in_(tenant_ids),
+                or_(
+                    CampaignSendLog.sent_at >= since,
+                    and_(CampaignSendLog.status.in_((LOG_UNCERTAIN, "sending")),
+                         CampaignSendLog.updated_at >= since),
+                ),
             )
+            .all()
         )
-    return MessagingBudget(scope, limit, source, budget, used=len(phones),
-                           tier_raw=tier_raw, tier_updated_at=tier_at, contacted_phones=phones)
+        ids = [int(r[0]) for r in logs]
+        first_claim: Dict[int, datetime] = {}
+        for i in range(0, len(ids), 1000):
+            for lid, first in (
+                db.query(CampaignSendAttempt.send_log_id, func.min(CampaignSendAttempt.claimed_at))
+                .filter(CampaignSendAttempt.send_log_id.in_(ids[i:i + 1000]))
+                .group_by(CampaignSendAttempt.send_log_id)
+                .all()
+            ):
+                first_claim[int(lid)] = _naive(first)
+        for lid, phone, cid, tid, status, sent_at, updated_at in logs:
+            fc = first_claim.get(int(lid))
+            if fc is not None and sent_at is not None and _naive(sent_at) >= fc:
+                continue                      # this send is the ledger's to count
+            if fc is not None and sent_at is None:
+                continue                      # uncertain/sending row owned by the ledger
+            out.setdefault(phone, []).append({
+                "source": "send_log", "campaign_id": cid, "tenant_id": tid,
+                "ts": _naive(sent_at if sent_at is not None and _naive(sent_at) >= since
+                             else updated_at),
+            })
+    return out
+
+
+CAPACITY_WAIT_KEY = "_capacity_wait"
+
+
+def record_capacity_wait(campaign: Any, budget: Optional[MessagingBudget], *,
+                         now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Persist on the campaign when it may continue after Meta's shared
+    messaging limit stopped it (stage only; caller commits). Durable
+    across restarts and deploys: the scheduler reads it from the DB."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    now = now or utcnow()
+    next_at = budget.next_slot_at if budget is not None else None
+    wait = {
+        "reason": PAUSE_MESSAGING_LIMIT,
+        "since": now.isoformat(),
+        "next_eligible_at": (next_at or now + CAPACITY_RECHECK_INTERVAL).isoformat(),
+        "next_eligible_exact": next_at is not None,
+        "scope_key": budget.scope_key if budget else None,
+        "used_24h": budget.used if budget else None,
+        "budget": budget.budget if budget else None,
+        "limit": budget.limit if budget else None,
+        "limit_source": budget.limit_source if budget else None,
+    }
+    tv = dict(campaign.template_variables or {})
+    tv[CAPACITY_WAIT_KEY] = wait
+    campaign.template_variables = tv
+    flag_modified(campaign, "template_variables")
+    return wait
+
+
+def clear_capacity_wait(campaign: Any) -> None:
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    tv = dict(campaign.template_variables or {})
+    if CAPACITY_WAIT_KEY in tv:
+        tv.pop(CAPACITY_WAIT_KEY, None)
+        campaign.template_variables = tv
+        flag_modified(campaign, "template_variables")
+
+
+def capacity_wait(campaign: Any) -> Optional[Dict[str, Any]]:
+    tv = campaign.template_variables or {}
+    w = tv.get(CAPACITY_WAIT_KEY) if isinstance(tv, dict) else None
+    return w if isinstance(w, dict) else None
 
 
 def post_accept_throttle(db: Session, scope_key: Optional[str], *,

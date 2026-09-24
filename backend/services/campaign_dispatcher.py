@@ -548,6 +548,7 @@ async def _dispatch_campaign_with_lease(
         campaign.updated_at = datetime.now(timezone.utc)
         if ctx.pause_reason and not ctx.lease_lost:
             campaign.status = "paused"
+        _note_capacity_wait(campaign, ctx)
         db.commit()
         return {
             "campaign_id":   campaign_id,
@@ -763,6 +764,7 @@ async def _dispatch_campaign_with_lease(
     campaign.sent_count = counts.get("sent", 0)
     campaign.status = final_status
     campaign.updated_at = datetime.now(timezone.utc)
+    _note_capacity_wait(campaign, ctx)
 
     _persist_dispatch_result(
         campaign,
@@ -1806,6 +1808,24 @@ def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
 # ── Batched send ─────────────────────────────────────────────────────────
 
 
+def _note_capacity_wait(campaign: Campaign, ctx: "DispatchRunContext") -> None:
+    """A run stopped by Meta's shared messaging limit is waiting for
+    capacity, not failed or merchant-paused: persist when it may continue
+    so the scheduler resumes it. Any other outcome clears the wait."""
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+    if ctx.lease_lost:
+        return
+    if ctx.pause_reason == ledger.PAUSE_MESSAGING_LIMIT:
+        wait = ledger.record_capacity_wait(campaign, ctx.capacity)
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d waiting for Meta messaging capacity "
+            "until %s (used=%s budget=%s scope=%s)", campaign.id,
+            wait["next_eligible_at"], wait["used_24h"], wait["budget"], wait["scope_key"],
+        )
+    else:
+        ledger.clear_capacity_wait(campaign)
+
+
 class DispatchRunContext:
     """Per-run execution state shared by ``dispatch_campaign`` and the
     send loop: which lease we hold and why (if at all) we stopped."""
@@ -1815,6 +1835,8 @@ class DispatchRunContext:
         self.pause_reason: Optional[str] = None
         self.pause_detail: str = ""
         self.lease_lost = False
+        # Budget snapshot when Meta's shared messaging limit stopped the run.
+        self.capacity: Any = None
 
     def pause(self, reason: str, detail: str = "") -> None:
         if self.pause_reason is None:
@@ -1953,6 +1975,7 @@ async def _dispatch_queued_rows(
                 # ── 1. Stop before sending into a known refusal ──────
                 budget = ledger.messaging_budget(db, wa_conn)
                 if not budget.allows(phone):
+                    ctx.capacity = budget
                     ctx.pause(
                         ledger.PAUSE_MESSAGING_LIMIT,
                         f"used={budget.used} budget={budget.budget} limit={budget.limit} "
@@ -2010,6 +2033,7 @@ async def _dispatch_queued_rows(
                 if claim.attempt is None:
                     if claim.reason == "budget_exhausted":
                         b = claim.budget
+                        ctx.capacity = b
                         ctx.pause(
                             ledger.PAUSE_MESSAGING_LIMIT,
                             f"used={b.used} budget={b.budget} limit={b.limit} "
@@ -2704,3 +2728,98 @@ async def _get_auto_coupon(
             tenant_id, customer.id, exc,
         )
     return ""
+
+
+# ── Waiting for Meta messaging capacity ──────────────────────────────────
+
+
+async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Continue every campaign that Meta's shared messaging limit paused,
+    once the limit has room again. Called by the scheduler; durable because
+    everything it needs is in the database (campaign status, the lease's
+    pause reason and stop flag, the recorded ``_capacity_wait``).
+
+    A campaign continues only when all of these hold:
+
+    * ``status='paused'`` with lease ``pause_reason='messaging_limit_reached'``
+      and no merchant stop (a stop/pause always wins — it needs the
+      merchant's own resume);
+    * no worker holds the lease;
+    * its ``next_eligible_at`` has passed;
+    * it still has ``queued`` recipients;
+    * the shared budget now admits a new recipient.
+
+    Otherwise the wait is re-recorded with the next moment a slot frees.
+    Continuing goes through the normal leased dispatch path — atomic
+    claims, the scope lock and the budget check are unchanged, so a
+    resumed run that fills the limit again simply goes back to waiting.
+    Wave campaigns are set back to ``active`` and their pending waves are
+    dispatched by the wave scheduler.
+    """
+    from models import CampaignDispatchLease, CampaignWave  # noqa: PLC0415
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+
+    now = now or ledger.utcnow()
+    out: List[Dict[str, Any]] = []
+    rows = (
+        db.query(Campaign, CampaignDispatchLease)
+        .join(CampaignDispatchLease, CampaignDispatchLease.campaign_id == Campaign.id)
+        .filter(
+            Campaign.status == "paused",
+            CampaignDispatchLease.pause_reason == ledger.PAUSE_MESSAGING_LIMIT,
+            CampaignDispatchLease.stop_requested_at.is_(None),
+        )
+        .all()
+    )
+    for campaign, lease in rows:
+        cid = int(campaign.id)
+        entry: Dict[str, Any] = {"campaign_id": cid}
+        out.append(entry)
+        if ledger.lease_is_live(lease, now=now):
+            entry["action"] = "worker_running"
+            continue
+        wait = ledger.capacity_wait(campaign) or {}
+        due = wait.get("next_eligible_at")
+        try:
+            due_at = ledger._naive(datetime.fromisoformat(due)) if due else None
+        except ValueError:
+            due_at = None
+        if due_at is not None and now < due_at:
+            entry.update(action="waiting", next_eligible_at=due)
+            continue
+        queued = (
+            db.query(func.count(CampaignSendLog.id))
+            .filter(CampaignSendLog.campaign_id == cid, CampaignSendLog.status == LOG_QUEUED)
+            .scalar()
+        ) or 0
+        if not queued:
+            entry["action"] = "nothing_queued"
+            continue
+        wa_conn = _get_wa_connection(db, campaign.tenant_id)
+        if wa_conn is None:
+            entry["action"] = "no_connection"
+            continue
+        budget = ledger.messaging_budget(db, wa_conn, now=now)
+        if budget.budget is not None and budget.used >= budget.budget:
+            wait = ledger.record_capacity_wait(campaign, budget, now=now)
+            db.commit()
+            entry.update(action="still_full", next_eligible_at=wait["next_eligible_at"],
+                         used_24h=budget.used, budget=budget.budget)
+            continue
+        has_waves = db.query(CampaignWave.id).filter(CampaignWave.campaign_id == cid).first()
+        campaign.status = "active"
+        campaign.updated_at = datetime.now(timezone.utc)
+        ledger.clear_capacity_wait(campaign)
+        db.commit()
+        logger.info(
+            "[campaign_dispatcher] campaign=%d Meta capacity available (used=%s budget=%s) "
+            "— continuing %d queued recipients%s", cid, budget.used, budget.budget, queued,
+            " via the wave scheduler" if has_waves else "",
+        )
+        if has_waves:
+            entry["action"] = "resumed_waves"
+            continue
+        result = await dispatch_campaign(db, cid)
+        entry.update(action="resumed", status=result.get("status"),
+                     sent=result.get("sent"), errors=(result.get("errors") or [])[:3])
+    return out
