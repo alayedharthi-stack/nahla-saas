@@ -288,6 +288,98 @@ def _addressable(inbounds: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], s
     return out
 
 
+RELEASED = "released"
+RELEASE_NOT_OURS = "not_ours"
+RELEASE_NOTHING_PENDING = "nothing_pending"
+RELEASE_KEPT = "kept"          # the runtime owns it: a turn exists, finished or not
+RELEASE_UNAVAILABLE = "unavailable"
+
+# Said once, where the disposal is authorised, so the row carries why rather
+# than a note somebody has to interpret later.
+_RELEASE_AUTHORITY = "platform:whatsapp_webhook_dispatch"
+_RELEASE_WHY = ("the commerce runtime was never asked for this inbound: a gate "
+                "ahead of it ended the turn, so no answer was owed by it")
+
+
+def release_unrouted_obligation(*, phone_number_id: Any, provider_message_id: Any,
+                                session_factory: Optional[Any] = None) -> str:
+    """Give back the acceptance obligation when the runtime never took the turn.
+
+    The acknowledgement promised that **the commerce runtime** owes this message
+    an answer. Several gates sit ahead of the runtime in ``whatsapp_webhook`` —
+    the conversation's own ``ai_paused``, ``should_skip_ai`` (blocklist,
+    handoff, rate limit, bot loop), billing, the conversation quota — and each
+    of them ends the turn with a ``return``, before the seam that would have
+    asked the runtime and before the bookkeeping that closes the record. The
+    obligation then has nobody to discharge it: one pending row per inbound,
+    until ``MAX_PENDING_DEFERRED`` refuses the next and the request is answered
+    503 — which stops that merchant's webhook being acknowledged at all.
+
+    Enumerating those gates at classification time would close today's list and
+    reopen with tomorrow's. This is asked once, at the single point every
+    inbound passes through when its turn is over, so a gate added later is
+    covered without anyone remembering to.
+
+    It decides nothing on its own. ``handover.dispose_inbound`` holds the
+    tenant's exclusive lock and refuses an entry whose turn is admitted and
+    unfinished, whose reply was accepted, or whose send outcome is unknown — so
+    a turn the runtime really owns, answered or still running, is never
+    disposed of underneath it. What this adds is the one case the records
+    already prove: **no turn at all**, therefore nothing owed.
+
+    Returns which of those happened, for the caller's log. Never raises.
+    """
+    identity = str(provider_message_id or "").strip()
+    channel = str(phone_number_id or "").strip()
+    if not identity or not channel:
+        return RELEASE_NOT_OURS
+
+    from core.commerce_runtime import handover, pilot_guard  # noqa: PLC0415
+    from core.commerce_runtime import handover_models as hm  # noqa: PLC0415
+
+    db = None
+    try:
+        db = _session(session_factory)
+        scope = pilot_guard.resolve_pilot_scope(db, phone_number_id=channel)
+        if scope.status == pilot_guard.SCOPE_NOT_OURS:
+            return RELEASE_NOT_OURS
+        if not scope.resolved:
+            # We could not establish whose this is. Leaving the row pending is
+            # the safe answer: it is visible to the operator either way, and a
+            # disposal we cannot justify is worse than one we did not make.
+            return RELEASE_UNAVAILABLE
+
+        record = handover.accepted_inbound(
+            db, tenant_id=scope.tenant_id,
+            channel_connection_ref=scope.connection_ref,
+            provider_message_id=identity)
+        if record is None or not record.pending:
+            return RELEASE_NOTHING_PENDING
+
+        result = handover.dispose_inbound(
+            db, tenant_id=scope.tenant_id, entry_ids=(int(record.id),),
+            disposition=hm.DISPOSITION_NOT_REQUIRED,
+            evidence={"authorized_by": _RELEASE_AUTHORITY, "why": _RELEASE_WHY},
+            by=_RELEASE_AUTHORITY)
+        if int(record.id) in set(result.disposed or ()):
+            return RELEASED
+        refusal = dict(result.refused or {}).get(int(record.id), "")
+        logger.info("[COMMERCE_RUNTIME_ACCEPT] obligation kept tenant=%s reason=%s",
+                    scope.tenant_id, refusal or "unknown")
+        return RELEASE_KEPT
+    except Exception as exc:  # noqa: BLE001 - a release we cannot make leaves the row pending
+        logger.warning("[COMMERCE_RUNTIME_ACCEPT] obligation release failed error=%s "
+                       "— the record stays pending and visible to the operator",
+                       type(exc).__name__)
+        return RELEASE_UNAVAILABLE
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("[COMMERCE_RUNTIME_ACCEPT] session close failed")
+
+
 def _session(session_factory: Optional[Any]) -> Any:
     if session_factory is None:
         from database.session import SessionLocal as session_factory  # noqa: PLC0415,N813
@@ -503,4 +595,6 @@ def _replayable(message: Mapping[str, Any]) -> Dict[str, Any]:
 __all__ = ["Acceptance", "DurableStatus", "IN_SCOPE", "OUT_OF_SCOPE",
            "REFUSED_NOT_PERSISTED", "REFUSED_RELEASED", "REFUSED_UNAUTHENTICATED",
            "REFUSED_UNDECIDABLE", "UNDECIDABLE", "durable_status",
-           "record_before_acknowledging"]
+           "record_before_acknowledging", "release_unrouted_obligation",
+           "RELEASED", "RELEASE_KEPT", "RELEASE_NOTHING_PENDING",
+           "RELEASE_NOT_OURS", "RELEASE_UNAVAILABLE"]
