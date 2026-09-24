@@ -44,6 +44,7 @@ unknown, and never start one concurrently from two workers.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -53,7 +54,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import and_, func, or_, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from models import (
@@ -399,15 +400,19 @@ class ClaimResult:
 # A recipient may be sent only when there is affirmative evidence that no
 # earlier attempt in this campaign may have reached Meta. The ``queued``
 # compare-and-set protects one row; a recipient can have several rows (the
-# same number stored as ``+966…`` and ``966…``), a row can be put back to
-# ``queued`` after it was sent, and a copy's only trace can be a
-# ``message_events`` row or a delivery receipt. The claim therefore checks
-# every trace of the recipient, under a per-recipient lock, and refuses —
-# durably, with the reason — unless each one proves "never accepted".
-# The absence of a delivered/read receipt is never such proof.
+# same number stored as ``+966…``, ``966…``, ``00966…`` or ``05…``), a row
+# can be put back to ``queued`` after it was sent, and a copy's only trace
+# can be a ``message_events`` row or a delivery receipt. The claim therefore
+# checks every trace of the recipient — matched by its validated identity
+# (``services.recipient_identity``) — under a per-recipient lock, and
+# refuses, durably and with the reason, unless each one proves "never
+# accepted". The absence of a delivered/read receipt is never such proof;
+# neither is a source that cannot be read or a copy that cannot be placed.
 
-LOG_SKIPPED_PRIOR_SEND = "skipped_prior_send"
+LOG_SKIPPED_SEND_GUARD = "skipped_send_guard"
 PRIOR_SEND_ERROR = "prior_send_evidence"
+EVIDENCE_UNREADABLE = "evidence_unreadable"
+PAUSE_EVIDENCE_UNREADABLE = "evidence_unreadable"
 
 # Attempt states that prove the request produced no accepted copy: Meta
 # answered with an error (rejected), the transport failed before the
@@ -415,72 +420,52 @@ PRIOR_SEND_ERROR = "prior_send_evidence"
 PROVEN_NOT_ACCEPTED_STATES = frozenset({ATTEMPT_REJECTED, ATTEMPT_NOT_SENT, ATTEMPT_ABANDONED})
 # Row statuses that say a copy may have been accepted.
 _ROW_MAY_HAVE_REACHED_META = frozenset({"sending", "sent", "delivered", "read", "uncertain"})
-_PRIOR_COPIES_KEY = "_campaign_prior_copy_recipients"
+_COPY_INDEX_KEY = "_campaign_copy_index"
 
 
-def recipient_digits(phone: Any) -> str:
-    import re  # noqa: PLC0415
-    return re.sub(r"\D", "", str(phone or ""))
+def _digits_sql(db: Session, col: str) -> str:
+    """SQL for the digits of ``col`` (only a prefilter; the match itself is
+    ``recipient_identity.may_be_recipient``)."""
+    if db.get_bind().dialect.name == "postgresql":
+        return f"regexp_replace(coalesce({col}, ''), '[^0-9]', '', 'g')"
+    from services.recipient_identity import digits  # noqa: PLC0415
+    db.connection().connection.dbapi_connection.create_function(
+        "nahla_digits", 1, digits, deterministic=True)
+    return f"nahla_digits({col})"
 
 
-def recipient_variants(phone: Any) -> List[str]:
-    """The stored spellings one recipient can have (``+966…``, ``966…``,
-    ``00966…``) — the same digits, so the same person."""
-    d = recipient_digits(phone)
-    return [f"+{d}", d, f"00{d}"] if d else []
-
-
-def _lock_recipient(db: Session, campaign_id: int, digits: str) -> None:
-    """Serialise claims for one recipient of one campaign across its rows
-    (PostgreSQL advisory lock, released at commit/rollback)."""
-    if db.get_bind().dialect.name != "postgresql" or not digits:
+def _lock_recipient(db: Session, campaign_id: int, canonical: str) -> None:
+    """Serialise every claim for one recipient of one campaign, whichever
+    of its rows or spellings (PostgreSQL advisory lock, released at
+    commit/rollback)."""
+    if db.get_bind().dialect.name != "postgresql" or not canonical:
         return
-    import hashlib  # noqa: PLC0415
     from sqlalchemy import text  # noqa: PLC0415
-    key = int.from_bytes(hashlib.sha1(f"campaign-recipient:{campaign_id}:{digits}".encode())
-                         .digest()[:8], "big", signed=True)
-    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+    from services.recipient_identity import lock_key  # noqa: PLC0415
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"),
+               {"k": lock_key(f"campaign-recipient:{campaign_id}", canonical)})
 
 
-def campaign_prior_copy_recipients(db: Session, campaign_id: int, tenant_id: int) -> set:
-    """Digits of every recipient this campaign's ``message_events`` hold an
-    outbound copy for — including first copies whose wamid a second copy
-    overwrote on the row, and pre-ledger sends. Tied to the recipient
-    through the event's conversation → customer (phone, normalized phone,
-    ``conversation.metadata.customer_phone``), as the reconciliation does."""
+def _recipient_rows(db: Session, ctx: Dict[str, Any], table: str, cols: str) -> List[Any]:
+    """Rows of ``table`` for this campaign whose phone is, or may be, the
+    recipient. SQL narrows by the number's last digits; the identity match
+    decides."""
     from sqlalchemy import text  # noqa: PLC0415
-    dialect = db.get_bind().dialect.name
-    cid = ("(me.metadata->>'campaign_id')" if dialect == "postgresql"
-           else "CAST(json_extract(me.metadata, '$.campaign_id') AS TEXT)")
-    conv_phone = ("conv.metadata->>'customer_phone'" if dialect == "postgresql"
-                  else "json_extract(conv.metadata, '$.customer_phone')")
+    from services.recipient_identity import may_be_recipient  # noqa: PLC0415
     rows = db.execute(text(
-        f"SELECT cu.phone, cu.normalized_phone, {conv_phone} FROM message_events me "
-        "LEFT JOIN conversations conv ON conv.id = me.conversation_id AND conv.tenant_id = me.tenant_id "
-        "LEFT JOIN customers cu ON cu.id = conv.customer_id AND cu.tenant_id = me.tenant_id "
-        "WHERE me.tenant_id = :t AND me.direction = 'outbound' AND me.event_type = 'campaign' "
-        f"AND {cid} = :c"), {"t": tenant_id, "c": str(campaign_id)}).all()
-    return {recipient_digits(x) for r in rows for x in r if recipient_digits(x)}
-
-
-def _prior_copies(db: Session, campaign_id: int, tenant_id: int) -> set:
-    """Per-session snapshot. Copies made after it are this session's own
-    sends, which the attempts check already sees."""
-    cache = db.info.setdefault(_PRIOR_COPIES_KEY, {})
-    if campaign_id not in cache:
-        cache[campaign_id] = campaign_prior_copy_recipients(db, campaign_id, tenant_id)
-    return cache[campaign_id]
+        f"SELECT customer_phone_e164, {cols} FROM {table} WHERE campaign_id = :c "
+        f"AND {_digits_sql(db, 'customer_phone_e164')} LIKE :tail"),
+        {"c": ctx["campaign_id"], "tail": f"%{ctx['suffix']}"}).all()
+    return [r[1:] for r in rows if may_be_recipient(r[0], ctx["canonical"])]
 
 
 def _check_attempts(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
-    """Every attempt of this campaign for the recipient, on any of its rows."""
-    for st, wamid, acc, dl, rd, started in (
-        db.query(CampaignSendAttempt.state, CampaignSendAttempt.provider_message_id,
-                 CampaignSendAttempt.accepted_at, CampaignSendAttempt.delivered_at,
-                 CampaignSendAttempt.read_at, CampaignSendAttempt.request_started_at)
-        .filter(CampaignSendAttempt.campaign_id == ctx["campaign_id"],
-                CampaignSendAttempt.customer_phone_e164.in_(ctx["variants"]))
-    ):
+    """Every attempt of this campaign for the recipient, on any of its rows.
+    The raw fields decide as much as the state label: a wamid, an accepted
+    or receipt time, or a started request outside a proven failure blocks."""
+    for st, wamid, acc, dl, rd, started in _recipient_rows(
+            db, ctx, "campaign_send_attempts",
+            "state, provider_message_id, accepted_at, delivered_at, read_at, request_started_at"):
         if rd:
             return "attempt_read"
         if dl:
@@ -498,19 +483,16 @@ def _check_rows(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
     """Every row of this campaign for the recipient: a stored wamid,
     ``sent_at`` or receipt, a status that may have reached Meta, or a
     legacy attempt count the ledger cannot account for."""
+    rows = _recipient_rows(db, ctx, "campaign_send_logs",
+                           "id, status, provider_message_id, sent_at, delivered_at, read_at, "
+                           "attempt_count")
+    ids = [int(r[0]) for r in rows]
     ledger_attempts = dict(
         db.query(CampaignSendAttempt.send_log_id, func.count(CampaignSendAttempt.id))
-        .filter(CampaignSendAttempt.campaign_id == ctx["campaign_id"],
-                CampaignSendAttempt.customer_phone_e164.in_(ctx["variants"]))
+        .filter(CampaignSendAttempt.send_log_id.in_(ids))
         .group_by(CampaignSendAttempt.send_log_id)
-    )
-    for rid, st, wamid, sent, dl, rd, count in (
-        db.query(CampaignSendLog.id, CampaignSendLog.status, CampaignSendLog.provider_message_id,
-                 CampaignSendLog.sent_at, CampaignSendLog.delivered_at, CampaignSendLog.read_at,
-                 CampaignSendLog.attempt_count)
-        .filter(CampaignSendLog.campaign_id == ctx["campaign_id"],
-                CampaignSendLog.customer_phone_e164.in_(ctx["variants"]))
-    ):
+    ) if ids else {}
+    for rid, st, wamid, sent, dl, rd, count in rows:
         own = int(rid) == ctx["log_id"]
         if rd:
             return "row_read"
@@ -527,23 +509,137 @@ def _check_rows(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+@dataclass
+class _CopyIndex:
+    """This campaign's outbound ``message_events`` copies, placed on
+    recipients. ``fingerprint`` is (count, max id) of the copies it was built
+    from: any copy committed since — by this worker, another worker or a
+    webhook, in any id order — changes it and forces a rebuild."""
+    fingerprint: Tuple[int, int]
+    placed: Dict[str, str] = field(default_factory=dict)     # identity -> reason
+    possible: List[Tuple[str, str]] = field(default_factory=list)  # (significant digits, reason)
+    unplaceable: int = 0
+
+
+def _campaign_copies_sql(db: Session) -> Tuple[str, str]:
+    if db.get_bind().dialect.name == "postgresql":
+        return "(me.metadata->>'campaign_id')", "conv.metadata->>'customer_phone'"
+    return ("CAST(json_extract(me.metadata, '$.campaign_id') AS TEXT)",
+            "json_extract(conv.metadata, '$.customer_phone')")
+
+
+def _copy_fingerprint(db: Session, ctx: Dict[str, Any]) -> Tuple[int, int]:
+    from sqlalchemy import text  # noqa: PLC0415
+    cid, _ = _campaign_copies_sql(db)
+    n, top = db.execute(text(
+        "SELECT count(*), coalesce(max(me.id), 0) FROM message_events me "
+        "WHERE me.tenant_id = :t AND me.direction = 'outbound' AND me.event_type = 'campaign' "
+        f"AND {cid} = :c"), {"t": ctx["tenant_id"], "c": str(ctx["campaign_id"])}).one()
+    return int(n), int(top)
+
+
+def _build_copy_index(db: Session, ctx: Dict[str, Any], fingerprint: Tuple[int, int]) -> _CopyIndex:
+    """Place every copy on a recipient: by its conversation's customer
+    (phone, normalised phone, ``conversation.metadata.customer_phone``) and
+    by whoever owns its wamid in this campaign (an attempt, a row, or a
+    receipt linked to a row). One identity → that recipient. Two or more,
+    or a link that contradicts the owner → every one of them is blocked
+    (``message_events_conflict``). None, and nothing that could be a
+    spelling of someone → ``unplaceable``: nobody in the campaign can be
+    proven clean."""
+    from sqlalchemy import text  # noqa: PLC0415
+    from services.recipient_identity import canonical_recipient, digits  # noqa: PLC0415
+    cid, conv_phone = _campaign_copies_sql(db)
+    p = {"t": ctx["tenant_id"], "c": str(ctx["campaign_id"]), "ci": ctx["campaign_id"]}
+    owners: Dict[str, set] = {}
+    for w, ph in db.execute(text(
+            "SELECT provider_message_id, customer_phone_e164 FROM campaign_send_attempts "
+            "WHERE campaign_id = :ci AND provider_message_id IS NOT NULL "
+            "UNION ALL SELECT provider_message_id, customer_phone_e164 FROM campaign_send_logs "
+            "WHERE campaign_id = :ci AND provider_message_id IS NOT NULL "
+            "UNION ALL SELECT mde.wamid, sl.customer_phone_e164 FROM message_delivery_events mde "
+            "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id WHERE sl.campaign_id = :ci"),
+            p).all():
+        owners.setdefault(w, set()).add(ph)
+    idx = _CopyIndex(fingerprint=fingerprint)
+    for md, cu_phone, cu_norm, cv_phone in db.execute(text(
+            f"SELECT me.metadata, cu.phone, cu.normalized_phone, {conv_phone} FROM message_events me "
+            "LEFT JOIN conversations conv ON conv.id = me.conversation_id AND conv.tenant_id = me.tenant_id "
+            "LEFT JOIN customers cu ON cu.id = conv.customer_id AND cu.tenant_id = me.tenant_id "
+            "WHERE me.tenant_id = :t AND me.direction = 'outbound' AND me.event_type = 'campaign' "
+            f"AND {cid} = :c"), p).all():
+        if isinstance(md, str):          # JSON returned as text (SQLite)
+            try:
+                md = json.loads(md)
+            except ValueError:
+                md = None
+        md = md if isinstance(md, dict) else {}
+        wamid = md.get("wa_message_id") or (md.get("provider_send") or {}).get("wamid")
+        linked = [x for x in (cu_phone, cu_norm, cv_phone) if x]
+        owned = sorted(owners.get(wamid, ())) if wamid else []
+        linked_ids = {canonical_recipient(x) for x in linked} - {None}
+        owned_ids = {canonical_recipient(x) for x in owned} - {None}
+        loose = {digits(x).lstrip("0") for x in linked + owned if canonical_recipient(x) is None}
+        loose = {d for d in loose if len(d) >= 7}
+        if linked_ids and owned_ids and not (linked_ids & owned_ids):
+            ids, reason = linked_ids | owned_ids, "message_events_conflict"
+        else:
+            ids = (linked_ids & owned_ids) or linked_ids or owned_ids
+            reason = "message_events_copy" if len(ids) == 1 else "message_events_conflict"
+        for i in ids:
+            if reason == "message_events_conflict" or idx.placed.get(i) == "message_events_conflict":
+                idx.placed[i] = "message_events_conflict"
+            else:
+                idx.placed[i] = "message_events_copy"
+        for d in loose:
+            idx.possible.append((d, "message_events_possible_copy"))
+        if not ids and not loose:
+            idx.unplaceable += 1
+    return idx
+
+
+def _copy_index(db: Session, ctx: Dict[str, Any]) -> _CopyIndex:
+    """The index, rebuilt whenever the campaign's copies changed. The
+    fingerprint is read inside the claim's own transaction, after the
+    recipient lock, so it reflects everything committed before this claim;
+    a cached index is reused only when nothing was added since."""
+    fp = _copy_fingerprint(db, ctx)
+    cache = db.info.setdefault(_COPY_INDEX_KEY, {})
+    idx = cache.get(ctx["campaign_id"])
+    if idx is None or idx.fingerprint != fp:
+        idx = _build_copy_index(db, ctx, fp)
+        cache[ctx["campaign_id"]] = idx
+    return idx
+
+
 def _check_message_events(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
-    if ctx["digits"] in _prior_copies(db, ctx["campaign_id"], ctx["tenant_id"]):
-        return "message_events_copy"
+    from services.recipient_identity import digits  # noqa: PLC0415
+    idx = _copy_index(db, ctx)
+    if ctx["canonical"] in idx.placed:
+        return idx.placed[ctx["canonical"]]
+    mine = digits(ctx["canonical"])
+    for significant, reason in idx.possible:
+        if mine.endswith(significant):
+            return reason
+    if idx.unplaceable:
+        return "message_events_unplaceable_copy"
     return None
 
 
 def _check_delivery_events(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
     """A provider receipt (delivered / read / failed) for any row of the
     recipient means Meta accepted that copy."""
-    from sqlalchemy import bindparam, text  # noqa: PLC0415
-    row = db.execute(text(
-        "SELECT mde.status FROM message_delivery_events mde "
-        "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id "
-        "WHERE sl.campaign_id = :c AND sl.customer_phone_e164 IN :v "
-        "AND mde.wamid NOT LIKE 'synth:%' LIMIT 1").bindparams(bindparam("v", expanding=True)),
-        {"c": ctx["campaign_id"], "v": ctx["variants"]}).first()
-    return f"delivery_event_{row[0]}" if row else None
+    from sqlalchemy import text  # noqa: PLC0415
+    from services.recipient_identity import may_be_recipient  # noqa: PLC0415
+    for phone, status in db.execute(text(
+            "SELECT sl.customer_phone_e164, mde.status FROM message_delivery_events mde "
+            "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id "
+            "WHERE sl.campaign_id = :c AND mde.wamid NOT LIKE 'synth:%' "
+            f"AND {_digits_sql(db, 'sl.customer_phone_e164')} LIKE :tail"),
+            {"c": ctx["campaign_id"], "tail": f"%{ctx['suffix']}"}).all():
+        if may_be_recipient(phone, ctx["canonical"]):
+            return f"delivery_event_{status}"
+    return None
 
 
 PRIOR_SEND_CHECKS = (_check_attempts, _check_rows, _check_message_events, _check_delivery_events)
@@ -552,11 +648,14 @@ PRIOR_SEND_CHECKS = (_check_attempts, _check_rows, _check_message_events, _check
 def prior_send_evidence(db: Session, *, campaign_id: int, tenant_id: int, log_id: int,
                         phone: Any) -> Optional[str]:
     """Why this recipient must not be sent, or ``None`` when every trace of
-    it in the campaign proves no copy was accepted."""
+    it in the campaign proves no copy was accepted. A read error propagates:
+    the caller refuses the claim."""
+    from services.recipient_identity import canonical_recipient, match_suffix  # noqa: PLC0415
+    canonical = canonical_recipient(phone)
+    if not canonical:
+        return "recipient_identity_unresolved"
     ctx = {"campaign_id": int(campaign_id), "tenant_id": int(tenant_id), "log_id": int(log_id),
-           "digits": recipient_digits(phone), "variants": recipient_variants(phone)}
-    if not ctx["digits"]:
-        return "no_recipient_number"
+           "canonical": canonical, "suffix": match_suffix(canonical)}
     for check in PRIOR_SEND_CHECKS:
         why = check(db, ctx)
         if why:
@@ -641,7 +740,8 @@ def claim_recipient(
         .filter(CampaignSendLog.id == log_id)
         .scalar()
     )
-    _lock_recipient(db, campaign_id, recipient_digits(phone_key))
+    from services.recipient_identity import canonical_recipient  # noqa: PLC0415
+    _lock_recipient(db, campaign_id, canonical_recipient(phone_key) or "")
     res = db.execute(
         update(CampaignSendLog)
         .where(CampaignSendLog.id == log_id, CampaignSendLog.status == "queued")
@@ -655,8 +755,16 @@ def claim_recipient(
     if res.rowcount != 1:
         db.rollback()
         return ClaimResult(None, "not_queued")
-    why = prior_send_evidence(db, campaign_id=campaign_id, tenant_id=tenant_id,
-                              log_id=log_id, phone=phone_key)
+    try:
+        why = prior_send_evidence(db, campaign_id=campaign_id, tenant_id=tenant_id,
+                                  log_id=log_id, phone=phone_key)
+    except SQLAlchemyError as exc:
+        # A source that cannot be read is never permission to send: the
+        # claim is refused, the row stays queued, and the run stops.
+        db.rollback()
+        logger.error("[campaign_ledger] campaign=%d row=%d evidence unreadable: %s",
+                     campaign_id, log_id, type(exc).__name__)
+        return ClaimResult(None, EVIDENCE_UNREADABLE, budget, evidence=type(exc).__name__)
     if why:
         # Refused durably: the row leaves the queue with its reason, so no
         # later run, resume or retry picks it up again.
@@ -664,14 +772,14 @@ def claim_recipient(
             update(CampaignSendLog)
             .where(CampaignSendLog.id == log_id)
             .values(
-                status=LOG_SKIPPED_PRIOR_SEND,
+                status=LOG_SKIPPED_SEND_GUARD,
                 attempt_count=func.greatest(func.coalesce(CampaignSendLog.attempt_count, 1) - 1, 0)
                 if db.get_bind().dialect.name == "postgresql"
                 else func.max(func.coalesce(CampaignSendLog.attempt_count, 1) - 1, 0),
                 error_code=PRIOR_SEND_ERROR,
                 skip_reason=why[:64],
-                error_message=f"[{PRIOR_SEND_ERROR}] {why}: this recipient may already have "
-                              "received this campaign; not sent again",
+                error_message=f"[{PRIOR_SEND_ERROR}] {why}: not sent — nothing proves this "
+                              "recipient has not already received this campaign",
                 updated_at=now,
             )
             .execution_options(synchronize_session=False)

@@ -2055,6 +2055,11 @@ async def _dispatch_queued_rows(
                     if claim.reason == "stop_requested":
                         ctx.pause(ledger.PAUSE_MERCHANT_STOP, "stop requested")
                         break
+                    if claim.reason == ledger.EVIDENCE_UNREADABLE:
+                        # The send guard could not read the recipient's
+                        # history: stop the run rather than guess.
+                        ctx.pause(ledger.PAUSE_EVIDENCE_UNREADABLE, claim.evidence or "")
+                        break
                     continue
                 attempt = claim.attempt
 
