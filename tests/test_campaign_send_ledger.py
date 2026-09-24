@@ -731,7 +731,7 @@ def _race_two_campaigns(dbf, fake_meta, monkeypatch, *, lock_enabled):
     import time as _time
     budget = 250 * ledger.CAMPAIGN_BUDGET_PERCENT // 100
     first = _seed(dbf, phones=[f"+96651000{n:04d}" for n in range(3)], campaign_name="حملة أ")
-    second = _seed(dbf, phones=[f"+96652000{n:04d}" for n in range(3)], campaign_name="حملة ب")
+    second = _seed(dbf, phones=[f"+96653000{n:04d}" for n in range(3)], campaign_name="حملة ب")
     _seed_scope_usage(dbf, first, "bm:BM-GENERIC-1", budget - 1)
     real_budget = ledger.messaging_budget
 
