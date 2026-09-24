@@ -1062,8 +1062,53 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
                     msg=msg,
                 ):
                     await _dispatch_message(phone_number_id, msg, value)
+                # The turn is over, whichever way it went. If the commerce
+                # runtime never took it — because a gate ahead of it returned,
+                # as ``ai_paused``, ``should_skip_ai``, billing and the
+                # conversation quota all do — the acceptance obligation taken
+                # before we acknowledged has nobody left to discharge it, and
+                # one pending row per inbound reaches ``MAX_PENDING_DEFERRED``
+                # and starts answering that merchant's webhook 503.
+                #
+                # Asked here rather than at each gate on purpose: this is the
+                # one point every inbound passes through when its turn ends, so
+                # a gate added later is covered without anyone remembering to.
+                # The release decides nothing itself — ``dispose_inbound``
+                # refuses under the tenant lock whenever a turn is admitted and
+                # unfinished, was answered, or has an unknown send outcome.
+                await _release_unrouted_obligation(phone_number_id, msg)
             for status in value.get("statuses", []):
                 await _handle_message_status(status)
+
+
+async def _release_unrouted_obligation(phone_number_id: Any, msg: Dict[str, Any]) -> None:
+    """Give back an acceptance obligation the runtime never took. Never raises.
+
+    Observability only from the caller's point of view: the turn has already
+    finished, and nothing here may change what the customer saw.
+    """
+    import asyncio as _asyncio  # noqa: PLC0415
+
+    identity = str((msg or {}).get("id") or "").strip()
+    if not identity:
+        return
+    try:
+        from services.commerce_runtime_acceptance import (  # noqa: PLC0415
+            RELEASED, release_unrouted_obligation,
+        )
+
+        outcome = await _asyncio.to_thread(
+            release_unrouted_obligation,
+            phone_number_id=str(phone_number_id or ""),
+            provider_message_id=identity,
+        )
+        if outcome == RELEASED:
+            logger.info("[COMMERCE_RUNTIME_ACCEPT] obligation released: the runtime "
+                        "was never asked for this inbound phone_number_id=%s",
+                        phone_number_id)
+    except Exception as exc:  # noqa: BLE001 - the turn is finished either way
+        logger.warning("[COMMERCE_RUNTIME_ACCEPT] obligation release failed error=%s",
+                       type(exc).__name__)
 
 
 async def _handle_meta_coexistence_change(
