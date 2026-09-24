@@ -73,15 +73,19 @@ from services.recipient_identity import (  # noqa: E402
 
 # Strongest first. ``unresolved_evidence`` outranks only ``clean``.
 EVIDENCE_ORDER = (
-    "read", "delivered", "accepted", "uncertain", "request_started", "failed", "unknown",
-    "sent_row", "wamid_row", "unresolved_evidence",
+    "read", "delivered", "accepted", "uncertain", "request_started", "legacy_attempt",
+    "failed", "unknown", "sent_row", "wamid_row", "unresolved_evidence",
 )
 # A claim whose request never started is durable proof that nothing left
 # (the request is marked started before it is sent): reported, not evidence.
+# The send guard (#1144) is stricter and refuses any such claim, because it
+# cannot tell a finished never-started claim from one a live worker holds;
+# for a historical RCA the durable ordering is enough.
 NOT_EVIDENCE = ("claimed_never_started",)
 # The owner's table: recipients with each kind of prior evidence (a
 # recipient can count in several), then those with none.
-TABLE_KINDS = ("accepted", "delivered", "read", "uncertain", "request_started")
+TABLE_KINDS = ("accepted", "delivered", "read", "uncertain", "request_started",
+               "legacy_attempt")
 PROVEN_NOT_ACCEPTED = ("rejected", "not_sent", "abandoned")
 KNOWN_STATES = ("claimed", "request_started", "accepted", "uncertain") + PROVEN_NOT_ACCEPTED
 
@@ -119,7 +123,8 @@ def _json(md: Any) -> Dict[str, Any]:
 
 
 def _event_wamid(md: Dict[str, Any]) -> Optional[str]:
-    return md.get("wa_message_id") or (md.get("provider_send") or {}).get("wamid") or None
+    ps = md.get("provider_send")
+    return md.get("wa_message_id") or (ps.get("wamid") if isinstance(ps, dict) else None) or None
 
 
 def _event_kinds(md: Dict[str, Any]) -> Set[str]:
@@ -300,13 +305,20 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
 
     # 2. this campaign's rows
     claimed_rows = set(log_ids)
-    for i, ph, st, wamid, dl, rd, sent_before in q("campaign_send_logs",
-            "SELECT id, customer_phone_e164, status, provider_message_id IS NOT NULL, "
+    ledger_count = dict(q("campaign_send_attempts",
+        "SELECT send_log_id, count(*) FROM campaign_send_attempts WHERE tenant_id = :t "
+        "AND campaign_id = :c GROUP BY send_log_id"))
+    for i, ph, st, wamid, dl, rd, sent_before, made in q("campaign_send_logs",
+            "SELECT id, customer_phone_e164, status, provider_message_id, "
             "delivered_at IS NOT NULL AND delivered_at < :s, read_at IS NOT NULL AND read_at < :s, "
-            "sent_at IS NOT NULL AND sent_at < :s FROM campaign_send_logs "
+            "sent_at IS NOT NULL AND sent_at < :s, coalesce(attempt_count, 0) FROM campaign_send_logs "
             "WHERE tenant_id = :t AND campaign_id = :c"):
         st = (st or "").lower()
         ks: Set[str] = set()
+        # Attempts the row counts but the ledger cannot account for were made
+        # by pre-ledger code: nothing proves they were not accepted.
+        if int(made) > int(ledger_count.get(int(i), 0)):
+            ks.add("legacy_attempt")
         if int(i) in claimed_rows:
             # The row claimed in the window: only what predates the window.
             if rd:
@@ -315,6 +327,10 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                 ks.add("delivered")
             if sent_before:
                 ks.update(("sent_row", "accepted"))
+            # A wamid no window attempt produced predates the window (an
+            # accepted wamid is never overwritten).
+            if wamid and wamid not in window_wamids:
+                ks.update(("wamid_row", "accepted"))
         else:
             if rd or st == "read":
                 ks.update(("read", "delivered"))
@@ -357,7 +373,9 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
         wamid = _event_wamid(md)
         if wamid and wamid in window_wamids:
             continue                           # the window's own copy
-        linked = [x for x in (cu_phone, cu_norm, conv_phone) if x]
+        # The event's own record of whom it was sent to counts as a link too.
+        linked = [x for x in (cu_phone, cu_norm, conv_phone, md.get("customer_phone"),
+                              md.get("phone")) if x]
         owned = sorted(owners.get(wamid, ())) if wamid else []
         linked_ids = {canonical_recipient(x) for x in linked} - {None}
         owned_ids = {canonical_recipient(x) for x in owned} - {None}

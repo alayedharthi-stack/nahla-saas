@@ -21,12 +21,11 @@ read-only incident RCA, so both see the same recipients.
 from __future__ import annotations
 
 import hashlib
-import re
+import unicodedata
 from typing import Any, Optional
 
 from utils.phone_utils import normalize_to_e164
 
-_NON_DIGIT = re.compile(r"\D")
 # Shortest tail of digits a stored spelling must share with a recipient's
 # number before it is considered possibly that recipient (and the length of
 # the SQL prefilter suffix, which is therefore a superset).
@@ -34,7 +33,10 @@ MATCH_SUFFIX_DIGITS = 7
 
 
 def digits(raw: Any) -> str:
-    return _NON_DIGIT.sub("", str(raw or ""))
+    """ASCII digits of ``raw``, with every Unicode decimal digit (Arabic-Indic
+    ``٠٥…``, Persian ``۰۵…``, fullwidth ``０５…``) mapped to its value — the
+    same digits libphonenumber reads."""
+    return "".join(str(unicodedata.decimal(ch)) for ch in str(raw or "") if ch.isdecimal())
 
 
 def canonical_recipient(raw: Any) -> Optional[str]:
