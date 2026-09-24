@@ -474,11 +474,15 @@ def _campaign_to_dict(
     elif raw_status == "paused":
         lifecycle = "paused"
         # Meta's shared messaging limit, not the merchant: the campaign
-        # continues on its own once capacity returns.
+        # continues on its own once capacity returns -- but only when a
+        # dispatch run recorded that wait. Without it (e.g. paused by an
+        # older build) it is plainly paused and needs the merchant.
+        from services.campaign_send_ledger import authorized_capacity_wait  # noqa: PLC0415
         if (
             execution is not None
             and execution.get("pause_reason") == "messaging_limit_reached"
             and not execution.get("stop_requested")
+            and authorized_capacity_wait(c.template_variables) is not None
         ):
             lifecycle = "waiting_for_capacity"
     elif raw_status == "draft":

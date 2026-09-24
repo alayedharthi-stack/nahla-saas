@@ -530,3 +530,121 @@ def test_unknown_portfolio_fails_closed(dbf, fake_meta, world, monkeypatch):
 def test_tier_extraction_shapes(payload, expected):
     import services.whatsapp_platform.service as svc
     assert svc.extract_messaging_limit(payload) == expected
+
+
+# ── Resume authority: only a wait this version recorded auto-resumes ─────
+
+
+def _legacy_pause(Session, cid, tenant_id, *, reason=ledger.PAUSE_MESSAGING_LIMIT, wait=None):
+    """The state an older build left behind (campaign 35 at 09:53): paused,
+    lease ``pause_reason`` set, no merchant stop -- and whatever wait record
+    (none, an older build's, or malformed) is given."""
+    db = Session()
+    c = db.get(Campaign, cid)
+    c.status = "paused"
+    tv = dict(c.template_variables or {})
+    tv.pop(ledger.CAPACITY_WAIT_KEY, None)
+    if wait is not None:
+        tv[ledger.CAPACITY_WAIT_KEY] = wait
+    c.template_variables = tv
+    lease = db.get(CampaignDispatchLease, cid)
+    if lease is None:
+        lease = CampaignDispatchLease(campaign_id=cid, tenant_id=tenant_id)
+        db.add(lease)
+    lease.owner = None
+    lease.expires_at = None
+    lease.pause_reason = reason
+    lease.pause_detail = "used=2 budget=2"
+    lease.paused_at = _now() - timedelta(hours=26)
+    lease.stop_requested_at = None
+    db.commit()
+    db.close()
+
+
+def _template_variables(Session, cid):
+    db = Session()
+    try:
+        return dict(db.get(Campaign, cid).template_variables or {})
+    finally:
+        db.close()
+
+
+_PAST = (datetime(2020, 1, 1)).isoformat()
+_AUTH = getattr(ledger, "CAPACITY_WAIT_AUTHORITY", "dispatch_run_v2")
+
+
+@pytest.mark.parametrize("wait", [
+    None,                                                      # paused before the record existed
+    {"reason": ledger.PAUSE_MESSAGING_LIMIT, "next_eligible_at": _PAST},  # an older build's record
+    {"reason": ledger.PAUSE_MESSAGING_LIMIT, "authority": _AUTH,
+     "next_eligible_at": "not-a-time"},                        # malformed
+    {"reason": "provider_throttling", "authority": _AUTH,
+     "next_eligible_at": _PAST},                               # not the shared limit
+], ids=["no_record", "older_build_record", "malformed", "other_reason"])
+def test_a_legacy_paused_campaign_is_never_auto_resumed(dbf, fake_meta, world, wait):
+    ids = _seed(dbf, phones=PHONES[:3])
+    _legacy_pause(dbf, ids.campaign_id, ids.tenant_id, wait=wait)
+    before = _template_variables(dbf, ids.campaign_id)
+    meta = fake_meta(FakeMeta())
+    for _ in range(3):   # capacity is free; the scheduler runs every minute
+        acts = world.resume(dbf)
+        assert [a["action"] for a in acts if a["campaign_id"] == ids.campaign_id] \
+            == ["needs_merchant_resume"]
+    assert meta.calls == []
+    c = _campaign(dbf, ids.campaign_id)
+    assert c.status == "paused" and c.pause_reason == ledger.PAUSE_MESSAGING_LIMIT
+    # The scheduler writes nothing for it -- no record it could later act on.
+    assert _template_variables(dbf, ids.campaign_id) == before
+    assert {s for s, _, _ in _logs(dbf, ids.campaign_id).values()} == {"queued"}
+    assert _lifecycle(dbf, ids.campaign_id)["lifecycle"] == "paused"
+
+
+def test_a_legacy_paused_campaign_continues_on_the_merchants_resume(dbf, fake_meta, world,
+                                                                       monkeypatch):
+    import routers.campaigns as rc
+    ids = _seed(dbf, phones=PHONES[:2])
+    _legacy_pause(dbf, ids.campaign_id, ids.tenant_id)
+    meta = fake_meta(FakeMeta())
+    assert [a["action"] for a in world.resume(dbf)] == ["needs_merchant_resume"]
+    spawned = []
+    monkeypatch.setattr(rc, "_spawn_dispatch_in_background", spawned.append)
+    monkeypatch.setattr(rc, "resolve_tenant_id", lambda request, db=None: ids.tenant_id)
+    db = dbf()
+    asyncio.run(rc.update_campaign_status(
+        ids.campaign_id, rc.UpdateCampaignStatusIn(status="active"), request=None, db=db))
+    db.close()
+    assert spawned == [ids.campaign_id]
+    world.dispatch(dbf, ids.campaign_id)
+    assert sorted(meta.calls) == sorted(PHONES[:2])
+    assert _campaign(dbf, ids.campaign_id).status == "completed"
+
+
+@pytest.mark.parametrize("reason", [ledger.PAUSE_PROVIDER_THROTTLING, "uncertain_sends"])
+def test_other_pauses_never_auto_resume_even_with_a_valid_record(dbf, fake_meta, world, reason):
+    """A valid wait record left from an earlier limit stop never lets the
+    scheduler lift a later throttling / uncertain pause."""
+    ids = _seed(dbf, phones=PHONES[:2])
+    _legacy_pause(dbf, ids.campaign_id, ids.tenant_id, reason=reason, wait={
+        "reason": ledger.PAUSE_MESSAGING_LIMIT, "authority": _AUTH,
+        "next_eligible_at": _PAST})
+    meta = fake_meta(FakeMeta())
+    assert [a for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == []
+    assert meta.calls == []
+    assert _campaign(dbf, ids.campaign_id).status == "paused"
+
+
+def test_a_wait_recorded_by_this_version_auto_resumes(dbf, fake_meta, world):
+    world.budget(2)
+    other = _seed(dbf, phones=["+966511111111"], campaign_name="حملة سابقة")
+    _seed_scope_usage(dbf, other, SCOPE, 2)
+    ids = _seed(dbf, phones=PHONES[:2])
+    meta = fake_meta(FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)
+    c = _campaign(dbf, ids.campaign_id)
+    assert c.wait["authority"] == _AUTH
+    assert _lifecycle(dbf, ids.campaign_id)["lifecycle"] == "waiting_for_capacity"
+    _age_window(dbf)
+    acts = world.resume(dbf)
+    assert [a["action"] for a in acts if a["campaign_id"] == ids.campaign_id] == ["resumed"]
+    assert sorted(meta.calls) == sorted(PHONES[:2])
+    assert _campaign(dbf, ids.campaign_id).status == "completed"
