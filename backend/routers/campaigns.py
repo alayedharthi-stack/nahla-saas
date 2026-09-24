@@ -1263,6 +1263,9 @@ _KNOWN_LOG_STATUSES = {
     "skipped_duplicate", "skipped_invalid", "skipped_unsubscribed",
     "skipped_unreachable", "skipped_manual_exclusion",
     "skipped_blocked_customer",
+    # The send guard refused a recipient: evidence of an earlier copy, an
+    # unplaceable copy, or no validated identity.
+    "skipped_send_guard",
 }
 
 
