@@ -81,6 +81,25 @@ class _DeadlinePassed(Exception):
         super().__init__(f"deadline {deadline_at.isoformat()} passed at {db_now.isoformat()}")
 
 
+# Asking the model for a paged list's words needs this much time left beyond
+# the provider's own wait, so the reply already verified can still be reserved
+# if the step that was asked for times out.
+WORDS_RESERVE_SECONDS = 5.0
+
+# Stops that end the step asked for a paged list's words without ending the
+# turn: the reply verified before it is still the answer. Every other stop —
+# cancellation, lost ownership, a concurrent invocation, the deadline — would
+# have ended the turn without the question and still does.
+_WORDS_FALLBACK_STOPS = frozenset({
+    ac.StopReason.BUDGET_EXHAUSTED.value,
+    ac.StopReason.PROVIDER_FAILURE.value,
+    ac.StopReason.PROVIDER_BLOCKED.value,
+    ac.StopReason.PROVIDER_INVALID.value,
+    ac.StopReason.PROVIDER_TIMEOUT.value,
+    ac.StopReason.UNSUPPORTED_CAPABILITY.value,
+})
+
+
 class AgentLoop:
     """Runs one turn to an accepted reply, or to an explicit stop."""
 
@@ -163,16 +182,11 @@ class AgentLoop:
                 problems = ac.verify_reply_draft(draft, session.observations,
                                                  inbound=context.inbound)
                 if not problems:
-                    # The model chose whether to offer a selector and which
-                    # products belong in it; what each row *says* is composed
-                    # here from this turn's own observations, so the structured
-                    # payload states the merchant's values and never the
-                    # model's. The text is carried through untouched, and a
-                    # selector that cannot be offered whole simply is not.
-                    session.verified_draft = draft
-                    session.presentation = presentation
-                    draft = self._shape_reply(draft, scope, session, presentation)
-                    return draft
+                    missing = self._paging_words_missing(draft, scope, session, presentation)
+                    if missing:
+                        draft = self._ask_for_words(provider, context, scope, session, cancelled,
+                                                    draft, missing)
+                    return self._verified(draft, scope, session, presentation)
                 session.record("verification_failed", {"problems": [p.code for p in problems]})
                 if not session.steps_left():
                     raise _Stop(ac.StopReason.VERIFICATION_FAILED.value,
@@ -200,6 +214,101 @@ class AgentLoop:
                 continue
 
             raise self._provider_stop(result)          # pragma: no cover - validation narrows the union
+
+    def _verified(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
+                  presentation: Optional[pp.PresentationContext]) -> ac.ReplyDraft:
+        """Shape the reply verification accepted, keeping what reshaping it needs.
+
+        The model chose whether to offer a selector and which products belong
+        in it; what each row *says* is composed here from this turn's own
+        observations, so the structured payload states the merchant's values
+        and never the model's. The text is carried through untouched, and a
+        selector that cannot be offered whole simply is not.
+        """
+        session.verified_draft = draft
+        session.presentation = presentation
+        return self._shape_reply(draft, scope, session, presentation)
+
+    def _paging_words_missing(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
+                              presentation: Optional[pp.PresentationContext]) -> Tuple[str, ...]:
+        """The words a list the platform will page needs and the model left out.
+
+        Asked only where a list can page at all, only of a selector the model
+        requested that ``_shape_reply`` would open a browse for, and only once
+        in a turn — also across a resumed invocation, whose restored feedback
+        still names the request. Whether the list pages was decided without
+        them; this names what the customer would read on it and nobody has
+        written. Nothing is asked when a step, or the time for one, is not left:
+        the reply then goes as the model asked.
+        """
+        if self._browse is None or not session.steps_left():
+            return ()
+        if any(p.code == br.WORDS_NEEDED for f in session.feedback for p in f.problems):
+            return ()
+        if session.remaining_seconds() < session.limits.provider_timeout_seconds + WORDS_RESERVE_SECONDS:
+            return ()
+        try:
+            shape = pp.decide(draft=draft, observations=session.observations,
+                              definitions=self._registry.definitions, presentation=presentation)
+            if shape.kind != pp.SHAPE_LIST or shape.reason != pp.MODEL_REQUESTED:
+                return ()
+            eligible, _reason = br.eligibility(draft, session.observations, scope=scope,
+                                               search_tool_names=self._browse.search_tool_names)
+        except Exception as exc:  # noqa: BLE001 - paging is an affordance; the answer still goes
+            session.record("browse_failed", {"error": type(exc).__name__})
+            return ()
+        return eligible.words_missing(draft) if eligible is not None else ()
+
+    def _ask_for_words(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope,
+                       session: "_Session", cancelled: Optional[Callable[[], bool]],
+                       draft: ac.ReplyDraft, missing: Sequence[str]) -> ac.ReplyDraft:
+        """One more step for the words a paged list needs, and the reply to shape.
+
+        The model is shown its reply as not yet accepted, with the one problem
+        that it lacks ``missing`` — the same channel verification speaks on —
+        and given exactly one step to answer. A verified reply from that step is
+        the answer. Anything else — no reply, a lookup instead of a reply, a
+        reply verification refuses, a provider that fails or times out — leaves
+        the reply already verified as the answer, shaped as the model asked it,
+        so asking never leaves the customer worse off than not asking. Only a
+        stop that would have ended the turn anyway — cancellation, lost
+        ownership, a concurrent invocation, the deadline — still ends it.
+        """
+        session.record("paging_words_requested", {"missing": list(missing)})
+        session.feedback.append(ac.VerificationFeedback(
+            step_no=session.progress.steps_used,
+            problems=(ac.VerificationProblem(br.WORDS_NEEDED, br.words_needed_detail(missing)),)))
+        answer: Optional[ac.ReplyDraft] = None
+        outcome = ""
+        try:
+            session.check_cancelled(cancelled)
+            self._debit(session, steps=1, phase=ac.LoopPhase.REASONING.value)
+            request = ac.ProviderRequest(
+                step_no=session.progress.steps_used, context=context, tools=self._registry.definitions,
+                observations=session.provider_observations(), feedback=session.provider_feedback(),
+                budget=session.budget_view(),
+            )
+            result = self._provider_step(provider, request, session)
+            session.check_cancelled(cancelled)
+            if isinstance(result, ac.ProviderReply):
+                problems = ac.verify_reply_draft(result.draft, session.observations,
+                                                 inbound=context.inbound)
+                if problems:
+                    outcome = "verification_failed"
+                    session.record("verification_failed", {"problems": [p.code for p in problems]})
+                else:
+                    answer, outcome = result.draft, "answered"
+            else:
+                # A lookup, or a step cut off before it finished. Neither is
+                # run on: the question was for the words, and one step was all
+                # it was given.
+                outcome = type(result).__name__
+        except _Stop as stop:
+            if stop.reason not in _WORDS_FALLBACK_STOPS:
+                raise
+            outcome = stop.reason
+        session.record("paging_words_answer", {"outcome": outcome})
+        return answer if answer is not None else draft
 
     def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
         """Invoke the provider under an enforced wait and validate its result whole."""

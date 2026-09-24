@@ -148,6 +148,10 @@ class TurnReport:
     # tap's outcome in the store is ``navigation_tap`` — resolved, or the
     # refusal it met. None of these carries a token or a product value.
     browse_outcome: Optional[str] = None
+    # When a list that pages lacked the model's words for it, what the one step
+    # asked for them came to: ``answered``, or why the verified reply before it
+    # went out instead. None when nothing was asked.
+    paging_words: Optional[str] = None
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
@@ -799,6 +803,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     accepted = next((event for event in reversed(outcome.events)
                      if event.kind == "reply_accepted"), None)
     accepted_detail = dict(getattr(accepted, "detail", None) or {})
+    words = next((event for event in outcome.events if event.kind == "paging_words_answer"), None)
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
     stop_detail = _stop_detail(outcome)
@@ -815,6 +820,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         choices_outcome=str(accepted_detail.get("choices") or "") or None,
         card_outcome=str(accepted_detail.get("card") or "") or None,
         browse_outcome=str(accepted_detail.get("browse") or "") or None,
+        paging_words=(str(words.detail.get("outcome") or "") or None) if words is not None else None,
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,

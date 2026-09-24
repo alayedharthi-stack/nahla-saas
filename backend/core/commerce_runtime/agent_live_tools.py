@@ -351,8 +351,12 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
         products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
         payload: Dict[str, Any] = {"status": "ok", "found": bool(products), "products": products}
+        # A search the model narrowed below the full window asked for a few
+        # products, not for the merchant's range: it has no continuation, so no
+        # selector over it is ever extended, and it carries no more_results.
+        narrowed = limit < MAX_SEARCH_LIMIT
         candidates = (_search_candidates(binding, scope, query, products)
-                      if binding.paging_available else None)
+                      if binding.paging_available and not narrowed else None)
         if candidates is not None:
             # One boolean, and only when it is known: the model learns that the
             # search matched more than it was shown, never what or how many.

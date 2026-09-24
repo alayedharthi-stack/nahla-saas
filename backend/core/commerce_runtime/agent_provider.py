@@ -167,18 +167,21 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
 # The one addition paging makes to the reply declaration, declared as such. It
 # is offered only by a provider built for a database that can store a browse's
 # continuation (``paging=True``); anywhere else the model is shown exactly the
-# declaration above. What it tells the model is operational: what the field
-# does, what it needs, and how the list it asks for relates to the text. When
-# to reach for it is the model's own judgement and is deliberately unstated.
+# declaration above. What it tells the model is operational: what the word is
+# for, when the platform needs it, and how the list it appears on relates to
+# the products named. Whether a list pages is decided by the platform from the
+# products the model names and the search's own result, never from this word.
 MORE_LABEL_PROPERTY: Mapping[str, Any] = {
     "type": "string",
     "description": (
-        "Optional. The word on the row that shows the next page of a search's results, in "
-        "the customer's language, at most 24 characters. Give it only for products from one "
-        "search whose result had more_results set to true, and give button as well. With "
-        "it, the selector presents that search's results in the search's own order, up to "
-        "ten at a time, and the platform composes every row itself, including products you "
-        "were not shown; without it, only the products you name are offered."
+        "The word on the row that opens the next page of a search's results, in the "
+        "customer's language, at most 24 characters. Give it, and button, whenever the "
+        "selector offers every product one search returned that can be bought now. If that "
+        "search matched more products than one list holds, the platform presents its results "
+        "in the search's own order, up to ten rows at a time, and composes every row itself, "
+        "including products you were not shown; this word is on the row that opens the next "
+        "page, and the platform has no wording of its own for it. A selector that offers only "
+        "some of a search's products is never extended."
     ),
 }
 
@@ -252,9 +255,9 @@ def _requested_choices(raw: Any) -> Dict[str, Any]:
     button = raw.get("button")
     if isinstance(button, str) and button.strip():
         request["button"] = button.strip()[:rc.MAX_BUTTON_LABEL]
-    # The word for a "More" row, when the model gave one. A request, like the
-    # rest: whether anything is paged is decided later from the search's own
-    # typed result, and without this word nothing is.
+    # The word for a "More" row, when the model gave one. Wording, and only
+    # wording: whether anything is paged is decided later from the products
+    # named and the search's own typed result, and this is what the row says.
     more_label = raw.get("more_label")
     if isinstance(more_label, str) and more_label.strip():
         request["more_label"] = " ".join(more_label.split())[:rc.MAX_ROW_TITLE]

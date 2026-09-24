@@ -28,8 +28,11 @@ What is proven
   tenant's — is named to the model and becomes no page, no search, no product
   selection;
 * a verified tap on a row the platform composed resolves and becomes a Card;
-* a focused answer, a comparison, and a selector without the model's words are
-  never expanded into the catalogue;
+* a focused answer, a comparison and a narrowed search are never expanded into
+  the catalogue, whatever words the model gives;
+* whether a list pages never waits on the model's optional words: a list that
+  pages and lacks them asks the model once, and when they still do not come —
+  or the step fails — the verified reply goes exactly as the model asked;
 * a token that cannot be spent with the reply leaves the page as lines and
   mints nothing.
 
@@ -215,7 +218,8 @@ class Shop:
 
     def turn(self, conversation: int, model: LiteralModel, *, question: str = "Show me",
              metadata: Optional[Dict[str, Any]] = None, tenant: Optional[int] = None,
-             statements: Optional[List[str]] = None) -> Tuple[entry.TurnReport, Transport]:
+             statements: Optional[List[str]] = None,
+             max_steps: int = 3) -> Tuple[entry.TurnReport, Transport]:
         """One real turn, then its reply persisted the way the pilot persists it."""
         tenant = tenant or self.tenant_a
         connection = self.connection_a if tenant == self.tenant_a else self.connection_b
@@ -230,7 +234,7 @@ class Shop:
                 provider_message_id="wamid.in." + uuid.uuid4().hex,
                 inbound_text=question, inbound_metadata=dict(metadata or {}),
                 transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
-                budget=ac.LoopBudget(max_steps=3, max_tool_calls=4, tool_timeout_seconds=10.0,
+                budget=ac.LoopBudget(max_steps=max_steps, max_tool_calls=4, tool_timeout_seconds=10.0,
                                      provider_timeout_seconds=15.0, deadline_seconds=45.0),
                 context_preamble={"channel": "whatsapp"}, anthropic_provider=model)
         assert report.dispatch_status == dd.SENT_ACCEPTED, report
@@ -662,22 +666,126 @@ def test_a_focused_product_stays_a_card_and_opens_no_browse(shop: Shop):
     assert shop.tokens_for(conversation) == before
 
 
-def test_a_comparison_without_the_models_word_is_exactly_what_it_named(shop: Shop):
+def test_a_comparison_is_exactly_what_it_named_even_with_the_more_word(shop: Shop):
+    """A pick of the model's — two of the five it was shown — is never widened,
+    and giving the "More" word does not make it a browse."""
     conversation = shop.conversation()
     before = shop.tokens_for(conversation)
-    report, transport = shop.turn(conversation, browse(SHIRTS, pick=2, more=None))
+    model = browse(SHIRTS, pick=2)
+    report, transport = shop.turn(conversation, model)
     products, more, _button = _rows(transport.sent[0])
     assert products == shop.products[SHIRTS][:2] and more is None
-    assert report.browse_outcome == br.NOT_ASKED and shop.tokens_for(conversation) == before
+    assert report.browse_outcome == br.MODEL_PICK and shop.tokens_for(conversation) == before
+    assert len(model.calls) == 2 and report.paging_words is None, "nothing was asked of the model"
 
 
-def test_a_browse_without_a_button_word_is_not_opened(shop: Shop):
-    """The platform composes no list whose button would fall back to a fixed phrase."""
+def test_a_search_the_model_narrowed_is_its_pick(shop: Shop):
+    """The model asked the search for two products. Naming both is still a pick."""
     conversation = shop.conversation()
-    report, transport = shop.turn(conversation, browse(SHIRTS, button=None))
+    before = shop.tokens_for(conversation)
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS, limit=2)])
+        ids = [int(p["product_id"]) for p in _last_search_result(messages)["result"]["products"]]
+        return _step([_reply("Two good ones.", commerce=True, refs=[f"catalog:product:{i}" for i in ids],
+                             choices={"product_ids": ids, "button": BUTTON, "more_label": MORE})])
+
+    model = LiteralModel(script)
+    report, transport = shop.turn(conversation, model)
+    assert "more_results" not in model.search_result()["result"]
     products, more, _button = _rows(transport.sent[0])
-    assert more is None and len(products) <= 5
-    assert report.browse_outcome == br.NO_BUTTON_WORD
+    assert products == shop.products[SHIRTS][:2] and more is None
+    assert report.browse_outcome == br.NO_CONTINUATION and shop.tokens_for(conversation) == before
+
+
+def _asked(model: LiteralModel) -> List[Dict[str, Any]]:
+    """What the model was told about its own replies that were not accepted."""
+    told = []
+    for message in model.calls[-1]["messages"]:
+        for block in message.get("content") or []:
+            if isinstance(block, Mapping) and block.get("type") == "tool_result" and block.get("is_error"):
+                told.append(json.loads(block["content"]))
+    return told
+
+
+def words_later(query: str, *, second: Optional[Dict[str, Any]] = None,
+                fail: bool = False) -> LiteralModel:
+    """A browse whose first reply leaves out both words; asked, it answers with
+    ``second`` (the words it gives then), or its provider fails."""
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("call_search_1", "search_products", query=query)])
+        if call == 3 and fail:
+            return {"provider": "anthropic", "status": "sdk_error", "blocks": [], "usage": {}}
+        ids = [int(p["product_id"]) for p in _last_search_result(messages)["result"]["products"]]
+        choices: Dict[str, Any] = {"product_ids": ids}
+        if call == 3:
+            choices.update(second or {})
+        return _step([_reply("These are some of the options.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in ids], choices=choices,
+                             call_id=f"reply_{call}")])
+    return LiteralModel(script)
+
+
+def test_a_list_that_pages_does_not_wait_on_the_models_optional_words(shop: Shop):
+    """The regression for the observation: no ``more_label`` used to mean no paging.
+
+    The platform decides the list is the search's and pages; the words it
+    lacks are asked of the model once, and the model's answer is on the list.
+    """
+    conversation = shop.conversation()
+    model = words_later(SHIRTS, second={"button": BUTTON, "more_label": MORE})
+    report, transport = shop.turn(conversation, model)
+    ids = shop.products[SHIRTS]
+    (told,) = _asked(model)
+    assert told["accepted"] is False
+    assert [p["code"] for p in told["problems"]] == [br.WORDS_NEEDED]
+    assert br.BUTTON_FIELD in told["problems"][0]["detail"] and br.MORE_FIELD in told["problems"][0]["detail"]
+    products, more, button = _rows(transport.sent[0])
+    assert products == ids[:9] and more["title"] == MORE and button == BUTTON
+    assert report.browse_outcome == br.OPENED and report.paging_words == "answered"
+    assert len(model.calls) == 3 and report.steps_used == 3
+    stored = shop.token_row(nav.token_from_row_id(more["id"]))
+    assert stored["more_label"] == MORE and stored["button_label"] == BUTTON
+
+
+@pytest.mark.parametrize("max_steps", [3, 5])
+def test_a_list_whose_words_never_come_is_exactly_what_the_model_named(shop: Shop, max_steps):
+    """Asked once and still without a word: the model's own selector, never a
+    "More" row in words the platform made up, and nothing stored — however many
+    steps the budget would still allow."""
+    conversation = shop.conversation()
+    before = shop.tokens_for(conversation)
+    model = words_later(SHIRTS, second={"button": BUTTON})
+    report, transport = shop.turn(conversation, model, max_steps=max_steps)
+    products, more, button = _rows(transport.sent[0])
+    assert products == shop.products[SHIRTS][:5] and more is None and button == BUTTON
+    assert report.browse_outcome == br.WORDS_MISSING and report.paging_words == "answered"
+    assert len(model.calls) == 3, "asked exactly once"
+    assert shop.tokens_for(conversation) == before
+
+
+def test_a_words_step_that_fails_still_sends_the_verified_reply(shop: Shop):
+    """Asking must never leave the customer worse off than not asking."""
+    conversation = shop.conversation()
+    before = shop.tokens_for(conversation)
+    model = words_later(SHIRTS, fail=True)
+    report, transport = shop.turn(conversation, model)
+    products, more, _button = _rows(transport.sent[0])
+    assert products == shop.products[SHIRTS][:5] and more is None
+    assert transport.sent[0]["text"] == "These are some of the options."
+    assert report.paging_words == ac.StopReason.PROVIDER_FAILURE.value
+    assert report.browse_outcome == br.WORDS_MISSING and shop.tokens_for(conversation) == before
+
+
+def test_a_result_that_fits_one_list_asks_for_no_more_word(shop: Shop):
+    conversation = shop.conversation()
+    model = browse(SHOES, more=None)
+    report, transport = shop.turn(conversation, model)
+    products, more, _button = _rows(transport.sent[0])
+    assert products == shop.products[SHOES] and more is None
+    assert report.browse_outcome == br.WHOLE and len(model.calls) == 2 and report.paging_words is None
 
 
 def test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page(shop: Shop):

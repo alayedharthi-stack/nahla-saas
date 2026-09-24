@@ -315,8 +315,10 @@ def test_a_result_that_fits_one_list_is_offered_whole_and_stores_nothing():
 
 
 @pytest.mark.parametrize("case,expected", [
-    ("no_more_word", br.NOT_ASKED),
-    ("no_button_word", br.NO_BUTTON_WORD),
+    ("no_selector", br.NO_SELECTOR),
+    ("no_more_word", br.WORDS_MISSING),
+    ("no_button_word", br.WORDS_MISSING),
+    ("models_pick", br.MODEL_PICK),
     ("two_searches", br.NO_CONTINUATION),
     ("other_scope", br.NO_CONTINUATION),
     ("nothing_more", br.NOTHING_MORE),
@@ -327,7 +329,11 @@ def test_a_browse_is_not_opened_unless_every_part_of_it_is_real(case, expected):
     obs = [search(ids[:5], candidates(ids, ids[:5]))]
     request = draft(ids[:5])
     reader = Reader()
-    if case == "no_more_word":
+    if case == "no_selector":
+        request = dataclasses.replace(request, payload={})
+    elif case == "models_pick":
+        request = draft(ids[:3])
+    elif case == "no_more_word":
         request = draft(ids[:5], more=None)
     elif case == "no_button_word":
         request = draft(ids[:5], button=None)
@@ -344,6 +350,146 @@ def test_a_browse_is_not_opened_unless_every_part_of_it_is_real(case, expected):
     composed, reason = br.open_browse(request, obs, scope=SCOPE, runtime=runtime(reader),
                                       timeout_seconds=5)
     assert composed is None and reason == expected
+
+
+# ── Eligibility is structure; the words are only words ─────────────────────
+
+
+def _subsets(window: Sequence[int]) -> List[List[int]]:
+    return [[pid for bit, pid in enumerate(window) if mask >> bit & 1]
+            for mask in range(1, 1 << len(window))]
+
+
+@pytest.mark.parametrize("more", ["More", None])
+@pytest.mark.parametrize("button", ["Pick", None])
+def test_whether_a_list_pages_never_depends_on_the_words(more, button):
+    """The observation this closes: a missing ``more_label`` used to decide paging.
+
+    Every selector over a search's window is judged the same with and without
+    either word — the full window pages, every strict subset is the model's
+    pick — and the words decide only which of them the list still needs.
+    """
+    ids = list(range(1301, 1330))
+    obs = [search(ids[:5], candidates(ids, ids[:5]))]
+    for chosen in _subsets(ids[:5]):
+        with_words, reason_with = br.eligibility(draft(chosen), obs, scope=SCOPE,
+                                                 search_tool_names=("search_products",))
+        eligible, reason = br.eligibility(draft(chosen, more=more, button=button), obs, scope=SCOPE,
+                                          search_tool_names=("search_products",))
+        assert reason == reason_with
+        assert (eligible is None) == (with_words is None)
+        assert reason == (br.ELIGIBLE if len(chosen) == 5 else br.MODEL_PICK)
+        if eligible is not None:
+            expected = tuple(field for field, word in ((br.BUTTON_FIELD, button), (br.MORE_FIELD, more))
+                             if word is None)
+            assert eligible.words_missing(draft(chosen, more=more, button=button)) == expected
+
+
+def test_a_selector_over_every_buyable_product_shown_is_the_searchs_results():
+    """The model may leave out what cannot be bought; what it may not leave out
+    is a product the customer could buy — that is a pick."""
+    ids = list(range(1401, 1430))
+    obs = [search(ids[:5], candidates(ids, ids[:5]), unorderable=[ids[3]])]
+    buyable = [pid for pid in ids[:5] if pid != ids[3]]
+    eligible, reason = br.eligibility(draft(buyable), obs, scope=SCOPE,
+                                      search_tool_names=("search_products",))
+    assert reason == br.ELIGIBLE and eligible.call_id == "s1"
+    _none, reason = br.eligibility(draft(buyable[:3] + [ids[3]]), obs, scope=SCOPE,
+                                   search_tool_names=("search_products",))
+    assert reason == br.MODEL_PICK
+    # A window with nothing the customer can buy offers no search to continue.
+    obs = [search(ids[:5], candidates(ids, ids[:5]), unorderable=ids[:5])]
+    _none, reason = br.eligibility(draft(ids[:5]), obs, scope=SCOPE,
+                                   search_tool_names=("search_products",))
+    assert reason == br.MODEL_PICK
+
+
+def test_a_pick_is_never_extended_even_when_the_model_gives_the_more_word():
+    ids = list(range(1501, 1530))
+    reader = Reader()
+    for chosen in ([ids[0]], ids[:2], [ids[1], ids[4]], ids[:4]):
+        composed, reason = br.open_browse(draft(chosen), [search(ids[:5], candidates(ids, ids[:5]))],
+                                          scope=SCOPE, runtime=runtime(reader), timeout_seconds=5)
+        assert composed is None and reason == br.MODEL_PICK
+    assert reader.asked == [], "a pick reads nothing from the catalogue"
+
+
+def test_a_result_that_fits_one_list_needs_no_more_word():
+    ids = list(range(1601, 1611))
+    obs = [search(ids[:5], candidates(ids, ids[:5]))]
+    eligible, _reason = br.eligibility(draft(ids[:5], more=None), obs, scope=SCOPE,
+                                       search_tool_names=("search_products",))
+    assert eligible.words_missing(draft(ids[:5], more=None)) == ()
+    composed, reason = br.open_browse(draft(ids[:5], more=None), obs, scope=SCOPE,
+                                      runtime=runtime(Reader()), timeout_seconds=5)
+    assert reason == br.WHOLE and listed(composed.selection) == ids and not composed.plan
+
+
+def test_the_words_request_names_fields_and_never_what_they_should_say():
+    detail = br.words_needed_detail((br.BUTTON_FIELD, br.MORE_FIELD))
+    assert br.BUTTON_FIELD in detail and br.MORE_FIELD in detail
+    assert not any("\u0600" <= ch <= "\u06ff" for ch in detail), "no customer-language wording"
+
+
+@dataclasses.dataclass
+class _WordsSession:
+    """The part of a loop session ``_paging_words_missing`` reads."""
+
+    observations: List[Any]
+    feedback: List[ac.VerificationFeedback] = dataclasses.field(default_factory=list)
+    steps_remaining: bool = True
+    seconds_left: float = 60.0
+    limits: ac.LoopBudget = dataclasses.field(default_factory=ac.LoopBudget)
+    events: List[Any] = dataclasses.field(default_factory=list)
+
+    def steps_left(self) -> bool:
+        return self.steps_remaining
+
+    def remaining_seconds(self) -> float:
+        return self.seconds_left
+
+    def record(self, kind: str, detail: Mapping[str, Any]) -> None:
+        self.events.append((kind, dict(detail)))
+
+
+def _words_loop(*, browse: bool = True) -> al.AgentLoop:
+    loop = al.AgentLoop.__new__(al.AgentLoop)
+    loop._browse = runtime(Reader()) if browse else None
+    loop._registry = type("Registry", (), {"definitions": ()})()
+    return loop
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("pages", (br.MORE_FIELD,)),
+    ("no_browse_runtime", ()),
+    ("already_asked_this_turn", ()),
+    ("no_step_left", ()),
+    ("no_time_for_a_step", ()),
+    ("models_pick", ()),
+    ("fits_one_list", ()),
+    ("card_requested", ()),
+])
+def test_the_loop_asks_for_words_only_for_a_list_that_pages_and_only_once(case, expected):
+    ids = list(range(1701, 1730))
+    obs = [search(ids[:5], candidates(ids, ids[:5]))]
+    request = draft(ids[:5], more=None)
+    session = _WordsSession(observations=obs)
+    loop = _words_loop(browse=case != "no_browse_runtime")
+    if case == "already_asked_this_turn":
+        # As a resumed invocation restores it: the code survives, the detail does not.
+        session.feedback.append(ac.VerificationFeedback(
+            step_no=2, problems=(ac.VerificationProblem(br.WORDS_NEEDED, "restored"),)))
+    elif case == "no_step_left":
+        session.steps_remaining = False
+    elif case == "no_time_for_a_step":
+        session.seconds_left = session.limits.provider_timeout_seconds + al.WORDS_RESERVE_SECONDS - 0.5
+    elif case == "models_pick":
+        request = draft(ids[:3], more=None)
+    elif case == "fits_one_list":
+        session.observations = [search(ids[:5], candidates(ids[:10], ids[:5]))]
+    elif case == "card_requested":
+        request = dataclasses.replace(request, payload={})
+    assert loop._paging_words_missing(request, SCOPE, session, None) == expected
 
 
 def test_a_capped_result_is_never_called_complete():

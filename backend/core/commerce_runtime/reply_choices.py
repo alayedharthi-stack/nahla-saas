@@ -180,8 +180,9 @@ def requested_more_label(draft: Any) -> str:
     Customer-facing wording, so it is the model's, in the customer's own
     language — the same rule the card's button word follows, and for the same
     reason: the platform has no phrase of its own and will not invent one in
-    whatever language it happens to be written in. Without a word there is no
-    affordance, and therefore no paging.
+    whatever language it happens to be written in. Whether a list pages is not
+    this word's to decide; a list that pages and lacks it is asked for it once,
+    and without it has no "More" row.
     """
     payload = getattr(draft, "payload", None)
     if not isinstance(payload, Mapping):

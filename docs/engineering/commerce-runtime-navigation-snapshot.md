@@ -23,13 +23,44 @@ never handles an offset, an order or a token.
 
 | | owns | how |
 |---|---|---|
-| **model** | whether this reply is a browse the customer may continue | gives the word for the "More" row (`choices.more_label`) and the list's button word (`choices.button`), in the customer's language, beside a selector over products of one search |
+| **model** | which products the reply offers, and the words a customer reads on a list | a selector over products of one search (`choices.product_ids`), and the list's button word (`choices.button`) and "More" word (`choices.more_label`) in the customer's language |
 | **tools** | which products are candidates, and in what order | the search that produced the five-product window also hands the platform the whole ordered result, typed and scoped (`SearchCandidates`) |
 | **platform** | the presentation | which products each page shows, where a page ends, whether another follows, and what every row says — read from the catalogue at the moment it is shown |
 
-Without the model's "More" word nothing engages, so a focused recommendation
-or a comparison stays exactly the products the model named, however many more
-the search matched.
+### Whether a list pages is structure, never wording
+
+`browse.eligibility` decides it from three facts and no word in the draft:
+
+1. every product the selector names comes from one search's window;
+2. every product that window showed the model **and the customer can buy now**
+   is named — a selector that leaves one out is the model's own pick (a
+   recommendation, a comparison), and a pick is never extended
+   (`selector_is_the_models_pick`);
+3. the stored result holds products beyond the window.
+
+A search the model narrowed below the full window (`limit` < 5) asked for a
+few products, not for the merchant's range: it carries no continuation and no
+`more_results` at all.
+
+The words are the expression layer's and only that. `Eligible.words_missing`
+names which a list that will page lacks — the button always, the "More" word
+only when page one has a successor. The loop then asks the model for them
+**once** (`_ask_for_words`): its reply is shown back as not yet accepted with
+the one problem `paging_words_needed`, through the same channel verification
+uses, and it gets exactly one step. A verified reply from that step is the
+answer. Anything else — no reply, a lookup, a refused reply, a provider that
+fails or times out — sends the reply already verified, shaped exactly as the
+model asked; only a stop that would have ended the turn anyway (cancellation,
+lost ownership, a concurrent invocation, the deadline) still ends it. Nothing
+is asked without a step left and `provider_timeout + 5 s` of the deadline, nor
+twice in a turn (a resumed invocation reads the request from its restored
+feedback). A list whose words never come records `paging_words_missing`; the
+platform never writes its own. The outcome of the step is on the turn report
+as `paging_words`.
+
+This closes the earlier design's flaw, in which the model's optional
+`more_label` was itself the switch: a full browse without the word was never
+paged, and a two-product pick with it was.
 
 ## The typed search-result contract
 
@@ -84,7 +115,9 @@ exhaustive only when that window held every product.
 ```
 search_products ─► model: ≤5 products + "more_results": true
                └► platform: SearchCandidates (≤50 ids, complete?)
-reply(choices: ids, button, more_label)
+reply(choices: ids, button?, more_label?)
+   └► browse.eligibility: the search's results that continue? (structure only)
+   └► words missing? ask the model once; else / otherwise the verified reply
    └► browse.open_browse: page 1 = stored head (9) + "More" row
         rows 6–9 hydrated by read_list_rows (trusted, tenant-scoped, NOT an observation)
         reservation transaction: reply intent + mint token(page 2)        ── one commit
@@ -251,9 +284,11 @@ Applying 0113 takes effect at the next process start.
 ```
 INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
 MODEL_CHANGED=NO
-PROMPT_CHANGED=YES   — tool/reply declarations, only where 0113 exists:
-                       choices.more_label (reply declaration) and one sentence
-                       on search_products about more_results
+PROMPT_CHANGED=YES   — model-facing text, only where 0113 exists:
+                       choices.more_label (reply declaration), one sentence
+                       on search_products about more_results, and the
+                       paging_words_needed problem detail the loop sends when
+                       a list that pages lacks its words
 PERSONA_CHANGED=NO
 PHRASE_MAP_CHANGED=NO
 KEYWORD_ROUTER_CHANGED=NO
@@ -277,6 +312,7 @@ paths, the same pattern a withheld selector already uses.
 | no provenance, no completeness, no stored words, no spender | all four, plus integrity checks |
 | every page nine; a final page could not carry ten | final page up to ten |
 | page-one rows were the model's selection | page one is the stored head; rows 6–9 hydrated by a trusted read |
+| (first cut of this PR) the model's optional `more_label` switched paging on | eligibility is structural; the words are asked for once when missing |
 
 ## Limitations
 
@@ -286,6 +322,14 @@ paths, the same pattern a withheld selector already uses.
   platform-composed rows are not resolved by the platform.
 * The words on later pages are the ones given when the browse opened; a
   customer who switches language mid-browse sees the first language's words.
+* A browse whose first reply lacks its words costs one more model step
+  (latency of one provider call, ≈ one reply's tokens) — the price of never
+  writing the words for the model. The declaration asks for them up front, so
+  the step is the exception; `paging_words` on the turn report counts it.
+* A model that names every buyable product of a search to *recommend* all of
+  them is, structurally, offering that search's results, and the list pages.
+  That is the intended reading: the platform cannot tell a pick from a browse
+  by anything but which products were named, and deliberately does not try.
 * A general browse (empty query) that is not exhaustive within its formatting
   window is stored as not complete, even when the remaining rows are all
   unorderable.

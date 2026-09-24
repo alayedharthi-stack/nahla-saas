@@ -2,19 +2,27 @@
 
 Three authorities meet here, and none of them does another's job:
 
-* **The model interprets the customer.** It decides a reply is a browse the
-  customer may want to continue — not a recommendation, not a comparison — and
-  says so the only way it can: by giving the word for the "More" row, in the
-  customer's language, beside a selector over products of one search. Without
-  that word nothing here engages, and a focused answer stays exactly the
-  products the model named.
+* **The model interprets the customer.** It decides which products a reply
+  offers, and that choice is the whole of its say in whether a list pages. A
+  selector over every product a search showed it that can be bought now is
+  that search's results, offered as such; a selector over only some of them is
+  the model's own pick — a recommendation, a comparison — and stays exactly the
+  products it named. No word the model writes, and no field it may leave out,
+  decides between the two.
 * **The tools establish the candidates.** The search that produced the model's
   five-product window also handed the platform its whole ordered result, typed
   and scoped (``search_candidates``). That, and nothing the model wrote, is
-  what the list pages through.
+  what the list pages through, and it alone says whether there is more.
 * **The platform selects the presentation.** Which products each page shows,
   where a page ends, whether another follows, and what every product row says
   — read from the merchant's catalogue at the moment it is shown.
+
+The words a customer reads on a paged list that are not the merchant's — the
+list's button and its "More" row — belong to the model, the one expression
+layer the runtime has. ``eligibility`` names which of them a paged list needs;
+the loop asks the model for any it left out, once, and a list that still has
+none is offered exactly as the model asked, never with a word the platform
+made up.
 
 What a list never does
 ======================
@@ -29,6 +37,9 @@ What a list never does
 * It never invents a word. Both words on a paged list that are not the
   merchant's — the list's button and the "More" row — are the model's, given
   when the browse was opened and carried on the stored row for later pages.
+* It never extends the model's own pick. A selector that leaves out a product
+  the search showed it and the customer could buy is a choice, and a choice is
+  never widened into the search it came from.
 """
 from __future__ import annotations
 
@@ -57,12 +68,24 @@ BROWSE_FAILED = "browse_failed"
 
 # Why a browse was not opened. The reply then offers exactly the selector the
 # model asked for, as it always has.
-NOT_ASKED = "paging_not_asked"
-NO_BUTTON_WORD = "paging_without_button_word"
+NO_SELECTOR = "no_selector_requested"
 NO_CONTINUATION = "no_search_continuation"
+# The selector leaves out a product the search showed the model that the
+# customer could buy: the model's own pick, never widened.
+MODEL_PICK = "selector_is_the_models_pick"
 NOTHING_MORE = "search_had_nothing_more"
+# The list is the search's and pages, but the model gave no word for its
+# button or its "More" row, even when asked. The platform has none of its own.
+WORDS_MISSING = "paging_words_missing"
 ROWS_UNAVAILABLE = "browse_rows_unavailable"
 NAMED_NOT_LISTED = "named_product_not_listable"
+ELIGIBLE = "browse_eligible"
+
+# The customer-facing words a paged list needs, by the reply fields the model
+# gives them in, and the one problem code the loop asks for them under.
+BUTTON_FIELD = "choices.button"
+MORE_FIELD = "choices.more_label"
+WORDS_NEEDED = "paging_words_needed"
 
 # The one key the model is told a "More" tap's outcome under, beside the other
 # trusted facts in its context. Data, never instruction.
@@ -144,35 +167,102 @@ def _search_for(requested: Sequence[int], observations: Sequence[Any], scope: An
     return None, ""
 
 
+@dataclasses.dataclass(frozen=True)
+class Eligible:
+    """A selector the platform will present as its search's results, and which
+    of the search's typed results it is."""
+
+    candidates: sc.SearchCandidates
+    call_id: str
+
+    @property
+    def first_page(self) -> nav.PageBounds:
+        return nav.page_bounds(len(self.candidates.product_ids), 0)
+
+    def words_missing(self, draft: Any) -> Tuple[str, ...]:
+        """The reply fields whose words this list needs and the draft lacks.
+
+        The button always; the "More" row only when page one has a successor.
+        """
+        missing = []
+        if not rc.requested_button(draft):
+            # The channel sender has a fixed phrase for a list with no button;
+            # a list the platform composes must never reach it.
+            missing.append(BUTTON_FIELD)
+        if self.first_page.has_next and not rc.requested_more_label(draft):
+            missing.append(MORE_FIELD)
+        return tuple(missing)
+
+
+def eligibility(draft: Any, observations: Sequence[Any], *, scope: Any,
+                search_tool_names: Sequence[str]) -> Tuple[Optional[Eligible], str]:
+    """Whether the selector the model asked for is a search's results that continue.
+
+    Decided from structure alone — the products the model named, the typed
+    result of the search it named them from, and the catalogue values that
+    search returned — and never from any word in the draft. Three things must
+    hold:
+
+    * every product named comes from one search's window;
+    * every product that window showed the model and the customer can buy now
+      is named — a selector that leaves one out is the model's own pick, and a
+      pick is never extended;
+    * the stored result holds products beyond the window.
+
+    Pure: it reads nothing, so the loop can ask it before a reply is shaped.
+    """
+    requested = rc.requested_product_ids(draft)
+    if not requested:
+        return None, NO_SELECTOR
+    candidates, call_id = _search_for(requested, observations, scope, search_tool_names)
+    if candidates is None:
+        return None, NO_CONTINUATION
+    observed = rc.observed_products(observations)
+    buyable = {pid for pid in candidates.window_ids if pid in observed and _listable(observed[pid])}
+    if not buyable or not buyable <= set(int(pid) for pid in requested):
+        return None, MODEL_PICK
+    if not candidates.extends_beyond_window:
+        return None, NOTHING_MORE
+    return Eligible(candidates=candidates, call_id=call_id), ELIGIBLE
+
+
+def words_needed_detail(missing: Sequence[str]) -> str:
+    """What the loop tells the model when a paged list lacks its words.
+
+    Addressed to the model, never shown to a customer: which fields are
+    missing and why, and nothing about what they should say.
+    """
+    return ("This selector offers every product the search returned that can be bought now, "
+            "and the search matched more than one list holds, so the platform will present "
+            "its results in pages. A paged list needs words the platform does not write: "
+            + ", ".join(missing) + ". Submit the reply again with them, in the customer's "
+            "language; nothing else about it needs to change.")
+
+
 def open_browse(draft: Any, observations: Sequence[Any], *, scope: Any,
                 runtime: BrowseRuntime, timeout_seconds: float) -> Tuple[Optional[Composed], str]:
     """Page one of the search the model offered a selector over, or why not.
 
-    Engages only when the model asked for it — a "More" word and a button word,
-    beside a selector over products of one search whose result extends beyond
-    what the model was shown. Page one is the stored result's head, in its
-    order: the products the model named are all on it, and the rest of it is
-    hydrated from the catalogue now. When anything is missing — a word, the
-    typed result, a readable catalogue, a row for a product the model named —
-    this returns ``None`` and the reply offers exactly what the model asked.
+    Engages when ``eligibility`` does: the model's selector is a search's
+    results and the stored result extends beyond what the model was shown.
+    Page one is the stored result's head, in its order: the products the model
+    named are all on it, and the rest of it is hydrated from the catalogue now.
+    When anything is missing — a word, a readable catalogue, a row for a
+    product the model named — this returns ``None`` and the reply offers
+    exactly what the model asked.
     """
+    eligible, reason = eligibility(draft, observations, scope=scope,
+                                   search_tool_names=runtime.search_tool_names)
+    if eligible is None:
+        return None, reason
+    if eligible.words_missing(draft):
+        return None, WORDS_MISSING
     label = rc.requested_more_label(draft)
-    requested = rc.requested_product_ids(draft)
-    if not label or not requested:
-        return None, NOT_ASKED
     button = rc.requested_button(draft)
-    if not button:
-        # The list's own button is the other word a customer reads on it. The
-        # channel sender has a fixed phrase for an empty one; a list the
-        # platform composes must never reach it.
-        return None, NO_BUTTON_WORD
-    candidates, call_id = _search_for(requested, observations, scope, runtime.search_tool_names)
-    if candidates is None:
-        return None, NO_CONTINUATION
-    if not candidates.extends_beyond_window:
-        return None, NOTHING_MORE
+    requested = rc.requested_product_ids(draft)
+    candidates, call_id = eligible.candidates, eligible.call_id
     stored = candidates.product_ids
-    bounds = nav.page_bounds(len(stored), 0)
+    bounds = eligible.first_page
     page_ids = stored[bounds.start:bounds.end]
     observed = rc.observed_products(observations)
     unseen = [pid for pid in page_ids if pid not in observed]
@@ -325,8 +415,9 @@ def page_as_lines(draft: Any, page: BrowsePage) -> Any:
 
 
 __all__ = [
-    "BROWSE_FAILED", "BrowsePage", "BrowseRuntime", "Composed", "FACTS_KEY", "NAMED_NOT_LISTED", "NOTHING_MORE",
-    "NOT_ASKED", "NO_BUTTON_WORD", "NO_CONTINUATION", "OPENED", "PAGE", "PAGE_AS_LINES",
-    "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE", "WITHHELD_KEY", "continue_browse", "open_browse",
-    "page_as_lines", "refusal_facts", "resolve_tap",
+    "BROWSE_FAILED", "BUTTON_FIELD", "BrowsePage", "BrowseRuntime", "Composed", "ELIGIBLE", "Eligible",
+    "FACTS_KEY", "MODEL_PICK", "MORE_FIELD", "NAMED_NOT_LISTED", "NOTHING_MORE", "NO_CONTINUATION",
+    "NO_SELECTOR", "OPENED", "PAGE", "PAGE_AS_LINES", "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE",
+    "WITHHELD_KEY", "WORDS_MISSING", "WORDS_NEEDED", "continue_browse", "eligibility", "open_browse",
+    "page_as_lines", "refusal_facts", "resolve_tap", "words_needed_detail",
 ]
