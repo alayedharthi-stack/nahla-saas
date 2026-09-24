@@ -1068,6 +1068,31 @@ async def provider_list_templates(
     return data, ctx
 
 
+# Since October 2025 Meta sets the business-initiated messaging limit per
+# business portfolio and deprecated the phone-number field
+# ``messaging_limit_tier``; the current value is
+# ``whatsapp_business_manager_messaging_limit``. The deprecated field is read
+# only as a fallback and logged as such.
+PORTFOLIO_LIMIT_FIELD = "whatsapp_business_manager_messaging_limit"
+LEGACY_LIMIT_FIELD = "messaging_limit_tier"
+PHONE_TIER_FIELDS = f"{PORTFOLIO_LIMIT_FIELD},{LEGACY_LIMIT_FIELD},quality_rating"
+
+
+def extract_messaging_limit(data: Any) -> tuple:
+    """``(tier, field)`` from a phone-number read; the portfolio field wins.
+    Accepts the value as a plain tier string or as an object carrying it."""
+    if not isinstance(data, dict):
+        return None, None
+    for key in (PORTFOLIO_LIMIT_FIELD, LEGACY_LIMIT_FIELD):
+        raw = data.get(key)
+        if isinstance(raw, dict):
+            raw = next((raw.get(k) for k in ("current_limit", "tier", "messaging_limit",
+                                              "value", "limit") if raw.get(k)), None)
+        if isinstance(raw, (str, int)) and str(raw).strip():
+            return str(raw).strip(), key
+    return None, None
+
+
 async def fetch_meta_phone_tier(
     conn: Any,
     ctx: WhatsAppTokenContext,
@@ -1125,15 +1150,21 @@ async def fetch_meta_phone_tier(
             tenant_id=tenant_id,
             operation="fetch_phone_tier",
             path=f"{phone_id}",
-            params={"fields": "messaging_limit_tier,quality_rating"},
+            params={"fields": PHONE_TIER_FIELDS},
             timeout=15,
         )
-        _record(f"GET /{phone_id}?fields=messaging_limit_tier,quality_rating", "2xx?", data)
-        tier = data.get("messaging_limit_tier") if isinstance(data, dict) else None
+        _record(f"GET /{phone_id}?fields={PHONE_TIER_FIELDS}", "2xx?", data)
+        tier, tier_field = extract_messaging_limit(data)
         quality = data.get("quality_rating") if isinstance(data, dict) else None
         if tier:
+            if tier_field != PORTFOLIO_LIMIT_FIELD:
+                logger.warning(
+                    "[WA] fetch_meta_phone_tier tenant=%s: %s missing, using deprecated %s=%s",
+                    tenant_id, PORTFOLIO_LIMIT_FIELD, tier_field, tier,
+                )
             return {
                 "messaging_limit": tier,
+                "messaging_limit_field": tier_field,
                 "quality_rating":  quality,
                 "_diagnostics":    diagnostics,
             }

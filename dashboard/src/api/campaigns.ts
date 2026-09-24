@@ -61,6 +61,10 @@ export type CampaignLifecycle =
   /** Stopped on purpose (merchant stop, shared Meta limit, Meta
    *  throttling, unknown send outcomes). See ``pause_reason``. */
   | 'paused'
+  /** Paused by Meta's shared messaging limit (not the merchant): the
+   *  scheduler continues it automatically once capacity returns. See
+   *  ``capacity_wait``. */
+  | 'waiting_for_capacity'
   | 'unknown'
 
 /** Canonical per-campaign analytics derived from ``CampaignSendLog``.
@@ -133,6 +137,15 @@ export interface CampaignErrorBreakdownEntry {
   retryable: boolean
 }
 
+export interface CampaignCapacityWait {
+  next_eligible_at?: string | null
+  next_eligible_exact?: boolean | null
+  used_24h?: number | null
+  budget?: number | null
+  limit?: number | null
+  limit_source?: string | null
+}
+
 export interface CampaignExecution {
   worker_running: boolean
   heartbeat_at?: string | null
@@ -186,6 +199,7 @@ export interface CampaignRecord {
   /** Lease-backed: is a worker really sending this campaign now? */
   execution?: CampaignExecution
   pause_reason?: string | null
+  capacity_wait?: CampaignCapacityWait | null
   created_at: string | null
   launched_at: string | null
   /** Wave/Batch — `immediate` for legacy / small campaigns,

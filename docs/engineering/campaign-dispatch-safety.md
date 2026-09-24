@@ -138,6 +138,45 @@ wave ticks put the wave back to pending, nothing reaches Meta. Read paths
 webhook falls back to its pre-ledger path. Once the tables exist the next
 tick/click proceeds (`test_missing_ledger_tables_fail_closed`).
 
+### 3a. Shared Meta limit: what is counted, and waiting for capacity
+
+**Tier.** Meta sets the business-initiated messaging limit per business
+portfolio (since October 2025) and deprecated the phone-number field
+`messaging_limit_tier`. `fetch_meta_phone_tier` requests
+`whatsapp_business_manager_messaging_limit` and uses it; the deprecated field
+is read only as a fallback and logged as such. The scope key is the portfolio
+(`bm:`) when the connection stores it, else `waba:` — a narrower fallback.
+
+**`used_24h`** is a local count of distinct recipient phones that may hold one
+of Meta's unique-user slots in the moving 24h window — not a count of
+conversations, and not a number Meta returns (`messaging_usage`):
+
+* ledger attempts in the scope that may have produced a message; an accepted
+  attempt Meta later reported failed, with no delivered/read receipt, reached
+  no one and is not counted;
+* send-log rows of the scope's tenants for sends the ledger does not cover
+  (pre-ledger history). Their `failed_at` cannot be tied to one copy, so they
+  always count; they leave the window 24h after the ledger deploy.
+
+`scripts/operators/campaign_messaging_budget_audit.py --tenant-id T --at <ts>
+--expect-used N` recomputes the number per source (unique phones, oldest and
+newest timestamp, intersection, union, per tenant/campaign, delivery evidence,
+`sent_at` sanity) read-only, and fails when it does not equal `N`.
+
+**Waiting for capacity.** When the budget stops a run, the campaign is
+`paused` with lease `pause_reason=messaging_limit_reached` and
+`template_variables._capacity_wait.next_eligible_at` = the moment enough
+counted recipients age out of the window. The `campaign_capacity_resume`
+scheduler (every 60s) continues it through the normal leased dispatch path
+once that time has passed, recipients are still queued and the budget admits
+a new one; a run that fills the limit again goes back to waiting. A merchant
+stop/pause (`stop_requested_at`) always wins: auto-resume never lifts it. The
+UI shows `lifecycle=waiting_for_capacity` with the expected resume time, and
+keeps merchant pause, Meta throttling (`provider_throttling`) and safety holds
+(`uncertain_sends`) as separate reasons. Nothing in this path changes the
+atomic claim, the campaign lease or the scope lock, and `sent`, `uncertain`
+and delivered recipients are never queued again.
+
 ## 4. Tests
 
 `tests/test_campaign_send_ledger.py` — runs on SQLite and, with
