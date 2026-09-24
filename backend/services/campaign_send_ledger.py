@@ -1396,6 +1396,12 @@ def messaging_usage(db: Session, scope: Optional[str], conns: List[Any], *,
 
 
 CAPACITY_WAIT_KEY = "_capacity_wait"
+# Who may write a wait that the scheduler acts on. Only a dispatch run of
+# this version that was itself stopped by the shared limit records it. A
+# campaign that is merely ``paused`` with ``pause_reason=messaging_limit_reached``
+# -- e.g. paused by an older build, before this record existed -- carries no
+# authority and continues only on the merchant's explicit resume.
+CAPACITY_WAIT_AUTHORITY = "dispatch_run_v2"
 
 
 def record_capacity_wait(campaign: Any, budget: Optional[MessagingBudget], *,
@@ -1408,6 +1414,7 @@ def record_capacity_wait(campaign: Any, budget: Optional[MessagingBudget], *,
     next_at = budget.next_slot_at if budget is not None else None
     wait = {
         "reason": PAUSE_MESSAGING_LIMIT,
+        "authority": CAPACITY_WAIT_AUTHORITY,
         "since": now.isoformat(),
         "next_eligible_at": (next_at or now + CAPACITY_RECHECK_INTERVAL).isoformat(),
         "next_eligible_exact": next_at is not None,
@@ -1437,6 +1444,24 @@ def capacity_wait(campaign: Any) -> Optional[Dict[str, Any]]:
     tv = campaign.template_variables or {}
     w = tv.get(CAPACITY_WAIT_KEY) if isinstance(tv, dict) else None
     return w if isinstance(w, dict) else None
+
+
+def authorized_capacity_wait(template_variables: Any) -> Optional[Dict[str, Any]]:
+    """The recorded wait, only when it authorises an automatic resume: written
+    by a dispatch run of this version (``CAPACITY_WAIT_AUTHORITY``) for the
+    shared messaging limit, with a parseable ``next_eligible_at``. Anything
+    else -- no record, a record from an older build, or a malformed one --
+    returns ``None``: the campaign waits for the merchant."""
+    w = template_variables.get(CAPACITY_WAIT_KEY) if isinstance(template_variables, dict) else None
+    if not isinstance(w, dict):
+        return None
+    if w.get("authority") != CAPACITY_WAIT_AUTHORITY or w.get("reason") != PAUSE_MESSAGING_LIMIT:
+        return None
+    try:
+        datetime.fromisoformat(str(w.get("next_eligible_at")))
+    except ValueError:
+        return None
+    return w
 
 
 def post_accept_throttle(db: Session, scope_key: Optional[str], *,

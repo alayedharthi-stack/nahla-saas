@@ -2744,6 +2744,11 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
     * ``status='paused'`` with lease ``pause_reason='messaging_limit_reached'``
       and no merchant stop (a stop/pause always wins — it needs the
       merchant's own resume);
+    * a wait record written by a dispatch run of this version
+      (``authorized_capacity_wait``). The pause columns alone are not
+      authority: a campaign paused by an older build, or paused for any
+      other reason, continues only on the merchant's explicit resume, and
+      this loop never writes a record for it;
     * no worker holds the lease;
     * its ``next_eligible_at`` has passed;
     * it still has ``queued`` recipients;
@@ -2778,13 +2783,13 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         if ledger.lease_is_live(lease, now=now):
             entry["action"] = "worker_running"
             continue
-        wait = ledger.capacity_wait(campaign) or {}
-        due = wait.get("next_eligible_at")
-        try:
-            due_at = ledger._naive(datetime.fromisoformat(due)) if due else None
-        except ValueError:
-            due_at = None
-        if due_at is not None and now < due_at:
+        wait = ledger.authorized_capacity_wait(campaign.template_variables)
+        if wait is None:
+            entry["action"] = "needs_merchant_resume"
+            continue
+        due = wait["next_eligible_at"]
+        due_at = ledger._naive(datetime.fromisoformat(due))
+        if now < due_at:
             entry.update(action="waiting", next_eligible_at=due)
             continue
         queued = (
