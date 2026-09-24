@@ -478,8 +478,9 @@ class TestFrequencyCap:
         row_b = db.query(CampaignSendLog).filter_by(campaign_id=camp_b.id).one()
         assert row_b.status == LOG_QUEUED
 
-    def test_bypass_disables_frequency_cap(self, monkeypatch):
-        """When ``bypass=True``, recent successful sends must NOT dedupe."""
+    def test_frequency_cap_has_no_bypass(self, monkeypatch):
+        """The cap cannot be switched off per call: there is no ``bypass``
+        argument, and a recent successful send always dedupes."""
         from services import campaign_dispatcher as disp
         monkeypatch.setattr(disp, "MARKETING_CAMPAIGN_FREQUENCY_CAP_DAYS", 14)
 
@@ -507,12 +508,14 @@ class TestFrequencyCap:
         _snapshot_recipients(db, t.id, camp_b.id, [cust], tpl)
         db.commit()
 
-        skipped = _apply_frequency_cap(db, t.id, camp_b.id, bypass=True)
+        with pytest.raises(TypeError):
+            _apply_frequency_cap(db, t.id, camp_b.id, bypass=True)  # type: ignore[call-arg]
+        skipped = _apply_frequency_cap(db, t.id, camp_b.id)
         db.commit()
 
-        assert skipped == 0
+        assert skipped == 1
         row_b = db.query(CampaignSendLog).filter_by(campaign_id=camp_b.id).one()
-        assert row_b.status == LOG_QUEUED
+        assert row_b.status == LOG_SKIPPED_DUPLICATE
 
     def test_cap_counts_legacy_wamid_without_sent_at_if_recent(self, monkeypatch):
         """``sent_at`` may be missing on legacy rows; a live ``wamid`` +
