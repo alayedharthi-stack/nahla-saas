@@ -138,6 +138,55 @@ wave ticks put the wave back to pending, nothing reaches Meta. Read paths
 webhook falls back to its pre-ledger path. Once the tables exist the next
 tick/click proceeds (`test_missing_ledger_tables_fail_closed`).
 
+### 3a. Shared Meta limit: what is counted, and waiting for capacity
+
+**Tier.** Meta sets the business-initiated messaging limit per business
+portfolio (since October 2025) and deprecated the phone-number field
+`messaging_limit_tier`. `fetch_meta_phone_tier` requests
+`whatsapp_business_manager_messaging_limit,quality_rating` and uses it; the
+deprecated `messaging_limit_tier` is asked for only in a separate fallback
+request (a removed field could fail a combined request and hide the current
+value), and the result says `current_field` / `legacy_fallback` / `failed`.
+
+**Scope = Meta's scope.** The budget and the atomic scope lock use the
+business portfolio (`bm:<id>`). The tier sync resolves a missing portfolio id
+from the WABA (`owner_business_info`) into `business_manager_id` (retried at
+most hourly; "refresh Meta tier" retries at once). Until it is known the
+budget fails closed (`limit_source=portfolio_unknown`, budget 0): a WABA-level
+budget could let two WABAs of one portfolio each admit their own share. Usage
+is counted across every key the portfolio's connections recorded attempts
+under (`bm:`, `waba:`, `phone:`), so the switch to `bm:` loses nothing.
+
+**`used_24h`** is a local count of distinct recipient phones that may hold one
+of Meta's unique-user slots in the moving 24h window — not a count of
+conversations, and not a number Meta returns (`messaging_usage`):
+
+* ledger attempts in the scope that may have produced a message; an accepted
+  attempt Meta later reported failed, with no delivered/read receipt, reached
+  no one and is not counted;
+* send-log rows of the scope's tenants for sends the ledger does not cover
+  (pre-ledger history). Their `failed_at` cannot be tied to one copy, so they
+  always count; they leave the window 24h after the ledger deploy.
+
+`scripts/operators/campaign_messaging_budget_audit.py --tenant-id T --at <ts>
+--expect-used N` recomputes the number per source (unique phones, oldest and
+newest timestamp, intersection, union, per tenant/campaign, delivery evidence,
+`sent_at` sanity) read-only, and fails when it does not equal `N`.
+
+**Waiting for capacity.** When the budget stops a run, the campaign is
+`paused` with lease `pause_reason=messaging_limit_reached` and
+`template_variables._capacity_wait.next_eligible_at` = the moment enough
+counted recipients age out of the window. The `campaign_capacity_resume`
+scheduler (every 60s) continues it through the normal leased dispatch path
+once that time has passed, recipients are still queued and the budget admits
+a new one; a run that fills the limit again goes back to waiting. A merchant
+stop/pause (`stop_requested_at`) always wins: auto-resume never lifts it. The
+UI shows `lifecycle=waiting_for_capacity` with the expected resume time, and
+keeps merchant pause, Meta throttling (`provider_throttling`) and safety holds
+(`uncertain_sends`) as separate reasons. Nothing in this path changes the
+atomic claim, the campaign lease or the scope lock, and `sent`, `uncertain`
+and delivered recipients are never queued again.
+
 ## 4. Tests
 
 `tests/test_campaign_send_ledger.py` — runs on SQLite and, with

@@ -58,6 +58,7 @@ export interface CampaignsListLabels {
     failed_all: string
     stalled: string
     paused: string
+    waiting_for_capacity: string
     unknown: string
   }
   sendHealth: {
@@ -71,6 +72,8 @@ export interface CampaignsListLabels {
       uncertain: string
     }
     pauseReasons: Record<string, string>
+    capacityResumeAt: string
+    capacityResumeSoon: string
   }
   types: {
     broadcast: string
@@ -704,6 +707,7 @@ export const campaignsListEn: CampaignsListLabels = {
     failed_all: 'Failed for everyone',
     stalled: 'Stopped mid-send (no active worker)',
     paused: 'Paused',
+    waiting_for_capacity: 'Waiting for Meta messaging capacity',
     unknown: 'Unknown',
   },
   sendHealth: {
@@ -722,6 +726,8 @@ export const campaignsListEn: CampaignsListLabels = {
       provider_throttling: 'Meta is throttling this number — sending stopped',
       uncertain_sends: 'Several sends had an unknown outcome — stopped for review',
     },
+    capacityResumeAt: 'Meta daily limit reached — continues automatically around {time}',
+    capacityResumeSoon: 'Meta daily limit reached — continues automatically when capacity returns',
   },
   types: {
     broadcast: 'Broadcast',
@@ -945,6 +951,7 @@ export const campaignsListAr: CampaignsListLabels = {
     failed_all: 'فشل الإرسال للجميع',
     stalled: 'توقف أثناء الإرسال (لا يوجد عامل نشط)',
     paused: 'متوقفة مؤقتاً',
+    waiting_for_capacity: 'بانتظار سعة المراسلة من Meta',
     unknown: 'غير معروفة',
   },
   sendHealth: {
@@ -963,6 +970,8 @@ export const campaignsListAr: CampaignsListLabels = {
       provider_throttling: 'Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال',
       uncertain_sends: 'نتيجة عدة رسائل غير محسومة — توقف للمراجعة',
     },
+    capacityResumeAt: 'بلغت حد Meta اليومي — تُستأنف تلقائياً قرابة {time}',
+    capacityResumeSoon: 'بلغت حد Meta اليومي — تُستأنف تلقائياً عند توفر السعة',
   },
   types: {
     broadcast: 'بث جماعي',

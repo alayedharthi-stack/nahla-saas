@@ -1068,6 +1068,56 @@ async def provider_list_templates(
     return data, ctx
 
 
+# Since October 2025 Meta sets the business-initiated messaging limit per
+# business portfolio and deprecated the phone-number field
+# ``messaging_limit_tier``; the current value is
+# ``whatsapp_business_manager_messaging_limit``. The two are never requested
+# together: once Meta rejects the deprecated field it could fail the whole
+# request and hide the valid current value. The current field is read first;
+# the deprecated one only in a separate fallback request, logged as such.
+PORTFOLIO_LIMIT_FIELD = "whatsapp_business_manager_messaging_limit"
+LEGACY_LIMIT_FIELD = "messaging_limit_tier"
+CURRENT_TIER_FIELDS = f"{PORTFOLIO_LIMIT_FIELD},quality_rating"
+LEGACY_TIER_FIELDS = f"{LEGACY_LIMIT_FIELD},quality_rating"
+
+
+def extract_messaging_limit(data: Any) -> tuple:
+    """``(tier, field)`` from a phone-number read; the portfolio field wins.
+    Accepts the value as a plain tier string or as an object carrying it."""
+    if not isinstance(data, dict) or data.get("error"):
+        return None, None
+    for key in (PORTFOLIO_LIMIT_FIELD, LEGACY_LIMIT_FIELD):
+        raw = data.get(key)
+        if isinstance(raw, dict):
+            raw = next((raw.get(k) for k in ("current_limit", "tier", "messaging_limit",
+                                              "value", "limit") if raw.get(k)), None)
+        if isinstance(raw, (str, int)) and str(raw).strip():
+            return str(raw).strip(), key
+    return None, None
+
+
+async def fetch_meta_portfolio_id(
+    conn: Any, ctx: "WhatsAppTokenContext", *, tenant_id: Optional[int] = None,
+) -> Optional[str]:
+    """The business portfolio that owns the connection's WABA
+    (``GET /{waba_id}?fields=owner_business_info``) — the scope Meta's
+    messaging limit applies to. None when Meta does not say."""
+    waba_id = getattr(conn, "whatsapp_business_account_id", None)
+    if not waba_id or not getattr(ctx, "token", None):
+        return None
+    try:
+        data = await provider_get_with_context(
+            conn, ctx, tenant_id=tenant_id, operation="fetch_waba_owner",
+            path=f"{waba_id}", params={"fields": "owner_business_info"}, timeout=15,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WA] fetch_meta_portfolio_id tenant=%s failed: %s", tenant_id, exc)
+        return None
+    info = data.get("owner_business_info") if isinstance(data, dict) else None
+    pid = info.get("id") if isinstance(info, dict) else None
+    return str(pid).strip() if pid else None
+
+
 async def fetch_meta_phone_tier(
     conn: Any,
     ctx: WhatsAppTokenContext,
@@ -1118,36 +1168,64 @@ async def fetch_meta_phone_tier(
             "_diagnostics":    [{"path": "(skipped)", "error": "no phone_id or token"}],
         }
 
-    # ── Graph-style ``GET /{phone_id}`` ───────────────────────────────────────
-    try:
-        data = await provider_get_with_context(
-            conn, ctx,
-            tenant_id=tenant_id,
-            operation="fetch_phone_tier",
-            path=f"{phone_id}",
-            params={"fields": "messaging_limit_tier,quality_rating"},
-            timeout=15,
-        )
-        _record(f"GET /{phone_id}?fields=messaging_limit_tier,quality_rating", "2xx?", data)
-        tier = data.get("messaging_limit_tier") if isinstance(data, dict) else None
-        quality = data.get("quality_rating") if isinstance(data, dict) else None
-        if tier:
-            return {
-                "messaging_limit": tier,
-                "quality_rating":  quality,
-                "_diagnostics":    diagnostics,
-            }
-    except Exception as exc:
-        _record(f"GET /{phone_id}", None, None, error=f"{type(exc).__name__}: {exc}"[:200])
+    async def _read(fields: str) -> Any:
+        try:
+            data = await provider_get_with_context(
+                conn, ctx,
+                tenant_id=tenant_id,
+                operation="fetch_phone_tier",
+                path=f"{phone_id}",
+                params={"fields": fields},
+                timeout=15,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _record(f"GET /{phone_id}?fields={fields}", None, None,
+                    error=f"{type(exc).__name__}: {exc}"[:200])
+            logger.warning(
+                "[WA] fetch_meta_phone_tier %s failed tenant=%s provider=%s: %s",
+                fields, tenant_id, provider, exc,
+            )
+            return None
+        _record(f"GET /{phone_id}?fields={fields}",
+                "error" if isinstance(data, dict) and data.get("error") else "2xx?", data)
+        return data
+
+    # ── 1. The current, portfolio-level field ────────────────────────────────
+    data = await _read(CURRENT_TIER_FIELDS)
+    tier, tier_field = extract_messaging_limit(data)
+    quality = data.get("quality_rating") if isinstance(data, dict) and not data.get("error") else None
+    if tier:
+        return {
+            "messaging_limit": tier,
+            "messaging_limit_field": tier_field,
+            "messaging_limit_source": "current_field",
+            "quality_rating":  quality,
+            "_diagnostics":    diagnostics,
+        }
+
+    # ── 2. Fallback: the deprecated per-number field, in its own request ─────
+    legacy = await _read(LEGACY_TIER_FIELDS)
+    tier, tier_field = extract_messaging_limit(legacy)
+    if tier:
         logger.warning(
-            "[WA] fetch_meta_phone_tier phone_id path failed tenant=%s provider=%s: %s",
-            tenant_id, provider, exc,
+            "[WA] fetch_meta_phone_tier tenant=%s: %s unavailable, using deprecated %s=%s",
+            tenant_id, PORTFOLIO_LIMIT_FIELD, tier_field, tier,
         )
+        if quality is None and isinstance(legacy, dict):
+            quality = legacy.get("quality_rating")
+        return {
+            "messaging_limit": tier,
+            "messaging_limit_field": tier_field,
+            "messaging_limit_source": "legacy_fallback",
+            "quality_rating":  quality,
+            "_diagnostics":    diagnostics,
+        }
 
     # Nothing worked. Return the diagnostics so the UI can render them
     # and the merchant can see WHY we don't have a fresh tier value.
     return {
         "messaging_limit": None,
-        "quality_rating":  None,
+        "messaging_limit_source": "failed",
+        "quality_rating":  quality,
         "_diagnostics":    diagnostics,
     }

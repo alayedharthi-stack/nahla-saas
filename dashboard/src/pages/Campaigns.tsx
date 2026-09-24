@@ -130,6 +130,7 @@ const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
   failed_all: 'red',
   stalled: 'amber',
   paused: 'amber',
+  waiting_for_capacity: 'blue',
   unknown: 'slate',
 }
 
@@ -3359,6 +3360,17 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 </button>
               )}
             </div>
+          )}
+          {lifecycleKey === 'waiting_for_capacity' && (
+            <p className="text-[10px] text-blue-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>
+              {campaign.capacity_wait?.next_eligible_at
+                ? health.capacityResumeAt.replace(
+                    '{time}',
+                    new Date(campaign.capacity_wait.next_eligible_at + (campaign.capacity_wait.next_eligible_at.endsWith('Z') || campaign.capacity_wait.next_eligible_at.includes('+') ? '' : 'Z'))
+                      .toLocaleString(localeTag(lang), { dateStyle: 'short', timeStyle: 'short' }),
+                  )
+                : health.capacityResumeSoon}
+            </p>
           )}
           {lifecycleKey === 'paused' && pauseReason && (
             <p className="text-[10px] text-amber-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>

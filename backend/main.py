@@ -1397,6 +1397,13 @@ async def on_startup() -> None:
         return run_campaign_wave_scheduler()
     _start("campaign_wave_scheduler", _f_campaign_wave_scheduler, 14)
 
+    # Continues campaigns paused by Meta's shared messaging limit once
+    # capacity returns (durable: state is in the DB, not the process).
+    def _f_campaign_capacity_resume():
+        from core.scheduler import run_campaign_capacity_resume_scheduler  # noqa: PLC0415
+        return run_campaign_capacity_resume_scheduler()
+    _start("campaign_capacity_resume", _f_campaign_capacity_resume, 16)
+
     def _f_abandoned_cart():
         from core.abandoned_cart_scheduler import run_abandoned_cart_scheduler  # noqa: PLC0415
         return run_abandoned_cart_scheduler()
