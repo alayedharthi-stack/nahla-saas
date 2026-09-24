@@ -746,7 +746,13 @@ async def _dispatch_campaign_with_lease(
             "campaign_id": campaign_id, "status": "lease_lost",
             "sent": sent, "failed": failed, "errors": errors,
         }
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
     from services.campaign_send_ledger import LOG_UNCERTAIN  # noqa: PLC0415
+    if not ctx.pause_reason and counts.get(LOG_QUEUED, 0) > 0:
+        # The run ended (a breaker, an abort) with recipients still waiting:
+        # that is a stop, never a completion.
+        ctx.pause(ledger.PAUSE_RUN_ENDED_WITH_QUEUE,
+                  "; ".join(e for e in errors if e.startswith("dispatch_"))[:500])
     if ctx.pause_reason:
         # Stopped on purpose (merchant stop, shared limit, Meta
         # throttling, unknown outcomes): the queue is intact and the
@@ -1815,6 +1821,14 @@ def _note_capacity_wait(campaign: Campaign, ctx: "DispatchRunContext") -> None:
     from services import campaign_send_ledger as ledger  # noqa: PLC0415
     if ctx.lease_lost:
         return
+    if ctx.pause_reason == ledger.PAUSE_PROVIDER_RATE_LIMITED:
+        wait = ledger.record_rate_limit_wait(campaign, detail=ctx.pause_detail)
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d backing off after Meta rate limit "
+            "until %s (attempt %d): %s", campaign.id, wait["next_eligible_at"],
+            wait["attempt"], ctx.pause_detail,
+        )
+        return
     if ctx.pause_reason == ledger.PAUSE_MESSAGING_LIMIT:
         wait = ledger.record_capacity_wait(campaign, ctx.capacity)
         logger.warning(
@@ -1988,10 +2002,12 @@ async def _dispatch_queued_rows(
                     break
                 throttle = ledger.post_accept_throttle(db, scope_key)
                 if throttle is not None:
+                    _tstat = ledger.post_accept_throttle_status(db, scope_key) or {}
                     ctx.pause(
                         ledger.PAUSE_PROVIDER_THROTTLING,
                         f"post_accept {throttle[0]} x{throttle[1]} in "
-                        f"{int(ledger.POST_ACCEPT_BREAKER_WINDOW.total_seconds() // 60)}m",
+                        f"{int(ledger.POST_ACCEPT_BREAKER_WINDOW.total_seconds() // 60)}m"
+                        f" clears_at={_tstat.get('clears_at', '')}",
                     )
                     logger.critical(
                         "[campaign_dispatcher] campaign=%d paused: Meta post-accept "
@@ -2054,6 +2070,16 @@ async def _dispatch_queued_rows(
                         break
                     if claim.reason == "stop_requested":
                         ctx.pause(ledger.PAUSE_MERCHANT_STOP, "stop requested")
+                        break
+                    if claim.reason == ledger.EVIDENCE_UNREADABLE:
+                        # The send guard could not read the recipient's
+                        # history: stop the run rather than guess.
+                        ctx.pause(ledger.PAUSE_EVIDENCE_UNREADABLE, claim.evidence or "")
+                        break
+                    if claim.reason == ledger.EVIDENCE_UNRESOLVED:
+                        # History that could be anyone's: stop the run with
+                        # every row still queued until it is resolved.
+                        ctx.pause(ledger.PAUSE_EVIDENCE_UNRESOLVED, claim.evidence or "")
                         break
                     continue
                 attempt = claim.attempt
@@ -2255,6 +2281,17 @@ async def _dispatch_queued_rows(
                                     )
                                     if bucket in _SYNC_THROTTLE_KEYS:
                                         ctx.pause(ledger.PAUSE_PROVIDER_THROTTLING, abort_reason)
+                                    elif bucket in ledger.RATE_LIMIT_BUCKETS:
+                                        # Meta asked us to slow down (per-minute
+                                        # limit, e.g. 130429): back off for a
+                                        # recorded time and continue then,
+                                        # instead of ending the run.
+                                        ctx.pause(ledger.PAUSE_PROVIDER_RATE_LIMITED, abort_reason)
+                                    else:
+                                        # Any other retryable code repeating is
+                                        # not proven temporary: stop for the
+                                        # merchant, never resume on a timer.
+                                        ctx.pause(ledger.PAUSE_PROVIDER_REPEATED_ERROR, abort_reason)
                                     logger.critical(
                                         "[campaign_dispatcher] campaign=%d "
                                         "same_code_circuit_breaker tripped key=%s "
@@ -2771,7 +2808,7 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         .join(CampaignDispatchLease, CampaignDispatchLease.campaign_id == Campaign.id)
         .filter(
             Campaign.status == "paused",
-            CampaignDispatchLease.pause_reason == ledger.PAUSE_MESSAGING_LIMIT,
+            CampaignDispatchLease.pause_reason.in_(tuple(ledger.AUTO_RESUME_REASONS)),
             CampaignDispatchLease.stop_requested_at.is_(None),
         )
         .all()
@@ -2783,7 +2820,7 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         if ledger.lease_is_live(lease, now=now):
             entry["action"] = "worker_running"
             continue
-        wait = ledger.authorized_capacity_wait(campaign.template_variables)
+        wait = ledger.authorized_capacity_wait(campaign.template_variables, lease.pause_reason)
         if wait is None:
             entry["action"] = "needs_merchant_resume"
             continue
@@ -2792,6 +2829,32 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         if now < due_at:
             entry.update(action="waiting", next_eligible_at=due)
             continue
+        requeue = (lease.pause_reason == ledger.PAUSE_PROVIDER_RATE_LIMITED
+                   or bool(wait.get("requeue_rate_limited")))
+        wa_conn = _get_wa_connection(db, campaign.tenant_id)
+        if wa_conn is None:
+            entry["action"] = "no_connection"
+            continue
+        budget = ledger.messaging_budget(db, wa_conn, now=now)
+        if budget.budget is not None and budget.used >= budget.budget:
+            # Capacity first: a rate-limit backoff that finds the shared
+            # limit full becomes a capacity wait (lease and record agree),
+            # still owing its re-queue for when a slot frees.
+            lease.pause_reason = ledger.PAUSE_MESSAGING_LIMIT
+            wait = ledger.record_capacity_wait(campaign, budget, now=now)
+            if requeue:
+                wait["requeue_rate_limited"] = True
+                ledger.store_capacity_wait(campaign, wait)
+            db.commit()
+            entry.update(action="still_full", next_eligible_at=wait["next_eligible_at"],
+                         used_24h=budget.used, budget=budget.budget)
+            continue
+        if requeue:
+            # Recipients Meta rejected for the per-minute limit were never
+            # accepted — put the provably unsent ones back (the claim guard
+            # still checks each one).
+            entry["requeued_rate_limited"] = reschedule_failed_for_retry(db, cid)
+            db.commit()
         queued = (
             db.query(func.count(CampaignSendLog.id))
             .filter(CampaignSendLog.campaign_id == cid, CampaignSendLog.status == LOG_QUEUED)
@@ -2800,21 +2863,14 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         if not queued:
             entry["action"] = "nothing_queued"
             continue
-        wa_conn = _get_wa_connection(db, campaign.tenant_id)
-        if wa_conn is None:
-            entry["action"] = "no_connection"
-            continue
-        budget = ledger.messaging_budget(db, wa_conn, now=now)
-        if budget.budget is not None and budget.used >= budget.budget:
-            wait = ledger.record_capacity_wait(campaign, budget, now=now)
-            db.commit()
-            entry.update(action="still_full", next_eligible_at=wait["next_eligible_at"],
-                         used_24h=budget.used, budget=budget.budget)
-            continue
         has_waves = db.query(CampaignWave.id).filter(CampaignWave.campaign_id == cid).first()
         campaign.status = "active"
         campaign.updated_at = datetime.now(timezone.utc)
-        ledger.clear_capacity_wait(campaign)
+        if lease.pause_reason != ledger.PAUSE_PROVIDER_RATE_LIMITED:
+            # A rate-limit backoff keeps its record through the run so a
+            # second consecutive limit backs off longer; the run replaces
+            # it if it pauses again and clears it otherwise.
+            ledger.clear_capacity_wait(campaign)
         db.commit()
         logger.info(
             "[campaign_dispatcher] campaign=%d Meta capacity available (used=%s budget=%s) "

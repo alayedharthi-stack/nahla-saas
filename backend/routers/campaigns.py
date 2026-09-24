@@ -362,10 +362,75 @@ def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict
     return out
 
 
+# Why a run stopped, in the merchant's words — keyed by the lease's
+# ``pause_reason``. These are Nahla's own pause reasons, never Meta error
+# codes: an internal token such as ``dispatch_paused:provider_throttling``
+# must not be run through the Meta error classifier (which read the word
+# "throttling" as Meta's per-minute ``rate_limit``).
+PAUSE_REASON_LABELS_AR: Dict[str, str] = {
+    "messaging_limit_reached": "بلغت الحملة حد المراسلة لدى Meta — تنتظر توفر السعة",
+    "provider_rate_limited": "طلبت Meta إبطاء الإرسال مؤقتًا — يُستأنف تلقائيًا بعد مهلة",
+    "provider_throttling": "Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال",
+    "provider_repeated_error": "تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة",
+    "marketing_blocked": (
+        "Meta أوقفت تسليم الرسائل التسويقية لعدد كبير من المستلمين (131049) — "
+        "توقف الإرسال حمايةً لجودة الرقم"
+    ),
+    "run_ended_with_queue": "انتهت جولة الإرسال قبل اكتمال المستلمين — تحتاج استئنافًا",
+    "uncertain_sends": "نتيجة عدة رسائل غير محسومة — توقف للمراجعة",
+    "merchant_stop": "أوقف التاجر الإرسال",
+    "evidence_unresolved": "توقف الإرسال: سجل إرسال سابق لا يمكن ربطه بمستلم — يحتاج مراجعة",
+    "evidence_unreadable": "توقف الإرسال: تعذرت قراءة سجل الإرسال السابق",
+}
+
+
+def _campaign_throttle(db: Session, campaign: Campaign) -> Optional[Dict[str, Any]]:
+    """Meta's post-accept breaker for this campaign's messaging scope as it
+    stands now (``key``, ``count``, ``clears_at``), or None when clear."""
+    from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    from services.campaign_dispatcher import _get_wa_connection  # noqa: PLC0415
+    conn = _get_wa_connection(db, campaign.tenant_id)
+    if conn is None:
+        return None
+    return _ledger.post_accept_throttle_status(db, _ledger.messaging_scope_key(conn))
+
+
+def _throttled_refusal(throttle: Dict[str, Any]) -> Dict[str, Any]:
+    reason_ar = PAUSE_REASON_LABELS_AR.get(throttle["key"]) or PAUSE_REASON_LABELS_AR[
+        "provider_throttling"]
+    return {
+        "ok":       False,
+        "kicked":   False,
+        "reason":   "provider_throttled",
+        "throttle": throttle,
+        "message":  (
+            f"{reason_ar}. لم يبدأ الإرسال الآن لأنه سيتوقف فورًا؛ يمكن الاستئناف "
+            "بعد الموعد المعروض."
+        ),
+    }
+
+
 def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str, Any]]:
     ids = [c.id for c in campaigns]
     stats_by_id = _campaign_canonical_stats(db, ids)
     exec_by_id = _campaign_executions(db, ids)
+    for c in campaigns:
+        ex = exec_by_id.get(c.id)
+        if (c.status or "").lower() == "paused" and ex and ex.get("pause_reason") == "provider_throttling":
+            # Only the post-accept breaker is a sliding window whose
+            # clearing can be read back; a per-run breaker (spam at send
+            # time) has no window, so "cleared" would be a false claim.
+            ex["throttle"] = None
+            ex["throttle_checked"] = False
+            if str(ex.get("pause_detail") or "").startswith("post_accept"):
+                try:
+                    from services.campaign_dispatcher import _get_wa_connection  # noqa: PLC0415
+                    # No connection means the window was not read: never "cleared".
+                    if _get_wa_connection(db, c.tenant_id) is not None:
+                        ex["throttle"] = _campaign_throttle(db, c)
+                        ex["throttle_checked"] = True
+                except Exception:  # noqa: BLE001, silent-ok — display only; the label still shows the reason
+                    ex["throttle"] = None
     return [
         _campaign_to_dict(
             c, canonical_stats=stats_by_id.get(c.id),
@@ -407,7 +472,18 @@ def _campaign_to_dict(
     last_error = dispatch_errors[0] if dispatch_errors else None
     last_error_ar: Optional[str] = None
     last_error_key: Optional[str] = None
-    if last_error:
+    if last_error and last_error.startswith(("dispatch_paused:", "dispatch_aborted:",
+                                            "dispatch_skipped:")):
+        token = last_error.split(":", 1)[1]
+        head = token.split(":", 1)[0]
+        if head == "same_code_circuit_breaker":
+            # ``same_code_circuit_breaker:<bucket>@<n>`` — the bucket says
+            # which pause it was.
+            bucket = token.split(":", 1)[1].split("@", 1)[0] if ":" in token else ""
+            head = {"rate_limit": "provider_rate_limited",
+                    "spam_rate_limit": "provider_throttling"}.get(bucket, "provider_repeated_error")
+        last_error_ar = PAUSE_REASON_LABELS_AR.get(head) or "توقف الإرسال لسبب داخلي — يحتاج مراجعة"
+    elif last_error:
         try:
             from services.meta_errors import (  # noqa: PLC0415
                 ERRORS as _META_ERRORS, classify_meta_error,
@@ -478,13 +554,22 @@ def _campaign_to_dict(
         # dispatch run recorded that wait. Without it (e.g. paused by an
         # older build) it is plainly paused and needs the merchant.
         from services.campaign_send_ledger import authorized_capacity_wait  # noqa: PLC0415
+        pr = (execution or {}).get("pause_reason")
+        stopped = bool((execution or {}).get("stop_requested"))
         if (
-            execution is not None
-            and execution.get("pause_reason") == "messaging_limit_reached"
-            and not execution.get("stop_requested")
+            pr == "messaging_limit_reached" and not stopped
             and authorized_capacity_wait(c.template_variables) is not None
         ):
             lifecycle = "waiting_for_capacity"
+        elif (
+            pr == "provider_rate_limited" and not stopped
+            and authorized_capacity_wait(c.template_variables, "provider_rate_limited") is not None
+        ):
+            lifecycle = "rate_limit_backoff"
+        elif pr == "provider_throttling":
+            detail = str((execution or {}).get("pause_detail") or "")
+            lifecycle = ("marketing_delivery_blocked" if "marketing_blocked" in detail
+                         else "provider_throttled")
     elif raw_status == "draft":
         lifecycle = "draft"
     else:
@@ -585,7 +670,21 @@ def _campaign_to_dict(
             {k: (tpl_vars.get("_capacity_wait") or {}).get(k) for k in (
                 "next_eligible_at", "next_eligible_exact", "used_24h", "budget", "limit",
                 "limit_source")}
-            if lifecycle == "waiting_for_capacity" else None
+            if lifecycle in ("waiting_for_capacity", "rate_limit_backoff") else None
+        ),
+        # Meta's post-accept breaker, live: what tripped it and when a
+        # resume can proceed (None when it has cleared).
+        "throttle": (execution or {}).get("throttle") if lifecycle in (
+            "marketing_delivery_blocked", "provider_throttled") else None,
+        # True only when the live post-accept window was read: the UI may
+        # say "cleared" only then.
+        "throttle_checked": bool((execution or {}).get("throttle_checked")) if lifecycle in (
+            "marketing_delivery_blocked", "provider_throttled") else False,
+        "pause_reason_ar": (
+            PAUSE_REASON_LABELS_AR.get(
+                "marketing_blocked" if lifecycle == "marketing_delivery_blocked"
+                else str((execution or {}).get("pause_reason") or ""))
+            if raw_status == "paused" else None
         ),
         "clicked_count": c.clicked_count,
         "converted_count": c.converted_count,
@@ -951,6 +1050,12 @@ async def update_campaign_status(
     # Without the ledger tables no worker can run at all, so a pause needs
     # nothing more than the status change below.
     if _ledger.ledger_available(db):
+        if body.status == "active" and was_not_active:
+            _throttle = _campaign_throttle(db, campaign)
+            if _throttle is not None:
+                # Same as dispatch-now: a resume now would stop at once.
+                raise HTTPException(status_code=409, detail={
+                    "error": "provider_throttled", **_throttled_refusal(_throttle)})
         if body.status == "paused":
             # Safe stop: the live worker (if any) finishes its in-flight
             # request and starts no new one.
@@ -1263,6 +1368,9 @@ _KNOWN_LOG_STATUSES = {
     "skipped_duplicate", "skipped_invalid", "skipped_unsubscribed",
     "skipped_unreachable", "skipped_manual_exclusion",
     "skipped_blocked_customer",
+    # The send guard refused a recipient: evidence of an earlier copy, an
+    # unplaceable copy, or no validated identity.
+    "skipped_send_guard",
 }
 
 
@@ -2804,6 +2912,19 @@ async def dispatch_campaign_now(
                 "حدّث الصفحة لمتابعة التقدّم."
             ),
         }
+
+    # Meta's post-accept breaker counts the whole messaging scope over a
+    # sliding window, not per run: a run started while it is tripped stops
+    # at its first recipient without sending. Say so, with when it clears,
+    # instead of starting a run that cannot send — before touching anything.
+    _throttle = _campaign_throttle(db, campaign)
+    if _throttle is not None:
+        logger.warning(
+            "[campaigns.dispatch-now] tenant=%d campaign=%d refused: post-accept "
+            "breaker %s x%d until %s", tenant_id, campaign_id, _throttle["key"],
+            _throttle["count"], _throttle["clears_at"],
+        )
+        return {"campaign_id": campaign_id, **_throttled_refusal(_throttle)}
 
     # Pre-flip status so the merchant sees "جاري الإرسال" on the next
     # /campaigns refresh (≤2s away), instead of "ينتظر بدء الإرسال"
