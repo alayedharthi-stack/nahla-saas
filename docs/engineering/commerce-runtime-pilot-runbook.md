@@ -190,6 +190,8 @@ misroutes.
 | `COMMERCE_RUNTIME_PILOT_TOOL_TIMEOUT_SECONDS` | optional, ≤ 20 | leave unset (10) |
 | `COMMERCE_RUNTIME_PILOT_PROVIDER_TIMEOUT_SECONDS` | optional, ≤ 60 | leave unset (35) |
 | `COMMERCE_RUNTIME_PILOT_DEADLINE_SECONDS` | optional, ≤ 120 | leave unset (75) |
+| `COMMERCE_RUNTIME_MODE` | which ownership stage is in force — see §2.1 | unset (`pilot`) |
+| `COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST` | comma-separated tenant ids held back from `global` | unset |
 
 `COMMERCE_RUNTIME_PILOT_MODEL` is required and has no default. The loop is
 model-neutral, and inheriting the legacy path's `CLAUDE_MODEL` or the
@@ -197,11 +199,49 @@ repository's fallback would mean activating a pilot on a model nobody chose for
 it; with it unset the guard refuses every turn with `model_not_configured`
 before touching the database, and the legacy path answers.
 
-Both allowlists are required. Setting the tenant list alone enables nothing:
-the guard also requires the recipient to be listed, so one allowlisted store
-cannot become "every conversation in that store". Configuration can only make a
-limit smaller; a value above its ceiling, or an unparsable one, falls back to
-the bounded default.
+In `pilot` both allowlists are required. Setting the tenant list alone enables
+nothing: the guard also requires the recipient to be listed, so one allowlisted
+store cannot become "every conversation in that store". Configuration can only
+make a limit smaller; a value above its ceiling, or an unparsable one, falls
+back to the bounded default.
+
+### 2.1 The three ownership stages
+
+`COMMERCE_RUNTIME_MODE` takes exactly three values, each a strict superset of
+the one before it, so the variable alone states the blast radius. An unset
+value, a typo, or a value from a newer deployment all read as `pilot`: a
+mis-set variable narrows the runtime, never widens it.
+
+| Value | Which tenants | Which recipients inside them |
+| --- | --- | --- |
+| `pilot` (default) | `COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST` | `COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST` |
+| `store_gated` | `COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST` | **the merchant's own** `store_ai_mode` — `off` admits nobody, `test` admits the numbers that merchant saved in `ai_test_allowed_numbers`, `on` admits everyone |
+| `global` | every tenant except `COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST` | the same merchant setting, per store |
+
+**What the two wider stages do not do is widen who receives AI at all.**
+`core.ai_disabled_gate` already decides that population for the legacy path,
+and the same rule — literally the same function, `store_ai_mode_allows` —
+decides it here. A store with AI off is answered by neither. What changes is
+which runtime composes the reply, and nothing else.
+
+So testing one store does **not** require putting its customers on an operator
+list, and does not require moving it to `store_ai_mode=on`. A store already in
+`test` mode with its own saved numbers is a complete test vehicle under
+`store_gated`: those numbers reach the commerce runtime, every other number in
+that store is refused by the merchant's own setting, and no store setting and no
+allowlist has to be edited to run the trial.
+
+`COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST` is the per-store rollback lever: it
+returns one store to the legacy path without returning every store to it. It
+applies only in `global`; in `store_gated` the tenant allowlist already decides.
+
+Two refusal reasons come from the merchant rather than from the operator, and
+they are reported in the merchant's own words so a runtime refusal and a legacy
+suppression read alike: `store_ai_disabled` and
+`store_ai_test_mode_not_allowed`. A third, `store_gate_unavailable`, is **not**
+a merchant decision — it means the settings could not be read — and it is
+handled as such everywhere: the inbound is not acknowledged as accepted, so the
+provider redelivers it rather than the work being dropped.
 
 ---
 
@@ -244,6 +284,36 @@ the bounded default.
    All four counts zero while healthy is what makes a non-zero count meaningful
    later. `barrier_is_open_not_draining` is the expected — and only — blocker
    here: a tenant that is serving has not been drained, which is correct.
+
+### 3.1 Widening a stage
+
+Each step is one variable change and one redeploy, and each is reversible by
+putting the variable back.
+
+1. **`pilot` → `store_gated`, one tenant.** Leave
+   `COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST` naming exactly the store being
+   trialled and set `COMMERCE_RUNTIME_MODE=store_gated`. Before redeploying,
+   read that store's `store_ai_mode` and, if it is `test`, its saved
+   `ai_test_allowed_numbers`: those are the numbers that will reach the runtime,
+   and they are also the numbers that reach the legacy brain today, so the set
+   of people who are answered does not change. Do not edit either setting for
+   the trial — a store in `test` mode is already a complete test vehicle, and
+   moving it to `on` would widen who is answered, which is a separate decision
+   from which runtime answers them.
+2. **Verify.** One message from a number that store saved: exactly one
+   `route=commerce_runtime` line with `replied=True`. One from a number it did
+   not save: `route=legacy` with `store_ai_test_mode_not_allowed`, answered as
+   before. A store with `store_ai_mode=off` is answered by neither, exactly as
+   today.
+3. **`store_gated` → `global`.** Set `COMMERCE_RUNTIME_MODE=global`. The tenant
+   allowlist stops being consulted; every store's own setting decides its own
+   recipients. Keep the allowlist value in place — it is what step 4 reverts to.
+4. **Rollback.** One store: add its id to
+   `COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST`. Every store: set
+   `COMMERCE_RUNTIME_MODE=pilot` (or unset it), which restores the operator
+   allowlists exactly as they were. Everything: `COMMERCE_RUNTIME_PILOT_ENABLED=false`,
+   after the handover in §5 — turning the switch off is a step that comes *after*
+   draining reports nothing left, in every mode.
 
 ---
 

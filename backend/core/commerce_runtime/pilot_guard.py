@@ -11,11 +11,37 @@ and the first that is not decides the outcome:
 5. the legacy path has not already answered, and the turn is not one the
    existing AI gates told us to skip.
 
-An empty allowlist permits nothing. A tenant is never enabled wholesale: the
-recipient list is required as well, so the runtime reaches the owner's own test
-conversations and nothing else. Nothing here reads a display name, a store
-title or any other label — authorisation comes from configured ids and from the
-verified connection, never from what something is called.
+An empty allowlist permits nothing. Nothing here reads a display name, a store
+title or any other label — authorisation comes from configured ids, from the
+merchant's own saved AI setting, and from the verified connection, never from
+what something is called.
+
+Steps 2 and 3 are the only part that widens as the runtime stops being a pilot,
+and ``COMMERCE_RUNTIME_MODE`` names which stage is in force. Three closed
+values, each a strict superset of the one before it, so the variable alone
+states the blast radius:
+
+``pilot`` (the default, and what an unset or unrecognised value means)
+    the configured tenant allowlist **and** the configured recipient allowlist.
+    A tenant is never enabled wholesale; the runtime reaches the owner's own
+    test conversations and nothing else.
+
+``store_gated``
+    the configured tenant allowlist, but within it the **merchant's own** AI
+    setting decides the recipient — ``off`` admits nobody, ``test`` admits the
+    numbers that merchant saved, ``on`` admits everyone. The operator's
+    recipient allowlist is not consulted.
+
+``global``
+    every tenant except an explicit denylist, each store's own AI setting
+    deciding its own recipients.
+
+What the last two deliberately do **not** do is widen who receives AI at all.
+``core.ai_disabled_gate`` already decides that for the legacy path, and the same
+rule — literally the same function — decides it here, so these stages change
+which runtime composes the reply and nothing else. A store with AI off is
+answered by neither, and that is not a coincidence to be re-derived: it is one
+rule with two readers.
 
 This mirrors the established `commerce_lifecycle.canary_guard` shape so the
 pilot is configured the same way the platform already configures a canary.
@@ -34,6 +60,8 @@ ENV_ENABLED = "COMMERCE_RUNTIME_PILOT_ENABLED"
 ENV_DRAINING = "COMMERCE_RUNTIME_PILOT_DRAINING"
 ENV_TENANT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST"
 ENV_RECIPIENT_ALLOWLIST = "COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST"
+ENV_MODE = "COMMERCE_RUNTIME_MODE"
+ENV_GLOBAL_TENANT_DENYLIST = "COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST"
 ENV_MODEL = "COMMERCE_RUNTIME_PILOT_MODEL"
 ENV_MAX_STEPS = "COMMERCE_RUNTIME_PILOT_MAX_STEPS"
 ENV_MAX_TOOL_CALLS = "COMMERCE_RUNTIME_PILOT_MAX_TOOL_CALLS"
@@ -41,11 +69,27 @@ ENV_DEADLINE_SECONDS = "COMMERCE_RUNTIME_PILOT_DEADLINE_SECONDS"
 ENV_PROVIDER_TIMEOUT_SECONDS = "COMMERCE_RUNTIME_PILOT_PROVIDER_TIMEOUT_SECONDS"
 ENV_TOOL_TIMEOUT_SECONDS = "COMMERCE_RUNTIME_PILOT_TOOL_TIMEOUT_SECONDS"
 
+# Closed ownership modes. An unset or unrecognised value reads as ``pilot``:
+# a mis-set variable narrows the runtime, it never widens it.
+MODE_PILOT = "pilot"
+MODE_STORE_GATED = "store_gated"
+MODE_GLOBAL = "global"
+KNOWN_MODES = frozenset({MODE_PILOT, MODE_STORE_GATED, MODE_GLOBAL})
+
 # Closed reasons. Exactly one is reported per decision.
 PERMITTED = "permitted"
 PILOT_DISABLED = "pilot_disabled"
 PILOT_DRAINING = "pilot_draining"
 TENANT_NOT_ALLOWLISTED = "tenant_not_allowlisted"
+TENANT_DENYLISTED = "tenant_denylisted"
+# The merchant's own answer, reported in the merchant's own words. These two
+# strings are ``core.ai_disabled_gate``'s constants, not paraphrases of them,
+# and a test pins that they stay equal — an operator reading a refusal here and
+# a suppression there must not have to work out that they mean the same thing.
+STORE_AI_DISABLED = "store_ai_disabled"
+STORE_AI_TEST_MODE_NOT_ALLOWED = "store_ai_test_mode_not_allowed"
+STORE_AI_REFUSED = "store_ai_refused"          # refused, cause unnamed by the gate
+STORE_GATE_UNAVAILABLE = "store_gate_unavailable"
 RECIPIENT_MISSING = "recipient_missing"
 RECIPIENT_UNNORMALIZABLE = "recipient_unnormalizable"
 RECIPIENT_NOT_ALLOWLISTED = "recipient_not_allowlisted"
@@ -184,8 +228,30 @@ def pilot_model() -> str:
     return str(os.environ.get(ENV_MODEL, "") or "").strip()
 
 
+def runtime_mode() -> str:
+    """Which ownership stage is configured. Never raises, never widens.
+
+    An unset value, a typo, or a value from a newer deployment all read as
+    ``pilot``. The failure mode of a mis-set variable is therefore the narrowest
+    stage, not the widest one.
+    """
+    raw = str(os.environ.get(ENV_MODE, "") or "").strip().lower()
+    return raw if raw in KNOWN_MODES else MODE_PILOT
+
+
+def store_gate_decides_recipient() -> bool:
+    """Whether the merchant's own AI setting, not the operator's list, decides."""
+    return runtime_mode() in {MODE_STORE_GATED, MODE_GLOBAL}
+
+
 def tenant_allowlist() -> FrozenSet[int]:
     return _int_allowlist(ENV_TENANT_ALLOWLIST)
+
+
+def global_tenant_denylist() -> FrozenSet[int]:
+    """Tenants held back from ``global``, so one store can be returned to the
+    legacy path without returning every store to it."""
+    return _int_allowlist(ENV_GLOBAL_TENANT_DENYLIST)
 
 
 def recipient_allowlist() -> FrozenSet[str]:
@@ -238,6 +304,37 @@ def pilot_budget() -> Any:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class _UnavailableGate:
+    """What a store gate that could not even be loaded reports.
+
+    Deliberately not built from ``store_gate``'s own dataclass: the one case
+    this exists for is that module being unimportable, and reaching back into it
+    to describe that would raise inside the handler for it.
+    """
+
+    reason: str
+    decided: bool = False
+    allowed: bool = False
+
+
+def _read_store_gate(db: Any, *, tenant_id: int, customer_phone: str) -> Any:
+    """The merchant's own AI decision for this recipient, read without writing.
+
+    Imported here rather than at module scope so the guard keeps loading in the
+    contexts that import it for its constants alone, and so an import failure is
+    an *unavailable* gate rather than an exception that reads as a refusal.
+    """
+    try:
+        from core.commerce_runtime.store_gate import read_store_gate  # noqa: PLC0415
+
+        return read_store_gate(db, tenant_id=tenant_id, customer_phone=customer_phone)
+    except Exception as exc:  # noqa: BLE001 - a gate we cannot load decides nothing
+        logger.error("[COMMERCE_RUNTIME_PILOT] store gate unavailable error=%s",
+                     type(exc).__name__)
+        return _UnavailableGate(type(exc).__name__)
+
+
 def _refused(reason: str, tenant_id: Any, recipient: Optional[str] = None) -> PilotDecision:
     try:
         tenant = int(tenant_id)
@@ -268,13 +365,21 @@ def evaluate_pilot_route(
     try:
         if not pilot_enabled():
             return _refused(PILOT_DISABLED, tenant_id)
-        tenants = tenant_allowlist()
+        mode = runtime_mode()
         try:
             tenant = int(tenant_id)
         except (TypeError, ValueError):
             return _refused(TENANT_NOT_ALLOWLISTED, 0)
-        if not tenants or tenant not in tenants:
-            return _refused(TENANT_NOT_ALLOWLISTED, tenant)
+        if mode == MODE_GLOBAL:
+            # Every tenant, minus the ones explicitly held back. The denylist is
+            # how one store returns to the legacy path without every store
+            # returning to it.
+            if tenant in global_tenant_denylist():
+                return _refused(TENANT_DENYLISTED, tenant)
+        else:
+            tenants = tenant_allowlist()
+            if not tenants or tenant not in tenants:
+                return _refused(TENANT_NOT_ALLOWLISTED, tenant)
 
         raw_phone = str(customer_phone or "").strip()
         if not raw_phone:
@@ -282,9 +387,25 @@ def evaluate_pilot_route(
         recipient = _normalize(raw_phone)
         if not recipient:
             return _refused(RECIPIENT_UNNORMALIZABLE, tenant)
-        recipients = recipient_allowlist()
-        if not recipients or recipient not in recipients:
-            return _refused(RECIPIENT_NOT_ALLOWLISTED, tenant, recipient)
+        if store_gate_decides_recipient():
+            # The merchant's own setting, read through the same rule the legacy
+            # path uses, so the two runtimes cannot disagree about who may be
+            # spoken to. ``raw_phone`` deliberately, not ``recipient``: the
+            # test-mode allowlist is matched with the platform's own allowlist
+            # normalisation, and handing it a differently normalised number
+            # would answer a different question about the same message.
+            gate = _read_store_gate(db, tenant_id=tenant, customer_phone=raw_phone)
+            if not gate.decided:
+                # Not "this store refuses": we could not find out. A store whose
+                # settings are unreadable keeps the behaviour it has today
+                # rather than being handed to whichever runtime fails quieter.
+                return _refused(STORE_GATE_UNAVAILABLE, tenant, recipient)
+            if not gate.allowed:
+                return _refused(gate.reason or STORE_AI_REFUSED, tenant, recipient)
+        else:
+            recipients = recipient_allowlist()
+            if not recipients or recipient not in recipients:
+                return _refused(RECIPIENT_NOT_ALLOWLISTED, tenant, recipient)
 
         if pilot_draining() and not finishing_open_work:
             # Handing back: this process takes no new turn. Asked *after* the
@@ -404,8 +525,14 @@ def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
 
     The reverse of :func:`verified_connection`, and deliberately narrower than a
     plain lookup: the connection row says which tenant owns the number, and the
-    answer is given only when that tenant is one the pilot is configured for. A
-    phone number id alone never selects a tenant for the runtime.
+    answer is given only when that tenant is one the runtime is configured for.
+    A phone number id alone never selects a tenant for the runtime.
+
+    What "configured for" means follows :func:`runtime_mode`. In ``pilot`` and
+    ``store_gated`` it is the tenant allowlist. In ``global`` it is every tenant
+    but the denylist, and the tenant then comes from the connection row itself —
+    the same row that would have had to agree with an allowlisted id anyway, so
+    the number still never selects a tenant on its own.
 
     A failed lookup is **not** "not ours". Answering that would let an
     unreachable database turn pilot-owned traffic into traffic nobody has to
@@ -414,23 +541,24 @@ def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
     rather than resolved to whichever row came back first.
     """
     identifier = str(phone_number_id or "").strip()
-    tenants = tenant_allowlist()
+    globally_owned = runtime_mode() == MODE_GLOBAL
+    tenants = frozenset() if globally_owned else tenant_allowlist()
     if not identifier:
         return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_phone_number_id")
-    if not tenants:
+    if not globally_owned and not tenants:
         return ScopeLookup(status=SCOPE_NOT_OURS, detail="no_tenant_allowlist")
     if db is None:
         return ScopeLookup(status=SCOPE_UNAVAILABLE, detail="no_session")
     try:
         from database.models import WhatsAppConnection  # noqa: PLC0415
 
-        connections = (
+        query = (
             db.query(WhatsAppConnection)
             .filter(WhatsAppConnection.phone_number_id == identifier)
-            .filter(WhatsAppConnection.tenant_id.in_(sorted(tenants)))
-            .limit(2)
-            .all()
         )
+        if not globally_owned:
+            query = query.filter(WhatsAppConnection.tenant_id.in_(sorted(tenants)))
+        connections = query.limit(2).all()
     except Exception as exc:  # noqa: BLE001 - a failed lookup decides nothing
         logger.error("[COMMERCE_RUNTIME_PILOT] scope lookup failed phone_number_id=%s "
                      "error=%s detail=%s — scope unavailable, not 'unrelated'",
@@ -443,7 +571,12 @@ def resolve_pilot_scope(db: Any, *, phone_number_id: Any) -> ScopeLookup:
                      "than one allowlisted tenant claims it", identifier)
         return ScopeLookup(status=SCOPE_AMBIGUOUS, detail="more_than_one_allowlisted_tenant")
     connection = connections[0]
-    return ScopeLookup(status=SCOPE_RESOLVED, tenant_id=int(connection.tenant_id),
+    owner = int(connection.tenant_id)
+    if globally_owned and owner in global_tenant_denylist():
+        # A held-back tenant is a decision about that traffic, not a failure to
+        # decide: it keeps exactly the behaviour it has today.
+        return ScopeLookup(status=SCOPE_NOT_OURS, detail="tenant_denylisted")
+    return ScopeLookup(status=SCOPE_RESOLVED, tenant_id=owner,
                        connection_ref=f"wa:{identifier}", connection_id=str(connection.id))
 
 
@@ -475,4 +608,9 @@ __all__ = [
     "tenant_for_phone_number_id", "verified_connection",
     "SCOPE_AMBIGUOUS", "SCOPE_NOT_OURS", "SCOPE_RESOLVED", "SCOPE_UNAVAILABLE",
     "ScopeLookup", "resolve_pilot_scope",
+    "ENV_GLOBAL_TENANT_DENYLIST", "ENV_MODE", "KNOWN_MODES",
+    "MODE_GLOBAL", "MODE_PILOT", "MODE_STORE_GATED",
+    "STORE_AI_DISABLED", "STORE_AI_REFUSED", "STORE_AI_TEST_MODE_NOT_ALLOWED",
+    "STORE_GATE_UNAVAILABLE", "TENANT_DENYLISTED",
+    "global_tenant_denylist", "runtime_mode", "store_gate_decides_recipient",
 ]

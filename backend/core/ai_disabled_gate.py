@@ -126,30 +126,35 @@ def is_store_ai_enabled(db: Session, tenant_id: int) -> bool:
     return resolve_store_ai_mode(ai) == STORE_AI_MODE_ON
 
 
-def is_ai_allowed_by_store_mode(
-    db: Session,
-    tenant_id: int,
+def store_ai_mode_allows(
+    ai_settings: Any,
     customer_phone: str,
 ) -> StoreAIModeDecision:
-    """
-    Evaluate store-wide AI mode for an inbound/automation target phone.
+    """The store-wide AI decision for one phone, from settings already read.
+
+    The rule on its own, separated from where the settings row came from, so a
+    caller that must not create one reaches the identical answer as a caller
+    that may. :func:`is_ai_allowed_by_store_mode` is this function plus the
+    read; nothing else may restate the rule.
 
     off  → blocked (store_ai_disabled)
     test → allowed only when phone is in ai_test_allowed_numbers
     on   → allowed (per-conversation guards still apply afterward)
+
+    ``ai_settings`` is the raw stored mapping, or ``None`` for a store that has
+    saved none — the platform's own defaults then apply, exactly as they do for
+    a row that was just created with them.
     """
     from core.tenant import (  # noqa: PLC0415
         STORE_AI_MODE_OFF,
         STORE_AI_MODE_ON,
         STORE_AI_MODE_TEST,
-        get_or_create_settings,
         merge_ai_defaults,
         resolve_store_ai_mode,
     )
     from utils.phone_utils import phone_matches_ai_test_allowlist  # noqa: PLC0415
 
-    settings = get_or_create_settings(db, tenant_id)
-    ai = merge_ai_defaults(settings.ai_settings)
+    ai = merge_ai_defaults(ai_settings)
     mode = resolve_store_ai_mode(ai)
 
     if mode == STORE_AI_MODE_ON:
@@ -172,6 +177,24 @@ def is_ai_allowed_by_store_mode(
         reason=REASON_STORE_AI_TEST_MODE_NOT_ALLOWED,
         mode=STORE_AI_MODE_TEST,
     )
+
+
+def is_ai_allowed_by_store_mode(
+    db: Session,
+    tenant_id: int,
+    customer_phone: str,
+) -> StoreAIModeDecision:
+    """
+    Evaluate store-wide AI mode for an inbound/automation target phone.
+
+    off  → blocked (store_ai_disabled)
+    test → allowed only when phone is in ai_test_allowed_numbers
+    on   → allowed (per-conversation guards still apply afterward)
+    """
+    from core.tenant import get_or_create_settings  # noqa: PLC0415
+
+    settings = get_or_create_settings(db, tenant_id)
+    return store_ai_mode_allows(settings.ai_settings, customer_phone)
 
 
 def _find_conversations_for_phone(
@@ -400,4 +423,5 @@ __all__ = [
     "log_ai_disabled_send_block",
     "no_ai_reply_result",
     "persist_inbound_for_suppressed_turn",
+    "store_ai_mode_allows",
 ]
