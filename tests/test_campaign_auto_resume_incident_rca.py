@@ -134,6 +134,29 @@ def test_incident_rca_isolates_the_window_and_its_history(pgdb, capsys):
     assert set(hist["sources_read"]) >= {
         "campaign_send_attempts", "campaign_send_logs", "message_events", "message_delivery_events"}
     assert out["campaign_now"]["lease"]["pause_reason"] == "provider_throttling"
+    # The owner's table, over the recipients Meta accepted in the window
+    # (A B C E F G): B's other row, F's other campaign and G's first copy
+    # were accepted before; C's earlier attempt is uncertain.
+    assert hist["table_accepted_in_window"] == {
+        "new_recipients": 6, "with_prior_accepted": 3, "with_prior_delivered": 3,
+        "with_prior_read": 2, "with_prior_uncertain": 1, "with_prior_request_started": 0,
+        "unresolved_evidence": 0, "clean": 2, "duplicate_incident": 4}
+
+
+@pg
+def test_request_started_is_evidence_and_a_claim_never_started_is_not(pgdb, capsys):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _attempt(c, log_id=1, phone=A, n=0, state="claimed", at=BEFORE, started=False)
+        _attempt(c, log_id=6, phone=E, n=0, state="request_started", at=BEFORE)
+    _, _, out = _run(url, capsys)
+    hist = out["history_before_window"]
+    by = hist["send_log_ids_by_strongest_evidence"]
+    assert by["request_started"] == [6]
+    assert 1 in by["clean"]                                   # the request never left
+    assert hist["recipients_with_prior_claim_never_started"] == 1
+    assert hist["table_accepted_in_window"]["with_prior_request_started"] == 1
 
 
 @pg

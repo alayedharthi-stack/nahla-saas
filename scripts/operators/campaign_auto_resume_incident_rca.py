@@ -57,9 +57,15 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 # Strongest first. ``unresolved_evidence`` outranks only ``clean``.
 EVIDENCE_ORDER = (
-    "read", "delivered", "accepted", "uncertain", "in_flight", "failed", "unknown",
+    "read", "delivered", "accepted", "uncertain", "request_started", "failed", "unknown",
     "sent_row", "wamid_row", "unresolved_evidence",
 )
+# A claim whose request never started is durable proof that nothing left
+# (the request is marked started before it is sent): reported, not evidence.
+NOT_EVIDENCE = ("claimed_never_started",)
+# The owner's table: recipients with each kind of prior evidence (a
+# recipient can count in several), then those with none.
+TABLE_KINDS = ("accepted", "delivered", "read", "uncertain", "request_started")
 _NORM = "regexp_replace({col}, '[^0-9]', '', 'g')"
 
 
@@ -83,7 +89,7 @@ def _digits(p: Any) -> str:
 
 
 def _strongest(kinds: Iterable[str]) -> str:
-    ks = set(kinds)
+    ks = set(kinds) - set(NOT_EVIDENCE)
     for k in EVIDENCE_ORDER:
         if k in ks:
             return k
@@ -222,8 +228,10 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                 ks.add("accepted")
             if st == "uncertain":
                 ks.add("uncertain")
-            if st in ("claimed", "request_started"):
-                ks.add("in_flight")
+            if st == "request_started":
+                ks.add("request_started")
+            if st == "claimed":
+                ks.add("claimed_never_started")
             if fl or st == "rejected":
                 ks.add("failed")
             add(ph, ks, "campaign_send_attempts")
@@ -243,7 +251,7 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                 if dl:
                     ks.add("delivered")
                 if sent_before:
-                    ks.add("sent_row")
+                    ks.update(("sent_row", "accepted"))
             else:
                 if rd or st == "read":
                     ks.update(("read", "delivered"))
@@ -251,10 +259,11 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                     ks.add("delivered")
                 if st in ("uncertain", "sending"):
                     ks.add("uncertain")
+                # A stored sent_at / wamid is Meta's acceptance of that copy.
                 if sent_before or st == "sent":
-                    ks.add("sent_row")
+                    ks.update(("sent_row", "accepted"))
                 if wamid:
-                    ks.add("wamid_row")
+                    ks.update(("wamid_row", "accepted"))
             add(ph, ks, "campaign_send_logs")
 
     # Who owns each known wamid (attempts and rows of this campaign), so a
@@ -326,7 +335,22 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                 ks.add("unresolved_evidence")
 
     strongest = {ph: _strongest(ks) for ph, ks in evidence.items()}
+
+    def table(pop: Iterable[str]) -> Dict[str, int]:
+        pop = list(pop)
+        row = {"new_recipients": len(pop)}
+        for k in TABLE_KINDS:
+            row[f"with_prior_{k}"] = sum(1 for ph in pop if k in evidence[ph])
+        row["unresolved_evidence"] = sum(1 for ph in pop if strongest[ph] == "unresolved_evidence")
+        row["clean"] = sum(1 for ph in pop if strongest[ph] == "clean")
+        row["duplicate_incident"] = sum(
+            1 for ph in pop if evidence[ph] & {"accepted", "delivered", "read", "uncertain"})
+        return row
     history = {
+        "table_accepted_in_window": table(ph for ph in phones if ph in accepted_phones),
+        "table_claimed_in_window": table(phones),
+        "recipients_with_prior_claim_never_started": sum(
+            1 for ks in evidence.values() if "claimed_never_started" in ks),
         "by_strongest_evidence": dict(Counter(strongest.values())),
         "accepted_recipients_by_strongest_evidence": dict(
             Counter(s for ph, s in strongest.items() if ph in accepted_phones)),
