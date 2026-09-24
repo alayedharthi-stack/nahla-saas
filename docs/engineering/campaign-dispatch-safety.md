@@ -143,9 +143,19 @@ tick/click proceeds (`test_missing_ledger_tables_fail_closed`).
 **Tier.** Meta sets the business-initiated messaging limit per business
 portfolio (since October 2025) and deprecated the phone-number field
 `messaging_limit_tier`. `fetch_meta_phone_tier` requests
-`whatsapp_business_manager_messaging_limit` and uses it; the deprecated field
-is read only as a fallback and logged as such. The scope key is the portfolio
-(`bm:`) when the connection stores it, else `waba:` — a narrower fallback.
+`whatsapp_business_manager_messaging_limit,quality_rating` and uses it; the
+deprecated `messaging_limit_tier` is asked for only in a separate fallback
+request (a removed field could fail a combined request and hide the current
+value), and the result says `current_field` / `legacy_fallback` / `failed`.
+
+**Scope = Meta's scope.** The budget and the atomic scope lock use the
+business portfolio (`bm:<id>`). The tier sync resolves a missing portfolio id
+from the WABA (`owner_business_info`) into `business_manager_id` (retried at
+most hourly; "refresh Meta tier" retries at once). Until it is known the
+budget fails closed (`limit_source=portfolio_unknown`, budget 0): a WABA-level
+budget could let two WABAs of one portfolio each admit their own share. Usage
+is counted across every key the portfolio's connections recorded attempts
+under (`bm:`, `waba:`, `phone:`), so the switch to `bm:` loses nothing.
 
 **`used_24h`** is a local count of distinct recipient phones that may hold one
 of Meta's unique-user slots in the moving 24h window — not a count of

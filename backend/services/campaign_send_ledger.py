@@ -1173,7 +1173,7 @@ def parse_messaging_tier(raw: Any) -> Optional[int]:
 class MessagingBudget:
     scope_key: Optional[str]
     limit: Optional[int]           # None = unlimited
-    limit_source: str              # meta_fresh | meta_stale_fallback | unknown_fallback | unlimited
+    limit_source: str              # meta_fresh | meta_stale_fallback | unknown_fallback | unlimited | portfolio_unknown
     budget: Optional[int]          # campaign share of the limit
     used: int = 0
     tier_raw: Optional[str] = None
@@ -1269,6 +1269,13 @@ def messaging_budget(db: Session, conn: Any, *, now: Optional[datetime] = None) 
         tier_raw, tier_at = stale_raw, None
 
     budget = max(0, (limit * max(0, min(100, CAMPAIGN_BUDGET_PERCENT))) // 100)
+    if not (scope or "").startswith("bm:"):
+        # Meta's limit is shared by every WABA and number in the business
+        # portfolio. Without the portfolio identity a narrower (WABA /
+        # number) budget could let two WABAs of one portfolio each admit
+        # their own share — so nothing is admitted until it is known (the
+        # tier sync resolves it from Meta; the campaign waits meanwhile).
+        source, budget = "portfolio_unknown", 0
     since = now - MESSAGING_WINDOW
     usage = messaging_usage(db, scope, conns, since=since)
     last_seen = {p: max((v["ts"] for v in rows if v["ts"] is not None), default=None)
@@ -1286,6 +1293,22 @@ def messaging_budget(db: Session, conn: Any, *, now: Optional[datetime] = None) 
                            tier_raw=tier_raw, tier_updated_at=tier_at,
                            contacted_phones=set(last_seen), next_slot_at=next_slot,
                            window_since=since)
+
+
+def scope_key_aliases(scope: Optional[str], conns: List[Any]) -> List[str]:
+    """Every scope key an attempt of these connections may have been
+    recorded under: the scope itself plus each connection's portfolio,
+    WABA and number keys — so a connection whose portfolio was resolved
+    later still counts the attempts it recorded under a narrower key."""
+    keys = {scope} if scope else set()
+    for c in conns:
+        for prefix, attr in (("bm", "business_manager_id"), ("bm", "meta_business_account_id"),
+                             ("waba", "whatsapp_business_account_id"),
+                             ("phone", "phone_number_id")):
+            v = str(getattr(c, attr, "") or "").strip()
+            if v:
+                keys.add(f"{prefix}:{v}"[:160])
+    return sorted(keys)
 
 
 def messaging_usage(db: Session, scope: Optional[str], conns: List[Any], *,
@@ -1308,7 +1331,8 @@ def messaging_usage(db: Session, scope: Optional[str], conns: List[Any], *,
       left to the ledger.
     """
     out: Dict[str, List[Dict[str, Any]]] = {}
-    if scope:
+    keys = scope_key_aliases(scope, conns)
+    if keys:
         rows = (
             db.query(CampaignSendAttempt.customer_phone_e164, CampaignSendAttempt.campaign_id,
                      CampaignSendAttempt.tenant_id, CampaignSendAttempt.state,
@@ -1316,7 +1340,7 @@ def messaging_usage(db: Session, scope: Optional[str], conns: List[Any], *,
                      CampaignSendAttempt.failed_at, CampaignSendAttempt.delivered_at,
                      CampaignSendAttempt.read_at)
             .filter(
-                CampaignSendAttempt.messaging_scope_key == scope,
+                CampaignSendAttempt.messaging_scope_key.in_(keys),
                 CampaignSendAttempt.state.in_(tuple(BUDGET_STATES)),
                 func.coalesce(CampaignSendAttempt.request_started_at,
                               CampaignSendAttempt.claimed_at) >= since,

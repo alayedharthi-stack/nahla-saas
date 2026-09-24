@@ -358,24 +358,167 @@ def test_next_slot_is_when_enough_recipients_age_out(dbf, monkeypatch):
                .total_seconds()) < 1
 
 
-def test_tier_is_read_from_the_business_portfolio_field(monkeypatch):
-    """Meta deprecated ``messaging_limit_tier``; the portfolio value wins
-    and is what the shared budget then uses."""
+def _fake_graph(monkeypatch, answers):
+    """``answers[fields]`` → response; records every request's fields."""
     import services.whatsapp_platform.service as svc
-    seen = {}
+    calls = []
 
     async def fake_get(conn, ctx, **kw):
-        seen["fields"] = kw["params"]["fields"]
-        return {"whatsapp_business_manager_messaging_limit": "TIER_10K",
-                "messaging_limit_tier": "TIER_250", "quality_rating": "GREEN"}
+        fields = kw["params"]["fields"]
+        calls.append(fields)
+        ans = answers.get(fields, {"error": {"message": f"(#100) Tried accessing nonexisting field ({fields})"}})
+        if isinstance(ans, Exception):
+            raise ans
+        return ans
 
     monkeypatch.setattr(svc, "provider_get_with_context", fake_get)
+    return svc, calls
+
+
+def test_tier_is_read_from_the_business_portfolio_field(monkeypatch):
+    """Meta deprecated ``messaging_limit_tier``; the portfolio value is read
+    in its own request and is what the shared budget then uses."""
+    svc, calls = _fake_graph(monkeypatch, {
+        "whatsapp_business_manager_messaging_limit,quality_rating":
+            {"whatsapp_business_manager_messaging_limit": "TIER_10K", "quality_rating": "GREEN"},
+    })
     conn = SimpleNamespace(phone_number_id="PN-1", provider="meta")
     out = asyncio.run(svc.fetch_meta_phone_tier(conn, SimpleNamespace(token="t")))
-    assert "whatsapp_business_manager_messaging_limit" in seen["fields"].split(",")
-    assert out["messaging_limit"] == "TIER_10K"
-    assert out["messaging_limit_field"] == "whatsapp_business_manager_messaging_limit"
+    assert calls == ["whatsapp_business_manager_messaging_limit,quality_rating"]
+    assert out["messaging_limit"] == "TIER_10K" and out["messaging_limit_source"] == "current_field"
     assert ledger.parse_messaging_tier(out["messaging_limit"]) == 10_000
+
+
+def test_the_deprecated_field_is_never_in_the_authoritative_request(monkeypatch):
+    """Meta rejects a removed field for the whole request: the legacy field
+    is only asked for separately, after the current one is unavailable."""
+    svc, calls = _fake_graph(monkeypatch, {
+        "whatsapp_business_manager_messaging_limit,quality_rating": {"quality_rating": "GREEN"},
+        "messaging_limit_tier,quality_rating": {"messaging_limit_tier": "TIER_250"},
+    })
+    conn = SimpleNamespace(phone_number_id="PN-1", provider="meta")
+    out = asyncio.run(svc.fetch_meta_phone_tier(conn, SimpleNamespace(token="t")))
+    assert calls == ["whatsapp_business_manager_messaging_limit,quality_rating",
+                     "messaging_limit_tier,quality_rating"]
+    assert all("messaging_limit_tier" not in c or "whatsapp_business_manager" not in c
+               for c in calls)
+    assert out["messaging_limit"] == "TIER_250" and out["messaging_limit_source"] == "legacy_fallback"
+    assert out["quality_rating"] == "GREEN"
+
+
+@pytest.mark.parametrize("legacy", [
+    {"error": {"message": "(#100) Tried accessing nonexisting field (messaging_limit_tier)"}},
+    RuntimeError("HTTP 400"),
+])
+def test_a_removed_legacy_field_never_breaks_the_current_read(monkeypatch, legacy):
+    svc, calls = _fake_graph(monkeypatch, {
+        "whatsapp_business_manager_messaging_limit,quality_rating":
+            {"whatsapp_business_manager_messaging_limit": "TIER_2K"},
+        "messaging_limit_tier,quality_rating": legacy,
+    })
+    conn = SimpleNamespace(phone_number_id="PN-1", provider="meta")
+    out = asyncio.run(svc.fetch_meta_phone_tier(conn, SimpleNamespace(token="t")))
+    assert out["messaging_limit"] == "TIER_2K" and len(calls) == 1
+    # Both unavailable → an explicit failure, the cached value is left alone.
+    svc, calls = _fake_graph(monkeypatch, {"messaging_limit_tier,quality_rating": legacy})
+    out = asyncio.run(svc.fetch_meta_phone_tier(conn, SimpleNamespace(token="t")))
+    assert out["messaging_limit"] is None and out["messaging_limit_source"] == "failed"
+    assert len(out["_diagnostics"]) == 2
+
+
+def test_portfolio_identity_is_resolved_and_stored(monkeypatch):
+    import routers.whatsapp_connect as wc
+    svc, calls = _fake_graph(monkeypatch, {
+        "owner_business_info": {"owner_business_info": {"id": "PF-777", "name": "x"}},
+    })
+    wc._portfolio_resolve_attempted.clear()
+    conn = SimpleNamespace(business_manager_id=None, meta_business_account_id=None,
+                           whatsapp_business_account_id="WABA-9", phone_number_id="PN-9",
+                           provider="meta")
+    assert asyncio.run(wc._ensure_portfolio_id(conn, SimpleNamespace(token="t"), 77)) is True
+    assert conn.business_manager_id == "PF-777"
+    assert ledger.messaging_scope_key(conn) == "bm:PF-777"
+    # Throttled: an unresolvable portfolio is not re-asked on every page view.
+    conn2 = SimpleNamespace(business_manager_id=None, meta_business_account_id=None,
+                            whatsapp_business_account_id="WABA-X", provider="meta")
+    _fake_graph(monkeypatch, {})
+    assert asyncio.run(wc._ensure_portfolio_id(conn2, SimpleNamespace(token="t"), 78)) is False
+    assert asyncio.run(wc._ensure_portfolio_id(conn2, SimpleNamespace(token="t"), 78)) is False
+
+
+# ── Budget scope = Meta's scope (the business portfolio) ────────────────
+
+
+def _wa_row(db, tenant_id, *, bm, waba, phone):
+    from models import WhatsAppConnection
+    row = WhatsAppConnection(tenant_id=tenant_id, status="connected", business_manager_id=bm,
+                             whatsapp_business_account_id=waba, phone_number_id=phone,
+                             meta_messaging_limit="TIER_250", meta_tier_updated_at=_now())
+    db.add(row)
+    db.commit()
+    return row
+
+
+def test_two_wabas_in_one_portfolio_share_one_budget(dbf, fake_meta, monkeypatch):
+    """Two merchants' WABAs sit in the same business portfolio. Usage on
+    WABA A — including attempts recorded under its old ``waba:`` key before
+    the portfolio was known — uses the budget WABA B's campaign sees."""
+    monkeypatch.setattr(ledger, "parse_messaging_tier", lambda raw: 3 if raw else None)
+    monkeypatch.setattr(ledger, "CAMPAIGN_BUDGET_PERCENT", 100)
+    a = _seed(dbf, phones=["+966511111111"], campaign_name="حملة التاجر أ")
+    b = _seed(dbf, phones=PHONES[:3], campaign_name="حملة التاجر ب")
+    db = dbf()
+    conn_a = _wa_row(db, a.tenant_id, bm="PF-SHARED", waba="WABA-A", phone="PN-A")
+    conn_b = _wa_row(db, b.tenant_id, bm="PF-SHARED", waba="WABA-B", phone="PN-B")
+    db.close()
+    _seed_scope_usage(dbf, a, "waba:WABA-A", 2, phone_prefix="+96655")      # before resolution
+    db = dbf()
+    log = db.query(CampaignSendLog).filter(CampaignSendLog.campaign_id == a.campaign_id).first()
+    db.add(CampaignSendAttempt(
+        tenant_id=a.tenant_id, campaign_id=a.campaign_id, send_log_id=log.id,
+        customer_phone_e164="+966560000001", attempt_no=2000, state="accepted",
+        messaging_scope_key="bm:PF-SHARED", claimed_at=_now(), request_started_at=_now(),
+        accepted_at=_now(), provider_message_id="w.bm.shared.1"))
+    db.commit()
+    db.close()
+    db = dbf()
+    budget_b = ledger.messaging_budget(db, db.merge(conn_b))
+    budget_a = ledger.messaging_budget(db, db.merge(conn_a))
+    db.close()
+    assert budget_b.scope_key == budget_a.scope_key == "bm:PF-SHARED"
+    assert budget_b.used == budget_a.used == 3 and budget_b.remaining == 0
+    meta = fake_meta(FakeMeta())
+    db = dbf()
+    ledger.acquire_lease(db, campaign_id=b.campaign_id, tenant_id=b.tenant_id, owner="w")
+    db.close()
+    ctx = disp.DispatchRunContext("w")
+    conn_b_ns = _conn(business_manager_id="PF-SHARED", whatsapp_business_account_id="WABA-B",
+                      phone_number_id="PN-B", meta_messaging_limit="TIER_250",
+                      meta_tier_updated_at=_now(), tenant_id=b.tenant_id)
+    asyncio.run(_ledger_suite._run(dbf, b, conn_b_ns, ctx=ctx))
+    assert meta.calls == [] and ctx.pause_reason == ledger.PAUSE_MESSAGING_LIMIT
+
+
+def test_unknown_portfolio_fails_closed(dbf, fake_meta, world, monkeypatch):
+    """Without the portfolio identity nothing is admitted — a WABA-level
+    budget could over-admit a limit Meta shares across WABAs."""
+    ids = _seed(dbf, phones=PHONES[:2])
+
+    def conn_for(db, tenant_id):
+        return _conn(business_manager_id=None, meta_business_account_id=None,
+                     whatsapp_business_account_id="WABA-ONLY", meta_messaging_limit="TIER_10K",
+                     meta_tier_updated_at=_now(), tenant_id=tenant_id)
+    monkeypatch.setattr(disp, "_get_wa_connection", conn_for)
+    meta = fake_meta(FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)
+    assert meta.calls == []
+    c = _campaign(dbf, ids.campaign_id)
+    assert c.status == "paused" and c.pause_reason == ledger.PAUSE_MESSAGING_LIMIT
+    assert c.wait["limit_source"] == "portfolio_unknown" and c.wait["next_eligible_exact"] is False
+    db = dbf()
+    b = ledger.messaging_budget(db, conn_for(db, ids.tenant_id))
+    db.close()
+    assert b.limit_source == "portfolio_unknown" and b.budget == 0
 
 
 @pytest.mark.parametrize("payload, expected", [
