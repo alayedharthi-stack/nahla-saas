@@ -8,6 +8,20 @@ import type { CampaignDebugSnapshot, CampaignRecord } from '../api/campaigns'
 
 type Runtime = CampaignsListLabels['runtime']
 
+export function campaignStopNotice(
+  campaign: Pick<CampaignRecord, 'status' | 'lifecycle' | 'pause_reason' | 'execution'>,
+  list: CampaignsListLabels,
+): { text: string; tone: 'amber' | 'red' } | null {
+  if (campaign.status !== 'paused') return null
+  const reason = campaign.lifecycle === 'marketing_delivery_blocked'
+    ? 'marketing_blocked'
+    : campaign.pause_reason || campaign.execution?.pause_reason
+  if (!reason || !list.sendHealth.pauseReasons[reason]) return null
+  const expectedPause = ['marketing_blocked', 'provider_throttling',
+    'provider_rate_limited', 'messaging_limit_reached', 'merchant_stop'].includes(reason)
+  return { text: list.sendHealth.pauseReasons[reason], tone: expectedPause ? 'amber' : 'red' }
+}
+
 export function campaignErrorLabel(
   code: string | null | undefined,
   labelAr: string | null | undefined,

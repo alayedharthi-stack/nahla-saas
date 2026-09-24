@@ -569,7 +569,7 @@ const STATUS_BREAKDOWN_AR: Record<string, string> = {
 }
 
 const REPORT_EN: CampaignsListLabels['diagnostics']['report'] = {
-  sentSummary: '📤 Sent to {sent} of {total} customers{failed}{skipped}',
+  sentSummary: '📤 Accepted by Meta: {sent} of {total} recipients (not proof of delivery){failed}{skipped}',
   sentFailedSuffix: ' — {n} failed',
   sentSkippedSuffix: ' — {n} skipped',
   templateLine: '📨 Template: {tpl}',
@@ -613,7 +613,7 @@ const REPORT_EN: CampaignsListLabels['diagnostics']['report'] = {
 }
 
 const REPORT_AR: CampaignsListLabels['diagnostics']['report'] = {
-  sentSummary: '📤 تم الإرسال إلى {sent} من {total} عملاء{failed}{skipped}',
+  sentSummary: '📤 قبلت Meta رسائل {sent} من {total} مستلمًا (لا يعني وصولها){failed}{skipped}',
   sentFailedSuffix: ' — فشل {n}',
   sentSkippedSuffix: ' — تخطّي {n}',
   templateLine: '📨 القالب: {tpl}',
@@ -732,7 +732,8 @@ export const campaignsListEn: CampaignsListLabels = {
     pauseReasons: {
       merchant_stop: 'Stopped by merchant',
       messaging_limit_reached: 'Meta daily messaging limit reached (shared by the business account)',
-      provider_throttling: 'Meta is throttling this number — sending stopped',
+      provider_throttling: 'Nahla paused the campaign after repeated Meta restrictions — review the details',
+      marketing_blocked: 'Nahla paused the campaign after Meta declined marketing delivery to multiple recipients (131049). Remaining recipients are queued.',
       uncertain_sends: 'Several sends had an unknown outcome — stopped for review',
       provider_rate_limited: 'Meta asked to slow down — continues automatically after a pause',
       provider_repeated_error: 'The same Meta error repeated for many recipients — sending stopped for review',
@@ -743,8 +744,8 @@ export const campaignsListEn: CampaignsListLabels = {
     capacityResumeAt: 'Meta daily limit reached — continues automatically around {time}',
     capacityResumeSoon: 'Meta daily limit reached — continues automatically when capacity returns',
     rateLimitResumeAt: 'Meta asked to slow down — continues automatically around {time}',
-    throttleClearsAt: '{count} Meta delivery failures ({key}) in the last {minutes} min — a resume can send again from {time}; it will not resume on its own',
-    throttleCleared: 'The Meta failure window has cleared — you can resume',
+    throttleClearsAt: '{count} Meta delivery failures ({key}) in the last {minutes} min — estimated retry eligibility: {time}, if no further failures arrive. Delivery is not guaranteed; no automatic resume',
+    throttleCleared: 'The local pause threshold is no longer reached — you can try resuming; Meta delivery is not guaranteed',
   },
   types: {
     broadcast: 'Broadcast',
@@ -987,7 +988,8 @@ export const campaignsListAr: CampaignsListLabels = {
     pauseReasons: {
       merchant_stop: 'أوقفها التاجر',
       messaging_limit_reached: 'بلغت حد Meta اليومي للمراسلة (مشترك على حساب الأعمال)',
-      provider_throttling: 'Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال',
+      provider_throttling: 'أوقفت نحلة الحملة مؤقتًا بعد تكرر قيود من Meta — راجع التفاصيل',
+      marketing_blocked: 'أوقفت نحلة الحملة مؤقتًا بعد رفض Meta تسليم رسائل تسويقية لعدة مستلمين (131049). بقية المستلمين في الطابور.',
       uncertain_sends: 'نتيجة عدة رسائل غير محسومة — توقف للمراجعة',
       provider_rate_limited: 'طلبت Meta إبطاء الإرسال مؤقتاً — تُستأنف تلقائياً بعد مهلة',
       provider_repeated_error: 'تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة',
@@ -998,8 +1000,8 @@ export const campaignsListAr: CampaignsListLabels = {
     capacityResumeAt: 'بلغت حد Meta اليومي — تُستأنف تلقائياً قرابة {time}',
     capacityResumeSoon: 'بلغت حد Meta اليومي — تُستأنف تلقائياً عند توفر السعة',
     rateLimitResumeAt: 'طلبت Meta إبطاء الإرسال — تُستأنف تلقائياً قرابة {time}',
-    throttleClearsAt: '{count} رسالة لم تسلّمها Meta ({key}) خلال آخر {minutes} دقيقة — يمكن الاستئناف من {time}، ولن تُستأنف تلقائياً',
-    throttleCleared: 'انقضت نافذة إخفاقات Meta — يمكن استئناف الإرسال',
+    throttleClearsAt: '{count} رسالة لم تسلّمها Meta ({key}) خلال آخر {minutes} دقيقة — موعد تقديري لإتاحة المحاولة: {time} إذا لم تصل إخفاقات إضافية. لا يضمن التسليم ولا يُستأنف تلقائيًا',
+    throttleCleared: 'لم تعد الإخفاقات تبلغ حد التوقف المحلي — يمكن محاولة الاستئناف، دون ضمان التسليم من Meta',
   },
   types: {
     broadcast: 'بث جماعي',

@@ -23,6 +23,7 @@ import {
   buildDispatchPollLines,
   campaignErrorLabel,
   campaignLastErrorDisplay,
+  campaignStopNotice,
   excludeReasonLabel,
   lifecycleLabelFromList,
 } from '../i18n/campaignRuntimeLabels'
@@ -3072,6 +3073,7 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
     (_statsCanonical?.recipients_delivered_multiple ?? 0)
     + (_statsCanonical?.recipients_accepted_multiple_unproven ?? 0)
   const pauseReason = campaign.pause_reason || campaign.execution?.pause_reason || null
+  const stopNotice = campaignStopNotice(campaign, list)
   const errorBreakdown = _statsCanonical?.error_breakdown ?? []
   const convRate = campaign.sent_count > 0 ? Math.round((campaign.converted_count / campaign.sent_count) * 100) : 0
   const [showErrors, setShowErrors] = useState(false)
@@ -3356,13 +3358,13 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
               a tiny "نسخ الخطأ التقني" copy icon so support can
               paste the raw Meta payload into a ticket without having
               to ask the merchant to find it. */}
-          {(campaign.last_error_ar || campaign.last_error || campaign.last_error_key) && (
-            <div className="flex items-center gap-1 mt-1 max-w-[200px]">
+          {(stopNotice || campaign.last_error_ar || campaign.last_error || campaign.last_error_key) && (
+            <div className="flex items-start gap-1 mt-1 min-w-[180px] max-w-[280px]">
               <p
-                className="text-[10px] text-red-500 truncate flex-1"
+                className={`text-xs whitespace-normal break-words flex-1 ${stopNotice?.tone === 'amber' ? 'text-amber-700' : 'text-red-600'}`}
                 title={campaign.last_error || ''}
               >
-                {campaignLastErrorDisplay(campaign, list.runtime, lang) || campaign.last_error}
+                {stopNotice?.text || campaignLastErrorDisplay(campaign, list.runtime, lang) || campaign.last_error}
               </p>
               {campaign.last_error && (
                 <button
