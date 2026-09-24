@@ -162,3 +162,95 @@ def test_rows_that_changed_after_the_snapshot_abort_the_write(pgdb, capsys, monk
     assert rc == 3 and "do not match" in out["result"]
     after = _statuses(engine)
     assert after[RECLAIMED] == ("queued", None) and after[PENDING] == ("queued", None)
+
+
+# ── Reversible, idempotent, never destructive ───────────────────────────
+
+
+def _counts(engine):
+    with engine.connect() as c:
+        return (_sql(c, "SELECT count(*) FROM campaign_send_logs").scalar(),
+                _sql(c, "SELECT count(*) FROM campaign_send_attempts").scalar())
+
+
+def _row(engine, phone):
+    with engine.connect() as c:
+        return tuple(_sql(c, "SELECT status, error_code, error_message FROM campaign_send_logs "
+                             "WHERE customer_phone_e164 = :p", p=phone).first())
+
+
+@pg
+def test_dry_run_reports_groups_and_exact_before_after(pgdb, capsys):
+    url, engine, _ = pgdb
+    _seed(engine)
+    rc, out = _run(url, capsys)
+    assert rc == 0
+    changes = out["planned_changes"]
+    assert [c["send_log_id"] for c in changes] == [2, 3, 4]
+    assert all(c["before"]["status"] == "queued" and c["after"] == {
+        "status": "uncertain", "error_code": "send_outcome_unknown"} for c in changes)
+    by_id = {c["send_log_id"]: c for c in changes}
+    assert by_id[2]["ledger_states"] == ["abandoned"] and by_id[2]["row_attempt_count"] == 1
+    assert by_id[3]["accepted_copies"] == 1 and by_id[3]["delivered_copies"] == 0
+    assert by_id[4]["reason"] == "unapplied inbox receipt for an unknown wamid"
+    assert sum(g["rows"] for g in out["unapproved_queued_groups"]) == 3
+    assert "+9665" not in json.dumps(out)
+
+
+@pg
+def test_hold_keeps_history_and_is_neither_failed_nor_resendable(pgdb, capsys, monkeypatch):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _sql(c, "UPDATE campaign_send_logs SET error_code = 'transport_not_sent', "
+                "error_message = 'connect timeout' WHERE customer_phone_e164 = :p", p=RECLAIMED)
+    counts = _counts(engine)
+    monkeypatch.setenv("NAHLA_QUARANTINE_CONFIRM", "campaign-9")
+    rc, out = _run(url, capsys, "--apply", "--expect", "3")
+    assert rc == 0, out.get("final_gate")
+    assert _counts(engine) == counts                           # nothing deleted
+    st, code, msg = _row(engine, RECLAIMED)
+    assert (st, code) == ("uncertain", "send_outcome_unknown")  # unknown, not failed
+    held = q.parse_hold(msg)
+    assert held["prev_error_code"] == "transport_not_sent"
+    assert held["prev_error_message"] == "connect timeout"
+    # Nothing re-queues it: the retry path only promotes failed rows, the
+    # dispatcher only claims queued rows, the reconciliation keeps it out.
+    sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "database")]
+    from sqlalchemy.orm import Session
+    from services import campaign_dispatcher as disp
+    with Session(engine) as db:
+        assert disp.reschedule_failed_for_retry(db, 9) == 0
+        db.commit()
+    assert _row(engine, RECLAIMED)[0] == "uncertain"
+    rc, out = _run(url, capsys)
+    assert out["unapproved_queued_count"] == 0
+    # Idempotent: a second apply has nothing to hold.
+    rc, out = _run(url, capsys, "--apply", "--expect", "0")
+    assert rc == 0 and out["held"] == 0 and _counts(engine) == counts
+
+
+@pg
+def test_revert_restores_exactly_the_held_rows(pgdb, capsys, monkeypatch):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _sql(c, "UPDATE campaign_send_logs SET error_code = 'transport_not_sent', "
+                "error_message = 'connect timeout' WHERE customer_phone_e164 = :p", p=RECLAIMED)
+        # An unrelated uncertain row the tool never held must stay untouched.
+        _log_row(c, 7, "+966500000207", "uncertain", 1, err="send_outcome_unknown")
+    before = _statuses(engine)
+    before_reclaimed = _row(engine, RECLAIMED)
+    monkeypatch.setenv("NAHLA_QUARANTINE_CONFIRM", "campaign-9")
+    _run(url, capsys, "--apply", "--expect", "3")
+    rc, out = _run(url, capsys, "--revert", "--expect", "2")   # wrong count
+    assert rc == 3 and out["result"].startswith("refused")
+    rc, out = _run(url, capsys, "--revert", "--expect", "3")
+    assert rc == 0 and out["reverted"] == 3
+    assert _statuses(engine) == before
+    assert _row(engine, RECLAIMED) == before_reclaimed
+    rc, out = _run(url, capsys, "--revert", "--expect", "0")   # idempotent
+    assert rc == 0 and out["reverted"] == 0
+    monkeypatch.delenv("NAHLA_QUARANTINE_CONFIRM")
+    rc, out = _run(url, capsys, "--revert", "--expect", "0")
+    assert rc == 3                                             # confirmation required

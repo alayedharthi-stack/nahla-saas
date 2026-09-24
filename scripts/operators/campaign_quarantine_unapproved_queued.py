@@ -37,6 +37,16 @@ Safety
   printed: ``decision_eligible``, ``queued == not_started_new_send_decision``,
   lease, ``attempts_in_flight`` and ``retry_review_candidate``.
 
+Reversible and non-destructive: no row or attempt is deleted, the outcome
+becomes "unknown" (never "failed"), and the hold message stores the row's
+previous ``error_code`` / ``error_message`` as JSON after the
+``[reconciliation_hold]`` marker. ``--revert --expect N`` (same
+confirmation, same lease / campaign-status checks, one transaction) puts
+exactly the rows this tool held back to ``queued`` with those values;
+uncertain rows it did not hold are never touched. Both directions are
+idempotent: a second run finds nothing to change. The dry run lists the
+exact ``before → after`` per send-log id and per-reason counts (no phones).
+
 The exit code is 0 only when the final gate passes (dry run: when the
 pre-write gate passes). Run it where ``DATABASE_URL`` is a reference, never
 printed; do not set ``PGOPTIONS=-c default_transaction_read_only=on`` for
@@ -49,6 +59,8 @@ Usage
       --tenant-id T --campaign-id C                       # dry run
   NAHLA_QUARANTINE_CONFIRM=campaign-C DATABASE_URL=… python … \\
       --tenant-id T --campaign-id C --apply --expect N    # hold exactly N rows
+  NAHLA_QUARANTINE_CONFIRM=campaign-C DATABASE_URL=… python … \\
+      --tenant-id T --campaign-id C --revert --expect N   # undo exactly those rows
 """
 from __future__ import annotations
 
@@ -69,9 +81,29 @@ _spec.loader.exec_module(rec)
 APPROVED = "not_started_new_send_decision"
 HOLD_STATUS = "uncertain"
 HOLD_CODE = "send_outcome_unknown"
-HOLD_MESSAGE = ("[reconciliation_hold] queued row not approved for a new send by the "
-                "campaign reconciliation ({category} / {proposal}); held, never re-sent "
-                "automatically")
+# The hold message is a marker plus JSON carrying the row's previous
+# error_code / error_message, so ``--revert`` can restore it exactly.
+HOLD_MARKER = "[reconciliation_hold] "
+
+
+def hold_message(v: Dict[str, Any], prev_code: Optional[str], prev_msg: Optional[str]) -> str:
+    return HOLD_MARKER + json.dumps({
+        "note": "queued row not approved for a new send by the campaign reconciliation; "
+                "held, never re-sent automatically",
+        "category": v["category"], "proposal": v["proposal"],
+        "history_reasons": v.get("history_reasons") or [],
+        "prev_status": "queued", "prev_error_code": prev_code, "prev_error_message": prev_msg,
+    }, ensure_ascii=False)
+
+
+def parse_hold(message: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not message or not message.startswith(HOLD_MARKER):
+        return None
+    try:
+        data = json.loads(message[len(HOLD_MARKER):])
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) and data.get("prev_status") == "queued" else None
 
 
 def reconcile(url: str, *, tenant_id: int, campaign_id: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -165,6 +197,52 @@ def _masked_rows(targets: Dict[str, Any]) -> List[Dict[str, Any]]:
                   key=lambda x: (x["category"], x["recipient"]))
 
 
+def _group(targets: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Counts per (category, proposal, first history reason), no PII."""
+    from collections import Counter  # noqa: PLC0415
+    c = Counter((v["category"], v["proposal"], (v.get("history_reasons") or ["—"])[0],
+                 v["copies"], v["delivered_copies"], v["has_proven_delivery"])
+                for v in targets.values())
+    return [{"category": k[0], "proposal": k[1], "reason": k[2], "accepted_copies": k[3],
+             "delivered_copies": k[4], "has_proven_delivery": k[5], "rows": n}
+            for k, n in sorted(c.items(), key=lambda kv: -kv[1])]
+
+
+def planned_changes(url: str, *, tenant_id: int, campaign_id: int,
+                    targets: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Read-only: the exact before → after of every row the hold would
+    change, by send-log id (no phone)."""
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            rows = conn.execute(text(
+                "SELECT id, customer_phone_e164, status, error_code, attempt_count, "
+                "provider_message_id IS NOT NULL, delivered_at IS NOT NULL, read_at IS NOT NULL, "
+                "failed_at IS NOT NULL FROM campaign_send_logs "
+                "WHERE tenant_id = :t AND campaign_id = :c AND status = 'queued' ORDER BY id"),
+                {"t": tenant_id, "c": campaign_id}).all()
+    finally:
+        engine.dispose()
+    out = []
+    for i, ph, st, code, att, has_wamid, dl, rd, fl in rows:
+        v = targets.get(rec.norm_phone(ph))
+        if v is None:
+            continue
+        out.append({
+            "send_log_id": int(i), "category": v["category"], "proposal": v["proposal"],
+            "reason": (v.get("history_reasons") or [None])[0],
+            "row_attempt_count": int(att or 0), "row_has_wamid": bool(has_wamid),
+            "row_delivered": bool(dl), "row_read": bool(rd), "row_failed_at": bool(fl),
+            "accepted_copies": v["copies"], "delivered_copies": v["delivered_copies"],
+            "ledger_states": v["ledger_states"], "unknown_attempts": v["unknown_attempts"],
+            "before": {"status": st, "error_code": code},
+            "after": {"status": HOLD_STATUS, "error_code": HOLD_CODE},
+        })
+    return out
+
+
 def apply_hold(url: str, *, tenant_id: int, campaign_id: int,
                targets: Dict[str, Any]) -> int:
     """Hold exactly ``targets`` in one transaction, or change nothing."""
@@ -189,27 +267,71 @@ def apply_hold(url: str, *, tenant_id: int, campaign_id: int,
             if (status or "").lower() == "active":
                 raise RuntimeError("campaign is active; nothing changed")
             rows = conn.execute(text(
-                "SELECT id, customer_phone_e164 FROM campaign_send_logs "
+                "SELECT id, customer_phone_e164, error_code, error_message FROM campaign_send_logs "
                 "WHERE tenant_id = :t AND campaign_id = :c AND status = 'queued' FOR UPDATE"),
                 {"t": tenant_id, "c": campaign_id}).all()
-            ids = [int(i) for i, ph in rows if rec.norm_phone(ph) in targets]
-            matched = {rec.norm_phone(ph) for i, ph in rows if rec.norm_phone(ph) in targets}
+            ids = [int(r[0]) for r in rows if rec.norm_phone(r[1]) in targets]
+            matched = {rec.norm_phone(r[1]) for r in rows if rec.norm_phone(r[1]) in targets}
             if len(ids) != len(targets) or matched != set(targets):
                 raise RuntimeError(
                     f"locked queued rows ({len(ids)}) do not match the reviewed set "
                     f"({len(targets)}); nothing changed")
-            for i, ph in rows:
+            for i, ph, prev_code, prev_msg in rows:
                 p = rec.norm_phone(ph)
                 if p not in targets:
                     continue
-                v = targets[p]
                 conn.execute(text(
                     "UPDATE campaign_send_logs SET status = :s, error_code = :e, "
                     "error_message = :m, updated_at = (now() AT TIME ZONE 'utc') "
                     "WHERE id = :i AND status = 'queued'"),
                     {"s": HOLD_STATUS, "e": HOLD_CODE, "i": int(i),
-                     "m": HOLD_MESSAGE.format(category=v["category"], proposal=v["proposal"])})
+                     "m": hold_message(targets[p], prev_code, prev_msg)})
             return len(ids)
+    finally:
+        engine.dispose()
+
+
+def held_rows(conn: Any, *, tenant_id: int, campaign_id: int, lock: bool = False) -> List[Any]:
+    from sqlalchemy import text  # noqa: PLC0415
+    rows = conn.execute(text(
+        "SELECT id, error_message FROM campaign_send_logs WHERE tenant_id = :t "
+        "AND campaign_id = :c AND status = :s AND error_code = :e "
+        "AND left(error_message, :n) = :m ORDER BY id" + (" FOR UPDATE" if lock else "")),
+        {"t": tenant_id, "c": campaign_id, "s": HOLD_STATUS, "e": HOLD_CODE,
+         "n": len(HOLD_MARKER), "m": HOLD_MARKER}).all()
+    return [(int(i), parse_hold(m)) for i, m in rows if parse_hold(m) is not None]
+
+
+def revert_hold(url: str, *, tenant_id: int, campaign_id: int, expect: int) -> int:
+    """Put exactly the rows this tool held back to ``queued`` with their
+    previous error_code / error_message — never any other uncertain row.
+    One transaction; the campaign must not be sendable while it runs."""
+    from sqlalchemy import create_engine, text  # noqa: PLC0415
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            lease = conn.execute(text(
+                "SELECT owner IS NOT NULL, expires_at > (now() AT TIME ZONE 'utc') "
+                "FROM campaign_dispatch_leases WHERE campaign_id = :c FOR UPDATE"),
+                {"c": campaign_id}).first()
+            if lease is not None and (lease[0] or lease[1]):
+                raise RuntimeError("campaign lease is held; nothing changed")
+            status = conn.execute(text(
+                "SELECT status FROM campaigns WHERE id = :c AND tenant_id = :t FOR UPDATE"),
+                {"c": campaign_id, "t": tenant_id}).scalar()
+            if (status or "").lower() == "active":
+                raise RuntimeError("campaign is active; nothing changed")
+            rows = held_rows(conn, tenant_id=tenant_id, campaign_id=campaign_id, lock=True)
+            if len(rows) != expect:
+                raise RuntimeError(f"{len(rows)} held rows, --expect {expect}; nothing changed")
+            for i, data in rows:
+                conn.execute(text(
+                    "UPDATE campaign_send_logs SET status = 'queued', error_code = :e, "
+                    "error_message = :m, updated_at = (now() AT TIME ZONE 'utc') "
+                    "WHERE id = :i AND status = :s"),
+                    {"i": i, "s": HOLD_STATUS, "e": data.get("prev_error_code"),
+                     "m": data.get("prev_error_message")})
+            return len(rows)
     finally:
         engine.dispose()
 
@@ -221,10 +343,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--campaign-id", type=int, required=True)
     ap.add_argument("--database-url", default=os.environ.get("DATABASE_URL"))
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--revert", action="store_true",
+                    help="put the rows this tool held back to queued (exact previous values)")
     ap.add_argument("--expect", type=int)
     args = ap.parse_args(argv)
     if not args.database_url:
         ap.error("DATABASE_URL is required")
+
+    if args.apply and args.revert:
+        ap.error("--apply and --revert are exclusive")
+    if args.revert:
+        if args.expect is None:
+            ap.error("--revert needs --expect N (the held rows reviewed)")
+        if os.environ.get("NAHLA_QUARANTINE_CONFIRM") != f"campaign-{args.campaign_id}":
+            print(json.dumps({"mode": "revert", "result": "refused: NAHLA_QUARANTINE_CONFIRM "
+                              "not set for this campaign"}))
+            return 3
+        try:
+            n = revert_hold(args.database_url, tenant_id=args.tenant_id,
+                            campaign_id=args.campaign_id, expect=args.expect)
+        except RuntimeError as exc:
+            print(json.dumps({"mode": "revert", "result": f"refused: {exc}"}))
+            return 3
+        print(json.dumps({"mode": "revert", "reverted": n}))
+        return 0
 
     out: Dict[str, Any] = {"mode": "apply" if args.apply else "dry_run"}
     try:
@@ -237,7 +379,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok, fails = gate(before, final=False)
     out["before"] = _public(before)
     out["unapproved_queued_count"] = len(targets)
+    out["unapproved_queued_groups"] = _group(targets)
     out["unapproved_queued"] = _masked_rows(targets)
+    out["planned_changes"] = planned_changes(args.database_url, tenant_id=args.tenant_id,
+                                             campaign_id=args.campaign_id, targets=targets)
     out["pre_write_gate"] = {"passed": ok, "failures": fails}
 
     if not args.apply:
