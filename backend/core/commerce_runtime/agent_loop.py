@@ -51,8 +51,10 @@ from sqlalchemy.engine import Connection
 
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_tools as at
+from core.commerce_runtime import browse as br
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import navigation as nav
 from core.commerce_runtime import presentation_policy as pp
 from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
@@ -82,13 +84,21 @@ class _DeadlinePassed(Exception):
 class AgentLoop:
     """Runs one turn to an accepted reply, or to an explicit stop."""
 
+    # No browse runtime unless one is handed in: the loop then shapes replies
+    # exactly as it did before paging existed.
+    _browse: Optional[br.BrowseRuntime] = None
+
     def __init__(self, ledgers: LedgerRepository, registry: at.ToolRegistry, *,
-                 budget: Optional[ac.LoopBudget] = None, clock: Optional[Clock] = None) -> None:
+                 budget: Optional[ac.LoopBudget] = None, clock: Optional[Clock] = None,
+                 browse: Optional[br.BrowseRuntime] = None) -> None:
         self._ledgers = ledgers
         self._foundation = ledgers.foundation
         self._registry = registry
         self._requested_budget = ac.validate_budget(budget or ac.LoopBudget())
         self._clock = clock or time.monotonic
+        # Present only where this database can store a browse's continuation.
+        # Absent, a reply offers exactly the selector the model asked for.
+        self._browse = browse
 
     # ── Public entry point ───────────────────────────────────────────────────
 
@@ -159,6 +169,8 @@ class AgentLoop:
                     # payload states the merchant's values and never the
                     # model's. The text is carried through untouched, and a
                     # selector that cannot be offered whole simply is not.
+                    session.verified_draft = draft
+                    session.presentation = presentation
                     draft = self._shape_reply(draft, scope, session, presentation)
                     return draft
                 session.record("verification_failed", {"problems": [p.code for p in problems]})
@@ -271,7 +283,8 @@ class AgentLoop:
                             **({"recovery_repeat": True} if recovery else {})})
 
     def _shape_reply(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
-                     presentation: Optional[pp.PresentationContext]) -> ac.ReplyDraft:
+                     presentation: Optional[pp.PresentationContext], *,
+                     navigation_enabled: bool = True) -> ac.ReplyDraft:
         """Give the verified answer the shape the platform decides it takes.
 
         The whole presentation boundary, in one place, so there is one path to
@@ -280,28 +293,71 @@ class AgentLoop:
         payloads. Called only after ``verify_reply_draft`` passed, so nothing
         here is a truth decision.
 
-        The model's text is not touched on any branch. What changes is only
-        which structured payload the reply carries, and the reason is recorded
-        either way so a production turn's shape is auditable from the log alone.
+        A list the platform composes itself — a later page a verified "More"
+        tap opened, or page one of a browse the model asked to be continuable —
+        is composed here too, and the navigation writes it needs are handed to
+        ``_accept`` to make inside the reply's own reservation. With
+        ``navigation_enabled`` off, as after those writes were refused, the
+        reply is shaped exactly as it would be without paging.
+
+        The model's text is not touched on any branch but one: a selector that
+        stands down for something the customer selected is carried as lines of
+        the merchant's values under it. What changes is otherwise only which
+        structured payload the reply carries, and the reason is recorded either
+        way so a production turn's shape is auditable from the log alone.
         """
         shape = pp.decide(draft=draft, observations=session.observations,
                           definitions=self._registry.definitions, presentation=presentation)
         shape = self._hydrate(shape, scope, session)
-        # A requested selector stands down only for a card that will actually
-        # be there. Asked of the composer itself, before anything is changed, so
-        # a customer whose tapped product turns out to have no photo still gets
-        # the selector the model offered rather than neither shape.
-        withhold = ""
-        if shape.withhold_selector:
-            composed, _reason = rcard.card(draft, session.observations,
-                                           determined_product_id=shape.determined_product_id)
-            withhold = rc.TAP_ANSWERED_FIRST if composed is not None else ""
-        draft, choices = rc.finalize(draft, session.observations, withhold=withhold)
+        session.navigation_plan = nav.Plan()
+        page = presentation.browse_page if presentation is not None else None
+        composed: Optional[br.Composed] = None
+        browse_outcome = ""
+        if shape.reason == pp.NAVIGATION_PAGE and page is not None:
+            if navigation_enabled:
+                composed = br.continue_browse(page)
+                browse_outcome = composed.reason
+            else:
+                # The page could not be spent with this reply. Its products,
+                # read moments ago, still follow the model's text as lines, so
+                # the answer to "More" is not an empty sentence.
+                draft = br.page_as_lines(draft, page)
+                browse_outcome = br.PAGE_AS_LINES
+        elif (navigation_enabled and self._browse is not None and shape.kind == pp.SHAPE_LIST
+              and shape.reason == pp.MODEL_REQUESTED):
+            composed, browse_outcome = br.open_browse(
+                draft, session.observations, scope=scope, runtime=self._browse,
+                timeout_seconds=session.wait_for(session.limits.tool_timeout_seconds))
+
+        if composed is not None and composed.selection is not None:
+            draft, choices = rc.finalize_composed(
+                draft, session.observations, composed.selection, composed.reason,
+                navigation=composed.navigation,
+                stand_down=rc.NAVIGATION_ANSWERED_FIRST if shape.reason == pp.NAVIGATION_PAGE else "")
+            session.navigation_plan = composed.plan
+        else:
+            if composed is not None:
+                # A later page with nothing left to show and nothing after it.
+                # The token it named is still spent with this reply.
+                session.navigation_plan = composed.plan
+            # A requested selector stands down only for a card that will
+            # actually be there. Asked of the composer itself, before anything
+            # is changed, so a customer whose tapped product turns out to have
+            # no photo still gets the selector the model offered rather than
+            # neither shape.
+            withhold = ""
+            if shape.withhold_selector and shape.reason != pp.NAVIGATION_PAGE:
+                card_composed, _reason = rcard.card(draft, session.observations,
+                                                    determined_product_id=shape.determined_product_id)
+                withhold = rc.TAP_ANSWERED_FIRST if card_composed is not None else ""
+            draft, choices = rc.finalize(draft, session.observations, withhold=withhold)
         # A card is the same split for the shape that follows a choice rather
         # than offering one. The selector wins when both are on the table: a
         # customer who still has to choose is not helped by one product's photo.
+        selector_offered = choices == rc.OFFERED or (composed is not None
+                                                     and composed.selection is not None)
         draft, card = rcard.finalize(
-            draft, session.observations, selector_offered=choices == rc.OFFERED,
+            draft, session.observations, selector_offered=selector_offered,
             determined_product_id=shape.determined_product_id)
         # A determination that failed closed never reached ``card`` with a
         # product, so it has no reason of its own to carry. Name it here, on the
@@ -311,7 +367,10 @@ class AgentLoop:
         session.record("reply_accepted",
                        {"evidence_refs": list(draft.evidence_refs), "kind": draft.kind,
                         "choices": choices, "card": card,
-                        "shape": shape.kind, "shape_reason": shape.reason})
+                        "shape": shape.kind, "shape_reason": shape.reason,
+                        **({"browse": browse_outcome} if browse_outcome else {}),
+                        **({"navigation": dict(composed.navigation)}
+                           if composed is not None else {})})
         return draft
 
     def _hydrate(self, shape: pp.Shape, scope: at.ToolScope, session: "_Session") -> pp.Shape:
@@ -417,6 +476,32 @@ class AgentLoop:
 
     def _accept(self, session: "_Session", draft: ac.ReplyDraft,
                 fault_before_commit: Optional[Callable[[], None]]) -> ac.LoopOutcome:
+        """Persist the accepted reply, its delivery intent and its navigation atomically.
+
+        A reply carrying a paged list reserves its navigation writes — the
+        tapped token spent, the next one minted — in the same transaction. When
+        the store refuses them (the token was spent or expired after it was
+        read, or the next could not be written), nothing at all was written:
+        the reply is shaped again without the navigation and reserved once
+        more, so the customer is still answered and no row points at a page
+        that was never sent.
+        """
+        plan = session.navigation_plan
+        try:
+            return self._accept_once(session, draft, fault_before_commit, plan)
+        except nav.NavigationNotPersisted as refused:
+            session.record("navigation_not_persisted", {"reason": refused.reason})
+            scope = session.scope
+            reshaped = self._shape_reply(
+                session.verified_draft or draft,
+                at.ToolScope(tenant_id=scope.tenant_id, namespace=scope.namespace,
+                             conversation_id=scope.conversation_id, turn_id=scope.turn_id),
+                session, session.presentation, navigation_enabled=False)
+            return self._accept_once(session, reshaped, fault_before_commit, nav.Plan())
+
+    def _accept_once(self, session: "_Session", draft: ac.ReplyDraft,
+                     fault_before_commit: Optional[Callable[[], None]],
+                     plan: nav.Plan) -> ac.LoopOutcome:
         """Persist the accepted reply state and its delivery intent atomically."""
         scope = session.scope
         snap = self._snapshot(session)                       # ownership re-validated after the last await
@@ -449,6 +534,13 @@ class AgentLoop:
             # row lock and before this transaction writes anything.
             if locked.db_now >= deadline_at:
                 raise _DeadlinePassed(locked.db_now, deadline_at)
+            # The page this reply shows is spent, and the next one minted, on
+            # this same locked connection: they commit with the reply or not at
+            # all. A refusal raises out of here and nothing is written.
+            if plan:
+                nav.apply(conn, plan, tenant_id=scope.tenant_id, namespace=scope.namespace,
+                          conversation_id=scope.conversation_id, turn_id=scope.turn_id,
+                          db_now=locked.db_now)
 
         try:
             decision = self._ledgers.commit_turn_decision(
@@ -656,6 +748,12 @@ class _Session:
         self.debited_here: Set[str] = set()      # signatures this invocation has already charged
         self.events: List[ac.LoopEvent] = []
         self.capabilities = ac.ProviderCapabilities(provider_name="unknown")
+        # The verified draft before it was shaped, and what shaping it needs,
+        # kept so a reply whose navigation writes were refused can be shaped
+        # again without them. ``navigation_plan`` is what the reservation writes.
+        self.verified_draft: Optional[ac.ReplyDraft] = None
+        self.presentation: Optional[pp.PresentationContext] = None
+        self.navigation_plan: nav.Plan = nav.Plan()
         self._clock = clock
         self._db_now: Optional[_dt.datetime] = None
         self._db_read_at: float = clock()

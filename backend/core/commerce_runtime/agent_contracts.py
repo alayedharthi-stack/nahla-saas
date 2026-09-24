@@ -171,6 +171,12 @@ class ToolObservation:
     evidence_refs: Tuple[str, ...]
     restored: bool = False
     body_truncated: bool = False
+    # What the tool handed the **platform** beside the result, typed by the
+    # tool that produced it (a search's ``SearchCandidates``). Never part of
+    # what the provider is shown: ``provider_observations`` copies the fields
+    # above and not this one, the checkpoint does not persist it, and the
+    # observation digest does not read it. A restored observation has none.
+    platform: Any = dataclasses.field(default=None, compare=False, repr=False)
 
 
 @dataclasses.dataclass(frozen=True)

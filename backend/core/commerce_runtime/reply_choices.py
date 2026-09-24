@@ -74,16 +74,16 @@ OFFERED = "offered"
 # answered first; the options here still follow the text as lines, so nothing
 # the model meant to offer is lost.
 TAP_ANSWERED_FIRST = "verified_tap_answered_first"
-# The options did not fit one list and were paged: nine products and one
-# affordance that reaches the rest. The affordance is not a product and carries
-# no merchant values; see ``navigation``.
-PAGED = "paged"
-# ``TOO_MANY`` keeps its meaning exactly: more options than the channel shows,
-# and no way to page them — no stored continuation, or no word for the
-# affordance that would carry it. The whole selector is withheld and every
-# option follows the text as a line, which is what happened before paging
-# existed and loses nothing. Why paging did not engage is the navigation
-# module's to log; the reply's reason stays the one the reader already knows.
+# A verified tap on a list's "More" row is being answered with the next page of
+# that list. A selector the model asked for in the same reply stands down for
+# it, and its options still follow the text as lines.
+NAVIGATION_ANSWERED_FIRST = "navigation_page_answered_first"
+
+# The key a paged or platform-expanded list's own account of itself rides
+# under, inside ``choices``: which page, how many shown, how many no longer
+# available, whether another page follows, and whether the stored result was
+# complete. Integers and booleans only — never a token, never a product value.
+NAVIGATION_KEY = "navigation"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -243,9 +243,14 @@ def unobserved_choices(draft: Any, observations: Sequence[Any]) -> Tuple[int, ..
                  or product_ref(product_id) not in cited)
 
 
-def _wire_rows(products: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
-    """The rows these products compose to, and whether every one became a row."""
-    composed = cr.choice_rows(products)
+def _wire_rows(products: Sequence[Mapping[str, Any]], *,
+               start_position: int = 1) -> Tuple[List[Dict[str, Any]], bool]:
+    """The rows these products compose to, and whether every one became a row.
+
+    ``start_position`` is where this list begins in a longer one, so a numbered
+    label on a later page states its place in the whole browse.
+    """
+    composed = cr.choice_rows(products, start_position=start_position)
     rows: List[Dict[str, Any]] = []
     for row in composed.rows:
         wire: Dict[str, Any] = {"id": row_id(row.product_id), "title": row.title}
@@ -261,30 +266,23 @@ def _requested_products(draft: Any, observations: Sequence[Any]) -> List[Mapping
             if product_id in observed]
 
 
-def selection(draft: Any, observations: Sequence[Any], *,
-              page: Optional[Any] = None) -> Tuple[Optional[ChoiceSelection], str]:
+def selection(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ChoiceSelection], str]:
     """The selector this draft may carry, and why there is none when there is not.
 
     Called after verification, so anything refused here is a display limit
     rather than a truth problem. The options themselves are not refused with
     it: see ``finalize``, which carries them into the text instead.
-
-    ``page`` is a stored continuation, when the platform made one: the products
-    this page shows, and the token that reaches the next. It changes only how
-    many rows are composed and adds one affordance at the end — every value the
-    customer reads on a product row still comes from this turn's observations,
-    and the affordance carries none.
     """
     requested = requested_product_ids(draft)
     if not requested:
         return None, NOT_REQUESTED
     if len(requested) < MIN_CHOICES:
         return None, TOO_FEW
+    if len(requested) > MAX_CHOICES:
+        return None, TOO_MANY
     products = _requested_products(draft, observations)
     if len(products) != len(requested):
         return None, NOT_OBSERVED
-    if len(requested) > MAX_CHOICES:
-        return _paged_selection(draft, products, page)
     rows, complete = _wire_rows(products)
     if not rows or not complete:
         return None, INCOMPLETE
@@ -292,39 +290,6 @@ def selection(draft: Any, observations: Sequence[Any], *,
                            product_ids=tuple(int(str(row["id"])[len(ROW_ID_PREFIX):])
                                              for row in rows),
                            button=requested_button(draft)), OFFERED
-
-
-def _paged_selection(draft: Any, products: Sequence[Mapping[str, Any]],
-                     page: Optional[Any]) -> Tuple[Optional[ChoiceSelection], str]:
-    """One page of a browse too long for a list, and the way to the rest.
-
-    Fails closed to the old behaviour on anything missing: no stored
-    continuation, no next page, or no word for the affordance means the whole
-    selector is withheld and every option is carried as a line instead. A
-    partial list with no way onward would hide options the customer asked for.
-    """
-    label = requested_more_label(draft)
-    if page is None or not getattr(page, "has_next", False) or not label:
-        return None, TOO_MANY
-    from core.commerce_runtime import navigation as nav  # noqa: PLC0415
-
-    shown = {int(item.get("product_id") or 0): item for item in products}
-    ordered = [shown[pid] for pid in getattr(page, "product_ids", ()) if pid in shown]
-    if len(ordered) != len(getattr(page, "product_ids", ())) or not ordered:
-        # The stored page names a product this turn did not read. Nothing is
-        # guessed and nothing partial is shown.
-        return None, TOO_MANY
-    rows, complete = _wire_rows(ordered)
-    if not rows or not complete:
-        return None, INCOMPLETE
-    # The affordance. Its id is in the navigation namespace, so no resolver can
-    # read it as a product; it carries the model's word and nothing else — no
-    # price, no title of the merchant's, no invented identity.
-    rows.append({"id": nav.row_id(page.next_token), "title": label})
-    return ChoiceSelection(rows=tuple(rows),
-                           product_ids=tuple(int(item.get("product_id") or 0)
-                                             for item in ordered),
-                           button=requested_button(draft)), PAGED
 
 
 def option_line(row: Mapping[str, Any]) -> str:
@@ -362,7 +327,7 @@ def options_as_text(text: str, rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def finalize(draft: Any, observations: Sequence[Any], *,
-             withhold: str = "", page: Optional[Any] = None) -> Tuple[Any, str]:
+             withhold: str = "") -> Tuple[Any, str]:
     """The draft as it will be delivered, with its selector or with its options.
 
     A verified selector makes the reply ``rich`` and leaves the text exactly as
@@ -378,7 +343,7 @@ def finalize(draft: Any, observations: Sequence[Any], *,
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
 
-    chosen, reason = selection(draft, observations, page=page)
+    chosen, reason = selection(draft, observations)
     if withhold and chosen is not None:
         # The platform decided this turn answers the customer's own selection
         # instead. The rows are not offered; the options still are, below.
@@ -405,6 +370,65 @@ def finalize(draft: Any, observations: Sequence[Any], *,
                                payload=ac.public_copy(payload)), reason
 
 
+def _is_navigation_row(row: Mapping[str, Any]) -> bool:
+    from core.commerce_runtime import navigation as nav  # noqa: PLC0415
+
+    return nav.token_from_row_id(row.get("id")) is not None
+
+
+def wire_rows(products: Sequence[Mapping[str, Any]], *,
+              start_position: int = 1) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """Rows for products the platform chose to list, and the ids that became none.
+
+    The platform-composed counterpart of the model's selector, for a list the
+    platform decided the shape of — a page of a stored browse. The same rows
+    as ``selection`` composes, from the merchant's values as a trusted read
+    returned them. A product that cannot be a row is named, not hidden.
+    """
+    rows, _complete = _wire_rows(products, start_position=start_position)
+    listed = {product_id_from_row_id(row["id"]) for row in rows}
+    dropped: List[int] = []
+    for product in products:
+        try:
+            product_id = int(product.get("product_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in listed and product_id not in dropped:
+            dropped.append(product_id)
+    return rows, dropped
+
+
+def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSelection, reason: str, *,
+                      navigation: Optional[Mapping[str, Any]] = None,
+                      stand_down: str = "") -> Tuple[Any, str]:
+    """The draft as it will be delivered, carrying a list the platform composed.
+
+    The model's text is not replaced. When the model asked for a selector of
+    its own and the platform is answering something else first — the next
+    page the customer tapped for — ``stand_down`` names why, the model's
+    selector is not offered, and its options follow the text as lines exactly
+    as ``finalize`` carries any withheld selector's options.
+    """
+    from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
+    from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
+
+    payload: Dict[str, Any] = {key: value
+                               for key, value in dict(getattr(draft, "payload", None) or {}).items()
+                               if key != REQUESTED_KEY}
+    text = getattr(draft, "text", "")
+    if stand_down and requested_product_ids(draft):
+        withheld_rows, _complete = _wire_rows(_requested_products(draft, observations))
+        text = options_as_text(text, withheld_rows)
+        if withheld_rows:
+            payload[WITHHELD_KEY] = stand_down
+    composed = chosen.as_payload()
+    if navigation:
+        composed[NAVIGATION_KEY] = dict(navigation)
+    payload[CHOICES_KEY] = composed
+    return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value, text=text,
+                               payload=ac.public_copy(payload)), reason
+
+
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """The same reply without its selector, for the bounded recovery attempt.
 
@@ -415,6 +439,9 @@ def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """
     out = {key: value for key, value in dict(payload or {}).items() if key != CHOICES_KEY}
     rows, _button = payload_rows(payload)
+    # The affordance that reached another page is not an option: as a line it
+    # would be a word with nothing behind it. Only products become lines.
+    rows = [row for row in rows if not _is_navigation_row(row)]
     if rows:
         out["text"] = options_as_text(out.get("text", ""), rows)
         out[WITHHELD_KEY] = "provider_rejected_the_list"
@@ -435,8 +462,9 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
-    "MAX_ROW_TITLE", "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED",
-    "PAGED", "PRODUCT_REF_PREFIX", "requested_more_label",
+    "MAX_ROW_TITLE", "MIN_CHOICES", "NAVIGATION_ANSWERED_FIRST", "NAVIGATION_KEY",
+    "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX", "finalize_composed",
+    "requested_more_label", "wire_rows",
     "TAP_ANSWERED_FIRST",
     "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
     "observed_products", "option_line", "options_as_text",

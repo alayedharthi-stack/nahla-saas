@@ -23,44 +23,52 @@ What one row is
 ===============
 One row is **one page token**: the opaque string the customer's next tap will
 present, the tenant and conversation it is only valid inside, the whole ordered
-result the browse produced, where this page starts in that order, when the token
-stops being usable, and whether it has already been used.
+result the originating search produced, where the page it opens starts in that
+order, when the token stops being usable, and whether it has been used.
 
 The ordered result is copied onto each page of the same series rather than
-referenced, and that is the point: page two must be able to continue from the
-order page one was composed against **without asking the catalogue again**. A
-second search could return a different set — a product sold out, a price
-changed, a new arrival — and "the next ten" would then silently mean something
-else. The rows a customer paged through are the rows they were shown.
+referenced, and that is the point: page two continues from the order page one
+was composed against **without asking the catalogue again**. A second search
+could return a different set — a product sold out, a price changed, a new
+arrival — and "the next nine" would then silently mean something else.
+
+Provenance is kept on the row: the turn and the search call that produced the
+result, the strategy that matched, a digest of the query (never the query), and
+whether the result is **complete** — proven to hold every match — or stopped at
+the platform's cap. A browse that is not complete never lets anything
+downstream say "that is everything".
+
+The two words a paged list shows that are not the merchant's — the row that
+reaches the next page, and the button that opens the list — are the model's,
+in the customer's language, given when the browse was opened. They are carried
+here so later pages show the model's words and never a platform default.
 
 Single use, by construction
 ===========================
 ``consumed_at`` is what makes a token a key and not a password. It is set in the
 same statement that reads the row, conditional on it still being unset and
-unexpired, so two taps racing on the same token produce exactly one page: the
-database arbitrates, not the application. A replayed token therefore resolves to
-nothing at all, and the turn proceeds on whatever text the tap delivered — the
-customer is still answered.
+unexpired, **inside the transaction that reserves the reply carrying the next
+page** — so a page is spent if and only if its answer was reserved, and two
+taps racing on one token produce exactly one page.
 
 A navigation token is not a product
 ===================================
 Its row id lives in its own namespace (``nahla:more:``), disjoint from the
 choice namespace (``nahla:choice:``) a product row uses. Nothing here is a
 catalogue identity, nothing here is commerce evidence, and no reply may cite it.
-That separation is why a "More" row can never be mistaken for a thirty-first
-product, and why no fake product id has to be invented to carry it.
 
 Like the foundation, the ledgers and the handover, this lives on ``RuntimeBase``
 metadata, outside the application's ``models.Base``: production startup
 materialises ``models.Base`` and pins ``alembic upgrade 0093``, so nothing here
 reaches a database until revision ``0113`` is applied on purpose.
 
-PostgreSQL semantics are assumed (``now()``, JSONB, partial indexes).
+PostgreSQL semantics are assumed (``now()``, JSONB).
 """
 from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -100,9 +108,20 @@ PAGE_SIZE = MAX_ROWS - 1
 # long an unfinished list stays open.
 TOKEN_LIFETIME_SECONDS = 24 * 3600
 
-# Rows are kept a while past expiry so an operator can still see what a customer
-# was offered, then removed. Retention is bounded by this, never unbounded.
-RETENTION_SECONDS = 7 * 24 * 3600
+# How long a row is kept once its token stopped being usable, so an operator can
+# still see what a customer was offered; then the sweep removes it. Measured
+# from expiry so the sweep can use the expiry index: with a 24h lifetime a row
+# lives at most seven days in all. Retention is bounded, never open-ended.
+RETENTION_AFTER_EXPIRY_SECONDS = 6 * 24 * 3600
+
+# The most identities one stored browse holds. The search hands the platform at
+# most this many (``search_candidates.CANDIDATE_CAP``) and the database refuses
+# more, so the bound holds whoever writes the row.
+MAX_STORED_PRODUCTS = 50
+
+# The model's words a paged list carries, bounded as the channel renders them.
+MAX_MORE_LABEL = 24
+MAX_BUTTON_LABEL = 20
 
 _NAMESPACE_SQL = "namespace IN ('live', 'shadow')"
 
@@ -118,8 +137,8 @@ class NavigationSnapshot(RuntimeBase):
     # nothing can be inferred from it or forged by editing it.
     token = Column(String(64), nullable=False)
     # The series this page belongs to. Every page of one browse shares it, which
-    # is what lets an operator — and the cleanup — see a whole abandoned browse
-    # rather than a scatter of unrelated rows.
+    # is what lets an operator see a whole abandoned browse rather than a
+    # scatter of unrelated rows.
     series = Column(String(64), nullable=False)
     tenant_id = Column(Integer, nullable=False)
     namespace = Column(String(16), nullable=False)
@@ -127,16 +146,33 @@ class NavigationSnapshot(RuntimeBase):
     # The turn that minted this token. Provenance only: the token's validity
     # never depends on it, because a page is answered by a *later* turn.
     minted_by_turn_id = Column(BigInteger, nullable=False)
-    # The whole ordered result the browse produced. Never re-derived: page two
-    # continues this order rather than searching again, so the customer pages
-    # through the rows they were actually shown.
+    # Where the stored result came from: the turn and the search call that
+    # produced it, the strategy that matched, and a digest of the query — never
+    # the words the customer typed.
+    origin_turn_id = Column(BigInteger, nullable=False)
+    origin_call_id = Column(String(128), nullable=False)
+    search_method = Column(String(64), nullable=False)
+    query_digest = Column(String(64), nullable=False)
+    # The whole ordered result the search produced, up to the platform's cap.
+    # Never re-derived: page two continues this order rather than searching
+    # again, so the customer pages through the result they were shown.
     product_ids = Column(JSONB, nullable=False)
-    # Where this page starts in that order.
-    page_offset = Column(Integer, nullable=False, server_default=text("0"))
+    # Proven, not assumed: true only when the search read fewer matches than
+    # it asked for, so ``product_ids`` holds every one of them.
+    complete = Column(Boolean, nullable=False)
+    # Where the page this token opens starts in that order, and how many
+    # products a page that has a successor carries.
+    page_offset = Column(Integer, nullable=False)
     page_size = Column(Integer, nullable=False)
+    # The model's own words, given when the browse was opened, in the
+    # customer's language. The platform has none of its own to use instead.
+    more_label = Column(String(MAX_MORE_LABEL), nullable=False)
+    button_label = Column(String(MAX_BUTTON_LABEL), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
-    # Set by the same statement that reads the row. A token is a single use.
+    # Set by the same statement that reads the row, in the transaction that
+    # reserves the reply showing the page. A token is a single use.
     consumed_at = Column(DateTime(timezone=True), nullable=True)
+    consumed_by_turn_id = Column(BigInteger, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
     __table_args__ = (
@@ -155,15 +191,25 @@ class NavigationSnapshot(RuntimeBase):
         # and the database says so rather than serving it twice.
         UniqueConstraint("series", "page_offset", name="uq_commerce_runtime_navigation_page"),
         CheckConstraint(_NAMESPACE_SQL, name="ck_commerce_runtime_navigation_namespace"),
-        CheckConstraint("page_offset >= 0", name="ck_commerce_runtime_navigation_offset"),
-        CheckConstraint(f"page_size >= 1 AND page_size <= {MAX_ROWS}",
+        CheckConstraint(
+            f"jsonb_typeof(product_ids) = 'array' AND jsonb_array_length(product_ids) >= 1 "
+            f"AND jsonb_array_length(product_ids) <= {MAX_STORED_PRODUCTS}",
+            name="ck_commerce_runtime_navigation_products"),
+        # A token opens a page after the first — page one never needs one — and
+        # a page that exists: an offset past the stored result is a token that
+        # leads nowhere, which the database refuses to store.
+        CheckConstraint("page_offset >= 1 AND page_offset < jsonb_array_length(product_ids)",
+                        name="ck_commerce_runtime_navigation_offset"),
+        CheckConstraint(f"page_size >= 1 AND page_size < {MAX_ROWS}",
                         name="ck_commerce_runtime_navigation_page_size"),
-        # Resolution always asks "this token, in this conversation, for this
-        # tenant" — so that is the index, and an unconsumed token is the only
-        # kind worth finding fast.
-        Index("ix_commerce_runtime_navigation_open", "tenant_id", "namespace", "conversation_id",
-              postgresql_where=text("consumed_at IS NULL")),
-        # Cleanup sweeps by age and nothing else.
+        CheckConstraint("char_length(more_label) >= 1 AND char_length(button_label) >= 1",
+                        name="ck_commerce_runtime_navigation_words"),
+        # Spent means both: when, and by which turn. One without the other is a
+        # row nobody can account for.
+        CheckConstraint("(consumed_at IS NULL) = (consumed_by_turn_id IS NULL)",
+                        name="ck_commerce_runtime_navigation_consumed"),
+        # Cleanup sweeps by expiry and nothing else. A token is found by its own
+        # unique index; nothing reads this relation any other way.
         Index("ix_commerce_runtime_navigation_expiry", "expires_at"),
     )
 
@@ -177,7 +223,8 @@ def create_navigation_tables(bind) -> None:
 
 
 __all__ = [
-    "MAX_ROWS", "NAVIGATION_ROW_PREFIX", "NAVIGATION_TABLE", "NAVIGATION_TABLES",
-    "NAVIGATION_TABLE_OBJECTS", "NavigationSnapshot", "PAGE_SIZE", "RETENTION_SECONDS",
-    "TOKEN_LIFETIME_SECONDS", "create_navigation_tables",
+    "MAX_BUTTON_LABEL", "MAX_MORE_LABEL", "MAX_ROWS", "MAX_STORED_PRODUCTS",
+    "NAVIGATION_ROW_PREFIX", "NAVIGATION_TABLE", "NAVIGATION_TABLES",
+    "NAVIGATION_TABLE_OBJECTS", "NavigationSnapshot", "PAGE_SIZE",
+    "RETENTION_AFTER_EXPIRY_SECONDS", "TOKEN_LIFETIME_SECONDS", "create_navigation_tables",
 ]

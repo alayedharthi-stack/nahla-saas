@@ -191,7 +191,7 @@ def _labels_from_facts(
     return labels
 
 
-def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
+def choice_rows(products: Sequence[Mapping[str, Any]], *, start_position: int = 1) -> ChoiceRows:
     """Rows for these products, in the order given, with distinct titles.
 
     Products sharing a visible title are labelled from the merchant's own facts
@@ -199,7 +199,13 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
     not. Nothing is left out for looking alike; only a product with no usable
     identity or title cannot become a row, and the caller is told — see
     ``complete``.
+
+    ``start_position`` is where this list starts in a longer browse it is one
+    page of, so a positional label stays a true statement about what the
+    customer is paging through: the first row of page two is «· 10», not a
+    second «· 1».
     """
+    first = max(1, int(start_position))
     offered = len(list(products))
     considered: List[Tuple[int, str, Mapping[str, Any]]] = []
     dropped: List[int] = []
@@ -237,7 +243,7 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
     for position, (product_id, base, product) in enumerate(considered):
         key = _title_key(base)
         if key in numbered:
-            title: Optional[str] = _positional_title(base, len(rows) + 1)
+            title: Optional[str] = _positional_title(base, first + len(rows))
         elif len(groups[key]) > 1:
             title = fact_labels.get(position)
         else:
@@ -245,7 +251,7 @@ def choice_rows(products: Sequence[Mapping[str, Any]]) -> ChoiceRows:
         if title is None or _title_key(title) in taken:
             # A label that collided with another group's: the row's own number
             # is still true and still free in all but a pathological catalogue.
-            fallback = _positional_title(base, len(rows) + 1)
+            fallback = _positional_title(base, first + len(rows))
             title = fallback if _title_key(fallback) not in taken else None
         if title is None:
             dropped.append(product_id)

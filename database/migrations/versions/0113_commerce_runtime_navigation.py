@@ -38,6 +38,19 @@ spelling matters wherever more than one head exists, for the reason ``0111``
 records at length. The downgrade drops the relation, which discards unfinished
 browses and nothing else: a customer mid-list simply gets a fresh answer.
 
+Drafts
+======
+This revision was first drafted in PR #1143 and revised before it was ever
+applied: the stored result now carries its provenance (the originating turn
+and search call, the strategy, a digest of the query), whether it is
+**complete**, the model's own words for the list's button and its "More" row,
+and which turn spent each token; the database refuses a token that points
+outside its result, a result above the cap, and a half-recorded spend; and the
+partial index nothing read is gone. A database that ever ran the first draft
+carries a relation of the same name and a different definition, and this
+revision refuses it rather than reconciling it — as it refuses any relation
+that only looks right.
+
 One source of truth
 ===================
 The relation is created from the package's own metadata rather than from a

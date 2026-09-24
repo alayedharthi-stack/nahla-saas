@@ -32,6 +32,8 @@ Precedence
 First match wins:
 
 1. a **verified fresh product-row selection** → hydrate → card;
+1b. a **verified "More" tap** on a list this conversation sent → the next page
+   of that list, from its stored order (see ``browse``);
 2. a valid model-requested shape, consistent with evidence and policy;
 3. a focused product from a deliberate ``get_product_details`` → card, subject
    to recent-card suppression when there is no new selection;
@@ -104,6 +106,9 @@ NO_PRODUCT_FOCUS = "no_product_focus"
 # The model's selector offers the tapped product back among others, so the turn
 # is a multi-product selection again — established from the requested ids.
 SELECTION_REOFFERED = "tapped_product_reoffered_among_others"
+# The customer tapped a list's "More" row, the token verified in the store, and
+# the page it opens was read from the catalogue before the model ran.
+NAVIGATION_PAGE = "verified_navigation_tap"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,6 +129,12 @@ class PresentationContext:
 
     tapped_product_id: Optional[int] = None
     last_card_product_id: Optional[int] = None
+    # A "More" tap already verified against the navigation store, in this
+    # tenant and conversation, unspent and unexpired, with the page it opens
+    # read from the catalogue (``browse.BrowsePage``). Not a product and not a
+    # selection: it chooses the reply's *shape* — the next page — and nothing
+    # about any product.
+    browse_page: Optional[Any] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -280,6 +291,15 @@ def decide(*, draft: Any, observations: Sequence[Any], definitions: Sequence[Any
         # multi-product selection again. Read from the requested ids alone.
         return Shape(kind=SHAPE_LIST, reason=SELECTION_REOFFERED, product_id=int(tapped))
 
+    # 1b. A verified "More" tap. The customer asked for the rest of a list this
+    #     conversation sent, so the rest of that list is the answer's shape. A
+    #     selector the model asked for in the same reply stands down for it,
+    #     exactly as it does for a product tap; its options still follow the
+    #     text as lines.
+    if ctx.browse_page is not None:
+        return Shape(kind=SHAPE_LIST, reason=NAVIGATION_PAGE,
+                     withhold_selector=requested == SHAPE_LIST)
+
     # 2. The model asked for a shape. It may legitimately decide this turn
     #    offers alternatives, and its request already passed verification. The
     #    composers below still refuse a request this turn's evidence will not
@@ -374,7 +394,8 @@ def after_hydration(shape: Shape, observations: Sequence[Any]) -> Shape:
 
 __all__ = [
     "CANDIDATE_KIND", "FOCUSED_PRODUCT", "FOCUS_KIND", "HYDRATION_CALL_ID", "HYDRATION_TOOL",
-    "MODEL_REQUESTED", "MULTIPLE_CANDIDATES", "NO_PRODUCT_FOCUS", "PresentationContext",
+    "MODEL_REQUESTED", "MULTIPLE_CANDIDATES", "NAVIGATION_PAGE", "NO_PRODUCT_FOCUS",
+    "PresentationContext",
     "SELECTION_REOFFERED",
     "Provenance", "RECENT_CARD_SUPPRESSED", "SHAPE_CARD", "SHAPE_LIST", "SHAPE_TEXT", "Shape",
     "TAP_HYDRATION_UNAVAILABLE", "TAP_PRODUCT_NOT_FOUND", "TAP_SELECTED", "after_hydration",

@@ -203,8 +203,11 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "salla_shipment_tracking",
                    # The navigation snapshot arrives with pagination: a page
                    # token that is not single-use, not scoped, or not bounded
-                   # would be a key left in a door, so its proofs are required.
-                   "commerce_runtime_navigation"]
+                   # would be a key left in a door, so its proofs are required —
+                   # as are the flow through the real runtime and the one
+                   # total order the pages are cut from.
+                   "commerce_runtime_navigation", "commerce_runtime_pagination",
+                   "catalog_search_order"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -227,6 +230,8 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
             "proof", {"LEGACY_MIG_PG_TEST_DATABASE_URL": None},
         ),
         "commerce_runtime_navigation": ("proof", harness_env),
+        "commerce_runtime_pagination": ("proof", harness_env),
+        "catalog_search_order": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

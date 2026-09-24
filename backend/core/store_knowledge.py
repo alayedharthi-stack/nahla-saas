@@ -28,7 +28,7 @@ import sys
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
 from sqlalchemy.orm import Session
 
@@ -230,6 +230,39 @@ class CatalogSearchProductsResult:
     catalog_fact_products: List[Dict[str, Any]] = field(default_factory=list)
 
 
+# The one total order every catalogue search returns its matches in: stocked
+# products first, then by id. ``in_stock`` alone is not an order \u2014 every
+# stocked product ties with every other \u2014 so without the id a database may
+# return equal rows in whatever order it likes, and the same query twice can
+# put a different product first. Every search path sorts by exactly this, so
+# what a legacy caller numbers, what the customer is shown first and what a
+# continuation reads next are one sequence.
+CATALOG_SEARCH_ORDER_SQL = "in_stock DESC, id"
+
+# How many rows past its bound a general-browse candidate read looks at.
+# Orderability is decided per product from its variants and metadata, so some
+# rows in the window may not count; this is the same allowance
+# ``get_top_products`` already makes for the same reason.
+TOP_CANDIDATE_SLACK = 20
+
+
+@dataclass(frozen=True)
+class CatalogCandidates:
+    """The ordered identities one search matched, and whether that is all of them.
+
+    ``product_ids`` is in the same total order the row search returns, so its
+    first *n* are the rows a search limited to *n* returns. ``exhausted`` is a
+    proof, never an inference: it is true only when the read got back fewer
+    matches than it asked for, so nothing beyond them matched. A read that
+    stopped at its own bound says ``exhausted=False`` however many it holds \u2014
+    reaching a cap is not reaching the end.
+    """
+
+    product_ids: Tuple[int, ...]
+    method: str
+    exhausted: bool
+
+
 _AR_DEF_ARTICLE = "\u0627\u0644"
 
 
@@ -350,8 +383,10 @@ class CatalogContextBuilder:
 
         When ``include_non_orderable_facts`` is True, also returns skipped
         formatted rows in ``catalog_fact_products`` (price/availability Q&A).
+
+        Rows come back in ``CATALOG_SEARCH_ORDER_SQL`` order on every path;
+        see ``_search_steps``.
         """
-        from sqlalchemy import text as sa_text  # noqa: PLC0415
         q_clean = query.strip()
         if not q_clean:
             if include_non_orderable_facts:
@@ -394,145 +429,132 @@ class CatalogContextBuilder:
             )
             return filtered
 
-        variants = _catalog_search_query_variants(q_clean)
-        for search_q in variants:
-            # -- Full-text search (tsvector, works with Arabic tokens) --------
-            try:
-                fts_sql = sa_text("""
-                    SELECT id FROM products
-                    WHERE tenant_id = :tid
-                      AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
-                          @@ plainto_tsquery('simple', :q)
-                    ORDER BY in_stock DESC, id
-                    LIMIT :lim
-                """)
-                result = self.db.execute(
-                    fts_sql,
-                    {"tid": self.tenant_id, "q": search_q, "lim": limit},
-                )
-                ids = [row[0] for row in result]
-                if ids:
-                    rows = (
-                        self.db.query(Product)
-                        .filter(Product.id.in_(ids))
-                        .all()
-                    )
-                    method = "fts" if search_q == q_clean else "fts_def_article_norm"
-                    return _finalize(rows, source="search", method=method)
-            except Exception:
-                pass  # fall through to ILIKE
-
-            # -- ILIKE fallback ---------------------------------------------------
-            q_like = f"%{search_q.lower()}%"
-            rows = (
-                self.db.query(Product)
-                .filter(
-                    Product.tenant_id == self.tenant_id,
-                    Product.title.ilike(q_like),
-                )
-                .order_by(Product.in_stock.desc())
-                .limit(limit)
-                .all()
-            )
+        for method, source, match in self._search_steps(q_clean):
+            rows = match(limit, False)
             if rows:
-                method = "ilike" if search_q == q_clean else "ilike_def_article_norm"
-                return _finalize(rows, source="search_ilike", method=method)
-
-        if _ARABIC_SCRIPT_RE.search(q_clean):
-            norm_q = _normalize_catalog_search_arabic(q_clean)
-            if norm_q:
-                norm_pattern = f"%{norm_q}%"
-                norm_title = _catalog_title_arabic_norm_expr(Product.title)
-                rows = (
-                    self.db.query(Product)
-                    .filter(
-                        Product.tenant_id == self.tenant_id,
-                        norm_title.like(norm_pattern),
-                    )
-                    .order_by(Product.in_stock.desc())
-                    .limit(limit)
-                    .all()
-                )
-                if rows:
-                    return _finalize(
-                        rows,
-                        source="search_ilike",
-                        method="ilike_arabic_norm",
-                    )
-
-        # Miss-only: single-token feminine plural → singular (ساعات → ساعة/ساعه)
-        for search_q in _catalog_search_arabic_feminine_plural_variants(q_clean):
-            try:
-                fts_sql = sa_text("""
-                    SELECT id FROM products
-                    WHERE tenant_id = :tid
-                      AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
-                          @@ plainto_tsquery('simple', :q)
-                    ORDER BY in_stock DESC, id
-                    LIMIT :lim
-                """)
-                result = self.db.execute(
-                    fts_sql,
-                    {"tid": self.tenant_id, "q": search_q, "lim": limit},
-                )
-                ids = [row[0] for row in result]
-                if ids:
-                    rows = (
-                        self.db.query(Product)
-                        .filter(Product.id.in_(ids))
-                        .all()
-                    )
-                    return _finalize(
-                        rows,
-                        source="search",
-                        method="fts_plural_singular",
-                    )
-            except Exception:  # noqa: silent-ok — SQLite/non-FTS engines fall through to ILIKE
-                pass
-
-            q_like = f"%{search_q.lower()}%"
-            rows = (
-                self.db.query(Product)
-                .filter(
-                    Product.tenant_id == self.tenant_id,
-                    Product.title.ilike(q_like),
-                )
-                .order_by(Product.in_stock.desc())
-                .limit(limit)
-                .all()
-            )
-            if rows:
-                return _finalize(
-                    rows,
-                    source="search_ilike",
-                    method="ilike_plural_singular",
-                )
-
-            if _ARABIC_SCRIPT_RE.search(search_q):
-                norm_q = _normalize_catalog_search_arabic(search_q)
-                if norm_q:
-                    norm_pattern = f"%{norm_q}%"
-                    norm_title = _catalog_title_arabic_norm_expr(Product.title)
-                    rows = (
-                        self.db.query(Product)
-                        .filter(
-                            Product.tenant_id == self.tenant_id,
-                            norm_title.like(norm_pattern),
-                        )
-                        .order_by(Product.in_stock.desc())
-                        .limit(limit)
-                        .all()
-                    )
-                    if rows:
-                        return _finalize(
-                            rows,
-                            source="search_ilike",
-                            method="ilike_plural_singular_arabic_norm",
-                        )
+                return _finalize(rows, source=source, method=method)
 
         if include_non_orderable_facts:
             return CatalogSearchProductsResult(products=[], catalog_fact_products=[])
         return []
+
+    # ── The one search strategy ────────────────────────────────────────────
+
+    def _canonical_order(self) -> Tuple[Any, Any]:
+        """``CATALOG_SEARCH_ORDER_SQL`` for the ORM paths: a total order."""
+        return (Product.in_stock.desc(), Product.id.asc())
+
+    def _fts_ids(self, search_q: str, limit: int) -> List[int]:
+        from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+        result = self.db.execute(
+            sa_text(f"""
+                SELECT id FROM products
+                WHERE tenant_id = :tid
+                  AND to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
+                      @@ plainto_tsquery('simple', :q)
+                ORDER BY {CATALOG_SEARCH_ORDER_SQL}
+                LIMIT :lim
+            """),
+            {"tid": self.tenant_id, "q": search_q, "lim": limit},
+        )
+        return [int(row[0]) for row in result]
+
+    def _rows_in_order(self, ids: List[int]) -> List[Product]:
+        """The products behind ``ids``, in exactly that order.
+
+        ``IN`` has no order of its own: the database returns the rows however
+        it finds them, which is how the full-text path used to hand its callers
+        a set the query had ordered and the hydration had shuffled.
+        """
+        if not ids:
+            return []
+        rows = (
+            self.db.query(Product)
+            .filter(Product.tenant_id == self.tenant_id, Product.id.in_(ids))
+            .all()
+        )
+        position = {int(pid): index for index, pid in enumerate(ids)}
+        return sorted(rows, key=lambda row: position.get(int(row.id), len(position)))
+
+    def _search_steps(
+        self, q_clean: str,
+    ) -> Iterator[Tuple[str, str, Callable[[int, bool], List[Any]]]]:
+        """Every way this builder matches a query, in the order it tries them.
+
+        Each step is ``(method, source, match)``; ``match(limit, ids_only)``
+        returns that step's matches in ``CATALOG_SEARCH_ORDER_SQL`` order — the
+        products themselves, or only their ids. The row search and the
+        candidate read walk this same sequence and stop at the same first step
+        that matches anything, so they cannot disagree about which search ran,
+        what it matched, or the order it matched it in.
+        """
+
+        def fts(search_q: str) -> Callable[[int, bool], List[Any]]:
+            def match(limit: int, ids_only: bool) -> List[Any]:
+                try:
+                    ids = self._fts_ids(search_q, limit)
+                except Exception:  # noqa: silent-ok — SQLite/non-FTS engines fall through to ILIKE
+                    return []
+                return ids if ids_only else self._rows_in_order(ids)
+            return match
+
+        def like(where: Any) -> Callable[[int, bool], List[Any]]:
+            def match(limit: int, ids_only: bool) -> List[Any]:
+                query = (
+                    self.db.query(Product.id if ids_only else Product)
+                    .filter(Product.tenant_id == self.tenant_id, where)
+                    .order_by(*self._canonical_order())
+                    .limit(limit)
+                )
+                rows = query.all()
+                return [int(row[0]) for row in rows] if ids_only else list(rows)
+            return match
+
+        for search_q in _catalog_search_query_variants(q_clean):
+            primary = search_q == q_clean
+            # -- Full-text search (tsvector, works with Arabic tokens) --------
+            yield ("fts" if primary else "fts_def_article_norm", "search", fts(search_q))
+            # -- ILIKE fallback -----------------------------------------------
+            yield ("ilike" if primary else "ilike_def_article_norm", "search_ilike",
+                   like(Product.title.ilike(f"%{search_q.lower()}%")))
+
+        if _ARABIC_SCRIPT_RE.search(q_clean):
+            norm_q = _normalize_catalog_search_arabic(q_clean)
+            if norm_q:
+                yield ("ilike_arabic_norm", "search_ilike",
+                       like(_catalog_title_arabic_norm_expr(Product.title).like(f"%{norm_q}%")))
+
+        # Miss-only: single-token feminine plural → singular (ساعات → ساعة/ساعه)
+        for search_q in _catalog_search_arabic_feminine_plural_variants(q_clean):
+            yield ("fts_plural_singular", "search", fts(search_q))
+            yield ("ilike_plural_singular", "search_ilike",
+                   like(Product.title.ilike(f"%{search_q.lower()}%")))
+            if _ARABIC_SCRIPT_RE.search(search_q):
+                norm_q = _normalize_catalog_search_arabic(search_q)
+                if norm_q:
+                    yield ("ilike_plural_singular_arabic_norm", "search_ilike",
+                           like(_catalog_title_arabic_norm_expr(Product.title).like(f"%{norm_q}%")))
+
+    def search_product_candidates(self, query: str, limit: int) -> CatalogCandidates:
+        """Every product ``search_products`` would match, as ordered ids, up to ``limit``.
+
+        The same strategy, the same predicate and the same total order as the
+        row search, read one further than asked so the answer can say whether
+        anything lies beyond. The membership is the search's own: orderable
+        products and the non-orderable ones ``include_non_orderable_facts``
+        also returns, since the model-visible result carries both.
+        """
+        q_clean = (query or "").strip()
+        bound = max(1, int(limit))
+        if not q_clean:
+            return CatalogCandidates(product_ids=(), method="", exhausted=True)
+        for method, _source, match in self._search_steps(q_clean):
+            ids = match(bound + 1, True)
+            if ids:
+                return CatalogCandidates(product_ids=tuple(ids[:bound]), method=method,
+                                         exhausted=len(ids) <= bound)
+        return CatalogCandidates(product_ids=(), method="", exhausted=True)
 
     def get_by_external_id(self, ext_id: str) -> Optional[Dict]:
         p = (
@@ -555,15 +577,65 @@ class CatalogContextBuilder:
         )
         return self._format(p) if p else None
 
-    def get_top_products(self, limit: int = 25) -> List[Dict]:
-        """Return top **orderable** products."""
+    def get_by_ids(self, product_ids: List[int]) -> Dict[int, Dict]:
+        """``get_by_id`` for several products in two statements, keyed by id.
+
+        Tenant-scoped exactly as ``get_by_id`` is, and formatted by the same
+        ``_format``. The variants every row needs are loaded with the rows
+        rather than one product at a time. An id this tenant does not hold is
+        simply absent from the result: never another tenant's row, never a
+        guess.
+        """
+        from sqlalchemy.orm import selectinload  # noqa: PLC0415
+
+        wanted: List[int] = []
+        for value in product_ids or ():
+            try:
+                pid = int(value)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and pid not in wanted:
+                wanted.append(pid)
+        if not wanted:
+            return {}
         rows = (
             self.db.query(Product)
-            .filter_by(tenant_id=self.tenant_id)
-            .order_by(Product.in_stock.desc(), Product.id)
-            .limit(limit + 20)  # fetch extra to compensate for filtered-out rows
+            .options(selectinload(Product.variants))
+            .filter(Product.tenant_id == self.tenant_id, Product.id.in_(wanted))
             .all()
         )
+        return {int(p.id): self._format(p) for p in rows}
+
+    def _top_rows(self, window: int, *, with_variants: bool = False) -> List[Product]:
+        """The general browse's rows, in its total order, up to ``window``."""
+        query = self.db.query(Product).filter_by(tenant_id=self.tenant_id)
+        if with_variants:
+            from sqlalchemy.orm import selectinload  # noqa: PLC0415
+
+            query = query.options(selectinload(Product.variants))
+        return query.order_by(*self._canonical_order()).limit(window).all()
+
+    def top_product_candidates(self, limit: int) -> CatalogCandidates:
+        """The products a general browse offers, as ordered ids, and whether that is all.
+
+        The browse offers only orderable products (``get_top_products``), and
+        orderability is decided by ``_format`` from a product's variants and
+        metadata rather than by a column, so the read formats a bounded window
+        of rows in the browse's own order. Exhaustion is proven only when the
+        window held every product this tenant has: a window cut short by its
+        own bound may have orderable products beyond it, and says so.
+        """
+        bound = max(1, int(limit))
+        window = bound + 1 + TOP_CANDIDATE_SLACK
+        rows = self._top_rows(window, with_variants=True)
+        ids = [int(p.id) for p in rows if self._format(p)["can_checkout"]]
+        read_everything = len(rows) < window
+        return CatalogCandidates(product_ids=tuple(ids[:bound]), method="top",
+                                 exhausted=read_everything and len(ids) <= bound)
+
+    def get_top_products(self, limit: int = 25) -> List[Dict]:
+        """Return top **orderable** products."""
+        rows = self._top_rows(limit + 20)  # fetch extra to compensate for filtered-out rows
         _raw_count = len(rows)
         _results = self._filter_orderable(rows, source="top_products")[:limit]
         _unsynced = sum(

@@ -1,0 +1,756 @@
+"""A search with more matches than one list shows, paged end to end — on real PostgreSQL.
+
+Every case runs the real ``run_commerce_runtime_turn``: real admission and
+ownership, the real agent loop and Anthropic adapter, the real trusted read
+context over the merchant's own rows, the real catalogue search, the real
+delivery ledger, and the real navigation store at revision ``0113``. Replies are
+persisted through the pilot service's own ``_record``, so a later tap is
+verified against exactly what production would have stored. Only two things
+are doubles: the Anthropic HTTP call and the WhatsApp transport.
+
+The scripted model is deliberately literal: it reads the search result it was
+actually shown and names what it saw — which is how these cases prove the model
+never saw more than five products, never named a product it was not shown, and
+never handled an offset, an order or a token.
+
+What is proven
+==============
+* one real search with more than ten matches opens page one: nine rows and a
+  "More" row, while the model received at most five products;
+* "More" continues the same stored order — no search runs, no statement touches
+  the catalogue's search predicates — through the final page, every product
+  exactly once, in order;
+* page boundaries at 10, 11, 23 and above the platform's cap of 50, where the
+  last page says the list does not hold every match and offers no "More";
+* a catalogue that changes between pages changes what rows say, never which
+  products a page holds;
+* every refusal — forged, replayed, expired, another conversation's, another
+  tenant's — is named to the model and becomes no page, no search, no product
+  selection;
+* a verified tap on a row the platform composed resolves and becomes a Card;
+* a focused answer, a comparison, and a selector without the model's words are
+  never expanded into the catalogue;
+* a token that cannot be spent with the reply leaves the page as lines and
+  mints nothing.
+
+Merchant-agnostic: a general store selling shirts, shoes, perfume, bags and
+watches, with generic customers.
+"""
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import json
+import uuid
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+import pytest
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import sessionmaker
+
+from core.commerce_runtime import agent_contracts as ac
+from core.commerce_runtime import agent_provider as ap
+from core.commerce_runtime import browse as br
+from core.commerce_runtime import delivery_dispatch as dd
+from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import navigation as nav
+from core.commerce_runtime import navigation_models as nm
+from core.commerce_runtime import reply_card as rcard
+from core.commerce_runtime import reply_choices as rc
+from core.commerce_runtime import runtime_entry as entry
+from core.commerce_runtime.ledgers import LedgerRepository
+from tests.commerce_reliability.test_commerce_runtime_foundation_pg import (
+    _alembic,
+    _create_database,
+    _drop_database,
+)
+
+PHONE = "+966500000321"
+MODEL = "model-configured-for-this-pilot"
+BUTTON = "Options"          # the model's words, in whatever language the customer used
+MORE = "See more"
+
+# One distinct search term per catalogue shape, so each case controls its count.
+SHIRTS, SHOES, PERFUME, BAGS, WATCHES = "قميص", "حذاء", "عطر", "حقيبة", "ساعة"
+COUNTS = {SHIRTS: 23, SHOES: 10, PERFUME: 55, BAGS: 11, WATCHES: 5}
+TITLES = {SHIRTS: "قميص قطني أزرق", SHOES: "حذاء رياضي أبيض", PERFUME: "عطر ورد 100ml",
+          BAGS: "حقيبة جلد بنية", WATCHES: "ساعة يد فضية"}
+
+
+# ── Doubles ──────────────────────────────────────────────────────────────────
+
+
+def _step(blocks: List[Dict[str, Any]], *, stop_reason: str = "tool_use") -> Dict[str, Any]:
+    return {"provider": "anthropic", "model": "scripted-model", "status": "ok",
+            "stop_reason": stop_reason, "blocks": blocks,
+            "usage": {"input_tokens": 100, "output_tokens": 20}, "request_id": "req"}
+
+
+def _tool_use(call_id: str, name: str, **arguments: Any) -> Dict[str, Any]:
+    return {"type": "tool_use", "id": call_id, "name": name, "input": dict(arguments)}
+
+
+def _reply(text_body: str, *, refs: Sequence[str] = (), commerce: bool = False,
+           choices: Optional[Dict[str, Any]] = None, card: Optional[Dict[str, Any]] = None,
+           call_id: str = "reply") -> Dict[str, Any]:
+    arguments: Dict[str, Any] = {"text": text_body, "evidence_refs": list(refs),
+                                 "claims_commerce_facts": commerce}
+    if choices is not None:
+        arguments["choices"] = choices
+    if card is not None:
+        arguments["card"] = card
+    return {"type": "tool_use", "id": call_id, "name": ap.REPLY_TOOL_NAME, "input": arguments}
+
+
+def _last_search_result(messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The search result the model was shown, exactly as the adapter serialised it."""
+    for message in reversed(list(messages)):
+        for block in reversed(list(message.get("content") or [])):
+            if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                payload = json.loads(block["content"])
+                if payload.get("tool") == "search_products":
+                    return payload
+    raise AssertionError("the model was never shown a search result")
+
+
+class LiteralModel:
+    """Stands in for the HTTP call. Names only what the model was actually shown.
+
+    ``browse(query, ...)`` searches, then offers a selector over exactly the
+    products the search result carried. ``answer()`` replies with text alone.
+    ``each_call`` runs before every step, for a case that changes the world
+    while the model is thinking.
+    """
+
+    def __init__(self, script: Callable[[int, Sequence[Mapping[str, Any]]], Dict[str, Any]],
+                 each_call: Optional[Callable[[], None]] = None) -> None:
+        self._script = script
+        self._each_call = each_call
+        self.calls: List[Dict[str, Any]] = []
+
+    def call_single_step(self, **kwargs: Any) -> Dict[str, Any]:
+        self.calls.append(kwargs)
+        if self._each_call is not None:
+            self._each_call()
+        return self._script(len(self.calls), kwargs["messages"])
+
+    # what the model was shown -------------------------------------------
+    def search_result(self) -> Dict[str, Any]:
+        return _last_search_result(self.calls[-1]["messages"])
+
+    def context_block(self) -> str:
+        return self.calls[0]["messages"][-1]["content"][0]["text"] \
+            if self.calls[0]["messages"][-1]["content"][0]["text"].startswith("<conversation_context>") \
+            else next(block["text"] for message in self.calls[0]["messages"]
+                      for block in message["content"]
+                      if isinstance(block, Mapping) and str(block.get("text", "")).startswith(
+                          "<conversation_context>"))
+
+    def declared(self, name: str) -> Mapping[str, Any]:
+        return next(tool for tool in self.calls[0]["tools"] if tool["name"] == name)
+
+
+def browse(query: str, *, pick: Optional[int] = None, more: Optional[str] = MORE,
+           button: Optional[str] = BUTTON) -> LiteralModel:
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("call_search_1", "search_products", query=query)])
+        shown = _last_search_result(messages)["result"]["products"]
+        ids = [int(p["product_id"]) for p in shown][:pick]
+        choices: Dict[str, Any] = {"product_ids": ids}
+        if button is not None:
+            choices["button"] = button
+        if more is not None:
+            choices["more_label"] = more
+        return _step([_reply("These are some of the options.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in ids],
+                             choices=choices)])
+    return LiteralModel(script)
+
+
+def answer(text_body: str = "Here you go.", **extra: Any) -> LiteralModel:
+    return LiteralModel(lambda _call, _messages: _step([_reply(text_body, **extra)]))
+
+
+@dataclasses.dataclass
+class Transport:
+    """Accepts every send and remembers it, like a provider that said yes."""
+
+    sent: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+
+    def __call__(self, payload: Mapping[str, Any]) -> lc.SendResponse:
+        self.sent.append(dict(payload))
+        return lc.SendResponse(http_status=200,
+                               body={"messages": [{"id": f"wamid.{uuid.uuid4().hex}"}]})
+
+
+class _Trace:
+    def mark_outbound_sent(self, **_kw: Any) -> None:
+        return None
+
+
+# ── Harness ──────────────────────────────────────────────────────────────────
+
+
+@dataclasses.dataclass
+class Shop:
+    engine: Any
+    session_factory: Any
+    tenant_a: int
+    tenant_b: int
+    connection_a: int
+    connection_b: int
+    customer_a: int
+    customer_b: int
+    products: Dict[str, List[int]]           # tenant A's products per search term, in id order
+
+    def conversation(self, *, tenant: Optional[int] = None) -> int:
+        tenant = tenant or self.tenant_a
+        customer = self.customer_a if tenant == self.tenant_a else self.customer_b
+        with self.engine.begin() as conn:
+            return int(conn.execute(text(
+                "INSERT INTO conversations (tenant_id, customer_id, external_id, status) "
+                "VALUES (:t, :c, :e, 'active') RETURNING id"),
+                {"t": tenant, "c": customer, "e": PHONE}).scalar_one())
+
+    def turn(self, conversation: int, model: LiteralModel, *, question: str = "Show me",
+             metadata: Optional[Dict[str, Any]] = None, tenant: Optional[int] = None,
+             statements: Optional[List[str]] = None) -> Tuple[entry.TurnReport, Transport]:
+        """One real turn, then its reply persisted the way the pilot persists it."""
+        tenant = tenant or self.tenant_a
+        connection = self.connection_a if tenant == self.tenant_a else self.connection_b
+        customer = self.customer_a if tenant == self.tenant_a else self.customer_b
+        transport = Transport()
+        with _capture(self.engine, statements):
+            report = entry.run_commerce_runtime_turn(
+                engine=self.engine, session_factory=self.session_factory, tenant_id=tenant,
+                conversation_id=conversation, connection_ref=f"wa:{connection}",
+                connection_id=str(connection), customer_id=customer,
+                normalized_customer_phone=PHONE,
+                provider_message_id="wamid.in." + uuid.uuid4().hex,
+                inbound_text=question, inbound_metadata=dict(metadata or {}),
+                transport=transport, instructions="EXISTING-INSTRUCTIONS", model=MODEL,
+                budget=ac.LoopBudget(max_steps=3, max_tool_calls=4, tool_timeout_seconds=10.0,
+                                     provider_timeout_seconds=15.0, deadline_seconds=45.0),
+                context_preamble={"channel": "whatsapp"}, anthropic_provider=model)
+        assert report.dispatch_status == dd.SENT_ACCEPTED, report
+        self._record(conversation, tenant, report, transport)
+        return report, transport
+
+    def _record(self, conversation: int, tenant: int, report: entry.TurnReport,
+                transport: Transport) -> None:
+        from services import commerce_runtime_pilot as pilot
+
+        wire = pilot.WireObservation()
+        rows, _button = rc.payload_rows(transport.sent[-1])
+        wire.record(str(transport.sent[-1].get("text") or ""), [], duplicate_suppressed=False,
+                    row_ids=[str(row["id"]) for row in rows])
+        db = self.session_factory()
+        try:
+            convo = db.execute(text("SELECT id FROM conversations WHERE id = :c"),
+                               {"c": conversation}).first()
+            pilot._record(db=db, trace=_Trace(), convo=convo, tenant_id=tenant, to=PHONE,
+                          report=report, wire=wire)
+            db.commit()
+        finally:
+            db.close()
+
+    def token_row(self, token: str) -> Dict[str, Any]:
+        with self.engine.connect() as conn:
+            row = conn.execute(text(f"SELECT * FROM {nm.NAVIGATION_TABLE} WHERE token = :t"),
+                               {"t": token}).mappings().first()
+        return dict(row) if row else {}
+
+    def tokens_for(self, conversation: int) -> int:
+        with self.engine.connect() as conn:
+            return int(conn.execute(text(
+                f"SELECT count(*) FROM {nm.NAVIGATION_TABLE} n "
+                "JOIN commerce_runtime_conversations c ON c.id = n.conversation_id "
+                "WHERE c.conversation_ref = :r"),
+                {"r": f"wa:conversation:{conversation}"}).scalar())
+
+
+@contextlib.contextmanager
+def _capture(engine: Any, statements: Optional[List[str]]) -> Iterator[None]:
+    if statements is None:
+        yield
+        return
+
+    def listen(_conn, _cursor, statement, _params, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", listen)
+    try:
+        yield
+    finally:
+        event.remove(engine, "before_cursor_execute", listen)
+
+
+def _seed(engine: Any) -> Shop:
+    with engine.begin() as conn:
+        def tenant(label: str) -> int:
+            return int(conn.execute(text(
+                "INSERT INTO tenants (name, is_active, is_platform_tenant) "
+                "VALUES (:n, true, false) RETURNING id"),
+                {"n": f"متجر تجريبي عام {label} {uuid.uuid4().hex[:8]}"}).scalar_one())
+
+        tenant_a, tenant_b = tenant("أ"), tenant("ب")
+
+        def connection(tenant_id: int, number: str) -> int:
+            return int(conn.execute(text(
+                "INSERT INTO whatsapp_connections (tenant_id, phone_number_id, status) "
+                "VALUES (:t, :p, 'connected') RETURNING id"), {"t": tenant_id, "p": number}
+            ).scalar_one())
+
+        def customer(tenant_id: int, name: str) -> int:
+            return int(conn.execute(text(
+                "INSERT INTO customers (tenant_id, phone, normalized_phone, name) "
+                "VALUES (:t, :p, :p, :n) RETURNING id"), {"t": tenant_id, "p": PHONE, "n": name}
+            ).scalar_one())
+
+        connection_a, connection_b = connection(tenant_a, "1555000321"), connection(tenant_b, "1555000322")
+        customer_a, customer_b = customer(tenant_a, "نورة عبدالله"), customer(tenant_b, "أحمد سالم")
+
+        def product(tenant_id: int, title: str, price: int) -> int:
+            ref = uuid.uuid4().hex[:10]
+            return int(conn.execute(text(
+                "INSERT INTO products (tenant_id, external_id, title, description, price, in_stock, "
+                "stock_quantity, metadata) VALUES (:t, :x, :ti, :d, :p, true, 5, CAST(:m AS JSONB)) "
+                "RETURNING id"),
+                {"t": tenant_id, "x": "SKU-" + ref, "ti": title, "d": "منتج عام", "p": price,
+                 "m": json.dumps({"image_url": f"https://cdn.example.test/{ref}.jpg",
+                                  "product_url": f"https://shop.example.test/p/{ref}"})}
+            ).scalar_one())
+
+        products: Dict[str, List[int]] = {}
+        for term, count in COUNTS.items():
+            # Interleave the other tenant's identical products so ids are not a
+            # contiguous run a test could accidentally lean on.
+            ids = []
+            for n in range(count):
+                ids.append(product(tenant_a, f"{TITLES[term]} {n + 1}", 100 + n))
+                if n % 4 == 0:
+                    product(tenant_b, f"{TITLES[term]} {n + 1}", 100 + n)
+            products[term] = ids
+    return Shop(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
+                tenant_a=tenant_a, tenant_b=tenant_b, connection_a=connection_a,
+                connection_b=connection_b, customer_a=customer_a, customer_b=customer_b,
+                products=products)
+
+
+@pytest.fixture(scope="module")
+def shop(pg_admin_dsn: str) -> Iterator[Shop]:
+    name, dsn = _create_database(pg_admin_dsn)
+    engine = create_engine(dsn, future=True)
+    try:
+        _alembic(dsn, "0111")
+        _alembic(dsn, "0113")
+        entry.reset_schema_probe()
+        nav.reset_schema_probe()
+        yield _seed(engine)
+    finally:
+        entry.reset_schema_probe()
+        nav.reset_schema_probe()
+        engine.dispose()
+        _drop_database(pg_admin_dsn, name)
+
+
+def _rows(payload: Mapping[str, Any]) -> Tuple[List[int], Optional[Dict[str, Any]], str]:
+    """Product ids, the "More" row if any, and the button, as the wire received them."""
+    rows, button = rc.payload_rows(payload)
+    products = [rc.product_id_from_row_id(row["id"]) for row in rows
+                if rc.product_id_from_row_id(row["id"]) is not None]
+    more = [row for row in rows if nav.token_from_row_id(row["id"]) is not None]
+    assert len(more) <= 1
+    return products, (more[0] if more else None), button
+
+
+def _tap_more(shop: Shop, conversation: int, more_row: Mapping[str, Any], *,
+              statements: Optional[List[str]] = None,
+              model: Optional[LiteralModel] = None) -> Tuple[entry.TurnReport, Transport, LiteralModel]:
+    model = model or answer()
+    report, transport = shop.turn(
+        conversation, model, question=str(more_row["title"]), statements=statements,
+        metadata={"list_reply_id": more_row["id"], "list_reply_title": more_row["title"]})
+    return report, transport, model
+
+
+def _searched(statements: Sequence[str]) -> List[str]:
+    """Statements that ran a catalogue search predicate."""
+    return [s for s in statements
+            if "to_tsvector" in s or "plainto_tsquery" in s
+            or ("products.title" in s.lower() and "like" in s.lower())]
+
+
+def _facts(model: LiteralModel) -> Dict[str, Any]:
+    block = model.context_block()
+    body = json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+    return body
+
+
+# ── Page one ─────────────────────────────────────────────────────────────────
+
+
+def test_one_search_with_more_than_ten_matches_opens_page_one(shop: Shop):
+    conversation = shop.conversation()
+    model = browse(SHIRTS)
+    report, transport = shop.turn(conversation, model)
+    ids = shop.products[SHIRTS]
+
+    # The model saw a bounded window, and was told only that more exist.
+    shown = model.search_result()["result"]
+    assert len(shown["products"]) <= 5
+    assert shown["more_results"] is True
+    everything_the_model_read = json.dumps([call["messages"] for call in model.calls])
+    for hidden in ids[5:]:
+        assert f'"product_id": {hidden}' not in everything_the_model_read
+    assert "more_label" in model.declared(ap.REPLY_TOOL_NAME)["input_schema"]["properties"][
+        "choices"]["properties"]
+
+    products, more, button = _rows(transport.sent[0])
+    assert products == ids[:9], "page one is the search's head, in its order"
+    assert more is not None and more["title"] == MORE and button == BUTTON
+    assert report.browse_outcome == br.OPENED and report.choice_rows == 9
+    assert report.navigation_page == 1 and report.navigation_has_next is True
+    stored = shop.token_row(nav.token_from_row_id(more["id"]))
+    assert stored["product_ids"] == ids and stored["complete"] is True
+    assert stored["page_offset"] == 9 and stored["consumed_at"] is None
+    assert stored["minted_by_turn_id"] == report.turn_id == stored["origin_turn_id"]
+    assert stored["origin_call_id"] == "call_search_1"
+    assert stored["more_label"] == MORE and stored["button_label"] == BUTTON
+    # The model's text is carried untouched; the rows are the platform's.
+    assert transport.sent[0]["text"] == "These are some of the options."
+
+
+def test_more_continues_the_same_snapshot_without_another_search(shop: Shop):
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    seen: List[int] = list(_products)
+    pages = 1
+    tokens: List[str] = []
+    while more is not None:
+        statements: List[str] = []
+        tokens.append(nav.token_from_row_id(more["id"]))
+        report, transport, model = _tap_more(shop, conversation, more, statements=statements)
+        pages += 1
+        assert _searched(statements) == [], "a page must never search again"
+        assert report.tools_called == (), "the model was asked for nothing"
+        facts = _facts(model)[br.FACTS_KEY]
+        assert facts["status"] == nav.RESOLVED and facts["page_number"] == pages
+        products, more, button = _rows(transport.sent[0])
+        assert button == BUTTON, "later pages carry the model's own words"
+        assert facts["products_on_this_page"] == len(products)
+        seen.extend(products)
+        assert report.browse_outcome == br.PAGE
+        # The tapped token was spent by exactly this turn's reply.
+        assert shop.token_row(tokens[-1])["consumed_by_turn_id"] == report.turn_id
+    assert seen == ids, "every match exactly once, in the order the search found them"
+    assert pages == 3
+
+
+@pytest.mark.parametrize("term,pages,sizes", [
+    (SHOES, 1, [10]),          # ten fit one list: nothing is stored
+    (BAGS, 2, [9, 2]),         # eleven: the first boundary
+    (SHIRTS, 3, [9, 9, 5]),
+    (PERFUME, 6, [9, 9, 9, 9, 9, 5]),   # fifty-five: above the cap of fifty
+])
+def test_page_boundaries_and_the_cap(shop: Shop, term, pages, sizes):
+    conversation = shop.conversation()
+    ids = shop.products[term]
+    before = shop.tokens_for(conversation)
+    report, transport = shop.turn(conversation, browse(term))
+    products, more, _button = _rows(transport.sent[0])
+    walked = [products]
+    last_model: Optional[LiteralModel] = None
+    while more is not None:
+        _report, transport, last_model = _tap_more(shop, conversation, more)
+        products, more, _button = _rows(transport.sent[0])
+        walked.append(products)
+    assert [len(page) for page in walked] == sizes
+    flat = [pid for page in walked for pid in page]
+    assert flat == ids[:50] and len(set(flat)) == len(flat)
+    if term == SHOES:
+        assert report.browse_outcome == br.WHOLE and shop.tokens_for(conversation) == before
+    if term == PERFUME:
+        # Fifty stored of fifty-five: the last page says so and offers no "More".
+        facts = _facts(last_model)[br.FACTS_KEY]
+        assert facts["more_matches_than_the_list_holds"] is True
+        assert facts["more_pages_after_this"] is False
+        assert shop.products[PERFUME][50] not in flat
+
+
+def test_a_search_the_model_saw_whole_is_not_expanded(shop: Shop):
+    conversation = shop.conversation()
+    model = browse(WATCHES)
+    report, transport = shop.turn(conversation, model)
+    assert model.search_result()["result"]["more_results"] is False
+    products, more, _button = _rows(transport.sent[0])
+    assert products == shop.products[WATCHES] and more is None
+    # Declined, and saying why: the reply offers exactly what the model named.
+    assert report.browse_outcome == br.NOTHING_MORE and report.choices_outcome == rc.OFFERED
+
+
+# ── The catalogue changes between pages ──────────────────────────────────────
+
+
+def test_a_catalogue_that_moves_changes_what_rows_say_never_which_products_a_page_holds(shop: Shop):
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    removed, repriced = ids[10], ids[12]
+    with shop.engine.begin() as conn:
+        conn.execute(text("UPDATE products SET tenant_id = :b WHERE id = :p"),
+                     {"b": shop.tenant_b, "p": removed})       # gone from this merchant
+        conn.execute(text("UPDATE products SET price = 777 WHERE id = :p"), {"p": repriced})
+        newcomer = int(conn.execute(text(
+            "INSERT INTO products (tenant_id, external_id, title, description, price, in_stock, "
+            "stock_quantity) VALUES (:t, 'SKU-NEW', 'قميص قطني جديد', 'جديد', 50, true, 5) "
+            "RETURNING id"), {"t": shop.tenant_a}).scalar_one())
+    try:
+        report, transport, model = _tap_more(shop, conversation, more)
+        products, more, _button = _rows(transport.sent[0])
+        assert products == [pid for pid in ids[9:18] if pid != removed]
+        assert newcomer not in products, "a page never grows a product the search did not find"
+        facts = _facts(model)[br.FACTS_KEY]
+        assert facts["no_longer_available"] == 1 and facts["products_on_this_page"] == 8
+        repriced_row = next(row for row in rc.payload_rows(transport.sent[0])[0]
+                            if row["id"] == rc.row_id(repriced))
+        assert "777" in repriced_row.get("description", "") + repriced_row["title"]
+        navigation = transport.sent[0][rc.CHOICES_KEY][rc.NAVIGATION_KEY]
+        assert navigation["unavailable"] == 1 and navigation["page"] == 2
+        _report, transport, _model = _tap_more(shop, conversation, more)
+        assert _rows(transport.sent[0])[0] == ids[18:23], "the next page did not move"
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET tenant_id = :a WHERE id = :p"),
+                         {"a": shop.tenant_a, "p": removed})
+            conn.execute(text("UPDATE products SET price = 112 WHERE id = :p"), {"p": repriced})
+            conn.execute(text("DELETE FROM products WHERE id = :p"), {"p": newcomer})
+
+
+# ── Refusals ─────────────────────────────────────────────────────────────────
+
+
+def _assert_refused(report: entry.TurnReport, transport: Transport, model: LiteralModel,
+                    statements: Sequence[str], status: str) -> None:
+    assert report.navigation_tap == status
+    assert _facts(model)[br.FACTS_KEY] == {"navigation": "next_page_of_an_earlier_list",
+                                           "status": status}
+    assert "customer_tapped" not in model.context_block()
+    assert _searched(statements) == [] and report.tools_called == ()
+    assert transport.sent[0].get(rc.CHOICES_KEY) is None
+    assert report.delivery_kind == lc.DeliveryKind.TEXT.value
+
+
+def test_a_forged_token_opens_nothing(shop: Shop):
+    conversation = shop.conversation()
+    statements: List[str] = []
+    report, transport, model = _tap_more(
+        shop, conversation, {"id": nav.row_id(nav.new_token()), "title": MORE},
+        statements=statements)
+    _assert_refused(report, transport, model, statements, nav.NOT_FOUND)
+
+
+def test_a_replayed_token_opens_nothing(shop: Shop):
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    _tap_more(shop, conversation, more)
+    statements: List[str] = []
+    report, transport, model = _tap_more(shop, conversation, more, statements=statements)
+    _assert_refused(report, transport, model, statements, nav.REPLAYED)
+
+
+def test_an_expired_token_opens_nothing(shop: Shop):
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    with shop.engine.begin() as conn:
+        conn.execute(text(f"UPDATE {nm.NAVIGATION_TABLE} SET expires_at = now() - interval "
+                          "'1 minute' WHERE token = :t"), {"t": nav.token_from_row_id(more["id"])})
+    statements: List[str] = []
+    report, transport, model = _tap_more(shop, conversation, more, statements=statements)
+    _assert_refused(report, transport, model, statements, nav.EXPIRED)
+    assert shop.token_row(nav.token_from_row_id(more["id"]))["consumed_at"] is None
+
+
+def test_another_conversations_token_opens_nothing_here_and_stays_theirs(shop: Shop):
+    theirs, ours = shop.conversation(), shop.conversation()
+    _report, first = shop.turn(theirs, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    statements: List[str] = []
+    report, transport, model = _tap_more(shop, ours, more, statements=statements)
+    _assert_refused(report, transport, model, statements, nav.NOT_FOUND)
+    _report, transport, _model = _tap_more(shop, theirs, more)
+    assert _rows(transport.sent[0])[0] == shop.products[BAGS][9:11]
+
+
+def test_another_tenants_token_opens_nothing_here(shop: Shop):
+    ours = shop.conversation()
+    _report, first = shop.turn(ours, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    theirs = shop.conversation(tenant=shop.tenant_b)
+    statements: List[str] = []
+    model = answer()
+    report, transport = shop.turn(
+        theirs, model, tenant=shop.tenant_b, statements=statements, question=MORE,
+        metadata={"list_reply_id": more["id"], "list_reply_title": MORE})
+    _assert_refused(report, transport, model, statements, nav.NOT_FOUND)
+    assert shop.token_row(nav.token_from_row_id(more["id"]))["consumed_at"] is None
+
+
+def test_a_product_row_id_is_never_read_as_navigation_and_the_reverse(shop: Shop):
+    assert nav.token_from_row_id(rc.row_id(shop.products[SHIRTS][0])) is None
+    assert rc.product_id_from_row_id(nav.row_id(nav.new_token())) is None
+
+
+# ── Taps, focus and precedence ───────────────────────────────────────────────
+
+
+def test_a_tap_on_a_row_the_platform_composed_becomes_a_card(shop: Shop):
+    """Row seven of page one was never shown to the model and never cited.
+
+    It was sent, so it verifies — re-read now — and the platform's own read
+    makes the Card, with the model's button word.
+    """
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    products, _more, _button = _rows(first.sent[0])
+    seventh = products[6]
+    model = answer("Here it is.", card={"button_label": "View"})
+    report, transport = shop.turn(
+        conversation, model, question="row seven",
+        metadata={"list_reply_id": rc.row_id(seventh), "list_reply_title": "row seven"})
+    assert f'"product_id": {seventh}' in model.context_block()
+    card = rcard.payload_card(transport.sent[0])
+    assert card is not None and card["product_id"] == seventh and card["button_label"] == "View"
+    assert report.navigation_tap is None
+
+
+def test_a_tap_on_a_second_page_row_becomes_a_card(shop: Shop):
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    _report, second, _model = _tap_more(shop, conversation, more)
+    page_two, _more, _button = _rows(second.sent[0])
+    model = answer("Here it is.", card={"button_label": "View"})
+    _report, transport = shop.turn(
+        conversation, model, question="that one",
+        metadata={"list_reply_id": rc.row_id(page_two[3]), "list_reply_title": "that one"})
+    assert rcard.payload_card(transport.sent[0])["product_id"] == page_two[3]
+
+
+def test_a_focused_product_stays_a_card_and_opens_no_browse(shop: Shop):
+    conversation = shop.conversation()
+    before = shop.tokens_for(conversation)
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        first = _last_search_result(messages)["result"]["products"][0]["product_id"]
+        if call == 2:
+            return _step([_tool_use("d1", "get_product_details", product_id=first)])
+        return _step([_reply("This one.", commerce=True, refs=[f"catalog:product:{first}"],
+                             card={"product_id": first, "button_label": "View"})])
+
+    _report, transport = shop.turn(conversation, LiteralModel(script))
+    assert rcard.payload_card(transport.sent[0]) is not None
+    assert transport.sent[0].get(rc.CHOICES_KEY) is None
+    assert shop.tokens_for(conversation) == before
+
+
+def test_a_comparison_without_the_models_word_is_exactly_what_it_named(shop: Shop):
+    conversation = shop.conversation()
+    before = shop.tokens_for(conversation)
+    report, transport = shop.turn(conversation, browse(SHIRTS, pick=2, more=None))
+    products, more, _button = _rows(transport.sent[0])
+    assert products == shop.products[SHIRTS][:2] and more is None
+    assert report.browse_outcome == br.NOT_ASKED and shop.tokens_for(conversation) == before
+
+
+def test_a_browse_without_a_button_word_is_not_opened(shop: Shop):
+    """The platform composes no list whose button would fall back to a fixed phrase."""
+    conversation = shop.conversation()
+    report, transport = shop.turn(conversation, browse(SHIRTS, button=None))
+    products, more, _button = _rows(transport.sent[0])
+    assert more is None and len(products) <= 5
+    assert report.browse_outcome == br.NO_BUTTON_WORD
+
+
+def test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page(shop: Shop):
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    watches = shop.products[WATCHES]
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=WATCHES)])
+        return _step([_reply("Also these.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in watches[:2]],
+                             choices={"product_ids": watches[:2], "button": BUTTON})])
+
+    report, transport, _model = _tap_more(shop, conversation, more, model=LiteralModel(script))
+    products, _more, _button = _rows(transport.sent[0])
+    assert products == shop.products[BAGS][9:11], "the tapped page is the answer's shape"
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+    assert TITLES[WATCHES] in transport.sent[0]["text"], "its options follow the text as lines"
+
+
+def test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_nothing(shop: Shop):
+    """The token expires while the model is answering.
+
+    The reservation's spend is refused, nothing it would have written is
+    written, and the answer is reserved again without the list: the page's
+    products follow the text as lines.
+    """
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    _products, more, _button = _rows(first.sent[0])
+    token = nav.token_from_row_id(more["id"])
+
+    def expire() -> None:
+        with shop.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {nm.NAVIGATION_TABLE} SET expires_at = now() - interval "
+                              "'1 second' WHERE token = :t"), {"t": token})
+
+    rows_before = shop.tokens_for(conversation)
+    model = LiteralModel(lambda _c, _m: _step([_reply("More options:")]), each_call=expire)
+    report, transport, _model = _tap_more(shop, conversation, more, model=model)
+    assert transport.sent[0].get(rc.CHOICES_KEY) is None
+    assert transport.sent[0][rc.WITHHELD_KEY] == br.PAGE_AS_LINES
+    assert TITLES[SHIRTS] in transport.sent[0]["text"]
+    assert shop.token_row(token)["consumed_at"] is None
+    assert shop.tokens_for(conversation) == rows_before, "no successor was minted"
+    assert report.browse_outcome == br.PAGE_AS_LINES
+
+
+# ── Off where the relation is absent ─────────────────────────────────────────
+
+
+def test_without_the_relation_the_turn_is_exactly_what_it_was(pg_admin_dsn: str):
+    """At 0111 alone: no candidate read, no more_results, no more_label, no token."""
+    name, dsn = _create_database(pg_admin_dsn)
+    engine = create_engine(dsn, future=True)
+    try:
+        _alembic(dsn, "0111")
+        entry.reset_schema_probe()
+        nav.reset_schema_probe()
+        dormant = _seed(engine)
+        model = browse(SHIRTS)
+        report, transport = dormant.turn(dormant.conversation(), model)
+        assert "more_results" not in model.search_result()["result"]
+        assert "more_label" not in model.declared(ap.REPLY_TOOL_NAME)["input_schema"][
+            "properties"]["choices"]["properties"]
+        assert "more_results" not in model.declared("search_products")["description"]
+        products, more, _button = _rows(transport.sent[0])
+        # Paging is off: no browse runtime exists, so nothing is even declined.
+        assert more is None and len(products) == 5 and report.browse_outcome is None
+    finally:
+        entry.reset_schema_probe()
+        nav.reset_schema_probe()
+        engine.dispose()
+        _drop_database(pg_admin_dsn, name)

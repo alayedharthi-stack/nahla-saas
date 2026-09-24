@@ -381,6 +381,19 @@ def _still_in_catalog(db: Any, *, tenant_id: int, product_ids: Sequence[int]) ->
     return out
 
 
+def product_still_in_catalog(db: Any, *, tenant_id: int, product_id: int) -> Optional[ShownProduct]:
+    """One product, re-read in the tenant's catalogue now, or ``None``.
+
+    For a row this conversation offered that no reply cited — a row the
+    platform composed on a page of a browse. Being offered as a row is what
+    makes a tap on it verifiable; this is the same re-read the cited products
+    get, so a product the merchant removed, or one that was never this
+    tenant's, still resolves to nothing.
+    """
+    found = _still_in_catalog(db, tenant_id=int(tenant_id), product_ids=[int(product_id)])
+    return found[0] if found else None
+
+
 def _scalar(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -392,5 +405,5 @@ __all__ = [
     "BROWSING_CONTEXT_LAPSE_SECONDS", "CARD_PRODUCT_ID_KEY", "CHOICE_ROW_IDS_KEY", "CARRIED",
     "PROVIDER_MESSAGE_ID_KEY", "LAPSED", "MAX_PRODUCTS", "MAX_REPLIES_READ",
     "NO_EARLIER_REPLY", "NO_PRODUCTS_CITED", "PRODUCT_REF_PREFIX", "ShownProduct",
-    "ShownProducts", "UNAVAILABLE", "products_shown_earlier",
+    "ShownProducts", "UNAVAILABLE", "product_still_in_catalog", "products_shown_earlier",
 ]

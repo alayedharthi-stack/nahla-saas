@@ -1,19 +1,36 @@
-"""The parts of paging that need no database, and the line it must not cross.
+"""The parts of paging that need no database, and the lines it must not cross.
 
-The durable half — single use, expiry, scope, races, cleanup — is proven against
-real PostgreSQL in ``tests/commerce_reliability/test_commerce_runtime_navigation_pg.py``,
-because it is the database that makes those guarantees. What is here is
-everything a store cannot help with: the two row namespaces staying disjoint,
-and a paged list refusing to exist unless every part of it is real.
+The durable half — single use, expiry, scope, races, cleanup, the migration —
+is proven against real PostgreSQL in
+``tests/commerce_reliability/test_commerce_runtime_navigation_pg.py``, and the
+whole flow through the real runtime in
+``tests/commerce_reliability/test_commerce_runtime_pagination_pg.py``. What is
+here is everything a store cannot help with:
+
+* the page arithmetic partitions any result, with no page over ten rows;
+* the typed search contract refuses every way it could be misused, and never
+  reaches the model — not in a result, not in a checkpoint, not in a digest;
+* a database without revision 0113 offers the model byte-for-byte the
+  declarations it offered before;
+* a browse opens only when the model gave both its words over products of one
+  search that has more, and never expands a focused answer;
+* the two row namespaces stay disjoint, and a "More" row is never an option;
+* cleanup has a registered owner.
 
 Merchant-agnostic: products are opaque integers, and rotating generic categories
 where a title is needed at all.
 """
 from __future__ import annotations
 
+import ast
+import dataclasses
+import json
 import sys
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in [str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database")]:
@@ -21,144 +38,429 @@ for _p in [str(REPO_ROOT), str(REPO_ROOT / "backend"), str(REPO_ROOT / "database
         sys.path.insert(0, _p)
 
 from core.commerce_runtime import agent_contracts as ac  # noqa: E402
+from core.commerce_runtime import agent_live_tools as alt  # noqa: E402
+from core.commerce_runtime import agent_loop as al  # noqa: E402
+from core.commerce_runtime import agent_provider as ap  # noqa: E402
+from core.commerce_runtime import agent_tools as at  # noqa: E402
+from core.commerce_runtime import browse as br  # noqa: E402
+from core.commerce_runtime import choice_rows as cr  # noqa: E402
+from core.commerce_runtime import contracts as c  # noqa: E402
 from core.commerce_runtime import navigation as nav  # noqa: E402
 from core.commerce_runtime import navigation_models as nm  # noqa: E402
+from core.commerce_runtime import presentation_policy as pp  # noqa: E402
 from core.commerce_runtime import reply_choices as rc  # noqa: E402
+from core.commerce_runtime import search_candidates as sc  # noqa: E402
 
 TITLES = ("قميص قطني أزرق", "حذاء رياضي أبيض", "عطر ورد 100ml", "حزام جلد بني",
           "ساعة يد كلاسيكية", "نظارة شمسية", "حقيبة كتف", "وشاح صوف", "قبعة صيفية",
           "معطف خفيف", "سترة رياضية", "جوارب قطنية")
+TENANT, CONVERSATION, TURN = 7, 70, 700
+SCOPE = at.ToolScope(tenant_id=TENANT, namespace="live", conversation_id=CONVERSATION, turn_id=TURN)
 
 
 def product(product_id: int) -> Dict[str, Any]:
-    return {"product_id": product_id, "title": TITLES[product_id % len(TITLES)],
-            "price": "100.00", "currency": "SAR",
+    return {"product_id": product_id, "title": f"{TITLES[product_id % len(TITLES)]} {product_id}",
+            "price": str(100 + product_id), "currency": "SAR",
             "evidence_ref": rc.product_ref(product_id)}
 
 
-def observed(product_ids: Sequence[int]) -> List[ac.ToolObservation]:
-    rows = [product(i) for i in product_ids]
-    return [ac.ToolObservation(call_id="m1", tool_name="search_products", ok=True,
-                               result={"status": "ok", "found": True, "products": rows},
-                               error_code=None, error=None,
-                               evidence_refs=tuple(rc.product_ref(i) for i in product_ids))]
+def candidates(ids: Sequence[int], window: Sequence[int], *, complete: bool = True,
+               **scope: Any) -> sc.SearchCandidates:
+    bound = {"tenant_id": TENANT, "namespace": "live", "conversation_id": CONVERSATION,
+             "turn_id": TURN, **scope}
+    return sc.SearchCandidates(query_digest=sc.query_digest("q"), method="fts",
+                               product_ids=tuple(ids), complete=complete,
+                               window_ids=tuple(window), **bound)
 
 
-def draft(product_ids: Sequence[int], *, more_label: str = "المزيد",
-          button: str = "اختر") -> ac.ReplyDraft:
-    request: Dict[str, Any] = {"product_ids": list(product_ids), "button": button}
-    if more_label:
-        request["more_label"] = more_label
-    return ac.ReplyDraft(text="عندنا أكثر من خيار:",
-                         evidence_refs=tuple(rc.product_ref(i) for i in product_ids),
+def search(window: Sequence[int], platform: Any, *, call_id: str = "s1",
+           tool: str = "search_products") -> ac.ToolObservation:
+    rows = [product(i) for i in window]
+    return ac.ToolObservation(call_id=call_id, tool_name=tool, ok=True,
+                              result={"status": "ok", "found": True, "products": rows},
+                              error_code=None, error=None,
+                              evidence_refs=tuple(r["evidence_ref"] for r in rows),
+                              platform=platform)
+
+
+def draft(ids: Sequence[int], *, more: Optional[str] = "More", button: Optional[str] = "Pick",
+          text: str = "Some options.") -> ac.ReplyDraft:
+    request: Dict[str, Any] = {"product_ids": list(ids)}
+    if more is not None:
+        request["more_label"] = more
+    if button is not None:
+        request["button"] = button
+    return ac.ReplyDraft(text=text, evidence_refs=tuple(rc.product_ref(i) for i in ids),
                          claims_commerce_facts=True, payload={rc.REQUESTED_KEY: request})
 
 
-class FakePage:
-    """What ``navigation.open_browse`` hands back, without a database."""
+@dataclasses.dataclass
+class Reader:
+    """A stand-in for the trusted catalogue read, recording what it was asked."""
 
-    def __init__(self, product_ids: Sequence[int], next_token: str) -> None:
-        self.product_ids = tuple(product_ids)
-        self.next_token = next_token
+    gone: Sequence[int] = ()
+    fail: bool = False
+    asked: List[List[int]] = dataclasses.field(default_factory=list)
 
-    @property
-    def has_next(self) -> bool:
-        return bool(self.next_token)
+    def __call__(self, scope: Any, ids: Sequence[int], wait: float) -> alt.ListRowsRead:
+        self.asked.append(list(ids))
+        if self.fail:
+            return alt.ListRowsRead(ok=False, error="timeout")
+        return alt.ListRowsRead(ok=True, products=tuple(product(i) for i in ids if i not in self.gone),
+                                missing=tuple(i for i in ids if i in self.gone))
 
 
-# ── The two namespaces are disjoint ──────────────────────────────────────────
+def runtime(reader: Reader) -> br.BrowseRuntime:
+    return br.BrowseRuntime(read_rows=reader, search_tool_names=("search_products",))
 
-def test_a_page_token_is_never_read_as_a_product() -> None:
+
+def listed(selection: rc.ChoiceSelection) -> List[int]:
+    return [rc.product_id_from_row_id(row["id"]) for row in selection.rows
+            if rc.product_id_from_row_id(row["id"]) is not None]
+
+
+def more_rows(selection: rc.ChoiceSelection) -> List[Mapping[str, Any]]:
+    return [row for row in selection.rows if nav.is_navigation_row(dict(row))]
+
+
+# ── Page arithmetic ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("total", list(range(0, 61)))
+def test_the_pages_of_any_result_partition_it_with_no_page_over_ten(total):
+    offset, pages, seen = 0, [], []
+    while True:
+        bounds = nav.page_bounds(total, offset)
+        if bounds.start >= bounds.end:
+            break
+        size = bounds.end - bounds.start
+        rows = size + (1 if bounds.has_next else 0)
+        assert rows <= nm.MAX_ROWS
+        assert size == nm.PAGE_SIZE if bounds.has_next else size <= nm.MAX_ROWS
+        assert bounds.number == len(pages) + 1
+        pages.append(size)
+        seen.extend(range(bounds.start, bounds.end))
+        if not bounds.has_next:
+            break
+        offset = bounds.end
+    assert seen == list(range(total)), "every position exactly once, in order"
+    if 0 < total <= 10:
+        assert pages == [total]
+
+
+def test_the_boundaries_named_in_the_assignment():
+    assert [nav.page_bounds(10, 0).has_next, nav.page_bounds(11, 0).has_next] == [False, True]
+    assert nav.page_bounds(11, 9) == nav.PageBounds(start=9, end=11, has_next=False)
+    assert nav.page_bounds(19, 9) == nav.PageBounds(start=9, end=19, has_next=False)
+    assert nav.page_bounds(20, 9) == nav.PageBounds(start=9, end=18, has_next=True)
+
+
+# ── Row namespaces ───────────────────────────────────────────────────────────
+
+
+def test_the_two_row_namespaces_are_disjoint():
     token = nav.new_token()
     assert rc.product_id_from_row_id(nav.row_id(token)) is None
+    assert nav.token_from_row_id(rc.row_id(42)) is None
+    assert nav.token_from_row_id(nm.NAVIGATION_ROW_PREFIX) is None
+    assert nav.token_from_row_id(nm.NAVIGATION_ROW_PREFIX + "x" * 65) is None
+    assert nav.token_from_row_id(nav.row_id(token)) == token
 
 
-def test_a_product_row_is_never_read_as_a_page_token() -> None:
-    assert nav.token_from_row_id(rc.row_id(7)) is None
+def test_a_more_row_is_never_carried_as_an_option_line():
+    payload = {"text": "Options:", rc.CHOICES_KEY: {
+        "rows": [{"id": rc.row_id(1), "title": "قميص قطني أزرق"},
+                 {"id": nav.row_id(nav.new_token()), "title": "More"}],
+        "product_ids": [1], "button": "Pick"}}
+    recovered = rc.text_only_payload(payload)
+    assert "قميص قطني أزرق" in recovered["text"] and "More" not in recovered["text"]
 
 
-def test_neither_resolver_is_fooled_by_a_bare_prefix_or_junk() -> None:
-    for junk in ("", "   ", nm.NAVIGATION_ROW_PREFIX, "nahla:more", "nahla:choice:", "42"):
-        assert nav.token_from_row_id(junk) is None, junk
+def test_a_numbered_label_on_a_later_page_states_its_place_in_the_browse():
+    alike = [{"product_id": i, "title": "فستان"} for i in range(1, 4)]
+    first = cr.choice_rows(alike)
+    later = cr.choice_rows(alike, start_position=10)
+    assert [row.title for row in first.rows] == ["فستان · 1", "فستان · 2", "فستان · 3"]
+    assert [row.title for row in later.rows] == ["فستان · 10", "فستان · 11", "فستان · 12"]
 
 
-def test_a_token_carries_no_catalogue_identity() -> None:
-    """Nothing about a token says which products it will show, so nothing can
-    be inferred from it and nothing forged by editing it."""
-    token = nav.new_token()
-    assert len(token) >= 24 and nav.new_token() != token
+# ── The typed search contract ────────────────────────────────────────────────
 
 
-# ── A paged list is all-or-nothing ───────────────────────────────────────────
-
-def test_nine_products_and_one_affordance_when_a_page_follows() -> None:
-    ids = list(range(1, 21))
-    page = FakePage(ids[:9], "tok-2")
-    chosen, reason = rc.selection(draft(ids), observed(ids), page=page)
-    assert reason == rc.PAGED and chosen is not None
-    rows = list(chosen.rows)
-    assert len(rows) == nm.MAX_ROWS
-    assert [r["id"] for r in rows[:9]] == [rc.row_id(i) for i in ids[:9]]
-    assert rows[-1] == {"id": nav.row_id("tok-2"), "title": "المزيد"}
-    # The affordance is not a product: it is not among the selection's ids, and
-    # it carries none of the merchant's values.
-    assert chosen.product_ids == tuple(ids[:9])
-    assert set(rows[-1]) == {"id", "title"}
+@pytest.mark.parametrize("bad", [
+    {"product_ids": (1, 1)}, {"product_ids": (True, 2)}, {"product_ids": (0,)},
+    {"product_ids": tuple(range(1, sc.CANDIDATE_CAP + 2))}, {"tenant_id": 0},
+    {"namespace": ""}, {"complete": "yes"}, {"window_ids": (3, 3)},
+])
+def test_the_contract_refuses_a_value_that_is_not_one(bad):
+    fields = {"tenant_id": TENANT, "namespace": "live", "conversation_id": CONVERSATION,
+              "turn_id": TURN, "query_digest": "d", "method": "fts",
+              "product_ids": (1, 2, 3), "complete": True, "window_ids": (1,)}
+    fields.update(bad)
+    with pytest.raises((ValueError, TypeError)):
+        sc.SearchCandidates(**fields)
 
 
-def test_without_a_word_for_the_affordance_there_is_no_paging() -> None:
-    """The same rule the card's button follows: customer-facing wording is the
-    model's, and the platform invents none. Without it the whole selector is
-    withheld and every option is carried as a line — today's behaviour."""
-    ids = list(range(1, 21))
-    _chosen, reason = rc.selection(draft(ids, more_label=""), observed(ids),
-                                   page=FakePage(ids[:9], "tok-2"))
-    assert reason == rc.TOO_MANY
+def _usable(obs: ac.ToolObservation) -> str:
+    return sc.from_observation(obs, tenant_id=TENANT, namespace="live",
+                               conversation_id=CONVERSATION, turn_id=TURN,
+                               search_tool_names=("search_products",))[1]
 
 
-def test_without_a_stored_continuation_there_is_no_paging() -> None:
-    ids = list(range(1, 21))
-    for page in (None, FakePage(ids[:9], "")):
-        _chosen, reason = rc.selection(draft(ids), observed(ids), page=page)
-        assert reason == rc.TOO_MANY
+def test_candidates_are_used_only_from_a_search_in_this_scope_that_agrees_with_its_window():
+    ids = list(range(1, 24))
+    good = search(ids[:5], candidates(ids, ids[:5]))
+    assert _usable(good) == sc.USABLE
+    assert _usable(search(ids[:5], candidates(ids, ids[:5]), tool="get_order_details")) == sc.NOT_A_SEARCH
+    assert _usable(dataclasses.replace(good, ok=False)) == sc.NOT_A_SEARCH
+    assert _usable(dataclasses.replace(good, body_truncated=True)) == sc.NOT_A_SEARCH
+    assert _usable(search(ids[:5], None)) == sc.NO_CANDIDATES
+    assert _usable(search(ids[:5], list(ids))) == sc.NO_CANDIDATES, "an untyped list is not a contract"
+    for other in ({"tenant_id": TENANT + 1}, {"conversation_id": CONVERSATION + 1},
+                  {"turn_id": TURN + 1}, {"namespace": "shadow"}):
+        assert _usable(search(ids[:5], candidates(ids, ids[:5], **other))) == sc.WRONG_SCOPE
+    # The model was shown products the stored result does not start with.
+    assert _usable(search(ids[5:10], candidates(ids, ids[5:10]))) == sc.WINDOW_NOT_PREFIX
+    assert _usable(search([99] + ids[:4], candidates(ids, ids[:5]))) == sc.WINDOW_NOT_PREFIX
 
 
-def test_a_page_naming_a_product_this_turn_did_not_read_is_refused() -> None:
-    """Nothing partial is shown and nothing is guessed."""
-    ids = list(range(1, 21))
-    stale = FakePage([*ids[:8], 999], "tok-2")
-    _chosen, reason = rc.selection(draft(ids), observed(ids), page=stale)
-    assert reason == rc.TOO_MANY
+def test_the_contract_never_reaches_the_model():
+    ids = list(range(1, 24))
+    obs = search(ids[:5], candidates(ids, ids[:5]))
+    session = al._Session(scope=al._Scope(TENANT, "live", CONVERSATION, TURN),
+                          token=c.OwnershipToken(owner_id="t", fence=1, epoch=1, tenant_id=TENANT,
+                                                 namespace="live", conversation_id=CONVERSATION),
+                          requested=ac.LoopBudget(), clock=time.monotonic)
+    session.observations = [obs]
+    shown = session.provider_observations()[0]
+    assert shown.platform is None
+    serialized = json.dumps([ap._observation_payload(shown),
+                             [cp.to_payload() for cp in ac.checkpoint_observations([obs])]])
+    for hidden in ids[5:]:
+        assert f'"product_id": {hidden}' not in serialized
+    assert ac.observation_digest(obs) == ac.observation_digest(dataclasses.replace(obs, platform=None))
+    assert all(restored.platform is None
+               for restored in (cp.restore() for cp in ac.checkpoint_observations([obs])))
 
 
-def test_a_list_that_fits_is_never_paged() -> None:
-    ids = list(range(1, 6))
-    chosen, reason = rc.selection(draft(ids), observed(ids), page=FakePage(ids, "tok-2"))
-    assert reason == rc.OFFERED and chosen is not None
-    assert [r["id"] for r in chosen.rows] == [rc.row_id(i) for i in ids]
-    assert not any(str(r["id"]).startswith(nm.NAVIGATION_ROW_PREFIX) for r in chosen.rows)
+# ── Dormant without revision 0113 ────────────────────────────────────────────
 
 
-def test_the_withheld_options_still_reach_the_customer_as_lines() -> None:
-    """Whatever stops paging, no option the model meant to offer is lost."""
-    ids = list(range(1, 21))
-    final, reason = rc.finalize(draft(ids, more_label=""), observed(ids))
-    assert reason == rc.TOO_MANY and rc.payload_rows(final.payload)[0] == []
-    for i in ids:
-        assert product(i)["title"] in final.text
+def test_without_paging_the_reply_declaration_is_byte_for_byte_what_it_was():
+    assert ap.reply_tool_schema(paging=False) is ap.REPLY_TOOL_SCHEMA
+    assert "more_label" not in json.dumps(ap.REPLY_TOOL_SCHEMA)
+    with_paging = ap.reply_tool_schema(paging=True)
+    assert with_paging["properties"]["choices"]["properties"]["more_label"] == ap.MORE_LABEL_PROPERTY
+    assert "more_label" not in json.dumps(ap.REPLY_TOOL_SCHEMA), "the shared schema was mutated"
 
 
-# ── The ordering the store is handed ─────────────────────────────────────────
+def test_without_paging_the_search_declaration_is_what_it_was():
+    class _Link:
+        tenant_id, namespace, runtime_conversation_id = TENANT, "live", CONVERSATION
 
-def test_the_browse_order_is_the_callers_and_is_never_re_sorted() -> None:
-    assert nav._clean_ids([9, 3, 7, 3, 1]) == (9, 3, 7, 1)
+    off = {t.definition.name: t.definition.description
+           for t in alt.build_live_tools(alt.LiveToolBinding(context=None, link=_Link()))}
+    on = {t.definition.name: t.definition.description
+          for t in alt.build_live_tools(alt.LiveToolBinding(context=None, link=_Link(),
+                                                            paging_available=True))}
+    declared = {name: description for name, description, *_ in alt._DECLARATIONS}
+    assert off == declared
+    assert on[alt.SEARCH_TOOL_NAME] == declared[alt.SEARCH_TOOL_NAME] + alt.SEARCH_PAGING_NOTE
+    assert {k: v for k, v in on.items() if k != alt.SEARCH_TOOL_NAME} == \
+        {k: v for k, v in declared.items() if k != alt.SEARCH_TOOL_NAME}
 
 
-def test_unusable_identities_are_dropped_rather_than_guessed() -> None:
-    assert nav._clean_ids([1, 0, -4, None, "x", True, 2.0, 2]) == (1, 2)
+def test_the_models_more_word_is_carried_as_a_request_and_bounded():
+    request = ap._requested_choices({"product_ids": [1, 2], "button": "Pick",
+                                     "more_label": "  " + "See more " * 6})
+    assert request[rc.REQUESTED_KEY]["more_label"] == ("See more " * 6).strip()[:rc.MAX_ROW_TITLE]
+    assert "more_label" not in ap._requested_choices({"product_ids": [1]})[rc.REQUESTED_KEY]
 
 
-def test_a_more_label_longer_than_the_row_renders_is_bounded() -> None:
-    long_word = "م" * 80
-    bounded = rc.requested_more_label(draft([1, 2], more_label=long_word))
-    assert len(bounded) == rc.MAX_ROW_TITLE
+# ── Opening a browse ─────────────────────────────────────────────────────────
+
+
+def test_page_one_is_the_stored_head_and_the_platform_hydrates_only_what_the_model_did_not_see():
+    ids = list(range(101, 124))
+    reader = Reader()
+    composed, reason = br.open_browse(draft(ids[:5]), [search(ids[:5], candidates(ids, ids[:5]))],
+                                      scope=SCOPE, runtime=runtime(reader), timeout_seconds=5)
+    assert reason == br.OPENED and composed is not None
+    assert listed(composed.selection) == ids[:9]
+    assert reader.asked == [ids[5:9]]
+    (more,) = more_rows(composed.selection)
+    assert more["title"] == "More" and composed.selection.button == "Pick"
+    mint = composed.plan.mint
+    assert mint.product_ids == tuple(ids) and mint.page_offset == 9 and not composed.plan.spend
+    assert nav.token_from_row_id(more["id"]) == mint.token
+    assert mint.origin_call_id == "s1" and mint.origin_turn_id == TURN
+    assert composed.navigation == {"page": 1, "offset": 0, "shown": 9, "unavailable": 0,
+                                   "has_next": True, "complete": True, "stored": 23}
+
+
+def test_a_result_that_fits_one_list_is_offered_whole_and_stores_nothing():
+    ids = list(range(1, 11))
+    composed, reason = br.open_browse(draft(ids[:5]), [search(ids[:5], candidates(ids, ids[:5]))],
+                                      scope=SCOPE, runtime=runtime(Reader()), timeout_seconds=5)
+    assert reason == br.WHOLE and listed(composed.selection) == ids
+    assert not more_rows(composed.selection) and not composed.plan
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("no_more_word", br.NOT_ASKED),
+    ("no_button_word", br.NO_BUTTON_WORD),
+    ("two_searches", br.NO_CONTINUATION),
+    ("other_scope", br.NO_CONTINUATION),
+    ("nothing_more", br.NOTHING_MORE),
+    ("catalogue_unreadable", br.ROWS_UNAVAILABLE),
+])
+def test_a_browse_is_not_opened_unless_every_part_of_it_is_real(case, expected):
+    ids = list(range(201, 230))
+    obs = [search(ids[:5], candidates(ids, ids[:5]))]
+    request = draft(ids[:5])
+    reader = Reader()
+    if case == "no_more_word":
+        request = draft(ids[:5], more=None)
+    elif case == "no_button_word":
+        request = draft(ids[:5], button=None)
+    elif case == "two_searches":
+        others = list(range(301, 330))
+        obs.append(search(others[:5], candidates(others, others[:5]), call_id="s2"))
+        request = draft(ids[:3] + others[:2])
+    elif case == "other_scope":
+        obs = [search(ids[:5], candidates(ids, ids[:5], conversation_id=CONVERSATION + 1))]
+    elif case == "nothing_more":
+        obs = [search(ids[:5], candidates(ids[:5], ids[:5]))]
+    elif case == "catalogue_unreadable":
+        reader = Reader(fail=True)
+    composed, reason = br.open_browse(request, obs, scope=SCOPE, runtime=runtime(reader),
+                                      timeout_seconds=5)
+    assert composed is None and reason == expected
+
+
+def test_a_capped_result_is_never_called_complete():
+    ids = list(range(401, 451))
+    composed, _reason = br.open_browse(
+        draft(ids[:5]), [search(ids[:5], candidates(ids, ids[:5], complete=False))],
+        scope=SCOPE, runtime=runtime(Reader()), timeout_seconds=5)
+    assert composed.plan.mint.complete is False and composed.navigation["complete"] is False
+    # Even a capped result whose stored part is all visible extends beyond it.
+    assert candidates(ids[:5], ids[:5], complete=False).extends_beyond_window
+
+
+def test_a_product_gone_since_the_search_is_counted_never_replaced():
+    ids = list(range(501, 530))
+    composed, _reason = br.open_browse(draft(ids[:5]), [search(ids[:5], candidates(ids, ids[:5]))],
+                                       scope=SCOPE, runtime=runtime(Reader(gone=[ids[7]])),
+                                       timeout_seconds=5)
+    assert listed(composed.selection) == [pid for pid in ids[:9] if pid != ids[7]]
+    assert composed.navigation["unavailable"] == 1
+    assert composed.plan.mint.page_offset == 9, "the boundary does not move for a missing product"
+
+
+# ── Continuing a browse ──────────────────────────────────────────────────────
+
+
+def _continuation(ids: Sequence[int], offset: int, *, complete: bool = True) -> nav.Continuation:
+    return nav.Continuation(status=nav.RESOLVED, token="tapped", series="series-1",
+                            product_ids=tuple(ids), page_offset=offset, complete=complete,
+                            more_label="More", button_label="Pick", origin_turn_id=1,
+                            origin_call_id="s1", search_method="fts", query_digest="d")
+
+
+def test_a_later_page_spends_the_tapped_token_and_mints_the_next_in_the_same_series():
+    ids = list(range(601, 631))
+    page, facts = br.resolve_tap(peek=lambda: _continuation(ids, 9), read_rows=Reader(gone=[ids[12]]),
+                                 scope=SCOPE, timeout_seconds=5)
+    assert facts == {"navigation": "next_page_of_an_earlier_list", "status": nav.RESOLVED,
+                     "page_number": 2, "products_on_this_page": 8, "no_longer_available": 1,
+                     "more_pages_after_this": True, "more_matches_than_the_list_holds": False}
+    composed = br.continue_browse(page)
+    assert listed(composed.selection) == [pid for pid in ids[9:18] if pid != ids[12]]
+    assert composed.plan.spend == "tapped"
+    assert composed.plan.mint.series == "series-1" and composed.plan.mint.page_offset == 18
+    (more,) = more_rows(composed.selection)
+    assert more["title"] == "More" and composed.selection.button == "Pick"
+
+
+def test_the_final_page_offers_no_more_and_a_capped_one_says_so():
+    ids = list(range(701, 751))
+    page, facts = br.resolve_tap(peek=lambda: _continuation(ids, 45, complete=False),
+                                 read_rows=Reader(), scope=SCOPE, timeout_seconds=5)
+    composed = br.continue_browse(page)
+    assert listed(composed.selection) == ids[45:] and not more_rows(composed.selection)
+    assert composed.plan.mint is None and composed.plan.spend == "tapped"
+    assert facts["more_pages_after_this"] is False
+    assert facts["more_matches_than_the_list_holds"] is True
+
+
+@pytest.mark.parametrize("status", [nav.NOT_FOUND, nav.REPLAYED, nav.EXPIRED, nav.UNAVAILABLE])
+def test_a_refused_tap_is_a_named_fact_and_no_page_and_reads_nothing(status):
+    reader = Reader()
+    page, facts = br.resolve_tap(peek=lambda: nav.Continuation(status=status), read_rows=reader,
+                                 scope=SCOPE, timeout_seconds=5)
+    assert page is None and facts == br.refusal_facts(status) and reader.asked == []
+
+
+# ── Precedence ───────────────────────────────────────────────────────────────
+
+
+def _page() -> br.BrowsePage:
+    ids = list(range(801, 831))
+    return br.BrowsePage(continuation=_continuation(ids, 9),
+                         products=tuple(product(i) for i in ids[9:18]), missing=())
+
+
+def test_a_verified_more_tap_is_the_shape_and_a_requested_selector_stands_down():
+    shape = pp.decide(draft=draft([1, 2]), observations=(), definitions=(),
+                      presentation=pp.PresentationContext(browse_page=_page()))
+    assert (shape.kind, shape.reason, shape.withhold_selector) == (pp.SHAPE_LIST, pp.NAVIGATION_PAGE, True)
+    assert shape.determined_product_id is None, "navigation never selects a product"
+
+
+def test_a_product_tap_still_comes_first():
+    shape = pp.decide(draft=draft([1, 2]), observations=(), definitions=(),
+                      presentation=pp.PresentationContext(tapped_product_id=5,
+                                                          browse_page=_page()))
+    assert shape.reason == pp.TAP_SELECTED
+
+
+def test_without_a_browse_runtime_the_loop_shapes_exactly_as_before():
+    """A loop that was handed no browse runtime has no path to paging at all."""
+    assert al.AgentLoop._browse is None
+    ids = list(range(901, 930))
+    loop = al.AgentLoop.__new__(al.AgentLoop)
+    loop._registry = at.ToolRegistry(())
+    session = al._Session(scope=al._Scope(TENANT, "live", CONVERSATION, TURN),
+                          token=c.OwnershipToken(owner_id="t", fence=1, epoch=1, tenant_id=TENANT,
+                                                 namespace="live", conversation_id=CONVERSATION),
+                          requested=ac.LoopBudget(), clock=time.monotonic)
+    session.observations = [search(ids[:5], candidates(ids, ids[:5]))]
+    shaped = loop._shape_reply(draft(ids[:5]), SCOPE, session, None)
+    assert [rc.product_id_from_row_id(r["id"]) for r in shaped.payload[rc.CHOICES_KEY]["rows"]] == ids[:5]
+    assert not session.navigation_plan
+
+
+# ── Provenance and ownership of the substrate ────────────────────────────────
+
+
+def test_the_lifted_schema_comparison_is_0111s_own_but_for_the_foreign_key_fix():
+    """``runtime_schema_guarantees`` claims to be 0111's comparison, lifted, with
+    one correction. This pins that claim: every function they share is
+    identical, except the one the correction names."""
+    def functions(path: Path) -> Dict[str, str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        return {node.name: ast.unparse(node) for node in tree.body
+                if isinstance(node, ast.FunctionDef)}
+
+    applied = functions(REPO_ROOT / "database/migrations/versions/0111_commerce_runtime_handover.py")
+    lifted = functions(REPO_ROOT / "database/runtime_schema_guarantees.py")
+    differing = {name for name in set(applied) & set(lifted) if applied[name] != lifted[name]}
+    assert differing == {"_reference_guarantees"}
+    assert set(lifted) - set(applied) == {"_referred_tables"}
+
+
+def test_cleanup_has_an_owner_the_application_starts():
+    source = (REPO_ROOT / "backend/main.py").read_text(encoding="utf-8")
+    assert 'from core.commerce_runtime.navigation import run_navigation_sweep_scheduler' in source
+    assert '_start("commerce_runtime_navigation_sweep", _f_navigation_sweep' in source

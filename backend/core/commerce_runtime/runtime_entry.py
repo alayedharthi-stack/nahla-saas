@@ -33,10 +33,13 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_live_tools as alt
 from core.commerce_runtime import agent_provider as ap
+from core.commerce_runtime import agent_tools as at
+from core.commerce_runtime import browse as br
 from core.commerce_runtime import contracts as c
 from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import navigation as nav
 from core.commerce_runtime import recent_products as rp
 from core.commerce_runtime import presentation_policy as pp
 from core.commerce_runtime import reply_card as rcard
@@ -140,6 +143,14 @@ class TurnReport:
     # unreadable without a transcript.
     choices_outcome: Optional[str] = None     # reply_choices: offered, or the reason withheld
     card_outcome: Optional[str] = None        # reply_card: offered, or the reason withheld
+    # A paged list's own account: whether a browse was opened, continued or
+    # declined (and why), the page shown, and whether another follows. A "More"
+    # tap's outcome in the store is ``navigation_tap`` — resolved, or the
+    # refusal it met. None of these carries a token or a product value.
+    browse_outcome: Optional[str] = None
+    navigation_tap: Optional[str] = None
+    navigation_page: Optional[int] = None
+    navigation_has_next: Optional[bool] = None
     recovery_status: Optional[str] = None     # the bounded rich-to-text attempt, when one was made
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
@@ -315,9 +326,18 @@ def _with_products_shown_earlier(
         if shown.products:
             binding.context.authorize_products(shown.product_ids, titles=shown.titles)
             preamble["products_shown_earlier"] = shown.as_facts()
-        tapped = _tapped_product(inbound_metadata, shown)
+        tapped = _tapped_product(
+            inbound_metadata, shown,
+            reread=lambda product_id: rp.product_still_in_catalog(
+                session, tenant_id=int(tenant_id), product_id=int(product_id)))
         if tapped is not None:
             preamble["customer_tapped"] = tapped
+            # A row the platform composed on a page is tappable without ever
+            # having been cited, so its product may not be among those carried
+            # above. The platform's own read of it below needs the identity.
+            binding.context.authorize_products(
+                [int(tapped["product_id"])],
+                titles={int(tapped["product_id"]): str(tapped.get("title") or "")})
         presentation = pp.PresentationContext(
             tapped_product_id=(int(tapped.get("product_id")) if tapped else None),
             last_card_product_id=shown.last_card_product_id)
@@ -333,7 +353,7 @@ def _with_products_shown_earlier(
 
 
 def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
-                    shown: Any) -> Optional[Dict[str, Any]]:
+                    shown: Any, *, reread: Any = None) -> Optional[Dict[str, Any]]:
     """The product a tap on a selector row names, once it verifies.
 
     A row id arrives from the wire, so it is a claim and not a fact, and two
@@ -379,9 +399,66 @@ def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
     for product in getattr(shown, "products", ()) or ():
         if int(getattr(product, "product_id", 0)) == product_id:
             return product.as_fact()
+    # Offered as a row, but not among the products replies cited — a row the
+    # platform composed on a page of a browse. The row was sent, which is what
+    # a tap has to be checked against; the product is re-read now exactly as a
+    # cited one is, so a removed product still verifies as nothing.
+    if reread is not None:
+        product = reread(product_id)
+        if product is not None:
+            return product.as_fact()
     logger.info("[COMMERCE_RUNTIME] a tapped row named a product this conversation no longer "
                 "carries product_id=%s", product_id)
     return None
+
+
+def _browse_continuation(
+    binding: alt.LiveToolBinding,
+    engine: Any,
+    *,
+    tenant_id: int,
+    runtime_conversation_id: int,
+    turn_id: int,
+    inbound_metadata: Optional[Mapping[str, Any]],
+    paging: bool,
+    timeout_seconds: float,
+) -> Tuple[Optional[Dict[str, Any]], Optional[br.BrowsePage]]:
+    """What a "More" tap opens, read before the model runs — or why it opens nothing.
+
+    Only a row id in the navigation namespace is considered; a product row, a
+    title, or anything the customer typed is never read as one. The token is
+    looked up in the store inside this tenant, namespace and **runtime**
+    conversation, and the page it opens is read from the catalogue through
+    the trusted context. Nothing is spent here: the token is spent with the
+    reply that shows the page, or not at all.
+
+    Returns the facts the model is told — the refusal's name, or the page's
+    counts — and, when the page resolved, the page itself for the policy. Every
+    refusal is a fact and no page. It never becomes a search, a product
+    selection or a guess, and the turn is still answered.
+    """
+    metadata = inbound_metadata if isinstance(inbound_metadata, Mapping) else {}
+    token = nav.token_from_row_id(metadata.get("list_reply_id"))
+    if token is None:
+        return None, None
+    if not paging:
+        return br.refusal_facts(nav.UNAVAILABLE), None
+    scope = at.ToolScope(tenant_id=int(tenant_id), namespace=NAMESPACE,
+                         conversation_id=int(runtime_conversation_id), turn_id=int(turn_id))
+    try:
+        page, facts = br.resolve_tap(
+            peek=lambda: nav.peek(engine, token=token, tenant_id=int(tenant_id),
+                                  namespace=NAMESPACE,
+                                  conversation_id=int(runtime_conversation_id)),
+            read_rows=lambda s, ids, wait: alt.read_list_rows(binding, s, ids, timeout_seconds=wait),
+            scope=scope, timeout_seconds=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001 - a navigation that cannot be read is no page
+        logger.warning("[COMMERCE_RUNTIME] navigation tap unreadable turn=%s error=%s",
+                       turn_id, type(exc).__name__)
+        return br.refusal_facts(nav.UNAVAILABLE), None
+    logger.info("[COMMERCE_RUNTIME] navigation tap turn=%s status=%s page=%s", turn_id,
+                facts.get("status"), facts.get("page_number"))
+    return facts, page
 
 
 def _close_quietly(session: Any) -> None:
@@ -638,6 +715,21 @@ def run_commerce_runtime_turn(
             binding, session, tenant_id=int(tenant_id), conversation_id=int(conversation_id),
             turn_id=turn_id, context_preamble=context_preamble,
             inbound_metadata=inbound_metadata)
+        # Paging exists only where the navigation relation does (revision
+        # 0113). Without it nothing below reads a candidate, mentions more
+        # results, offers a "More" word or stores a token.
+        paging = nav.schema_available(engine)
+        binding.paging_available = paging
+        effective_budget = budget if budget is not None else ac.LoopBudget()
+        navigation_facts, browse_page = _browse_continuation(
+            binding, engine, tenant_id=int(tenant_id),
+            runtime_conversation_id=int(runtime_conversation_id), turn_id=int(turn_id),
+            inbound_metadata=inbound_metadata, paging=paging,
+            timeout_seconds=float(effective_budget.tool_timeout_seconds))
+        if navigation_facts is not None:
+            preamble[br.FACTS_KEY] = navigation_facts
+        if browse_page is not None:
+            presentation = dataclasses.replace(presentation, browse_page=browse_page)
         registry = alt.build_live_registry(binding)
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
@@ -651,8 +743,12 @@ def run_commerce_runtime_turn(
                            "model": requested_model},
             context_preamble=preamble,
             history=history,
+            paging=paging,
         )
-        loop = AgentLoop(ledgers, registry, budget=budget)
+        browse_runtime = (br.BrowseRuntime(
+            read_rows=lambda s, ids, wait: alt.read_list_rows(binding, s, ids, timeout_seconds=wait),
+            search_tool_names=(alt.SEARCH_TOOL_NAME,)) if paging else None)
+        loop = AgentLoop(ledgers, registry, budget=budget, browse=browse_runtime)
         outcome = loop.run_turn(
             tenant_id=tenant_id, namespace=NAMESPACE, conversation_id=runtime_conversation_id,
             turn_id=turn_id, token=token, provider=reasoner, presentation=presentation,
@@ -661,6 +757,8 @@ def run_commerce_runtime_turn(
                              runtime_conversation_id=runtime_conversation_id, token=token,
                              transport=transport, owner_id=owner_id, report_base=report_base,
                              reasoner=reasoner)
+        if navigation_facts is not None:
+            report = dataclasses.replace(report, navigation_tap=str(navigation_facts.get("status")))
     except Exception as exc:  # noqa: BLE001 - one turn's failure is never the worker's
         logger.exception("[COMMERCE_RUNTIME] turn failed turn=%s error=%s", turn_id,
                          type(exc).__name__)
@@ -711,6 +809,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         tools_called=tools_called,
         choices_outcome=str(accepted_detail.get("choices") or "") or None,
         card_outcome=str(accepted_detail.get("card") or "") or None,
+        browse_outcome=str(accepted_detail.get("browse") or "") or None,
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,
@@ -738,7 +837,14 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     common["reply_text"] = str(intent_payload.get("text") or "")
     common["delivery_kind"] = getattr(sequence, "intent_kind", None)
     offered_rows, _button = rc.payload_rows(intent_payload)
-    common["choice_rows"] = len(offered_rows)
+    # Products offered, not rows: a "More" row is how to reach more of them,
+    # and counting it as one would overstate what the customer can choose.
+    common["choice_rows"] = len([row for row in offered_rows if not nav.is_navigation_row(row)])
+    listed = (intent_payload.get(rc.CHOICES_KEY) or {}).get(rc.NAVIGATION_KEY) \
+        if isinstance(intent_payload.get(rc.CHOICES_KEY), Mapping) else None
+    if isinstance(listed, Mapping):
+        common["navigation_page"] = int(listed.get("page") or 0) or None
+        common["navigation_has_next"] = bool(listed.get("has_next"))
     common["choice_row_ids"] = tuple(str(row.get("id") or "") for row in offered_rows
                                      if row.get("id"))
     common["card_product_id"] = (rcard.payload_card(intent_payload) or {}).get("product_id")
