@@ -38,6 +38,7 @@ from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import recent_products as rp
+from core.commerce_runtime import presentation_policy as pp
 from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime.agent_loop import AgentLoop
@@ -126,6 +127,11 @@ class TurnReport:
     # is checked against. Empty when the list was withheld or refused: a row
     # nobody was sent is a row nobody can have tapped.
     choice_row_ids: Tuple[str, ...] = ()
+    # The product of the card that actually reached the customer, or ``None``.
+    # Set only from a send the provider accepted, because recent-card
+    # suppression is built on this and a suppression resting on an unsent
+    # payload would silence a card the customer never saw.
+    card_product_id: Optional[int] = None
     # Why the reply carried the shape it did. ``choice_rows=0`` on its own
     # cannot tell a model that never asked for a selector from one that asked
     # and had it withheld — for an unobserved product, a missing photo, a
@@ -280,7 +286,7 @@ def _with_products_shown_earlier(
     turn_id: int,
     context_preamble: Optional[Mapping[str, Any]],
     inbound_metadata: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], pp.PresentationContext]:
     """Carry this conversation's recently shown products into the turn.
 
     Two things happen together, and neither is useful alone: the products
@@ -293,8 +299,16 @@ def _with_products_shown_earlier(
     the same trusted-fact block the preamble already uses. No order is claimed;
     see ``recent_products`` for why. Never raises — a turn that cannot read its
     own earlier replies runs without the aid.
+
+    Two things come back, going to two different places. The **preamble** is
+    what the model is told. The **presentation context** is what the platform
+    keeps to itself: a verified row tap and the product of the card this
+    conversation last delivered. Those decide the reply's *shape* and must not
+    decide its wording, so they are deliberately not put in front of the model —
+    a fact about what the platform did last time is no business of the answer.
     """
     preamble: Dict[str, Any] = dict(context_preamble or {})
+    presentation = pp.PresentationContext()
     try:
         shown = rp.products_shown_earlier(
             session, tenant_id=int(tenant_id), conversation_id=int(conversation_id))
@@ -304,15 +318,18 @@ def _with_products_shown_earlier(
         tapped = _tapped_product(inbound_metadata, shown)
         if tapped is not None:
             preamble["customer_tapped"] = tapped
+        presentation = pp.PresentationContext(
+            tapped_product_id=(int(tapped.get("product_id")) if tapped else None),
+            last_card_product_id=shown.last_card_product_id)
     except Exception as exc:  # noqa: BLE001 - the aid is never the turn's precondition
         logger.warning("[COMMERCE_RUNTIME] browsing context unavailable turn=%s error=%s",
                        turn_id, type(exc).__name__)
-        return preamble
+        return preamble, presentation
     logger.info("[COMMERCE_RUNTIME] browsing context turn=%s reason=%s products=%d "
                 "seconds_since_last_product_shown=%s tapped=%s", turn_id, shown.reason,
                 len(shown.products), shown.seconds_since_last_product_shown,
                 (preamble.get("customer_tapped") or {}).get("product_id"))
-    return preamble
+    return preamble, presentation
 
 
 def _tapped_product(inbound_metadata: Optional[Mapping[str, Any]],
@@ -617,7 +634,7 @@ def run_commerce_runtime_turn(
         # bind to instead of a phrase to search for. Identity only: every fact
         # still has to be read by a tool in this turn and cited as this turn's
         # evidence. Inside the try, so the session below is always retired.
-        preamble = _with_products_shown_earlier(
+        preamble, presentation = _with_products_shown_earlier(
             binding, session, tenant_id=int(tenant_id), conversation_id=int(conversation_id),
             turn_id=turn_id, context_preamble=context_preamble,
             inbound_metadata=inbound_metadata)
@@ -638,7 +655,7 @@ def run_commerce_runtime_turn(
         loop = AgentLoop(ledgers, registry, budget=budget)
         outcome = loop.run_turn(
             tenant_id=tenant_id, namespace=NAMESPACE, conversation_id=runtime_conversation_id,
-            turn_id=turn_id, token=token, provider=reasoner,
+            turn_id=turn_id, token=token, provider=reasoner, presentation=presentation,
         )
         report = _after_loop(ledgers=ledgers, outcome=outcome, tenant_id=tenant_id,
                              runtime_conversation_id=runtime_conversation_id, token=token,
@@ -724,6 +741,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     common["choice_rows"] = len(offered_rows)
     common["choice_row_ids"] = tuple(str(row.get("id") or "") for row in offered_rows
                                      if row.get("id"))
+    common["card_product_id"] = (rcard.payload_card(intent_payload) or {}).get("product_id")
     dispatch = dd.dispatch_reserved_delivery(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE,
         conversation_id=runtime_conversation_id, token=token,
@@ -735,10 +753,12 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         transport=transport, owner_id=owner_id)
     if recovery is not None:
         common["recovery_status"] = recovery.status
-        # The recovery is the send that reached the customer, and it carried no
-        # rows. Reporting the withheld ones would let a later tap verify
-        # against a list nobody received.
+        # The recovery is the send that reached the customer, and it carried
+        # neither rows nor a card. Reporting the withheld ones would let a later
+        # tap verify against a list nobody received, and a later suppression
+        # rest on a card nobody saw.
         common["choice_row_ids"] = ()
+        common["card_product_id"] = None
         dispatch = recovery
     terminal = dd.complete_turn(
         ledgers=ledgers, tenant_id=tenant_id, namespace=NAMESPACE, turn_id=turn_id, token=token,
@@ -759,7 +779,7 @@ def _recover_without_the_selector(
     token: c.OwnershipToken, dispatch: dd.DispatchOutcome, sequence: Any,
     intent_payload: Mapping[str, Any], transport: dd.Transport, owner_id: str,
 ) -> Optional[dd.DispatchOutcome]:
-    """Send the answer without its selector when the rich send was refused.
+    """Send the answer without its rich shape when the rich send was refused.
 
     Only on a **proven** rejection of a rich message: an unknown send may
     already have reached the customer, and a second one would be a duplicate,
@@ -773,16 +793,23 @@ def _recover_without_the_selector(
     trust: the ledger re-reads the outcome, the attempt kind and the bound, and
     an accepted, unknown or already-recovered reservation permits nothing.
 
-    The reply itself is unchanged — same text, same evidence, no selector — so
-    a provider that will not render the rows costs the customer the tapping and
-    nothing else. A recovery that is itself refused leaves the first outcome
+    The reply itself is unchanged — same text, same evidence, no selector and
+    no card — so a provider that will not render the rows, or will not take the
+    image header, costs the customer the tapping and nothing else. A recovery that is itself refused leaves the first outcome
     standing rather than inventing a better one.
     """
     if dispatch.status != dd.SENT_REJECTED:
         return None
     if str(getattr(sequence, "intent_kind", "") or "") != lc.DeliveryKind.RICH.value:
         return None
+    # Whichever rich shape the provider refused is the one that has to go. A
+    # list is dropped to its options as lines; a card is dropped to the text it
+    # always carried. Re-sending the refused shape unchanged would be the same
+    # message twice, not a recovery — which is what happened when only the
+    # selector was stripped and a refused card went back out identical.
     payload = rc.text_only_payload(intent_payload)
+    if rcard.payload_card(payload) is not None:
+        payload = rcard.text_only_payload(payload)
     if not str(payload.get("text") or "").strip():
         return None
     recovery = dd.dispatch_delivery_recovery(
@@ -795,8 +822,8 @@ def _recover_without_the_selector(
         logger.info("[COMMERCE_RUNTIME] selector recovery not made sequence=%s reason=%s",
                     dispatch.sequence_id, recovery.blocked_reason)
         return None
-    logger.info("[COMMERCE_RUNTIME] the selector was refused; the same answer was sent as text "
-                "sequence=%s outcome=%s", dispatch.sequence_id, recovery.status)
+    logger.info("[COMMERCE_RUNTIME] the rich shape was refused; the same answer was sent as "
+                "text sequence=%s outcome=%s", dispatch.sequence_id, recovery.status)
     return recovery
 
 

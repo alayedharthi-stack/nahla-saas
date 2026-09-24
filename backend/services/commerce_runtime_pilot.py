@@ -1161,6 +1161,13 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                 # checked against these, so a reply that offered no list — or
                 # whose list the provider refused — leaves nothing tappable.
                 rp.CHOICE_ROW_IDS_KEY: list(wire.row_ids),
+                # The card this message actually delivered, for the same reason
+                # and with the same discipline: it is written only because this
+                # send was accepted and identified, so recent-card suppression
+                # rests on a card the customer saw rather than on one a payload
+                # once held. A reply that carried none stores nothing.
+                **({rp.CARD_PRODUCT_ID_KEY: int(report.card_product_id)}
+                   if report.card_product_id else {}),
             },
         )
     except Exception:  # noqa: BLE001 - the send already happened; persistence must not undo it

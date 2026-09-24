@@ -132,13 +132,24 @@ def _https(value: Any) -> str:
     return text if text.lower().startswith("https://") else ""
 
 
-def card(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ProductCard], str]:
+def card(draft: Any, observations: Sequence[Any], *,
+         determined_product_id: Optional[int] = None) -> Tuple[Optional[ProductCard], str]:
     """The card this draft may carry, and why there is none when there is not.
 
     Called after verification, so anything refused here is a display limit
     rather than a truth problem, and the model's text is never touched by it.
+
+    ``determined_product_id`` is the platform's own determination — a product
+    the presentation policy established from structured provenance, typically a
+    verified row tap it then read itself. It is deliberately a separate
+    argument from the model's request: what was asked for and what the platform
+    established are never the same field, here as everywhere else. Everything
+    the customer then sees is read from this turn's observations exactly as it
+    is for a requested card; only the *choice of product* has a different
+    author, and only the button word is sourced differently (below).
     """
-    product_id = requested_product_id(draft)
+    platform_determined = determined_product_id is not None
+    product_id = int(determined_product_id) if platform_determined else requested_product_id(draft)
     if product_id is None:
         return None, NOT_REQUESTED
     observed = rc.observed_products(observations)
@@ -154,8 +165,14 @@ def card(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ProductCard]
     if not button_url:
         return None, NO_LINK if not str(product.get("product_url") or "").strip() else INSECURE_LINK
     label = requested_label(draft)
-    if not label:
+    if not label and not platform_determined:
+        # A model that asked for a card chooses its own word; without one there
+        # is simply no card, because the platform supplies no phrase of its own.
         return None, NO_LABEL
+    # A platform-determined card was never offered a word, so none is invented
+    # here either: an empty label leaves the send path's existing ``display_text``
+    # in place, exactly as ``reply_choices`` leaves the list button to the
+    # channel sender. No customer-facing constant is introduced.
     return ProductCard(product_id=int(product_id),
                        image_url=image_url,
                        button_url=button_url,
@@ -175,9 +192,19 @@ def payload_card(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     button_url = _https(raw.get("button_url"))
     if not image_url or not button_url:
         return None
-    return {"image_url": image_url,
-            "button_url": button_url,
-            "button_label": str(raw.get("button_label") or "").strip()}
+    try:
+        product_id = int(raw.get("product_id") or 0)
+    except (TypeError, ValueError):
+        product_id = 0
+    card_view: Dict[str, Any] = {"image_url": image_url,
+                                 "button_url": button_url,
+                                 "button_label": str(raw.get("button_label") or "").strip()}
+    # The identity behind the card, when the stored payload carries one. A
+    # payload written by an older release does not, and its absence is simply
+    # an unknown identity — never a wrong one.
+    if product_id > 0:
+        card_view["product_id"] = product_id
+    return card_view
 
 
 
@@ -188,13 +215,20 @@ SELECTOR_PREFERRED = "selector_offered_instead"
 
 
 def finalize(draft: Any, observations: Sequence[Any], *,
-             selector_offered: bool) -> Tuple[Any, str]:
+             selector_offered: bool,
+             determined_product_id: Optional[int] = None) -> Tuple[Any, str]:
     """The draft as it will be delivered, with its card or without one.
 
     The model's text is never touched here. A card that cannot be offered is
     simply absent, and the reason rides on the delivered payload — the answer
     itself already stood on its own prose, which is why a card is an affordance
     over it rather than a part of it.
+
+    ``determined_product_id`` carries the presentation policy's own choice, for
+    the shapes the platform decides rather than the model — a verified row tap
+    above all. A determination is never silently dropped: when it cannot become
+    a card, the reason is recorded on the payload just as a refused request's
+    is, so a turn that failed closed says so.
     """
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
@@ -203,21 +237,45 @@ def finalize(draft: Any, observations: Sequence[Any], *,
                                for key, value in dict(getattr(draft, "payload", None) or {}).items()
                                if key != REQUESTED_KEY}
     asked = REQUESTED_KEY in (getattr(draft, "payload", None) or {})
+    determined = determined_product_id is not None
     if selector_offered:
-        if asked:
+        # A customer who still has to choose between products is not helped by
+        # one product's photo, whoever asked for the photo.
+        if asked or determined:
             payload[WITHHELD_KEY] = SELECTOR_PREFERRED
             return dataclasses.replace(draft, payload=ac.public_copy(payload)), SELECTOR_PREFERRED
         return draft, NOT_REQUESTED
 
-    composed, reason = card(draft, observations)
+    composed, reason = card(draft, observations, determined_product_id=determined_product_id)
     if composed is not None:
         payload[CARD_KEY] = composed.as_payload()
         return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value,
                                    payload=ac.public_copy(payload)), reason
-    if reason == NOT_REQUESTED and not asked:
+    if reason == NOT_REQUESTED and not asked and not determined:
         return draft, reason
     payload[WITHHELD_KEY] = reason
     return dataclasses.replace(draft, payload=ac.public_copy(payload)), reason
+
+
+def note_withheld(draft: Any, reason: str) -> Any:
+    """Record on the delivered payload why a card the platform meant to show is absent.
+
+    A determination that failed closed before a card could even be attempted —
+    the tapped product could not be read, or is no longer in the catalogue —
+    leaves no trace in ``card``'s own reasons, because ``card`` was never
+    reached with a product. Without this the turn would go out looking like one
+    that simply never wanted a card, which is a different fact about the
+    merchant's catalogue. The answer itself is untouched.
+    """
+    from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
+
+    if not reason:
+        return draft
+    payload: Dict[str, Any] = dict(getattr(draft, "payload", None) or {})
+    if CARD_KEY in payload:
+        return draft
+    payload[WITHHELD_KEY] = str(reason)
+    return dataclasses.replace(draft, payload=ac.public_copy(payload))
 
 
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -236,7 +294,7 @@ __all__ = [
     "CARD_KEY", "INSECURE_LINK", "MAX_BUTTON_LABEL", "NOT_OBSERVED", "NOT_REQUESTED",
     "NO_IMAGE", "NO_LABEL", "NO_LINK", "OFFERED", "REQUESTED_KEY", "WITHHELD_KEY",
     "SELECTOR_PREFERRED",
-    "ProductCard", "card", "finalize", "payload_card", "requested_label",
+    "ProductCard", "card", "finalize", "note_withheld", "payload_card", "requested_label",
     "requested_product_id", "text_only_payload",
     "unobserved_card",
 ]

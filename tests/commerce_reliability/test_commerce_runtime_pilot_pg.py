@@ -37,6 +37,7 @@ from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
 from core.commerce_runtime import recent_products as rp
+from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime import runtime_entry as entry
 from core.commerce_runtime.agent_loop import AgentLoop
@@ -2459,6 +2460,59 @@ def test_a_rejection_this_call_did_not_make_still_reaches_the_customer(pilot):
         # The late send still carries every option it was meant to offer.
         assert text_transport.sent[0]["text"].splitlines() == [
             "هذي الخيارات", "قميص قطني أزرق", "حذاء رياضي أبيض"]
+
+
+@contextlib.contextmanager
+def _card_reservation(pilot: "Pilot", body: str) -> Any:
+    """A reserved rich intent, as a turn that offered a product card leaves behind."""
+    reservation = pilot.reserve_reply(
+        body, kind=lc.DeliveryKind.RICH.value,
+        payload={rcard.CARD_KEY: {"product_id": 1,
+                                  "image_url": "https://cdn.example.test/generic/1.jpg",
+                                  "button_url": "https://demostore.example.test/p/1",
+                                  "button_label": "التفاصيل"}})
+    try:
+        yield reservation
+    finally:
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            dd.complete_turn(ledgers=pilot.ledgers, tenant_id=pilot.tenant_a,
+                             namespace=entry.NAMESPACE, turn_id=reservation.turn_id,
+                             token=token, processing_outcome=c.ProcessingOutcome.FAILED.value)
+
+
+def test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged(pilot):
+    """The recovery drops whichever rich shape the provider refused.
+
+    Stripping only the selector left a refused **card** payload untouched, so
+    the transport — which reads the shape off the payload — composed the very
+    same card again. That is the same message twice, not a recovery. The
+    customer's answer is the text, and the text is what goes out.
+    """
+    with _card_reservation(pilot, "الساعة متوفرة بسعر 540 ريال.") as reservation:
+        with pilot.owned(turn_id=reservation.turn_id) as token:
+            first = dd.dispatch_reserved_delivery(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE,
+                conversation_id=pilot.runtime_conversation_id, token=token,
+                sequence_id=reservation.sequence_id, transport=Transport([rejected()]),
+                recorded_by="pilot")
+            assert first.status == dd.SENT_REJECTED
+            sequence = pilot.ledgers.get_delivery_sequence(
+                tenant_id=pilot.tenant_a, namespace=entry.NAMESPACE, turn_id=reservation.turn_id)
+            text_transport = Transport([accepted("wamid.CARD_RECOVERED")])
+            recovery = entry._recover_without_the_selector(
+                ledgers=pilot.ledgers, tenant_id=pilot.tenant_a,
+                runtime_conversation_id=pilot.runtime_conversation_id, token=token,
+                dispatch=first, sequence=sequence,
+                intent_payload=dict(sequence.intent_payload or {}),
+                transport=text_transport, owner_id="pilot")
+        assert recovery is not None and recovery.status == dd.SENT_ACCEPTED
+        sent = text_transport.sent[0]
+        assert rcard.payload_card(sent) is None, "the refused card was sent again"
+        assert sent[rcard.WITHHELD_KEY] == "provider_rejected_the_card"
+        # Nothing of the answer was lost: the card carried no words of its own.
+        assert sent["text"] == "الساعة متوفرة بسعر 540 ريال."
+        assert [a.kind for a in pilot.attempts(reservation.turn_id)] == [
+            lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
 
 
 def test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller(pilot):

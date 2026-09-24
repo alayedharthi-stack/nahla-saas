@@ -287,3 +287,66 @@ def test_a_reply_that_offered_rows_without_a_message_id_joins_only_the_flat_set(
     result = shown(monkeypatch, [OfferedRow(["catalog:product:11"], [11])])
     assert result.offered_as_rows == (11,)
     assert result.offered_by_message == {}
+
+
+# ── The card this conversation actually delivered ────────────────────────────
+#
+# Recent-card suppression rests on this and on nothing else, so the readback has
+# to distinguish "a card reached the customer" from "a reply once held one".
+
+
+class DeliveredCard(Row):
+    """An outbound reply whose card the provider accepted and identified.
+
+    The send path writes this key only after ``report.replied`` — an accepted
+    send with a provider message id — so a row carrying it is evidence the card
+    was really put on the wire.
+    """
+
+    def __init__(self, refs: Any, card_product_id: Any, *, hours_ago: float = 1.0) -> None:
+        super().__init__(refs, hours_ago=hours_ago)
+        self.extra_metadata = {**(self.extra_metadata or {}),
+                               rp.CARD_PRODUCT_ID_KEY: card_product_id}
+
+
+def test_the_card_a_reply_delivered_is_read_back_for_suppression(monkeypatch) -> None:
+    result = shown(monkeypatch, [DeliveredCard(["catalog:product:11"], 11)])
+    assert result.last_card_product_id == 11
+
+
+def test_a_reply_that_delivered_no_card_leaves_nothing_to_suppress(monkeypatch) -> None:
+    """A reply that carried rows, or only prose, is not a card that was sent."""
+    result = shown(monkeypatch, [OfferedRow(["catalog:product:11", "catalog:product:12"], [11, 12]),
+                                 Row(["catalog:product:13"], hours_ago=2)])
+    assert result.last_card_product_id is None
+
+
+def test_only_the_most_recent_delivered_card_counts(monkeypatch) -> None:
+    """Suppression asks "is this the card we just sent", so an older one is
+    never the answer — a customer who has since been shown something else is
+    not being repeated at."""
+    newest = DeliveredCard(["catalog:product:13"], 13, hours_ago=1)
+    older = DeliveredCard(["catalog:product:11"], 11, hours_ago=6)
+    assert shown(monkeypatch, [newest, older]).last_card_product_id == 13
+
+
+def test_a_card_older_than_the_lapse_is_a_new_answer_not_a_repeat(monkeypatch) -> None:
+    result = shown(monkeypatch, [DeliveredCard(["catalog:product:11"], 11, hours_ago=100)])
+    assert result.last_card_product_id is None
+
+
+def test_an_unusable_card_identity_is_no_identity_at_all(monkeypatch) -> None:
+    """Never a wrong product: a value that is not one usable id suppresses
+    nothing, rather than resolving to some default."""
+    for bad in (0, -3, "", None, "eleven", {"product_id": 11}, [11]):
+        result = shown(monkeypatch, [DeliveredCard(["catalog:product:11"], bad)])
+        assert result.last_card_product_id is None, bad
+    # A payload written before this key existed carries none, and says so.
+    assert shown(monkeypatch, [Row(["catalog:product:11"])]).last_card_product_id is None
+
+
+def test_a_delivered_card_survives_a_reply_that_cited_nothing(monkeypatch) -> None:
+    """The two facts are independent: a card was sent even if this read finds
+    no citable product left in the merchant's catalogue."""
+    result = shown(monkeypatch, [DeliveredCard(None, 11)], catalogue={})
+    assert result.last_card_product_id == 11
