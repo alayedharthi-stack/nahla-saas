@@ -113,11 +113,15 @@ def run_input(monkeypatch):
                                      recipient="test-recipient", model="configured-test-model"),
             customer_name=""))
         call = calls[-1]
-        # The name is data beside the customer's turn, never part of the instructions.
-        assert "assistant_name" not in call["system"]
         assert call["audit_context"]["model"] == "configured-test-model"
         block = call["messages"][0]["content"][0]["text"]
-        return json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+        facts = json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
+        # The saved name is data beside the customer's turn, never written into
+        # the instructions.
+        if facts.get("assistant_name") not in (None, DEFAULT_AI["assistant_name"]):
+            assert facts["assistant_name"] not in call["system"]
+        assert "assistant_name" not in call["system"]
+        return facts
 
     return run
 
@@ -152,10 +156,19 @@ def test_next_turn_reads_rename_even_with_a_preloaded_orm_object(sessions, run_i
         assert run_input(db)["assistant_name"] == "ياسمين"
 
 
+def _logged_errors(monkeypatch):
+    """The pilot's own error log, observed directly rather than through logging
+    configuration another suite may have changed."""
+    errors = []
+    monkeypatch.setattr(seam.logger, "error", lambda message, *args: errors.append(message % args))
+    return errors
+
+
 def test_settings_read_failure_is_not_misreported_and_the_turn_still_goes(
-        sessions, run_input, monkeypatch, caplog):
+        sessions, run_input, monkeypatch):
     """A failed read is neither a missing name nor a dropped turn: the model is
     reached without the name, and the failure is logged."""
+    errors = _logged_errors(monkeypatch)
     with sessions() as db:
         real_query = db.query
 
@@ -164,18 +177,18 @@ def test_settings_read_failure_is_not_misreported_and_the_turn_still_goes(
                 raise RuntimeError("synthetic settings read failure")
             return real_query(*args, **kwargs)
         monkeypatch.setattr(db, "query", unreadable)
-        with caplog.at_level("ERROR"):
-            facts = run_input(db)
+        facts = run_input(db)
         assert "assistant_name" not in facts
-        assert "assistant name unreadable" in caplog.text
+        assert any("assistant name unreadable" in line for line in errors)
 
 
-@pytest.mark.parametrize("stored", ["وردة", ["وردة"], '{"assistant_name": "وردة"}'])
-def test_settings_that_are_not_an_object_leave_the_name_out(sessions, run_input, stored, caplog):
+@pytest.mark.parametrize("stored", ["وردة", ["وردة"], '{"assistant_name": "وردة"}',
+                                    {"assistant_name": {"ar": "وردة"}}, {"assistant_name": 7}])
+def test_settings_that_are_not_an_object_leave_the_name_out(sessions, run_input, stored, monkeypatch):
+    errors = _logged_errors(monkeypatch)
     with sessions() as db:
         db.add(TenantSettings(tenant_id=701, ai_settings=stored))
         db.commit()
-        with caplog.at_level("ERROR"):
-            facts = run_input(db)
+        facts = run_input(db)
         assert "assistant_name" not in facts
-        assert "not an object" in caplog.text
+        assert any("not an object with a text name" in line for line in errors)

@@ -67,11 +67,17 @@ Only `backend/services/commerce_runtime_pilot.py` changes runtime behavior:
    starting the runtime worker. Do not create settings or run configuration
    hygiene in this new read.
 2. Preserve a nonblank saved name verbatim, including its script; no translation.
-3. For a missing/blank name, supply `NAHLAH` when the existing conversation
-   language is English (`en` or `en-*`), otherwise `نحلة`. No text-based language
-   detection or change to conversation language is added.
-4. A database read failure propagates to the existing runtime error handling;
-   it is not silently converted into an assertion that the setting is absent.
+3. For a missing/blank name, supply the platform's own default,
+   `core.tenant.DEFAULT_AI["assistant_name"]` (the settings form's default too).
+   (An earlier revision branched on a conversation language that production
+   conversations do not carry; review removed it.)
+4. A read that fails — in the database or on a value that is not an object with
+   a text name — is logged at error level and the name is **left out**, neither
+   defaulted nor guessed, and the turn still runs. It runs in a connection
+   savepoint, so a statement that fails in PostgreSQL leaves the webhook's
+   session usable, and flushes nothing. (An earlier revision let the failure
+   propagate: it escaped after the route was taken and before admission, and
+   the customer went unanswered with nothing recorded.)
 
 There are no identity-specific keyword rules, fixed greetings, regex rewrites,
 forced introductions, migrations, environment changes or cache restarts.
@@ -102,9 +108,12 @@ it neither calls a model nor sends a WhatsApp message.
 - After repair: custom-name delivery; second generic clothing merchant named
   Atlas; Arabic custom name preserved in an English conversation; absent,
   missing-key, empty and whitespace names in Arabic/English; rename visible
-  on the next turn while an old ORM settings object remains cached; failed
-  settings read is not mistaken for a missing name.
-- The test pins the separately supplied system instructions and model value.
+  on the next turn while an old ORM settings object remains cached; a failed
+  settings read or a non-object value leaves the name out and the turn still
+  reaches the model; on PostgreSQL, a read failing in the database leaves the
+  session usable and unflushed.
+- The tests pin that neither the key nor a saved name is written into the
+  separately supplied system instructions, and the model value.
 - Existing seam test fixture gains only support for the new scalar settings
   read; no existing assertion or guard is removed.
 - Local results: **134 passed** (new identity tests, seam and provider),

@@ -145,10 +145,12 @@ def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
     from core.tenant import DEFAULT_AI  # noqa: PLC0415
     from models import TenantSettings  # noqa: PLC0415
 
-    nested = getattr(db, "begin_nested", None)
+    connection = getattr(db, "connection", None)
     try:
-        # In a savepoint: a failed read must not leave the turn's session aborted.
-        with (nested() if callable(nested) else contextlib.nullcontext()):
+        # A connection savepoint: a read that fails in the database leaves the
+        # turn's session usable, and — unlike Session.begin_nested — it flushes
+        # nothing the session is holding.
+        with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
             settings = db.query(TenantSettings.ai_settings).filter(
                 TenantSettings.tenant_id == int(tenant_id)).scalar()
     except Exception as exc:  # noqa: BLE001 - the turn is answered without the name
@@ -157,12 +159,12 @@ def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
         return None
     if settings is None:
         settings = {}
-    if not isinstance(settings, Mapping):
-        logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object tenant=%s "
-                     "type=%s", tenant_id, type(settings).__name__)
+    configured = settings.get("assistant_name") if isinstance(settings, Mapping) else None
+    if not isinstance(settings, Mapping) or not isinstance(configured, (str, type(None))):
+        logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
+                     "name tenant=%s", tenant_id)
         return None
-    configured = str(settings.get("assistant_name") or "")
-    return configured if configured.strip() else str(DEFAULT_AI["assistant_name"])
+    return configured if (configured or "").strip() else str(DEFAULT_AI["assistant_name"])
 
 
 def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -> Dict[str, Any]:
