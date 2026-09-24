@@ -105,7 +105,7 @@ def _call_debug(db, tenant_id, campaign_id):
 
 
 def _call_dispatch_now(
-    db, tenant_id, campaign_id, *, bypass_frequency_cap: bool = False,
+    db, tenant_id, campaign_id, *, bypass_frequency_cap=None,
 ):
     original = campaigns_router.resolve_tenant_id
     campaigns_router.resolve_tenant_id = (
@@ -566,12 +566,9 @@ class TestDispatchNow:
         assert c.status == "active"
         assert c.launched_at is not None
 
-    def test_dispatch_now_sets_bypass_flag_without_running_background_task(
-            self, monkeypatch,
-    ):
-        """``bypass_frequency_cap=true`` persists ``_bypass_frequency_cap``
-        on the campaign row before the background spawn; the dispatcher
-        consumes it as a one-shot flag."""
+    def test_dispatch_now_refuses_a_frequency_cap_bypass(self, monkeypatch):
+        """``bypass_frequency_cap=true`` is refused before anything changes:
+        no flag is stored, nothing is spawned, the campaign stays as it was."""
         db, _ = _make_db()
         t, tpl, c = _seed(db, status="draft", audience_count=2)
         c.launched_at = None
@@ -586,14 +583,15 @@ class TestDispatchNow:
             campaigns_router, "_spawn_dispatch_in_background", _capture_spawn,
         )
 
-        result = _call_dispatch_now(db, t.id, c.id, bypass_frequency_cap=True)
-        assert result["ok"] is True
-        assert result["bypass_frequency_cap"] is True
-        assert spawned == [c.id]
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            _call_dispatch_now(db, t.id, c.id, bypass_frequency_cap="true")
+        assert exc.value.status_code == 400
+        assert spawned == []
 
         db.refresh(c)
-        assert (c.template_variables or {}).get("_bypass_frequency_cap") == "true"
-        assert c.status == "active"
+        assert "_bypass_frequency_cap" not in (c.template_variables or {})
+        assert c.status == "draft"
 
 
 # ── 4. _campaign_to_dict carries lifecycle for the listing endpoint ──

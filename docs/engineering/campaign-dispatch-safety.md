@@ -171,7 +171,7 @@ deployments:
 | Recipients | count |
 | --- | --- |
 | accepted at least once | **1,483** (1,034 once, **449 twice**) |
-| every copy failed (after acceptance) | 1,226 |
+| every known copy failed (after acceptance) | 1,226 |
 | rejected before acceptance only | 6 |
 | one copy, no failure report | 252 |
 | two copies, at least one without failure report | 5 |
@@ -190,6 +190,10 @@ unique accepted recipients before the 10:55:41 snapshot, which also says
 `sent: 925`.
 
 Coverage and gaps:
+* These are observations of the copies the logs show, not categories: logs
+  carry no attempt counter, so a log-only run cannot prove any recipient's
+  full attempt history and the current tool reports none of them as
+  `all_failed` (or `delivered_once`). Only the database run can.
 * Delivery/read receipts are logged with a truncated wamid, so **delivered vs.
   pending is not derivable from logs**; the two "delivered" categories need the
   database run below. No recipient is claimed delivered here, and the 259
@@ -198,14 +202,76 @@ Coverage and gaps:
   flag; a DB run replaces this inference with the rows themselves.
 * Late failure webhooks may still arrive.
 
-Authoritative run (read-only transaction; reads `campaign_send_logs`,
-`message_events` — which keeps one row per accepted copy with its receipt
-flags — and `campaign_send_attempts` if present):
+Authoritative run — one `REPEATABLE READ, READ ONLY` transaction that reads
+`campaign_send_logs`, `message_events` (one row per accepted copy with its
+receipt flags), `message_delivery_events`, `campaign_send_attempts` and
+`campaign_status_event_inbox`:
 
 ```bash
 DATABASE_URL=<read-only credentials> python scripts/operators/campaign_send_reconciliation.py \
-  --tenant-id <T> --campaign-id <C> --emit-recipients --out reconciliation.json
+  --tenant-id <T> --campaign-id <C> --check-schema --emit-recipients --out reconciliation.json
 ```
+
+Evidence rules the tool enforces:
+
+* **Sources must be complete.** Every evidence table must exist and be
+  SELECT-able (checked up front, so an empty lookup set cannot hide a missing
+  grant), and every query must run to completion. Otherwise the run aborts
+  (exit 2) with `decision_eligible=false` and the failing source named. A
+  missing ledger table is reported as `absent` only when
+  `--allow-missing-ledger` is passed, and the report is then not
+  decision-eligible. Log-only (`--no-database`) runs are never eligible.
+* **Query completion is not attribution.** Copies are discovered from every
+  campaign association: ledger attempts, the summary row, campaign
+  `message_events` (placed through their conversation's customer),
+  `message_delivery_events` linked to the campaign's send-log rows, and accept
+  lines from `--log-json`. Receipts are then read for the whole wamid set until
+  it stops growing. Campaign-scoped evidence that cannot be tied to exactly one
+  recipient is counted under `attribution` and makes the report ineligible; so
+  does a copy found after the reads. An unapplied inbox receipt for an unknown
+  wamid addressed to a recipient keeps that recipient `uncertain`.
+  `decision_eligible` needs complete sources, complete attribution and a
+  passed `--check-schema`.
+* **Row columns are recipient-level evidence.** After the ledger,
+  `campaign_send_logs.provider_message_id` keeps the first accepted wamid while
+  `delivered_at` / `read_at` / `failed_at` are aggregates over every accepted
+  attempt; before it, they were set for whichever wamid the row held when the
+  receipt arrived. They count towards `has_proven_delivery` (so the recipient
+  is excluded from a resend) but never become a delivered, read or failed copy
+  of the anchor wamid, never raise `delivered_copies` and never make
+  `delivered_multiple`. The single exception is a legacy-only row (no ledger
+  attempt) whose complete history has the anchor as its only known copy, and
+  even then only delivered/read are used: the pre-ledger attempt counter was a
+  read-then-write that concurrent workers could lose, so "only copy" can hide
+  one copy, and a failed column may be that hidden copy's failure. Recipients
+  proven only at recipient level are reported with
+  `delivery_evidence_scope=recipient_aggregate`, and are never `all_failed`.
+* **Identity conflicts are not merged.** Two send-log rows of the campaign
+  that normalise to one phone are an attribution conflict (report ineligible,
+  recipient `uncertain`); ledger attempts are keyed by
+  `(send_log_id, attempt_no)`. A failure receipt in `--log-json` for a wamid
+  the database does not know, addressed to a campaign recipient, keeps that
+  recipient `uncertain`.
+* **Every counted attempt is accounted for once.** `all_failed` and
+  `delivered_once` need the whole attempt history the send-log row counted.
+  A ledger row is identified by `attempt_no`; an accepted copy by its wamid;
+  the summary row stands for the last attempt only, and is the ledger's last
+  attempt again whenever the ledger has one (it copies its code onto the row).
+  `abandoned` claims are not counted attempts. An attempt is proven unsent only
+  by a ledger `not_sent` state, or by a rejection (ledger `rejected` or a
+  legacy row) whose code is in `PROVEN_REJECTION_CODES` — a ledger `rejected`
+  with `unknown` / `service_unavailable` / `internal_error` stays unknown.
+  Legacy histories rest on the legacy attempt counter; the database run
+  cannot see a copy that left no row anywhere. `watchdog_timeout`, `exception`, `no_message_id`,
+  `unknown`, `retry_exhausted`, empty or unrecognised codes prove nothing.
+  Earlier legacy attempts whose outcome was overwritten stay unknown, with or
+  without copies, and exported log lines never add proof.
+* **Proven delivery excludes the recipient.** Each recipient carries
+  `has_proven_delivery` and `delivered_copies`; any delivered/read copy makes
+  `resend_proposal=excluded_proven_delivery`, whatever happened to the other
+  copies. Post-accept failures are `excluded_meta_restriction`; only retryable
+  pre-accept rejections are `retry_review_candidate`. These are proposals for a
+  person to review, not an authorisation to resend.
 
 ## 6. Production remediation plan (separate from the code fix; needs approval)
 

@@ -399,7 +399,6 @@ export interface CampaignDebugSnapshot {
   /** Frequency-cap diagnostics + audit trail for skipped_duplicate
    *  rows tied to ``frequency_cap_marketing``. */
   frequency_cap: {
-    bypassed: boolean
     cap_days: number
     capped_count: number
     /** Same data as ``source_rows`` — canonical key requested by API
@@ -871,10 +870,7 @@ export const campaignsApi = {
    *  ``reason='already_running'`` while a worker holds the campaign
    *  lease; recipients already sent or with an unknown outcome are
    *  never re-sent. */
-  dispatchNow: (
-    id: number,
-    opts?: { bypassFrequencyCap?: boolean },
-  ) =>
+  dispatchNow: (id: number) =>
     apiCall<{
       campaign_id: number
       ok: boolean
@@ -884,7 +880,6 @@ export const campaignsApi = {
       message?: string
       status?: string
       error?: string
-      bypass_frequency_cap?: boolean
       /** Number of failed rows promoted back to ``queued`` before
        *  the dispatch task was kicked. */
       rescheduled_failed?: number
@@ -893,9 +888,7 @@ export const campaignsApi = {
       /** Present with ``reason='already_running'``. */
       execution?: CampaignExecution
     }>(
-      `/campaigns/${id}/dispatch-now${
-        opts?.bypassFrequencyCap === true ? '?bypass_frequency_cap=true' : ''
-      }`,
+      `/campaigns/${id}/dispatch-now`,
       { method: 'POST' },
     ),
 
