@@ -131,8 +131,15 @@ def _instructions() -> str:
     return build_pilot_instructions()
 
 
-def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
+def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -> Dict[str, Any]:
     """Trusted facts the platform hands the model as data, never as wording."""
+    from models import TenantSettings  # noqa: PLC0415
+
+    # Read the column each turn, not a cached ORM entity or merged defaults.
+    # Absence must remain distinguishable from a merchant's saved Arabic name.
+    # A failed read propagates; it is not evidence that the name is missing.
+    ai_settings = db.query(TenantSettings.ai_settings).filter(
+        TenantSettings.tenant_id == int(tenant_id)).scalar() or {}
     preamble: Dict[str, Any] = {"channel": "whatsapp"}
     name = str(customer_name or "").strip()
     if name:
@@ -140,6 +147,11 @@ def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
     language = str(getattr(convo, "language", "") or "").strip()
     if language:
         preamble["conversation_language"] = language
+    configured_name = str(ai_settings.get("assistant_name") or "")
+    preamble["assistant_name"] = (
+        configured_name if configured_name.strip()
+        else "NAHLAH" if language.lower().split("-", 1)[0] == "en" else "نحلة"
+    )
     return preamble
 
 
@@ -1011,6 +1023,8 @@ async def _own_turn(
                 provider_message_id=str(recovery_grant.provider_message_id))
         return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
 
+    context_preamble = _context_preamble(db, int(tenant_id), convo, customer_name)
+
     def run() -> Any:
         return entry.run_commerce_runtime_turn(
             engine=engine,
@@ -1031,7 +1045,7 @@ async def _own_turn(
             model=str(decision.model or ""),
             admission_barrier=admission_barrier,
             budget=pilot_guard.pilot_budget(),
-            context_preamble=_context_preamble(convo, customer_name),
+            context_preamble=context_preamble,
             history=_prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
                                  phone=to, current_text=text),
         )
