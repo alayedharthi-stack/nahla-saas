@@ -293,3 +293,27 @@ def test_a_window_number_without_identity_is_unresolved(pgdb, capsys):
     assert out["window"]["recipients_without_validated_identity"] == 1
     assert 11 in out["history_before_window"]["send_log_ids_by_strongest_evidence"][
         "unresolved_evidence"]
+
+
+@pg
+def test_a_copy_naming_two_recipients_leaves_neither_clean(pgdb, capsys):
+    """linked = {A (customer), E (conversation.metadata.customer_phone)},
+    owned = {A (A's row holds the wamid)}: E must not come out clean."""
+    from sqlalchemy import text
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        a_customer = c.execute(text("SELECT id FROM customers WHERE tenant_id = 5 "
+                                    "AND normalized_phone = :p"), {"p": A}).scalar()
+        conv = c.execute(text("INSERT INTO conversations (tenant_id, customer_id, status, metadata) "
+                              "VALUES (5, :cu, 'active', CAST(:m AS jsonb)) RETURNING id"),
+                         {"cu": a_customer, "m": json.dumps({"customer_phone": E})}).scalar()
+        # A's earlier copy: its receipt is linked to A's row, so A owns the wamid.
+        _sql(c, "INSERT INTO message_delivery_events (tenant_id, wamid, status, campaign_send_log_id, "
+                "suppress_on_repeat, occurred_at, source) VALUES (5, 'w.a-old', 'delivered', 1, "
+                "false, :at, 'meta')", at=BEFORE)
+        _campaign_event(c, "w.a-old", conv=conv)
+        _event_at(c, BEFORE)
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 6 in by["unresolved_evidence"] and 6 not in by.get("clean", [])

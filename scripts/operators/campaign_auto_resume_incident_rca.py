@@ -368,7 +368,9 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
             for i in linked_ids | owned_ids:
                 recips.add(i, {"unresolved_evidence"}, hits["message_events"])
             continue
-        who = (linked_ids & owned_ids) or linked_ids or owned_ids
+        # Every identity any link or owner names is a candidate; more than
+        # one, however they overlap, is a conflict.
+        who = linked_ids | owned_ids
         if len(who) > 1:
             unplaceable["more_than_one_recipient"] += 1
             for i in who:
