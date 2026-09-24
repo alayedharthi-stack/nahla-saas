@@ -613,32 +613,6 @@ def test_negative_control_dropping_unplaceable_copies_sends(dbf, fake_meta, monk
     assert sorted(meta.calls) == sorted([X, Y])
 
 
-def test_negative_control_a_cache_that_never_refreshes_hides_the_copy(dbf, fake_meta,
-                                                                     monkeypatch):
-    """The earlier head cached once per session."""
-    real = ledger._copy_index
-    frozen = {}
-
-    def once(db, ctx):
-        if ctx["campaign_id"] not in frozen:
-            frozen[ctx["campaign_id"]] = real(db, ctx)
-        return frozen[ctx["campaign_id"]]
-    monkeypatch.setattr(ledger, "_copy_index", once)
-    ids = _seed(dbf, phones=[X, Y])
-    s = dbf()
-    ledger.acquire_lease(s, campaign_id=ids.campaign_id, tenant_id=ids.tenant_id, owner="w1")
-    rows = dict((p, i) for i, p in s.query(CampaignSendLog.id, CampaignSendLog.customer_phone_e164)
-                .filter(CampaignSendLog.campaign_id == ids.campaign_id))
-    camp = s.get(Campaign, ids.campaign_id)
-    ledger.claim_recipient(s, log_id=rows[X], campaign=camp, owner="w1", scope_key=None,
-                           phone_number_id=None)
-    _copy(dbf, ids, phone=Y, wamid="w.y-first")
-    r = ledger.claim_recipient(s, log_id=rows[Y], campaign=camp, owner="w1", scope_key=None,
-                               phone_number_id=None)
-    s.close()
-    assert r.reason == "claimed"                          # the hidden copy: a duplicate
-
-
 def test_negative_control_a_fail_open_read_sends(dbf, fake_meta, monkeypatch):
     from sqlalchemy import text
     real = ledger._check_message_events
@@ -660,3 +634,143 @@ def test_negative_control_a_fail_open_read_sends(dbf, fake_meta, monkeypatch):
     meta = fake_meta(FakeMeta())
     _dispatch(dbf, ids)
     assert meta.calls == [X]
+
+
+# ── Review round 3: partial attribution overlap, in-place changes ────────
+
+
+def _claim_pair(Session, ids, first, second, between):
+    """One session claims ``first`` (evidence read), ``between`` changes the
+    database from another session, then the same session claims ``second``."""
+    s = Session()
+    ledger.acquire_lease(s, campaign_id=ids.campaign_id, tenant_id=ids.tenant_id, owner="w1")
+    rows = dict((p, i) for i, p in s.query(CampaignSendLog.id, CampaignSendLog.customer_phone_e164)
+                .filter(CampaignSendLog.campaign_id == ids.campaign_id))
+    camp = s.get(Campaign, ids.campaign_id)
+    r1 = ledger.claim_recipient(s, log_id=rows[first], campaign=camp, owner="w1", scope_key=None,
+                                phone_number_id=None)
+    between()
+    r2 = ledger.claim_recipient(s, log_id=rows[second], campaign=camp, owner="w1", scope_key=None,
+                                phone_number_id=None)
+    s.close()
+    return r1, r2
+
+
+def _conv_for(Session, ids, phone, *, meta_phone=None):
+    db = Session()
+    cust = db.query(Customer).filter(Customer.tenant_id == ids.tenant_id,
+                                     Customer.normalized_phone == phone).first()
+    if cust is None:
+        cust = Customer(tenant_id=ids.tenant_id, phone=phone, normalized_phone=phone,
+                        name="أحمد سالم", extra_metadata={})
+        db.add(cust)
+        db.commit()
+    conv = Conversation(tenant_id=ids.tenant_id, customer_id=cust.id, status="active",
+                        extra_metadata={"customer_phone": meta_phone} if meta_phone else {})
+    db.add(conv)
+    db.commit()
+    out = (conv.id, cust.id)
+    db.close()
+    return out
+
+
+def _event_on(Session, ids, conv_id, wamid):
+    db = Session()
+    db.add(MessageEvent(tenant_id=ids.tenant_id, conversation_id=conv_id, direction="outbound",
+                        event_type="campaign", created_at=_now() - timedelta(days=1),
+                        extra_metadata={"campaign_id": ids.campaign_id, "wa_message_id": wamid}))
+    db.commit()
+    db.close()
+
+
+def test_a_copy_naming_two_recipients_blocks_both_even_when_one_owns_it(dbf, fake_meta):
+    """linked = {X (customer), Y (conversation.metadata.customer_phone)},
+    owned = {X (X's row holds the wamid)}. The earlier head intersected the
+    two sets, blocked X and let Y through."""
+    ids = _seed(dbf, phones=[X, Y, Z])
+    db = dbf()
+    x = db.query(CampaignSendLog).filter(CampaignSendLog.campaign_id == ids.campaign_id,
+                                         CampaignSendLog.customer_phone_e164 == X).one()
+    x.provider_message_id = "w.of-x"
+    db.commit()
+    db.close()
+    conv_id, _ = _conv_for(dbf, ids, X, meta_phone=Y)
+    _event_on(dbf, ids, conv_id, "w.of-x")
+    meta = fake_meta(FakeMeta())
+    _dispatch(dbf, ids)
+    assert meta.calls == [Z]
+    assert _row(dbf, ids.campaign_id, Y) == (ledger.LOG_SKIPPED_SEND_GUARD, "message_events_conflict")
+
+
+def test_a_conversation_relinked_in_place_is_seen_by_the_next_claim(dbf, fake_meta):
+    """The copy starts on Z's conversation; after the first claim the
+    conversation is re-pointed to Y's customer (no row added, count and max
+    id unchanged). Y's claim must see it."""
+    ids = _seed(dbf, phones=[X, Y])
+    conv_id, _ = _conv_for(dbf, ids, Z)
+    _event_on(dbf, ids, conv_id, "w.moved")
+    _, y_customer = _conv_for(dbf, ids, Y)
+
+    def relink():
+        db = dbf()
+        db.get(Conversation, conv_id).customer_id = y_customer
+        db.commit()
+        db.close()
+    r1, r2 = _claim_pair(dbf, ids, X, Y, relink)
+    assert r1.reason == "claimed"
+    assert (r2.reason, r2.evidence) == (ledger.PRIOR_SEND_ERROR, "message_events_copy")
+
+
+def test_a_customer_phone_changed_in_place_is_seen_by_the_next_claim(dbf, fake_meta):
+    ids = _seed(dbf, phones=[X, Y])
+    conv_id, z_customer = _conv_for(dbf, ids, Z)
+    _event_on(dbf, ids, conv_id, "w.renumbered")
+
+    def renumber():
+        db = dbf()
+        c = db.get(Customer, z_customer)
+        c.phone = c.normalized_phone = Y.lstrip("+")          # Y, in another spelling
+        db.commit()
+        db.close()
+    r1, r2 = _claim_pair(dbf, ids, X, Y, renumber)
+    assert r1.reason == "claimed"
+    assert r2.reason == ledger.PRIOR_SEND_ERROR
+
+
+def _fingerprint_cache(monkeypatch):
+    """The previous head's cache: reuse the index while (count, max id) of
+    the campaign's copies is unchanged."""
+    from sqlalchemy import text
+    real = ledger._build_copy_index
+    cache = {}
+
+    def cached(db, ctx):
+        fp = tuple(db.execute(text(
+            "SELECT count(*), coalesce(max(id), 0) FROM message_events WHERE tenant_id = :t"),
+            {"t": ctx["tenant_id"]}).one())
+        if cache.get("fp") != fp:
+            cache.update(fp=fp, idx=real(db, ctx))
+        return cache["idx"]
+    monkeypatch.setattr(ledger, "_build_copy_index", cached)
+
+
+@pytest.mark.parametrize("change", ["relink", "renumber"])
+def test_negative_control_a_count_max_id_cache_hides_in_place_changes(dbf, fake_meta, monkeypatch,
+                                                                      change):
+    _fingerprint_cache(monkeypatch)
+    ids = _seed(dbf, phones=[X, Y])
+    conv_id, z_customer = _conv_for(dbf, ids, Z)
+    _event_on(dbf, ids, conv_id, "w.hidden")
+    _, y_customer = _conv_for(dbf, ids, Y)
+
+    def mutate():
+        db = dbf()
+        if change == "relink":
+            db.get(Conversation, conv_id).customer_id = y_customer
+        else:
+            c = db.get(Customer, z_customer)
+            c.phone = c.normalized_phone = Y.lstrip("+")
+        db.commit()
+        db.close()
+    _, r2 = _claim_pair(dbf, ids, X, Y, mutate)
+    assert r2.reason == "claimed"                          # the hidden copy: a duplicate

@@ -420,7 +420,6 @@ PAUSE_EVIDENCE_UNREADABLE = "evidence_unreadable"
 PROVEN_NOT_ACCEPTED_STATES = frozenset({ATTEMPT_REJECTED, ATTEMPT_NOT_SENT, ATTEMPT_ABANDONED})
 # Row statuses that say a copy may have been accepted.
 _ROW_MAY_HAVE_REACHED_META = frozenset({"sending", "sent", "delivered", "read", "uncertain"})
-_COPY_INDEX_KEY = "_campaign_copy_index"
 
 
 def _digits_sql(db: Session, col: str) -> str:
@@ -512,10 +511,11 @@ def _check_rows(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
 @dataclass
 class _CopyIndex:
     """This campaign's outbound ``message_events`` copies, placed on
-    recipients. ``fingerprint`` is (count, max id) of the copies it was built
-    from: any copy committed since — by this worker, another worker or a
-    webhook, in any id order — changes it and forces a rebuild."""
-    fingerprint: Tuple[int, int]
+    recipients. Built inside the claim's own transaction and never reused
+    across claims: attribution depends on rows that can change in place
+    (an event's conversation, a conversation's customer, a customer's
+    phone, a row's or attempt's wamid), so no cheap fingerprint can prove a
+    cached copy is still right."""
     placed: Dict[str, str] = field(default_factory=dict)     # identity -> reason
     possible: List[Tuple[str, str]] = field(default_factory=list)  # (significant digits, reason)
     unplaceable: int = 0
@@ -528,17 +528,7 @@ def _campaign_copies_sql(db: Session) -> Tuple[str, str]:
             "json_extract(conv.metadata, '$.customer_phone')")
 
 
-def _copy_fingerprint(db: Session, ctx: Dict[str, Any]) -> Tuple[int, int]:
-    from sqlalchemy import text  # noqa: PLC0415
-    cid, _ = _campaign_copies_sql(db)
-    n, top = db.execute(text(
-        "SELECT count(*), coalesce(max(me.id), 0) FROM message_events me "
-        "WHERE me.tenant_id = :t AND me.direction = 'outbound' AND me.event_type = 'campaign' "
-        f"AND {cid} = :c"), {"t": ctx["tenant_id"], "c": str(ctx["campaign_id"])}).one()
-    return int(n), int(top)
-
-
-def _build_copy_index(db: Session, ctx: Dict[str, Any], fingerprint: Tuple[int, int]) -> _CopyIndex:
+def _build_copy_index(db: Session, ctx: Dict[str, Any]) -> _CopyIndex:
     """Place every copy on a recipient: by its conversation's customer
     (phone, normalised phone, ``conversation.metadata.customer_phone``) and
     by whoever owns its wamid in this campaign (an attempt, a row, or a
@@ -561,7 +551,7 @@ def _build_copy_index(db: Session, ctx: Dict[str, Any], fingerprint: Tuple[int, 
             "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id WHERE sl.campaign_id = :ci"),
             p).all():
         owners.setdefault(w, set()).add(ph)
-    idx = _CopyIndex(fingerprint=fingerprint)
+    idx = _CopyIndex()
     for md, cu_phone, cu_norm, cv_phone in db.execute(text(
             f"SELECT me.metadata, cu.phone, cu.normalized_phone, {conv_phone} FROM message_events me "
             "LEFT JOIN conversations conv ON conv.id = me.conversation_id AND conv.tenant_id = me.tenant_id "
@@ -581,11 +571,11 @@ def _build_copy_index(db: Session, ctx: Dict[str, Any], fingerprint: Tuple[int, 
         owned_ids = {canonical_recipient(x) for x in owned} - {None}
         loose = {digits(x).lstrip("0") for x in linked + owned if canonical_recipient(x) is None}
         loose = {d for d in loose if len(d) >= 7}
-        if linked_ids and owned_ids and not (linked_ids & owned_ids):
-            ids, reason = linked_ids | owned_ids, "message_events_conflict"
-        else:
-            ids = (linked_ids & owned_ids) or linked_ids or owned_ids
-            reason = "message_events_copy" if len(ids) == 1 else "message_events_conflict"
+        # Every identity any link or owner names is a candidate. One is a
+        # copy; more than one — however they overlap — is a conflict, and
+        # every candidate is blocked.
+        ids = linked_ids | owned_ids
+        reason = "message_events_copy" if len(ids) == 1 else "message_events_conflict"
         for i in ids:
             if reason == "message_events_conflict" or idx.placed.get(i) == "message_events_conflict":
                 idx.placed[i] = "message_events_conflict"
@@ -598,23 +588,9 @@ def _build_copy_index(db: Session, ctx: Dict[str, Any], fingerprint: Tuple[int, 
     return idx
 
 
-def _copy_index(db: Session, ctx: Dict[str, Any]) -> _CopyIndex:
-    """The index, rebuilt whenever the campaign's copies changed. The
-    fingerprint is read inside the claim's own transaction, after the
-    recipient lock, so it reflects everything committed before this claim;
-    a cached index is reused only when nothing was added since."""
-    fp = _copy_fingerprint(db, ctx)
-    cache = db.info.setdefault(_COPY_INDEX_KEY, {})
-    idx = cache.get(ctx["campaign_id"])
-    if idx is None or idx.fingerprint != fp:
-        idx = _build_copy_index(db, ctx, fp)
-        cache[ctx["campaign_id"]] = idx
-    return idx
-
-
 def _check_message_events(db: Session, ctx: Dict[str, Any]) -> Optional[str]:
     from services.recipient_identity import digits  # noqa: PLC0415
-    idx = _copy_index(db, ctx)
+    idx = _build_copy_index(db, ctx)
     if ctx["canonical"] in idx.placed:
         return idx.placed[ctx["canonical"]]
     mine = digits(ctx["canonical"])
