@@ -25,6 +25,7 @@ customer-facing text is involved on any path here.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
@@ -73,6 +74,20 @@ class _Fixture:
 
     def settings_rows(self) -> List[int]:
         return sorted(int(r.tenant_id) for r in self.db.query(self.M.TenantSettings).all())
+
+    def grant_billing(self, tenant_id: int) -> None:
+        """Put this tenant inside Nahla's own free-trial window, for real.
+
+        Not a stub: ``has_billing_access`` reads the same tenant row through
+        ``has_active_trial`` and ``compute_trial_info``, and the cases below
+        assert it actually answers true before relying on it.
+        """
+        now = _dt.datetime.now(_dt.timezone.utc)
+        row = self.db.query(self.M.Tenant).filter(self.M.Tenant.id == tenant_id).first()
+        row.first_whatsapp_connected_at = now - _dt.timedelta(days=1)
+        row.trial_started_at = now - _dt.timedelta(days=1)
+        row.trial_ends_at = now + _dt.timedelta(days=7)
+        self.db.commit()
 
 
 @pytest.fixture()
@@ -603,3 +618,142 @@ def test_the_change_reaches_no_intelligence_surface():
         for forbidden in ("SYSTEM_PROMPT", "persona", "pilot_instructions",
                           "REPLY_TOOL_DESCRIPTION"):
             assert forbidden not in source, (module.__name__, forbidden)
+
+
+# ── An obligation the runtime could never discharge ─────────────────────────
+#
+# The acceptance boundary writes a durable record *before* the webhook is
+# acknowledged, and only the runtime's own post-turn bookkeeping
+# (``commerce_runtime_pilot`` → ``handover.resolve_inbound``) ever clears one.
+# Gates ahead of the runtime in ``whatsapp_webhook`` return before that seam, so
+# an obligation taken for traffic they silence is never discharged: one pending
+# row per inbound until ``handover.MAX_PENDING_DEFERRED`` refuses the next, at
+# which point the batch is "not accepted" and the request is answered 503 — that
+# merchant's webhook stops being acknowledged at all.
+#
+# Under ``pilot`` this was unreachable: in scope required an explicitly
+# allowlisted recipient. It became reachable the moment the merchant's own
+# setting started deciding the recipient, which is what these cases pin.
+
+
+def test_an_obligation_is_never_taken_for_a_tenant_the_platform_will_silence(
+        platform, switched_on, monkeypatch):
+    """The regression, in the shape it actually occurred.
+
+    A store that never touched the coupon dashboard defaults to
+    ``store_ai_mode=on``; billing access is independent of it and defaults to
+    false. In ``global`` that combination reached ``in_scope``.
+    """
+    from core.billing import has_billing_access
+    from services import commerce_runtime_acceptance as acc
+
+    monkeypatch.setenv(pg.ENV_MODE, pg.MODE_GLOBAL)
+    platform.set_store_ai(OTHER_TENANT, None)            # nothing saved → default "on"
+
+    assert has_billing_access(platform.db, OTHER_TENANT) is False
+    assert sg.read_store_gate(platform.db, tenant_id=OTHER_TENANT,
+                              customer_phone=OTHER_CUSTOMER).allowed is True
+
+    verdict, target, detail = acc._classify(
+        platform.db, phone_number_id=PHONE_ID_OTHER, recipient=OTHER_CUSTOMER)
+    assert verdict == acc.OUT_OF_SCOPE, "an unresolvable obligation must not be taken"
+    assert target is None
+    assert detail == acc.BILLING_ACCESS_DENIED
+
+
+def test_a_tenant_the_platform_does_answer_for_is_still_in_scope(
+        platform, switched_on, monkeypatch):
+    """The other half: the fix must not stop the runtime owning real traffic."""
+    from core.billing import has_billing_access
+    from services import commerce_runtime_acceptance as acc
+
+    monkeypatch.setenv(pg.ENV_MODE, pg.MODE_GLOBAL)
+    platform.set_store_ai(OTHER_TENANT, STORE_ON)
+    platform.grant_billing(OTHER_TENANT)
+    assert has_billing_access(platform.db, OTHER_TENANT) is True
+
+    verdict, target, detail = acc._classify(
+        platform.db, phone_number_id=PHONE_ID_OTHER, recipient=OTHER_CUSTOMER)
+    assert verdict == acc.IN_SCOPE, detail
+    assert target is not None and int(target[0]) == OTHER_TENANT
+
+
+def test_an_unreadable_entitlement_is_undecidable_never_unrelated(
+        platform, switched_on, monkeypatch):
+    """A failed read is a fact about us. Acknowledging it would drop the work."""
+    from services import commerce_runtime_acceptance as acc
+
+    monkeypatch.setenv(pg.ENV_MODE, pg.MODE_GLOBAL)
+    platform.set_store_ai(OTHER_TENANT, STORE_ON)
+
+    def _explode(*_a: Any, **_k: Any) -> bool:
+        raise RuntimeError("billing unavailable")
+
+    monkeypatch.setattr("core.billing.has_billing_access", _explode)
+    verdict, target, detail = acc._classify(
+        platform.db, phone_number_id=PHONE_ID_OTHER, recipient=OTHER_CUSTOMER)
+    assert verdict == acc.UNDECIDABLE
+    assert target is None
+    assert detail.startswith(acc.BILLING_UNREADABLE)
+    assert acc.BILLING_ACCESS_DENIED not in detail
+
+
+def test_the_pilot_stage_does_not_ask_at_all_and_keeps_its_contract(
+        platform, switched_on):
+    """The live stage is left byte-for-byte as it is, deliberately.
+
+    In ``pilot`` an obligation is bounded to the handful of recipients an
+    operator explicitly configured and supervises, so the accumulation the check
+    exists to prevent needs traffic nobody chose — which is what the merchant's
+    own setting introduced, and only there. Asked in ``pilot`` it would change
+    the contract of the stage running in production for no defect.
+
+    So a tenant *without* billing is still in scope here, and that is the
+    assertion: the narrowing is a decision, not an oversight.
+    """
+    from core.billing import has_billing_access
+    from services import commerce_runtime_acceptance as acc
+
+    assert pg.runtime_mode() == pg.MODE_PILOT
+    assert has_billing_access(platform.db, ALLOWLISTED_TENANT) is False
+
+    verdict, target, _detail = acc._classify(
+        platform.db, phone_number_id=PHONE_ID_ALLOWLISTED, recipient=SAVED_TEST_NUMBER)
+    assert verdict == acc.IN_SCOPE
+    assert target is not None and int(target[0]) == ALLOWLISTED_TENANT
+
+
+def test_the_stage_gated_stage_asks_it_too_not_only_global(
+        platform, switched_on, monkeypatch):
+    """``store_gated`` is where the merchant's setting first decides recipients,
+    so it is where the obligation first outruns what an operator chose."""
+    from services import commerce_runtime_acceptance as acc
+
+    monkeypatch.setenv(pg.ENV_MODE, pg.MODE_STORE_GATED)
+    platform.set_store_ai(ALLOWLISTED_TENANT, STORE_ON)
+    verdict, _target, detail = acc._classify(
+        platform.db, phone_number_id=PHONE_ID_ALLOWLISTED, recipient=OTHER_CUSTOMER)
+    assert verdict == acc.OUT_OF_SCOPE and detail == acc.BILLING_ACCESS_DENIED
+
+
+def test_the_entitlement_read_writes_nothing(platform, switched_on, monkeypatch):
+    """The acceptance boundary is a read. ``has_billing_access`` must keep it one."""
+    from services import commerce_runtime_acceptance as acc
+
+    monkeypatch.setenv(pg.ENV_MODE, pg.MODE_GLOBAL)
+    platform.set_store_ai(OTHER_TENANT, STORE_ON)
+    def _census() -> Dict[str, int]:
+        from sqlalchemy import func, select
+
+        counts: Dict[str, int] = {}
+        for table in platform.M.Base.metadata.sorted_tables:
+            counts[table.name] = int(
+                platform.db.execute(select(func.count()).select_from(table)).scalar() or 0)
+        return counts
+
+    before = _census()
+    acc._classify(platform.db, phone_number_id=PHONE_ID_OTHER, recipient=OTHER_CUSTOMER)
+    platform.db.commit()
+    after = _census()
+
+    assert after == before, {k: (before[k], after[k]) for k in after if after[k] != before[k]}

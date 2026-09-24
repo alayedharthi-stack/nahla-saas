@@ -148,6 +148,12 @@ IN_SCOPE = "in_scope"            # pilot traffic: it must be durable before we a
 OUT_OF_SCOPE = "out_of_scope"    # verified as not the pilot's: untouched, as today
 UNDECIDABLE = "undecidable"      # the lookup failed, or two tenants claim the number
 
+# A tenant the platform will silence before the runtime is asked. Reported in
+# its own words rather than folded into a routing reason, because it is neither
+# a routing decision nor the merchant's.
+BILLING_ACCESS_DENIED = "billing_access_denied"
+BILLING_UNREADABLE = "billing_access_unreadable"
+
 
 def _classify(db: Any, *, phone_number_id: str, recipient: str) -> Tuple[str, Any, str]:
     """``(verdict, target, detail)`` for one message.
@@ -210,9 +216,62 @@ def _classify(db: Any, *, phone_number_id: str, recipient: str) -> Tuple[str, An
     normalized = decision.recipient or pilot_guard.normalize_recipient(recipient)
     if not normalized:
         return OUT_OF_SCOPE, None, pilot_guard.RECIPIENT_UNNORMALIZABLE
+
+    # The last question, and the one that makes this an obligation the runtime
+    # can actually discharge.
+    #
+    # Being *permitted* says the runtime would own this turn if it were asked.
+    # It is not asked when a gate ahead of it silences the turn, and the billing
+    # guard is such a gate: ``whatsapp_webhook`` calls ``has_billing_access``
+    # and returns before the commerce-runtime seam, so for a tenant without it
+    # the record written here is never reached by the only code that resolves
+    # one. It would stay pending for the life of the row, one per inbound, until
+    # ``MAX_PENDING_DEFERRED`` refused the next — and a refused acceptance is
+    # answered 503, which would stop that merchant's webhook being acknowledged
+    # at all. ``has_billing_access``'s own contract is that webhook processing
+    # is always allowed regardless of it, so taking an obligation it will
+    # silence is this side's mistake, not theirs.
+    #
+    # Asked only in the stages where it became reachable. Under ``pilot`` in
+    # scope requires an explicitly allowlisted recipient, so the obligation is
+    # bounded to the handful of numbers an operator configured and supervises;
+    # the accumulation needs traffic the operator did not choose, which is
+    # exactly what the merchant's own setting introduced. Keeping the question
+    # out of ``pilot`` also keeps the stage that is live today byte-for-byte as
+    # it is, which is worth more than the symmetry.
+    #
+    # It is asked here rather than in the guard on purpose: the guard's answer
+    # decides who *replies*, and nothing about billing should move that — the
+    # webhook has already returned by the time the guard is asked on that path.
+    verdict = (_billing_admits(db, scope.tenant_id)
+               if pilot_guard.store_gate_decides_recipient() else True)
+    if verdict is not True:
+        if verdict is False:
+            return OUT_OF_SCOPE, None, BILLING_ACCESS_DENIED
+        # Unreadable, not denied. Same asymmetry as everywhere else: a fact
+        # about us is never reported as a fact about the traffic.
+        return UNDECIDABLE, None, f"{BILLING_UNREADABLE}:{verdict}"
+
     return IN_SCOPE, (scope.tenant_id,
                       decision.connection_ref or scope.connection_ref,
                       normalized, scope.connection_id), decision.reason
+
+
+def _billing_admits(db: Any, tenant_id: int) -> Any:
+    """``True``, ``False``, or the name of the error that prevented an answer.
+
+    Read-only: ``has_billing_access`` and the three subscription reads beneath
+    it add, flush and commit nothing.
+    """
+    try:
+        from core.billing import has_billing_access  # noqa: PLC0415
+
+        return bool(has_billing_access(db, int(tenant_id)))
+    except Exception as exc:  # noqa: BLE001 - an unreadable entitlement denies nothing
+        logger.error("[COMMERCE_RUNTIME_ACCEPT] billing access unreadable tenant=%s "
+                     "error=%s — undecidable, not 'unrelated'",
+                     tenant_id, type(exc).__name__)
+        return type(exc).__name__
 
 
 def _addressable(inbounds: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], str, str, str]]:
