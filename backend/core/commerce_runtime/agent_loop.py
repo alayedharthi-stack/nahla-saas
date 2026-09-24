@@ -287,7 +287,16 @@ class AgentLoop:
         shape = pp.decide(draft=draft, observations=session.observations,
                           definitions=self._registry.definitions, presentation=presentation)
         shape = self._hydrate(shape, scope, session)
-        draft, choices = rc.finalize(draft, session.observations)
+        # A requested selector stands down only for a card that will actually
+        # be there. Asked of the composer itself, before anything is changed, so
+        # a customer whose tapped product turns out to have no photo still gets
+        # the selector the model offered rather than neither shape.
+        withhold = ""
+        if shape.withhold_selector:
+            composed, _reason = rcard.card(draft, session.observations,
+                                           determined_product_id=shape.determined_product_id)
+            withhold = rc.TAP_ANSWERED_FIRST if composed is not None else ""
+        draft, choices = rc.finalize(draft, session.observations, withhold=withhold)
         # A card is the same split for the shape that follows a choice rather
         # than offering one. The selector wins when both are on the table: a
         # customer who still has to choose is not helped by one product's photo.

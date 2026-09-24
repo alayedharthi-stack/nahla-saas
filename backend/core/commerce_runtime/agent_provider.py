@@ -127,18 +127,28 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
         "card": {
             "type": "object",
             "description": (
-                "Optional. Show this one product as a card beside the text: its photo, "
-                "and a button that opens its page. Name the product only \u2014 the photo "
-                "and the link are taken from the merchant's own records as this turn read "
-                "them. The product must have been looked up in this turn and cited in "
-                "evidence_refs. The card is an addition over the text, never a "
-                "replacement for it, and is never required. A card is not sent when a "
-                "selector is offered in the same reply."
+                "Optional. Show a product as a card beside the text: its photo, and a "
+                "button that opens its page. The photo and the link are taken from the "
+                "merchant's own records as this turn read them. The card is an addition "
+                "over the text, never a replacement for it, and is never required. A "
+                "card is not sent when a selector is offered in the same reply.\n"
+                "button_label is the only required field, and it is the one thing here "
+                "the customer reads: give it whenever this reply is about a product the "
+                "customer may want to open, even when you do not name a product "
+                "yourself. The platform may already know which product the customer "
+                "chose \u2014 by a tap on a row it sent \u2014 and will show that one; "
+                "without a word from you in the customer's own language it can show no "
+                "card at all, because it has no wording of its own to use."
             ),
             "properties": {
                 "product_id": {
                     "type": "integer",
-                    "description": "The product to show.",
+                    "description": (
+                        "Optional. The product you are asking to show. It must have been "
+                        "looked up in this turn and cited in evidence_refs. Leave it out "
+                        "to give only the button wording and let the platform decide "
+                        "which product, if any, the card shows."
+                    ),
                 },
                 "button_label": {
                     "type": "string",
@@ -148,7 +158,7 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                     ),
                 },
             },
-            "required": ["product_id", "button_label"],
+            "required": ["button_label"],
         },
     },
     "required": ["text", "claims_commerce_facts"],
@@ -159,28 +169,36 @@ _INVALID_CARD: Dict[str, Any] = {"__invalid__": True}
 
 
 def _requested_card(raw: Any) -> Dict[str, Any]:
-    """What the model asked to show, carried as a request and nothing more.
+    """What the model offered for a card, carried as a request and nothing more.
 
-    Only the id and the button word survive translation. Whether a card may be
-    shown at all, and what photo and link it opens, are established later
-    against this turn's observations — never from anything the model wrote.
+    Two independent things arrive here, and keeping them apart is the point.
+
+    The **button word** is the only part of a card the customer reads, so it is
+    the model's, in the customer's own language — the platform has no wording of
+    its own and will not invent any. It survives on its own: a reply that gives
+    a word and names no product still offers that word, for a card the platform
+    may decide to show from a verified selection of the customer's.
+
+    The **product** is a request and never authority. Whether a card may be
+    shown at all, which product it shows, and what photo and link it opens are
+    established later against this turn's observations and the customer's own
+    verified selection — never from anything the model wrote.
     """
     if raw is None:
         return {}
     if not isinstance(raw, Mapping):
         return _INVALID_CARD
+    request: Dict[str, Any] = {}
     product_id = raw.get("product_id")
-    if product_id is None:
-        return {}
-    try:
-        product_id = int(product_id)
-    except (TypeError, ValueError):
-        return _INVALID_CARD
-    request: Dict[str, Any] = {"product_id": product_id}
+    if product_id is not None:
+        try:
+            request["product_id"] = int(product_id)
+        except (TypeError, ValueError):
+            return _INVALID_CARD
     label = raw.get("button_label")
     if isinstance(label, str) and label.strip():
         request["button_label"] = label.strip()[:rcard.MAX_BUTTON_LABEL]
-    return {rcard.REQUESTED_KEY: request}
+    return {rcard.REQUESTED_KEY: request} if request else {}
 
 
 def _requested_choices(raw: Any) -> Dict[str, Any]:

@@ -189,11 +189,29 @@ def browsed(*product_ids: int, tenant: int = TENANT) -> ac.ToolObservation:
                     tuple(str(r["evidence_ref"]) for r in rows))
 
 
+# The button word is the one thing on a card the customer reads, so the reply
+# contract makes it the model's and the only required field of ``card``. The
+# helper offers it the way a model answering a product question does — in the
+# language it is writing in — and a case that is *about* its absence passes
+# ``label=""``.
+LABEL_AR = "التفاصيل"
+LABEL_EN = "View product"
+
+
 def draft(text: str = "تفضل", *, cite: Sequence[int] = (), payload: Optional[Dict[str, Any]] = None,
-          extra_refs: Sequence[str] = ()) -> ac.ReplyDraft:
+          extra_refs: Sequence[str] = (), label: str = LABEL_AR,
+          card_product_id: Optional[int] = None) -> ac.ReplyDraft:
     refs = tuple(rc.product_ref(i) for i in cite) + tuple(extra_refs)
+    body: Dict[str, Any] = dict(payload or {})
+    request: Dict[str, Any] = {}
+    if label:
+        request["button_label"] = label
+    if card_product_id is not None:
+        request["product_id"] = int(card_product_id)
+    if request:
+        body[rcard.REQUESTED_KEY] = request
     return ac.ReplyDraft(text=text, evidence_refs=refs, claims_commerce_facts=True,
-                         payload=dict(payload or {}))
+                         payload=body)
 
 
 def shape_of(session: "al._Session") -> Dict[str, Any]:
@@ -414,18 +432,49 @@ def test_12_tapping_the_same_product_again_gets_the_card_again() -> None:
     assert shape_of(session)["shape_reason"] == pp.TAP_SELECTED
 
 
-# ══ 13. A valid model-requested shape comes first ════════════════════════════
+# ══ 13. The tap outranks a model-requested shape ═════════════════════════════
 
-def test_13_a_model_requested_list_outranks_a_tap() -> None:
-    """The model may legitimately decide this turn offers alternatives, even
-    right after a tap. Its request already passed verification."""
+def test_13_an_unrelated_selector_never_cancels_the_tapped_products_card() -> None:
+    """The negative control for the precedence.
+
+    The customer tapped product 14. The model, in the same reply, asks for a
+    selector over two entirely different products. That request is a suggestion;
+    the tap is the customer's own structured selection, and it wins — otherwise
+    an arbitrary request could turn an explicit choice into some other list.
+    """
     request = {rc.REQUESTED_KEY: {"product_ids": [11, 12], "button": "اختر"}}
+    tap = pp.PresentationContext(tapped_product_id=14)
+    final, session = run_seam(draft("تفضل", cite=[11, 12], payload=request), [browsed(11, 12)],
+                              presentation=tap)
+
+    assert (card_of(final) or {})["product_id"] == 14, "the tap's card was cancelled"
+    assert rc.payload_rows(final.payload)[0] == []
+    assert final.payload.get(rc.WITHHELD_KEY) == rc.TAP_ANSWERED_FIRST
+    assert shape_of(session)["shape_reason"] == pp.TAP_SELECTED
+    # Nothing the model meant to offer is lost: the options it asked for follow
+    # its own sentence as lines of the merchant's values.
+    for product_id in (11, 12):
+        assert CATALOGUE[TENANT][product_id]["title"] in final.text
+
+
+def test_13b_a_selector_that_offers_the_tapped_product_back_is_selection_again() -> None:
+    """The one structured fact that returns such a turn to multi-product
+    selection: the agent puts the customer's own choice back among others. It is
+    read off the requested ids, never off anything anyone wrote."""
+    request = {rc.REQUESTED_KEY: {"product_ids": [12, 13], "button": "اختر"}}
     tap = pp.PresentationContext(tapped_product_id=12)
-    final, session = run_seam(draft(cite=[11, 12], payload=request), [browsed(11, 12)],
+    final, session = run_seam(draft(cite=[12, 13], payload=request), [browsed(12, 13)],
                               presentation=tap)
     rows, _button = rc.payload_rows(final.payload)
-    assert [r["id"] for r in rows] == [rc.row_id(11), rc.row_id(12)]
+    assert [r["id"] for r in rows] == [rc.row_id(12), rc.row_id(13)]
     assert card_of(final) is None
+    assert shape_of(session)["shape_reason"] == pp.SELECTION_REOFFERED
+
+
+def test_13c_a_model_requested_shape_still_leads_when_nothing_was_tapped() -> None:
+    request = {rc.REQUESTED_KEY: {"product_ids": [11, 12], "button": "اختر"}}
+    final, session = run_seam(draft(cite=[11, 12], payload=request), [browsed(11, 12)])
+    assert [r["id"] for r in rc.payload_rows(final.payload)[0]] == [rc.row_id(11), rc.row_id(12)]
     assert shape_of(session)["shape_reason"] == pp.MODEL_REQUESTED
 
 
@@ -522,3 +571,91 @@ def test_a_failed_or_truncated_observation_states_nothing() -> None:
     truncated = dataclasses.replace(browsed(11, 12), body_truncated=True)
     reads = pp.provenance([failed, truncated], build_registry().definitions)
     assert reads.candidates == () and reads.focused == ()
+
+
+# ══ The button word reaches the wire as the model wrote it ═══════════════════
+#
+# The channel sender substitutes a fixed Arabic ``display_text`` when it is
+# handed an empty label:
+#
+#     "display_text": str(btn_label or "عرض المنتج")[:20]
+#
+# A platform-determined card is never offered a word by the platform, so before
+# this change it would have arrived carrying that phrase — wording nobody wrote,
+# in one language whatever language the customer is writing. These run the real
+# payload builder and the real transport to show the substitution is now
+# unreachable from this path.
+
+def _payload(card: Mapping[str, Any], text: str = "تفضل") -> Dict[str, Any]:
+    from routers.whatsapp_webhook import build_cta_url_payload  # noqa: PLC0415
+
+    return build_cta_url_payload(to="15550000000", body_text=text,
+                                 btn_label=card["button_label"], btn_url=card["button_url"],
+                                 header_image_url=card["image_url"])
+
+
+def _display_text(payload: Mapping[str, Any]) -> str:
+    return payload["interactive"]["action"]["parameters"]["display_text"]
+
+
+HIDDEN_FALLBACK = "عرض المنتج"
+
+
+@pytest.mark.parametrize("label", [LABEL_AR, LABEL_EN, "Ver producto", "Voir le produit"])
+def test_a_platform_determined_card_carries_the_models_own_word_to_the_wire(label) -> None:
+    """Two conversations, two languages, one rule: what the customer reads on
+    the button is what the model wrote, in the language it was writing in."""
+    tap = pp.PresentationContext(tapped_product_id=12)
+    final, _session = run_seam(draft("تفضل", label=label), [], presentation=tap)
+    card = card_of(final)
+    assert card is not None and card["button_label"] == label
+    assert _display_text(_payload(card)) == label
+    assert _display_text(_payload(card)) != HIDDEN_FALLBACK
+
+
+def test_a_card_is_never_composed_without_a_word_so_the_fallback_is_unreachable() -> None:
+    """The contract test. A reply that offers no button word yields no card at
+    all — so nothing on this path can ever hand the sender an empty label."""
+    tap = pp.PresentationContext(tapped_product_id=12)
+    final, session = run_seam(draft("تفضل", label=""), [], presentation=tap)
+
+    assert card_of(final) is None
+    assert final.payload.get(rcard.WITHHELD_KEY) == rcard.NO_LABEL
+    assert shape_of(session)["card"] == rcard.NO_LABEL
+    # And the model's answer still goes out, untouched.
+    assert final.text == "تفضل"
+
+
+def test_the_same_refusal_holds_for_a_card_the_model_asked_for() -> None:
+    """One rule, not two: whoever chose the product, a card needs a word."""
+    _final, reason = rcard.card(draft(cite=[12], card_product_id=12, label=""), [read(12)])
+    assert reason == rcard.NO_LABEL
+
+
+def test_a_stored_payload_whose_word_was_lost_is_not_a_card_the_transport_may_send() -> None:
+    """The same refusal on the read side, for a payload written by an older
+    release: the transport asks ``payload_card`` and is told there is none, so
+    it sends the text rather than letting the channel invent a word."""
+    sent: List[Tuple[Any, ...]] = []
+    from core.commerce_runtime import runtime_entry as entry  # noqa: PLC0415
+
+    transport = entry.whatsapp_reply_transport(
+        send=lambda to, text: (sent.append(("text", to, text)) or ("ok", "wamid.T", 200)),
+        send_list=None, recipient="15550000000",
+        send_card=lambda *args: (sent.append(("card", *args)) or ("ok", "wamid.C", 200)))
+    wordless = {"text": "تفضل",
+                rcard.CARD_KEY: {"product_id": 12, "image_url": IMAGE.format(12),
+                                 "button_url": LINK.format(12), "button_label": ""}}
+    transport(wordless)
+    assert [row[0] for row in sent] == ["text"], "a wordless card reached the card sender"
+
+
+def test_the_fallback_is_still_there_for_the_paths_that_own_it() -> None:
+    """Scope: this change does not touch ``build_cta_url_payload``, which other
+    senders share. What changed is that the commerce runtime never reaches its
+    substitution — proved by composing the card, not by editing the sender."""
+    from routers.whatsapp_webhook import build_cta_url_payload  # noqa: PLC0415
+
+    bare = build_cta_url_payload(to="1", body_text="x", btn_label="",
+                                 btn_url=LINK.format(12), header_image_url=IMAGE.format(12))
+    assert _display_text(bare) == HIDDEN_FALLBACK

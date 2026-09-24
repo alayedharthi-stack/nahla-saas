@@ -66,6 +66,11 @@ TOO_MANY = "more_options_than_the_channel_shows"
 NOT_OBSERVED = "not_observed_this_turn"
 INCOMPLETE = "not_every_option_could_be_a_row"
 OFFERED = "offered"
+# The customer picked a product from a list this conversation sent, and this
+# reply's selector does not offer that product back. Their own selection is
+# answered first; the options here still follow the text as lines, so nothing
+# the model meant to offer is lost.
+TAP_ANSWERED_FIRST = "verified_tap_answered_first"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -285,7 +290,8 @@ def options_as_text(text: str, rows: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join([body, *lines]) if body else "\n".join(lines)
 
 
-def finalize(draft: Any, observations: Sequence[Any]) -> Tuple[Any, str]:
+def finalize(draft: Any, observations: Sequence[Any], *,
+             withhold: str = "") -> Tuple[Any, str]:
     """The draft as it will be delivered, with its selector or with its options.
 
     A verified selector makes the reply ``rich`` and leaves the text exactly as
@@ -302,6 +308,10 @@ def finalize(draft: Any, observations: Sequence[Any]) -> Tuple[Any, str]:
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
 
     chosen, reason = selection(draft, observations)
+    if withhold and chosen is not None:
+        # The platform decided this turn answers the customer's own selection
+        # instead. The rows are not offered; the options still are, below.
+        chosen, reason = None, withhold
     payload: Dict[str, Any] = {key: value
                                for key, value in dict(getattr(draft, "payload", None) or {}).items()
                                if key != REQUESTED_KEY}
@@ -355,6 +365,7 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
     "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX",
+    "TAP_ANSWERED_FIRST",
     "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
     "observed_products", "option_line", "options_as_text",
     "payload_rows", "product_id_from_row_id", "product_ref", "requested_button",

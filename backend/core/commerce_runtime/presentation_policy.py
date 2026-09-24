@@ -31,16 +31,28 @@ Precedence
 ==========
 First match wins:
 
-1. a valid model-requested shape, consistent with evidence and policy;
-2. a **verified fresh product-row selection** → hydrate → card;
+1. a **verified fresh product-row selection** → hydrate → card;
+2. a valid model-requested shape, consistent with evidence and policy;
 3. a focused product from a deliberate ``get_product_details`` → card, subject
    to recent-card suppression when there is no new selection;
 4. multiple candidates and no single focus → list;
 5. otherwise → text.
 
-Step 2 sits above step 3 deliberately: a tap is the most explicit product
-selection the channel allows, so it beats suppression. A customer who taps a
-product again is asking for it again.
+**The tap is first, and that is the whole point of it.** A tap on a row this
+conversation sent is the strongest structured product selection the channel
+gives us — stronger than a model request, which is a suggestion, and stronger
+than suppression, which is a guess about repetition. Letting an unrelated
+selector in the same reply turn an explicit choice into a different list would
+answer a question the customer did not ask.
+
+Only one structured fact returns such a turn to multi-product selection: the
+model asks for a selector that **itself offers the tapped product back**, among
+others. That is the agent deliberately presenting the customer's own choice as
+one of several — a comparison the selection is part of — and it is read off the
+requested product ids, never off anything anyone wrote. A selector that does not
+carry the tapped product is about something else and does not cancel the card;
+its options still reach the customer as lines under the model's own sentence, so
+nothing it meant to offer is lost.
 
 Hydration is the tools' own contract, not a copy of it
 ======================================================
@@ -89,6 +101,9 @@ FOCUSED_PRODUCT = "focused_product_read"
 RECENT_CARD_SUPPRESSED = "recent_card_already_sent"
 MULTIPLE_CANDIDATES = "multiple_candidates_no_focus"
 NO_PRODUCT_FOCUS = "no_product_focus"
+# The model's selector offers the tapped product back among others, so the turn
+# is a multi-product selection again — established from the requested ids.
+SELECTION_REOFFERED = "tapped_product_reoffered_among_others"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -122,6 +137,10 @@ class Shape:
     product_id: Optional[int] = None
     # Whether the platform must read the product before the card can compose.
     hydrate: bool = False
+    # Whether a selector the model requested must not be offered this turn. Set
+    # only when the customer's own verified selection is being answered instead;
+    # the options themselves are never withheld with it.
+    withhold_selector: bool = False
 
     @property
     def determined_product_id(self) -> Optional[int]:
@@ -204,6 +223,16 @@ def provenance(observations: Sequence[Any], definitions: Sequence[Any]) -> Prove
     return Provenance(focused=tuple(focused), candidates=tuple(candidates))
 
 
+def _selector_offers(draft: Any, product_id: int) -> bool:
+    """Whether a selector the model requested offers this product back.
+
+    Read from the requested product ids and nothing else. It is the one
+    structured fact that can return a tapped turn to multi-product selection,
+    so it must be exactly that fact and not an impression of one.
+    """
+    return int(product_id) in rc.requested_product_ids(draft)
+
+
 def _model_requested(draft: Any) -> Optional[str]:
     """The shape the model asked for, if it asked for one.
 
@@ -219,7 +248,11 @@ def _model_requested(draft: Any) -> Optional[str]:
         return SHAPE_LIST
     from core.commerce_runtime import reply_card as rcard  # noqa: PLC0415
 
-    return SHAPE_CARD if rcard.REQUESTED_KEY in payload else None
+    # A card request that names no product is not a request for a shape — it is
+    # the button wording, offered for whatever card the platform decides to
+    # show. Treating it as a shape would let a word the model supplied stand in
+    # front of the customer's own verified selection.
+    return SHAPE_CARD if rcard.requested_product_id(draft) is not None else None
 
 
 def decide(*, draft: Any, observations: Sequence[Any], definitions: Sequence[Any],
@@ -231,21 +264,28 @@ def decide(*, draft: Any, observations: Sequence[Any], definitions: Sequence[Any
     goes out whatever this returns.
     """
     ctx = presentation if presentation is not None else PresentationContext()
-
-    # 1. The model asked for a shape. It may legitimately decide this turn
-    #    offers alternatives, even right after a tap, and its request already
-    #    passed verification. The composers below still refuse a request this
-    #    turn's evidence will not support.
     requested = _model_requested(draft)
-    if requested is not None:
-        return Shape(kind=requested, reason=MODEL_REQUESTED)
 
-    # 2. A verified fresh product-row selection. The most explicit product
-    #    choice the channel allows, so it outranks suppression, and the product
-    #    is read by the platform rather than hoped for from the model.
+    # 1. A verified fresh product-row selection. The strongest structured
+    #    product choice the channel gives us, so it comes first: the product is
+    #    read by the platform rather than hoped for from the model, and no
+    #    request of the model's turns it into a different list.
     tapped = ctx.tapped_product_id
     if tapped is not None and int(tapped) > 0:
-        return Shape(kind=SHAPE_CARD, reason=TAP_SELECTED, product_id=int(tapped), hydrate=True)
+        if not _selector_offers(draft, int(tapped)):
+            return Shape(kind=SHAPE_CARD, reason=TAP_SELECTED, product_id=int(tapped),
+                         hydrate=True, withhold_selector=requested == SHAPE_LIST)
+        # The selector offers the tapped product back among others: the agent
+        # is presenting the customer's own choice as one of several, which is a
+        # multi-product selection again. Read from the requested ids alone.
+        return Shape(kind=SHAPE_LIST, reason=SELECTION_REOFFERED, product_id=int(tapped))
+
+    # 2. The model asked for a shape. It may legitimately decide this turn
+    #    offers alternatives, and its request already passed verification. The
+    #    composers below still refuse a request this turn's evidence will not
+    #    support.
+    if requested is not None:
+        return Shape(kind=requested, reason=MODEL_REQUESTED)
 
     reads = provenance(observations, definitions)
 
@@ -335,6 +375,7 @@ def after_hydration(shape: Shape, observations: Sequence[Any]) -> Shape:
 __all__ = [
     "CANDIDATE_KIND", "FOCUSED_PRODUCT", "FOCUS_KIND", "HYDRATION_CALL_ID", "HYDRATION_TOOL",
     "MODEL_REQUESTED", "MULTIPLE_CANDIDATES", "NO_PRODUCT_FOCUS", "PresentationContext",
+    "SELECTION_REOFFERED",
     "Provenance", "RECENT_CARD_SUPPRESSED", "SHAPE_CARD", "SHAPE_LIST", "SHAPE_TEXT", "Shape",
     "TAP_HYDRATION_UNAVAILABLE", "TAP_PRODUCT_NOT_FOUND", "TAP_SELECTED", "after_hydration",
     "already_read",

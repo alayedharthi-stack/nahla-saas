@@ -48,18 +48,36 @@ browse, so it never becomes a Card or a row on its own.
 
 Exactly this order, first match wins:
 
-1. **A valid model-requested shape** that is consistent with evidence and
-   policy. The model may legitimately decide this turn offers alternatives,
-   even right after a tap.
-2. **A verified fresh product-row selection** → hydrate → **Card**.
+1. **A verified fresh product-row selection** → hydrate → **Card**.
+2. **A valid model-requested shape** that is consistent with evidence and
+   policy.
 3. **A focused product** from a deliberate `get_product_details` → **Card**,
    subject to recent-card suppression when there is no new selection.
 4. **Multiple candidates and no focus** → **List**.
 5. Otherwise → **Text**.
 
+**The tap is first, and that is the point of it.** A tap on a row this
+conversation sent is the strongest structured product selection the channel
+gives us: stronger than a model request, which is a suggestion, and stronger
+than suppression, which is a guess about repetition. An unrelated selector in
+the same reply must not be able to turn an explicit choice into a different
+list — that answers a question the customer did not ask.
+
+Exactly one structured fact returns such a turn to multi-product selection: the
+model asks for a selector that **itself offers the tapped product back**, among
+others. That is the agent deliberately presenting the customer's own choice as
+one of several, and it is read off the requested product ids — never off
+anything anyone wrote. A selector that does not carry the tapped product is
+about something else: the Card goes out, the selector stands down with
+`verified_tap_answered_first`, and its options still follow the model's own
+sentence as lines, so nothing it meant to offer is lost. The selector only
+stands down for a Card that will actually be there — asked of the composer
+before anything is changed — so a tapped product that turns out to have no photo
+leaves the customer with the selector rather than with neither shape.
+
 Where a model request conflicts with structured facts or evidence, the existing
 guards win — verification runs before any of this, and a card or row whose
-product this turn did not observe and cite never reaches step 1.
+product this turn did not observe and cite never reaches step 2.
 
 ## Rule 1 — a verified tap leads to a Card deterministically
 
@@ -104,14 +122,50 @@ named reason on the delivered payload — never a Card built from a guess:
 product coming back from `search_products` is a candidate, not a selection, and
 does not become a Card by being alone.
 
-### The button label adds no new fixed wording
+### The button word is the expression layer's, in the customer's language
 
-A model-requested Card still needs the model's own button word
-(`no_button_label_offered` when it offers none) — unchanged. A
-**platform-determined** Card after a tap was never offered one, so it carries an
-empty label and the send path's existing `display_text` default stands, exactly
-as `reply_choices` leaves the list button to the channel sender. This PR
-introduces no customer-facing constant.
+The button is the one thing on a Card the customer *reads*. Everything else —
+the product, its photo, the page the button opens — is the merchant's, read
+through the tools. So the two are owned separately, and neither can stand in
+for the other:
+
+| | authority |
+|---|---|
+| product identity, image, URL | **merchant / tool** — read through `get_product_details`, never from the model's words |
+| button wording | **expression layer** — the model, in the customer's own language |
+
+The platform has no word of its own and will not invent one: **no word, no
+Card**, whoever chose the product. The answer still goes out, with
+`no_button_label_offered` on the payload.
+
+This is not a formality. The channel sender substitutes a fixed Arabic phrase
+for an empty label —
+
+```python
+"display_text": str(btn_label or "عرض المنتج")[:20]
+```
+
+— so a Card composed without a word would arrive carrying wording nobody wrote,
+in one language whatever language the customer is writing in. Refusing to
+compose one is what makes that substitution unreachable from this path;
+`payload_card` refuses the same on the read side, for a payload written by an
+older release. `build_cta_url_payload` itself is untouched, because other
+senders share it; a case pins that its fallback is still there for the paths
+that own it, and that this one never reaches it.
+
+Localization was considered and rejected on evidence: the only customer-language
+signal in the codebase is `preferred_language` in the legacy Brain profile,
+which defaults to `"ar"` at every call site and yields a *language code*, not a
+word. Turning it into a button label would need a language→phrase table — a
+customer-facing constant per language rather than one, which is the same
+violation multiplied.
+
+So the reply contract makes `button_label` the only **required** field of
+`card`, and `product_id` optional. The model may give the wording without
+naming a product, and the platform then decides which product the Card shows —
+from the customer's verified selection, not from anything the model wrote. A
+card request carrying only wording is therefore not a request for a *shape*: it
+never stands in front of the customer's own selection.
 
 ## Rule 2 — the pagination snapshot: an explicit lifecycle proof
 
@@ -164,7 +218,7 @@ same way and for the same reason. Read back, the question is exact: *was the
 most recent Card this conversation actually delivered for this same product?*
 
 And it is beaten by a verified fresh tap, because precedence puts the tap at
-step 2 and suppression at step 3. A customer who taps a product again is asking
+step 1 and suppression at step 3. A customer who taps a product again is asking
 for it again; answering that with suppressed presentation would be the platform
 overruling an explicit selection.
 

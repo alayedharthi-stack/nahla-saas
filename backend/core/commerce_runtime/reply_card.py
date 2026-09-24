@@ -37,8 +37,9 @@ REQUESTED_KEY = "requested_card"
 CARD_KEY = "card"
 WITHHELD_KEY = "card_withheld"
 
-# Meta truncates a CTA button label; a label longer than this is the merchant's
-# words cut mid-phrase, so the platform's own short label is used instead.
+# Meta truncates a CTA button label, so the model's word is bounded to what the
+# channel will render whole. The platform has no label of its own to fall back
+# on: a card without a word from the model is no card at all.
 MAX_BUTTON_LABEL = 20
 
 # Closed reasons, for the pilot log and for tests.
@@ -47,10 +48,12 @@ NOT_OBSERVED = "not_observed_this_turn"
 NO_IMAGE = "product_has_no_image"
 NO_LINK = "product_has_no_link"
 INSECURE_LINK = "product_link_not_https"
-# Meta requires text on a CTA button. The word is the model's to choose —
-# the platform supplies no default of its own, for the same reason the
-# selector does not: a fixed phrase here would be a second customer-facing
-# constant nobody approved. Without one there is simply no card.
+# Meta requires text on a CTA button, and it is the one thing on a card the
+# customer reads — so it is the model's, in the customer's own language. The
+# platform supplies no default of its own, for the same reason the selector does
+# not: a fixed phrase here would be a customer-facing constant nobody approved,
+# and in one language whatever language the customer is writing. Without a word
+# there is simply no card, whoever chose the product.
 NO_LABEL = "no_button_label_offered"
 OFFERED = "offered"
 
@@ -145,11 +148,12 @@ def card(draft: Any, observations: Sequence[Any], *,
     argument from the model's request: what was asked for and what the platform
     established are never the same field, here as everywhere else. Everything
     the customer then sees is read from this turn's observations exactly as it
-    is for a requested card; only the *choice of product* has a different
-    author, and only the button word is sourced differently (below).
+    is for a requested card: only the *choice of product* has a different
+    author. The button word stays the model's either way, and without one there
+    is no card either way.
     """
-    platform_determined = determined_product_id is not None
-    product_id = int(determined_product_id) if platform_determined else requested_product_id(draft)
+    product_id = (int(determined_product_id) if determined_product_id is not None
+                  else requested_product_id(draft))
     if product_id is None:
         return None, NOT_REQUESTED
     observed = rc.observed_products(observations)
@@ -165,14 +169,18 @@ def card(draft: Any, observations: Sequence[Any], *,
     if not button_url:
         return None, NO_LINK if not str(product.get("product_url") or "").strip() else INSECURE_LINK
     label = requested_label(draft)
-    if not label and not platform_determined:
-        # A model that asked for a card chooses its own word; without one there
-        # is simply no card, because the platform supplies no phrase of its own.
+    if not label:
+        # The button word is the one thing on a card the customer reads, so it
+        # is the model's, in the customer's own language. Without one there is
+        # no card — for a card the platform determined just as much as for one
+        # the model asked for.
+        #
+        # This is not a formality. The channel sender substitutes a fixed
+        # Arabic ``display_text`` for an empty label, so a card composed without
+        # a word would arrive carrying a phrase nobody wrote and no customer's
+        # language chose. Refusing here is what keeps that unreachable; a
+        # wire-level case pins it.
         return None, NO_LABEL
-    # A platform-determined card was never offered a word, so none is invented
-    # here either: an empty label leaves the send path's existing ``display_text``
-    # in place, exactly as ``reply_choices`` leaves the list button to the
-    # channel sender. No customer-facing constant is introduced.
     return ProductCard(product_id=int(product_id),
                        image_url=image_url,
                        button_url=button_url,
@@ -190,7 +198,13 @@ def payload_card(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     image_url = _https(raw.get("image_url"))
     button_url = _https(raw.get("button_url"))
-    if not image_url or not button_url:
+    label = str(raw.get("button_label") or "").strip()
+    # A card whose word is missing is not a card the transport may send. The
+    # channel sender substitutes a fixed phrase for an empty label, so handing
+    # it one would put wording on the wire that nobody wrote and no customer's
+    # language chose. ``card`` already refuses to compose one; this is the same
+    # refusal on the read side, for a payload written by an older release.
+    if not image_url or not button_url or not label:
         return None
     try:
         product_id = int(raw.get("product_id") or 0)
@@ -198,7 +212,7 @@ def payload_card(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         product_id = 0
     card_view: Dict[str, Any] = {"image_url": image_url,
                                  "button_url": button_url,
-                                 "button_label": str(raw.get("button_label") or "").strip()}
+                                 "button_label": label}
     # The identity behind the card, when the stored payload carries one. A
     # payload written by an older release does not, and its absence is simply
     # an unknown identity — never a wrong one.
@@ -236,7 +250,10 @@ def finalize(draft: Any, observations: Sequence[Any], *,
     payload: Dict[str, Any] = {key: value
                                for key, value in dict(getattr(draft, "payload", None) or {}).items()
                                if key != REQUESTED_KEY}
-    asked = REQUESTED_KEY in (getattr(draft, "payload", None) or {})
+    # "Asked for a card" means named a product. A request carrying only the
+    # button wording is an offer of words for whatever card the platform shows,
+    # so a turn that shows none is not a withheld request and records nothing.
+    asked = requested_product_id(draft) is not None
     determined = determined_product_id is not None
     if selector_offered:
         # A customer who still has to choose between products is not helped by

@@ -16,6 +16,7 @@ import pytest
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_provider as ap
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
 
 INSTRUCTIONS = "EXISTING-INSTRUCTIONS-OWNED-ELSEWHERE"
@@ -835,14 +836,51 @@ def test_the_declaration_still_says_nothing_about_when_to_reach_for_either():
 
 
 def test_the_accepted_shape_itself_is_untouched_by_the_correction():
-    """Description-only. A model that already asked correctly under the old
-    declaration sends exactly the same arguments under the new one."""
+    """A model that already asked correctly sends exactly the same arguments.
+
+    ``card.product_id`` became optional, which only ever *widens* what is
+    accepted: nothing a model could send before is refused now, and nothing it
+    sent before means something different. The widening exists because the
+    button word is the one thing on a card the customer reads — it is the
+    model's, in the customer's language — while which product the card shows is
+    the platform's, from the customer's own verified selection. Requiring the
+    two together made the wording unobtainable without also claiming the
+    identity; see ``card.button_label`` below and
+    docs/engineering/commerce-runtime-product-presentation.md.
+    """
     schema = ap.REPLY_TOOL_SCHEMA
     assert set(schema["properties"]) == {"text", "evidence_refs", "claims_commerce_facts",
                                          "choices", "card"}
     assert schema["properties"]["choices"]["required"] == ["product_ids"]
-    assert schema["properties"]["card"]["required"] == ["product_id", "button_label"]
+    assert schema["properties"]["card"]["required"] == ["button_label"]
     assert set(schema["properties"]["choices"]["properties"]) == {"product_ids", "button"}
     assert set(schema["properties"]["card"]["properties"]) == {"product_id", "button_label"}
     for optional in ("choices", "card"):
         assert optional not in schema["required"]
+
+
+def test_a_card_request_naming_both_is_translated_exactly_as_it_was():
+    """The widening changes no accepted request. The shape a model already
+    sends arrives as the same payload it always did."""
+    both = ap._requested_card({"product_id": 23, "button_label": "اطلب الآن"})
+    assert both == {rcard.REQUESTED_KEY: {"product_id": 23, "button_label": "اطلب الآن"}}
+
+
+def test_the_button_word_survives_without_a_product_and_claims_no_identity():
+    """The new shape: wording offered for whatever card the platform shows.
+
+    It carries no product, so it cannot stand in front of the customer's own
+    verified selection — and ``requested_product_id`` reads no identity out of
+    it, which is what keeps the two authorities apart.
+    """
+    only_words = ap._requested_card({"button_label": "View product"})
+    assert only_words == {rcard.REQUESTED_KEY: {"button_label": "View product"}}
+    draft = ac.ReplyDraft(text="x", evidence_refs=(), claims_commerce_facts=True,
+                          payload=only_words)
+    assert rcard.requested_product_id(draft) is None
+    assert rcard.requested_label(draft) == "View product"
+
+
+def test_a_card_object_with_neither_field_is_no_request_at_all():
+    assert ap._requested_card({}) == {}
+    assert ap._requested_card(None) == {}
