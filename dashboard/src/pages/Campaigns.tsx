@@ -131,7 +131,16 @@ const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
   stalled: 'amber',
   paused: 'amber',
   waiting_for_capacity: 'blue',
+  rate_limit_backoff: 'blue',
+  marketing_delivery_blocked: 'amber',
+  provider_throttled: 'amber',
   unknown: 'slate',
+}
+
+/** A server UTC timestamp (with or without a zone suffix) in local time. */
+function formatUtcTime(iso: string, lang: Parameters<typeof localeTag>[0]): string {
+  const z = iso.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(iso) ? '' : 'Z'
+  return new Date(iso + z).toLocaleString(localeTag(lang), { dateStyle: 'short', timeStyle: 'short' })
 }
 
 const WIZARD_STEP_KEYS = [
@@ -3219,6 +3228,16 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
         setDiagnostic(res.message || dr.dispatchSkipped)
         return
       }
+      if (res.ok === false && res.reason === 'provider_throttled' && res.throttle) {
+        setDiagnostic(
+          (res.message || '') + '\n' + health.throttleClearsAt
+            .replace('{count}', String(res.throttle.count))
+            .replace('{key}', res.throttle.key)
+            .replace('{minutes}', String(res.throttle.window_minutes))
+            .replace('{time}', formatUtcTime(res.throttle.clears_at, lang)),
+        )
+        return
+      }
       if (res.ok === false && res.reason === 'already_running') {
         setDiagnostic(res.message || health.alreadyRunning)
         return
@@ -3370,6 +3389,26 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                       .toLocaleString(localeTag(lang), { dateStyle: 'short', timeStyle: 'short' }),
                   )
                 : health.capacityResumeSoon}
+            </p>
+          )}
+          {lifecycleKey === 'rate_limit_backoff' && (
+            <p className="text-[10px] text-blue-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>
+              {campaign.capacity_wait?.next_eligible_at
+                ? health.rateLimitResumeAt.replace('{time}', formatUtcTime(campaign.capacity_wait.next_eligible_at, lang))
+                : health.pauseReasons.provider_rate_limited}
+            </p>
+          )}
+          {(lifecycleKey === 'marketing_delivery_blocked' || lifecycleKey === 'provider_throttled') && (
+            <p className="text-[10px] text-amber-600 mt-1 max-w-[220px]" title={campaign.execution?.pause_detail || ''}>
+              {campaign.throttle
+                ? health.throttleClearsAt
+                    .replace('{count}', String(campaign.throttle.count))
+                    .replace('{key}', campaign.throttle.key)
+                    .replace('{minutes}', String(campaign.throttle.window_minutes))
+                    .replace('{time}', formatUtcTime(campaign.throttle.clears_at, lang))
+                : campaign.throttle_checked
+                  ? health.throttleCleared
+                  : (health.pauseReasons[pauseReason || ''] || campaign.pause_reason_ar || pauseReason)}
             </p>
           )}
           {lifecycleKey === 'paused' && pauseReason && (
@@ -3642,7 +3681,11 @@ export default function Campaigns() {
     try {
       const updated = await campaignsApi.updateStatus(id, status)
       setCampaigns(cs => cs.map(c => c.id === updated.id ? updated : c))
-    } catch { /* ignore */ }
+    } catch (e) {
+      // A refused resume (e.g. 409 provider_throttled) carries the reason
+      // and when it can proceed — show it instead of doing nothing.
+      if (e instanceof Error && e.message) window.alert(e.message)
+    }
   }
 
   const handleDelete = async (id: number) => {
