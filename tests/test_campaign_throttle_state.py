@@ -399,3 +399,15 @@ def test_a_per_run_spam_breaker_is_never_shown_as_cleared(dbf, fake_meta, world)
     payload = _cap._lifecycle(dbf, ids.campaign_id)
     assert payload["lifecycle"] == "provider_throttled"
     assert payload["throttle"] is None and payload["throttle_checked"] is False
+
+
+def test_without_a_connection_the_block_is_never_shown_as_cleared(dbf, fake_meta, world, monkeypatch):
+    ids = _seed(dbf, phones=PHONES[:2])
+    _post_accept_failures(dbf, ids, 25)
+    fake_meta(FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)
+    _age_failures(dbf, 16)                               # the window has in fact cleared
+    monkeypatch.setattr(disp, "_get_wa_connection", lambda db, tenant_id: None)
+    payload = _cap._lifecycle(dbf, ids.campaign_id)
+    assert payload["lifecycle"] == "marketing_delivery_blocked"
+    assert payload["throttle"] is None and payload["throttle_checked"] is False

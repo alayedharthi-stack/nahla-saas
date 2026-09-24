@@ -1796,7 +1796,7 @@ def record_rate_limit_wait(campaign: Any, *, detail: str,
     prev = capacity_wait(campaign) or {}
     # A stale record left from an earlier backoff can only lengthen this
     # one (never shorten it or re-send anything) — the safe direction.
-    attempt =int(prev.get("attempt", 0)) + 1 if prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED else 1
+    attempt = int(prev.get("attempt", 0)) + 1 if prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED else 1
     delay = min(RATE_LIMIT_BACKOFF_BASE * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_MAX)
     wait = {
         "reason": PAUSE_PROVIDER_RATE_LIMITED,

@@ -424,8 +424,11 @@ def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str,
             ex["throttle_checked"] = False
             if str(ex.get("pause_detail") or "").startswith("post_accept"):
                 try:
-                    ex["throttle"] = _campaign_throttle(db, c)
-                    ex["throttle_checked"] = True
+                    from services.campaign_dispatcher import _get_wa_connection  # noqa: PLC0415
+                    # No connection means the window was not read: never "cleared".
+                    if _get_wa_connection(db, c.tenant_id) is not None:
+                        ex["throttle"] = _campaign_throttle(db, c)
+                        ex["throttle_checked"] = True
                 except Exception:  # noqa: BLE001, silent-ok — display only; the label still shows the reason
                     ex["throttle"] = None
     return [
