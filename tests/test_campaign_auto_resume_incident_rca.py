@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -222,3 +224,72 @@ def test_incident_rca_is_read_only(pgdb, capsys):
     before = snap()
     _run(url, capsys)
     assert snap() == before
+
+
+# ── Review findings: false clean, raw-field classification, identity ─────
+
+
+@pg
+def test_a_never_started_claim_plus_an_unplaceable_copy_is_never_clean(pgdb, capsys):
+    """Reproduces the review's case: the recipient's only history is a claim
+    that never started (not evidence) and some pre-window copy cannot be
+    placed. The orphan rule must still mark it unresolved -- the earlier
+    head skipped it because its evidence set was not empty, then dropped
+    ``claimed_never_started`` and reported clean."""
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _attempt(c, log_id=1, phone=A, n=0, state="claimed", at=BEFORE, started=False)
+        _campaign_event(c, "w.orphan", conv=None, _status_delivered=True)
+        _event_at(c, BEFORE)
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 1 in by["unresolved_evidence"]
+    assert 1 not in by.get("clean", [])
+
+
+@pg
+@pytest.mark.parametrize("state, wamid, started, expect", [
+    ("claimed", None, True, "request_started"),        # label says claimed, request left
+    ("rejected", "w.contradiction", True, "accepted"),  # label says rejected, Meta gave a wamid
+    ("abandoned", None, True, "request_started"),      # abandoned after the request started
+    ("mystery", None, False, "unknown"),               # a label nobody defined
+])
+def test_prior_attempts_are_classified_from_their_raw_fields(pgdb, capsys, state, wamid,
+                                                             started, expect):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _attempt(c, log_id=1, phone=A, n=0, state=state, at=BEFORE, started=started, wamid=wamid)
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 1 in by[expect] and 1 not in by.get("clean", [])
+
+
+@pg
+@pytest.mark.parametrize("spelling", ["00" + A.lstrip("+"), "0" + A[4:], "+966 50 000 0401"])
+def test_history_is_matched_by_identity_not_by_digits(pgdb, capsys, spelling):
+    """A's earlier accepted attempt stored as ``00966…`` / ``05…`` / spaced
+    is still A's (digit stripping alone missed ``00966…`` and ``05…``)."""
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _attempt(c, log_id=8, phone=spelling, n=5, state="accepted", at=BEFORE, campaign=10,
+                 accepted=True, wamid="w.other-spelling")
+    _, _, out = _run(url, capsys)
+    by = out["history_before_window"]["send_log_ids_by_strongest_evidence"]
+    assert 1 in by["accepted"]
+
+
+@pg
+def test_a_window_number_without_identity_is_unresolved(pgdb, capsys):
+    url, engine, _ = pgdb
+    _seed(engine)
+    with engine.begin() as c:
+        _log_row(c, 11, "+96650000040", "sent", 1, wamid="w.11")      # one digit short
+        _attempt(c, log_id=11, phone="+96650000040", n=1, state="accepted", at=IN_WINDOW,
+                 accepted=True, wamid="w.11")
+    _, _, out = _run(url, capsys)
+    assert out["window"]["recipients_without_validated_identity"] == 1
+    assert 11 in out["history_before_window"]["send_log_ids_by_strongest_evidence"][
+        "unresolved_evidence"]

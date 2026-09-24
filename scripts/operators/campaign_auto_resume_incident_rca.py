@@ -24,12 +24,19 @@ for a recipient's history:
 * ``message_delivery_events`` — receipts for those copies' wamids and for
   this campaign's rows.
 
+Recipients are matched by the platform's validated identity
+(``services.recipient_identity``: ``+966…``, ``966…``, ``00966…`` and
+``05…`` are one person) — the same rule the send guard uses. Prior attempts
+are classified from their raw fields (wamid, accepted / receipt times,
+request start), not from the state label alone.
+
 A recipient is ``clean`` only when every one of those sources was read and
-nothing was found. When a pre-window copy cannot be tied to exactly one
-recipient (no wamid, no conversation/customer, or two owners), no recipient
-without other evidence can be proven clean: they are ``unresolved_evidence``
-and the count of unplaceable rows is reported. If a source cannot be read the
-tool exits non-zero instead of reporting.
+nothing was found. It is ``unresolved_evidence`` instead when its own number
+has no validated identity, when a pre-window copy may be its (a spelling
+without identity whose digits are its number's tail), or when any pre-window
+copy cannot be tied to anyone at all (no identity, no wamid owner) — such a
+copy could be anyone's. If a source cannot be read the tool exits non-zero
+instead of reporting.
 
 It also intersects the window with ``--unapproved-send-log-ids`` — the rows
 the reconciliation did not approve, as listed (``planned_changes``) by the
@@ -49,11 +56,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+
+ROOT = Path(__file__).resolve().parents[2]
+for _p in (ROOT / "backend", ROOT / "database"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from services.recipient_identity import (  # noqa: E402
+    MATCH_SUFFIX_DIGITS, canonical_recipient, digits, may_be_recipient,
+)
 
 # Strongest first. ``unresolved_evidence`` outranks only ``clean``.
 EVIDENCE_ORDER = (
@@ -66,7 +82,8 @@ NOT_EVIDENCE = ("claimed_never_started",)
 # The owner's table: recipients with each kind of prior evidence (a
 # recipient can count in several), then those with none.
 TABLE_KINDS = ("accepted", "delivered", "read", "uncertain", "request_started")
-_NORM = "regexp_replace({col}, '[^0-9]', '', 'g')"
+PROVEN_NOT_ACCEPTED = ("rejected", "not_sent", "abandoned")
+KNOWN_STATES = ("claimed", "request_started", "accepted", "uncertain") + PROVEN_NOT_ACCEPTED
 
 
 class SourceUnreadable(RuntimeError):
@@ -84,16 +101,21 @@ def _ids(raw: Optional[str]) -> List[int]:
     return sorted({int(x) for x in (raw or "").replace(" ", "").split(",") if x})
 
 
-def _digits(p: Any) -> str:
-    return re.sub(r"\D", "", str(p or ""))
-
-
 def _strongest(kinds: Iterable[str]) -> str:
     ks = set(kinds) - set(NOT_EVIDENCE)
     for k in EVIDENCE_ORDER:
         if k in ks:
             return k
     return "clean"
+
+
+def _json(md: Any) -> Dict[str, Any]:
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except ValueError:
+            return {}
+    return md if isinstance(md, dict) else {}
 
 
 def _event_wamid(md: Dict[str, Any]) -> Optional[str]:
@@ -103,11 +125,7 @@ def _event_wamid(md: Dict[str, Any]) -> Optional[str]:
 def _event_kinds(md: Dict[str, Any]) -> Set[str]:
     """Evidence one outbound campaign copy carries. A copy with a wamid was
     accepted; without one its outcome is unknown."""
-    ks: Set[str] = set()
-    if _event_wamid(md):
-        ks.add("accepted")
-    else:
-        ks.add("unknown")
+    ks: Set[str] = {"accepted"} if _event_wamid(md) else {"unknown"}
     if md.get("_status_read"):
         ks.update(("read", "delivered"))
     if md.get("_status_delivered"):
@@ -121,6 +139,64 @@ def _status_kinds(status: Any) -> Set[str]:
     st = str(status or "").lower()
     return {"read": {"read", "delivered"}, "delivered": {"delivered"},
             "failed": {"failed"}}.get(st, {"unknown"} if st else set())
+
+
+def attempt_kinds(state: Any, wamid: Any, accepted: Any, delivered: Any, read: Any,
+                  started: Any, failed: Any) -> Set[str]:
+    """What one earlier attempt proves, from its raw fields first. A wamid,
+    an acceptance or a receipt time is acceptance whatever the label says;
+    a started request is ``request_started`` unless the attempt is a proven
+    pre-accept failure; only a claim with nothing started and nothing
+    accepted is ``claimed_never_started``. An unknown label is ``unknown``."""
+    st = str(state or "").lower()
+    ks: Set[str] = set()
+    if read:
+        ks.update(("read", "delivered", "accepted"))
+    if delivered:
+        ks.update(("delivered", "accepted"))
+    if accepted or wamid:
+        ks.add("accepted")
+    if st == "uncertain":
+        ks.add("uncertain")
+    if st not in KNOWN_STATES:
+        ks.add("unknown")
+    if started and not ks and st not in ("rejected", "not_sent"):
+        ks.add("request_started")
+    if st == "request_started" and not (ks - {"request_started"}):
+        ks.add("request_started")
+    if failed or st in ("rejected", "not_sent"):
+        ks.add("failed")
+    if st == "claimed" and not started and not ks:
+        ks.add("claimed_never_started")
+    return ks
+
+
+class _Recipients:
+    """Evidence per window recipient, keyed by validated identity; spellings
+    without identity are matched conservatively (``may_be_recipient``)."""
+
+    def __init__(self, identities: Iterable[str]) -> None:
+        self.evidence: Dict[str, Set[str]] = {i: set() for i in identities}
+        self.by_tail: Dict[str, List[str]] = {}
+        for i in self.evidence:
+            self.by_tail.setdefault(digits(i)[-MATCH_SUFFIX_DIGITS:], []).append(i)
+
+    def matching(self, stored: Any) -> List[str]:
+        own = canonical_recipient(stored)
+        if own is not None:
+            return [own] if own in self.evidence else []
+        d = digits(stored)
+        return [i for i in self.by_tail.get(d[-MATCH_SUFFIX_DIGITS:], ()) if may_be_recipient(stored, i)]
+
+    def add(self, stored: Any, kinds: Iterable[str], hits: Counter) -> None:
+        exact = canonical_recipient(stored) is not None
+        ks = set(kinds)
+        for i in self.matching(stored):
+            # A spelling without identity may be this recipient: that is
+            # unresolved, never a proof either way.
+            got = ks if exact else {"unresolved_evidence"}
+            self.evidence[i] |= got
+            hits.update(got)
 
 
 def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, until: datetime,
@@ -139,23 +215,29 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
             read_sources.append(source)
         return rows
 
-    n = _NORM.format(col="customer_phone_e164")
-
     # ── the window ──────────────────────────────────────────────────────
     attempts = q("campaign_send_attempts",
-        f"SELECT id, send_log_id, {n}, state, provider_message_id, "
+        "SELECT id, send_log_id, customer_phone_e164, state, provider_message_id, "
         "request_started_at IS NOT NULL, accepted_at IS NOT NULL, delivered_at IS NOT NULL, "
         "read_at IS NOT NULL, failed_at IS NOT NULL, post_accept_error_code, error_code, "
         "messaging_scope_key FROM campaign_send_attempts WHERE tenant_id = :t AND campaign_id = :c "
         "AND claimed_at >= :s AND claimed_at <= :u ORDER BY id")
+    key_of: Dict[int, str] = {}
+    unresolved_identity: Set[str] = set()
+    for a in attempts:
+        ident = canonical_recipient(a[2])
+        if ident is None:
+            ident = f"unresolved-identity:{a[1]}"
+            unresolved_identity.add(ident)
+        key_of[int(a[0])] = ident
     log_ids = sorted({int(a[1]) for a in attempts if a[1] is not None})
-    phones = sorted({a[2] for a in attempts if a[2]})
+    phones = sorted(set(key_of.values()))
     window_wamids = {a[4] for a in attempts if a[4]}
     by_phone_logs: Dict[str, Set[int]] = {}
     for a in attempts:
-        if a[2] and a[1] is not None:
-            by_phone_logs.setdefault(a[2], set()).add(int(a[1]))
-    accepted_phones = {a[2] for a in attempts if a[6] and a[2]}
+        if a[1] is not None:
+            by_phone_logs.setdefault(key_of[int(a[0])], set()).add(int(a[1]))
+    accepted_phones = {key_of[int(a[0])] for a in attempts if a[6]}
     window = {
         "attempts_claimed_in_window": len(attempts),
         "requests_started_in_window": sum(1 for a in attempts if a[5]),
@@ -170,116 +252,98 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
         "send_log_rows_claimed": len(log_ids),
         "recipients_claimed": len(phones),
         "recipients_accepted": len(accepted_phones),
+        "recipients_without_validated_identity": len(unresolved_identity),
         "recipients_with_more_than_one_claim": sum(
-            1 for k in Counter(a[2] for a in attempts).values() if k > 1),
+            1 for k in Counter(key_of.values()).values() if k > 1),
         "scope_key_kinds": dict(Counter((a[12] or "").split(":", 1)[0] for a in attempts)),
         "send_log_ids_claimed": log_ids,
     }
 
     # ── the unapproved rows (as listed before the window) ───────────────
     unapproved = sorted(set(unapproved_ids))
-    un_phones: Dict[int, str] = {}
+    un_keys: Dict[int, str] = {}
     if unapproved:
         for i, ph in q("campaign_send_logs",
-                       f"SELECT id, {n} FROM campaign_send_logs WHERE tenant_id = :t "
+                       "SELECT id, customer_phone_e164 FROM campaign_send_logs WHERE tenant_id = :t "
                        "AND campaign_id = :c AND id = ANY(:ids)", ids=unapproved):
-            un_phones[int(i)] = ph
+            un_keys[int(i)] = canonical_recipient(ph) or f"unresolved-identity:{i}"
     phone_set = set(phones)
     intersection = {
         "unapproved_listed": len(unapproved),
-        "unapproved_found_in_campaign": len(un_phones),
+        "unapproved_found_in_campaign": len(un_keys),
         "claimed_rows_that_are_unapproved": len(set(log_ids) & set(unapproved)),
         "unapproved_rows_whose_recipient_was_claimed": sum(
-            1 for ph in un_phones.values() if ph in phone_set),
+            1 for k in un_keys.values() if k in phone_set),
         "unapproved_rows_whose_recipient_was_accepted": sum(
-            1 for ph in un_phones.values() if ph in accepted_phones),
+            1 for k in un_keys.values() if k in accepted_phones),
         "unapproved_ids_hit_by_row": sorted(set(log_ids) & set(unapproved)),
         "unapproved_ids_hit_by_recipient": sorted(
-            i for i, ph in un_phones.items() if ph in phone_set),
+            i for i, k in un_keys.items() if k in phone_set),
         "claimed_send_log_ids_for_those_recipients": sorted(
-            {i for ph in set(un_phones.values()) if ph in by_phone_logs for i in by_phone_logs[ph]}),
+            {i for k in set(un_keys.values()) if k in by_phone_logs for i in by_phone_logs[k]}),
     }
 
     # ── evidence before the window, per claimed recipient ───────────────
-    evidence: Dict[str, Set[str]] = {ph: set() for ph in phones}
-    source_hits: Dict[str, Counter] = {s: Counter() for s in (
+    recips = _Recipients(p for p in phones if p not in unresolved_identity)
+    hits: Dict[str, Counter] = {s: Counter() for s in (
         "campaign_send_attempts", "campaign_send_logs", "message_events",
         "message_delivery_events")}
     unplaceable = Counter()
 
-    def add(ph: str, kinds: Iterable[str], source: str) -> None:
-        ks = set(kinds)
-        if ph in evidence and ks:
-            evidence[ph] |= ks
-            source_hits[source].update(ks)
+    # 1. earlier ledger attempts, any campaign of the tenant
+    for ph, *raw in q("campaign_send_attempts",
+            "SELECT customer_phone_e164, state, provider_message_id, accepted_at IS NOT NULL, "
+            "delivered_at IS NOT NULL, read_at IS NOT NULL, request_started_at IS NOT NULL, "
+            "failed_at IS NOT NULL FROM campaign_send_attempts "
+            "WHERE tenant_id = :t AND claimed_at < :s"):
+        recips.add(ph, attempt_kinds(*raw), hits["campaign_send_attempts"])
 
-    if phones:
-        # 1. earlier ledger attempts, any campaign of the tenant
-        for ph, st, dl, rd, acc, fl in q("campaign_send_attempts",
-                f"SELECT {n}, state, delivered_at IS NOT NULL, read_at IS NOT NULL, "
-                "accepted_at IS NOT NULL, failed_at IS NOT NULL FROM campaign_send_attempts "
-                f"WHERE tenant_id = :t AND claimed_at < :s AND {n} = ANY(:ph)", ph=phones):
-            ks = set()
+    # 2. this campaign's rows
+    claimed_rows = set(log_ids)
+    for i, ph, st, wamid, dl, rd, sent_before in q("campaign_send_logs",
+            "SELECT id, customer_phone_e164, status, provider_message_id IS NOT NULL, "
+            "delivered_at IS NOT NULL AND delivered_at < :s, read_at IS NOT NULL AND read_at < :s, "
+            "sent_at IS NOT NULL AND sent_at < :s FROM campaign_send_logs "
+            "WHERE tenant_id = :t AND campaign_id = :c"):
+        st = (st or "").lower()
+        ks: Set[str] = set()
+        if int(i) in claimed_rows:
+            # The row claimed in the window: only what predates the window.
             if rd:
                 ks.update(("read", "delivered"))
             if dl:
                 ks.add("delivered")
-            if acc or st == "accepted":
-                ks.add("accepted")
-            if st == "uncertain":
+            if sent_before:
+                ks.update(("sent_row", "accepted"))
+        else:
+            if rd or st == "read":
+                ks.update(("read", "delivered"))
+            if dl or st == "delivered":
+                ks.add("delivered")
+            if st in ("uncertain", "sending"):
                 ks.add("uncertain")
-            if st == "request_started":
-                ks.add("request_started")
-            if st == "claimed":
-                ks.add("claimed_never_started")
-            if fl or st == "rejected":
-                ks.add("failed")
-            add(ph, ks, "campaign_send_attempts")
+            # A stored sent_at / wamid is Meta's acceptance of that copy.
+            if sent_before or st == "sent":
+                ks.update(("sent_row", "accepted"))
+            if wamid:
+                ks.update(("wamid_row", "accepted"))
+        recips.add(ph, ks, hits["campaign_send_logs"])
 
-        # 2. this campaign's rows for the recipient
-        for i, ph, st, wamid, dl, rd, sent_before in q("campaign_send_logs",
-                f"SELECT id, {n}, status, provider_message_id IS NOT NULL, "
-                "delivered_at IS NOT NULL AND delivered_at < :s, read_at IS NOT NULL AND read_at < :s, "
-                "sent_at IS NOT NULL AND sent_at < :s FROM campaign_send_logs "
-                f"WHERE tenant_id = :t AND campaign_id = :c AND {n} = ANY(:ph)", ph=phones):
-            st = (st or "").lower()
-            ks = set()
-            if int(i) in by_phone_logs.get(ph, set()):
-                # The row claimed in the window: only what predates the window.
-                if rd:
-                    ks.update(("read", "delivered"))
-                if dl:
-                    ks.add("delivered")
-                if sent_before:
-                    ks.update(("sent_row", "accepted"))
-            else:
-                if rd or st == "read":
-                    ks.update(("read", "delivered"))
-                if dl or st == "delivered":
-                    ks.add("delivered")
-                if st in ("uncertain", "sending"):
-                    ks.add("uncertain")
-                # A stored sent_at / wamid is Meta's acceptance of that copy.
-                if sent_before or st == "sent":
-                    ks.update(("sent_row", "accepted"))
-                if wamid:
-                    ks.update(("wamid_row", "accepted"))
-            add(ph, ks, "campaign_send_logs")
-
-    # Who owns each known wamid (attempts and rows of this campaign), so a
-    # copy with no conversation link can still be placed.
-    wamid_owner: Dict[str, Set[str]] = {}
+    # Who owns each wamid of this campaign (attempts, rows, receipts linked
+    # to rows) — places a copy that has no conversation link.
+    owners: Dict[str, Set[str]] = {}
     for w, ph in q("campaign_send_attempts",
-                   f"SELECT provider_message_id, {n} FROM campaign_send_attempts "
-                   "WHERE tenant_id = :t AND campaign_id = :c AND provider_message_id IS NOT NULL"):
-        wamid_owner.setdefault(w, set()).add(ph)
-    for w, ph in q("campaign_send_logs",
-                   f"SELECT provider_message_id, {n} FROM campaign_send_logs "
-                   "WHERE tenant_id = :t AND campaign_id = :c AND provider_message_id IS NOT NULL"):
-        wamid_owner.setdefault(w, set()).add(ph)
+            "SELECT provider_message_id, customer_phone_e164 FROM campaign_send_attempts "
+            "WHERE tenant_id = :t AND campaign_id = :c AND provider_message_id IS NOT NULL "
+            "UNION ALL SELECT provider_message_id, customer_phone_e164 FROM campaign_send_logs "
+            "WHERE tenant_id = :t AND campaign_id = :c AND provider_message_id IS NOT NULL "
+            "UNION ALL SELECT mde.wamid, sl.customer_phone_e164 FROM message_delivery_events mde "
+            "JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id "
+            "WHERE sl.tenant_id = :t AND sl.campaign_id = :c"):
+        owners.setdefault(w, set()).add(ph)
 
     # 3. this campaign's outbound copies in message_events, before the window
-    prior_wamids: Dict[str, str] = {}
+    prior_wamids: Dict[str, List[str]] = {}
     events = q("message_events",
         "SELECT me.id, me.metadata, cu.phone, cu.normalized_phone, "
         "conv.metadata->>'customer_phone' FROM message_events me "
@@ -289,27 +353,37 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
         "AND (me.metadata->>'campaign_id') = CAST(:c AS text) "
         "AND (me.created_at IS NULL OR me.created_at < :s)")
     for _ev_id, md, cu_phone, cu_norm, conv_phone in events:
-        md = md or {}
+        md = _json(md)
         wamid = _event_wamid(md)
         if wamid and wamid in window_wamids:
             continue                           # the window's own copy
-        linked = {_digits(x) for x in (cu_phone, cu_norm, conv_phone) if _digits(x)}
-        owners = set(wamid_owner.get(wamid, set())) if wamid else set()
-        if linked and owners and not (linked & owners):
+        linked = [x for x in (cu_phone, cu_norm, conv_phone) if x]
+        owned = sorted(owners.get(wamid, ())) if wamid else []
+        linked_ids = {canonical_recipient(x) for x in linked} - {None}
+        owned_ids = {canonical_recipient(x) for x in owned} - {None}
+        loose = [x for x in linked + owned if canonical_recipient(x) is None
+                 and len(digits(x).lstrip("0")) >= MATCH_SUFFIX_DIGITS]
+        if linked_ids and owned_ids and not (linked_ids & owned_ids):
             unplaceable["attribution_conflict"] += 1
-            for ph in linked | owners:
-                add(ph, {"unresolved_evidence"}, "message_events")
+            for i in linked_ids | owned_ids:
+                recips.add(i, {"unresolved_evidence"}, hits["message_events"])
             continue
-        who = (linked & owners) or linked or owners
-        if len(who) != 1:
-            unplaceable["no_recipient_link" if not who else "more_than_one_recipient"] += 1
-            for ph in who:
-                add(ph, {"unresolved_evidence"}, "message_events")
+        who = (linked_ids & owned_ids) or linked_ids or owned_ids
+        if len(who) > 1:
+            unplaceable["more_than_one_recipient"] += 1
+            for i in who:
+                recips.add(i, {"unresolved_evidence"}, hits["message_events"])
             continue
-        ph = next(iter(who))
-        add(ph, _event_kinds(md), "message_events")
+        for x in loose:
+            recips.add(x, {"unresolved_evidence"}, hits["message_events"])
+        if not who:
+            if not loose:
+                unplaceable["no_recipient_link"] += 1
+            continue
+        ident = next(iter(who))
+        recips.add(ident, _event_kinds(md), hits["message_events"])
         if wamid:
-            prior_wamids[wamid] = ph
+            prior_wamids.setdefault(wamid, []).append(ident)
 
     # 4. receipts for those copies, and for this campaign's rows
     if prior_wamids:
@@ -317,21 +391,25 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
                        "SELECT wamid, status FROM message_delivery_events WHERE tenant_id = :t "
                        "AND wamid = ANY(:w) AND (occurred_at IS NULL OR occurred_at < :s)",
                        w=sorted(prior_wamids)):
-            add(prior_wamids[w], _status_kinds(st), "message_delivery_events")
+            for ident in prior_wamids[w]:
+                recips.add(ident, _status_kinds(st), hits["message_delivery_events"])
     for w, st, ph in q("message_delivery_events",
-            f"SELECT mde.wamid, mde.status, {_NORM.format(col='sl.customer_phone_e164')} "
+            "SELECT mde.wamid, mde.status, sl.customer_phone_e164 "
             "FROM message_delivery_events mde JOIN campaign_send_logs sl ON sl.id = mde.campaign_send_log_id "
             "AND sl.tenant_id = mde.tenant_id WHERE mde.tenant_id = :t AND sl.campaign_id = :c "
             "AND (mde.occurred_at IS NULL OR mde.occurred_at < :s)"):
         if w in window_wamids or (w or "").startswith("synth:"):
             continue
-        add(ph, _status_kinds(st), "message_delivery_events")
+        recips.add(ph, _status_kinds(st), hits["message_delivery_events"])
 
-    # A pre-window copy nobody can be tied to could be anyone's: nobody
-    # without other evidence is provably clean.
+    evidence: Dict[str, Set[str]] = {p: set(recips.evidence.get(p, ())) for p in phones}
+    for p in unresolved_identity:
+        evidence[p].add("unresolved_evidence")
+    # A pre-window copy nobody can be tied to could be anyone's: no
+    # recipient whose evidence is otherwise clean is provably clean.
     if sum(unplaceable.values()):
-        for ph, ks in evidence.items():
-            if not ks:
+        for ks in evidence.values():
+            if _strongest(ks) == "clean":
                 ks.add("unresolved_evidence")
 
     strongest = {ph: _strongest(ks) for ph, ks in evidence.items()}
@@ -358,7 +436,7 @@ def analyse(conn: Any, *, tenant_id: int, campaign_id: int, since: datetime, unt
             k: sorted(i for ph, s in strongest.items() if s == k for i in by_phone_logs.get(ph, ()))
             for k in EVIDENCE_ORDER + ("clean",) if any(s == k for s in strongest.values())
         },
-        "evidence_hits_by_source": {s: dict(c) for s, c in source_hits.items() if c},
+        "evidence_hits_by_source": {s: dict(c) for s, c in hits.items() if c},
         "pre_window_campaign_copies_read": len(events),
         "pre_window_copies_not_placeable": dict(unplaceable),
         "sources_read": read_sources,
