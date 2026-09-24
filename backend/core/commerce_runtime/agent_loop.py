@@ -81,9 +81,10 @@ class _DeadlinePassed(Exception):
         super().__init__(f"deadline {deadline_at.isoformat()} passed at {db_now.isoformat()}")
 
 
-# Asking the model for a paged list's words needs this much time left beyond
-# the provider's own wait, so the reply already verified can still be reserved
-# if the step that was asked for times out.
+# Time kept back for reserving the reply once it is shaped. Asking the model
+# for a paged list's words needs the provider's wait, the page-one catalogue
+# read and this much left, so the reply is still reserved however the step
+# asked for ends; and page one is read only in the time before it.
 WORDS_RESERVE_SECONDS = 5.0
 
 # Stops that end the step asked for a paged list's words without ending the
@@ -238,14 +239,21 @@ class AgentLoop:
         in a turn — also across a resumed invocation, whose restored feedback
         still names the request. Whether the list pages was decided without
         them; this names what the customer would read on it and nobody has
-        written. Nothing is asked when a step, or the time for one, is not left:
-        the reply then goes as the model asked.
+        written. Nothing is asked without two steps left, nor without time for
+        the step, the page-one read and the reservation after them: the reply
+        then goes as the model asked.
         """
-        if self._browse is None or not session.steps_left():
+        if self._browse is None or session.progress is None:
+            return ()
+        # Two steps: the one asked for, and one more a resumed invocation can
+        # still answer with if this one is lost after its step was debited.
+        if session.limits.max_steps - session.progress.steps_used < 2:
             return ()
         if any(p.code == br.WORDS_NEEDED for f in session.feedback for p in f.problems):
             return ()
-        if session.remaining_seconds() < session.limits.provider_timeout_seconds + WORDS_RESERVE_SECONDS:
+        needed = (session.limits.provider_timeout_seconds + session.limits.tool_timeout_seconds
+                  + WORDS_RESERVE_SECONDS)
+        if session.remaining_seconds() < needed:
             return ()
         try:
             shape = pp.decide(draft=draft, observations=session.observations,
@@ -279,7 +287,7 @@ class AgentLoop:
             step_no=session.progress.steps_used,
             problems=(ac.VerificationProblem(br.WORDS_NEEDED, br.words_needed_detail(missing)),)))
         answer: Optional[ac.ReplyDraft] = None
-        outcome = ""
+        outcome = "not_run"
         try:
             session.check_cancelled(cancelled)
             self._debit(session, steps=1, phase=ac.LoopPhase.REASONING.value)
@@ -304,10 +312,12 @@ class AgentLoop:
                 # it was given.
                 outcome = type(result).__name__
         except _Stop as stop:
+            outcome = stop.reason
             if stop.reason not in _WORDS_FALLBACK_STOPS:
                 raise
-            outcome = stop.reason
-        session.record("paging_words_answer", {"outcome": outcome})
+        finally:
+            # Recorded however the step ended, a stop that ends the turn included.
+            session.record("paging_words_answer", {"outcome": outcome})
         return answer if answer is not None else draft
 
     def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
@@ -435,9 +445,16 @@ class AgentLoop:
                     browse_outcome = br.PAGE_AS_LINES
             elif (navigation_enabled and self._browse is not None and shape.kind == pp.SHAPE_LIST
                   and shape.reason == pp.MODEL_REQUESTED):
-                composed, browse_outcome = br.open_browse(
-                    draft, session.observations, scope=scope, runtime=self._browse,
-                    timeout_seconds=session.wait_for(session.limits.tool_timeout_seconds))
+                # Page one is read only in the time before the reservation's
+                # own; a list that cannot be read in it is the model's selector.
+                read_for = min(float(session.limits.tool_timeout_seconds),
+                               session.remaining_seconds() - WORDS_RESERVE_SECONDS)
+                if read_for > 0:
+                    composed, browse_outcome = br.open_browse(
+                        draft, session.observations, scope=scope, runtime=self._browse,
+                        timeout_seconds=read_for)
+                else:
+                    browse_outcome = br.NO_TIME
         except Exception as exc:  # noqa: BLE001 - paging is an affordance; the answer still goes
             # A composition that fails for any reason is a list not paged, never
             # a turn not answered: the reply is shaped as it would be without it.

@@ -102,9 +102,11 @@ class Reader:
     unorderable: Sequence[int] = ()
     fail: bool = False
     asked: List[List[int]] = dataclasses.field(default_factory=list)
+    waits: List[float] = dataclasses.field(default_factory=list)
 
     def __call__(self, scope: Any, ids: Sequence[int], wait: float) -> alt.ListRowsRead:
         self.asked.append(list(ids))
+        self.waits.append(wait)
         if self.fail:
             return alt.ListRowsRead(ok=False, error="timeout")
         return alt.ListRowsRead(
@@ -433,38 +435,52 @@ def test_the_words_request_names_fields_and_never_what_they_should_say():
 
 @dataclasses.dataclass
 class _WordsSession:
-    """The part of a loop session ``_paging_words_missing`` reads."""
+    """The part of a loop session the words request and the shaping read."""
 
     observations: List[Any]
     feedback: List[ac.VerificationFeedback] = dataclasses.field(default_factory=list)
-    steps_remaining: bool = True
+    steps_used: int = 2
     seconds_left: float = 60.0
     limits: ac.LoopBudget = dataclasses.field(default_factory=ac.LoopBudget)
     events: List[Any] = dataclasses.field(default_factory=list)
+    navigation_plan: Any = None
 
-    def steps_left(self) -> bool:
-        return self.steps_remaining
+    @property
+    def progress(self) -> Any:
+        return type("Progress", (), {"steps_used": self.steps_used})()
 
     def remaining_seconds(self) -> float:
         return self.seconds_left
+
+    def wait_for(self, limit: float) -> float:
+        return min(float(limit), self.seconds_left)
 
     def record(self, kind: str, detail: Mapping[str, Any]) -> None:
         self.events.append((kind, dict(detail)))
 
 
-def _words_loop(*, browse: bool = True) -> al.AgentLoop:
+def _words_loop(*, browse: bool = True, reader: Optional[Reader] = None) -> al.AgentLoop:
     loop = al.AgentLoop.__new__(al.AgentLoop)
-    loop._browse = runtime(Reader()) if browse else None
+    loop._browse = runtime(reader or Reader()) if browse else None
     loop._registry = type("Registry", (), {"definitions": ()})()
     return loop
+
+
+def _card_request(product_id: int) -> ac.ReplyDraft:
+    from core.commerce_runtime import reply_card as rcard  # noqa: PLC0415
+
+    return ac.ReplyDraft(text="This one.", evidence_refs=(rc.product_ref(product_id),),
+                         claims_commerce_facts=True,
+                         payload={rcard.REQUESTED_KEY: {"product_id": product_id,
+                                                        "button_label": "View"}})
 
 
 @pytest.mark.parametrize("case,expected", [
     ("pages", (br.MORE_FIELD,)),
     ("no_browse_runtime", ()),
     ("already_asked_this_turn", ()),
-    ("no_step_left", ()),
-    ("no_time_for_a_step", ()),
+    ("one_step_left", ()),
+    ("no_time_for_step_read_and_reservation", ()),
     ("models_pick", ()),
     ("fits_one_list", ()),
     ("card_requested", ()),
@@ -479,17 +495,77 @@ def test_the_loop_asks_for_words_only_for_a_list_that_pages_and_only_once(case, 
         # As a resumed invocation restores it: the code survives, the detail does not.
         session.feedback.append(ac.VerificationFeedback(
             step_no=2, problems=(ac.VerificationProblem(br.WORDS_NEEDED, "restored"),)))
-    elif case == "no_step_left":
-        session.steps_remaining = False
-    elif case == "no_time_for_a_step":
-        session.seconds_left = session.limits.provider_timeout_seconds + al.WORDS_RESERVE_SECONDS - 0.5
+    elif case == "one_step_left":
+        # Asking would spend the step a resumed invocation needs to answer at all.
+        session.steps_used = session.limits.max_steps - 1
+    elif case == "no_time_for_step_read_and_reservation":
+        session.seconds_left = (session.limits.provider_timeout_seconds
+                                + session.limits.tool_timeout_seconds
+                                + al.WORDS_RESERVE_SECONDS - 0.5)
     elif case == "models_pick":
         request = draft(ids[:3], more=None)
     elif case == "fits_one_list":
         session.observations = [search(ids[:5], candidates(ids[:10], ids[:5]))]
     elif case == "card_requested":
-        request = dataclasses.replace(request, payload={})
+        request = _card_request(ids[0])
+        assert pp.decide(draft=request, observations=obs, definitions=()).kind == pp.SHAPE_CARD
     assert loop._paging_words_missing(request, SCOPE, session, None) == expected
+
+
+@pytest.mark.parametrize("seconds_left,read", [(60.0, True), (al.WORDS_RESERVE_SECONDS + 1.0, True),
+                                               (al.WORDS_RESERVE_SECONDS - 0.5, False)])
+def test_page_one_is_read_only_in_the_time_before_the_reservation(seconds_left, read):
+    """A late reply must still be reserved: page one's catalogue read never
+    takes the time the reservation needs, and without it the reply offers the
+    model's own selector."""
+    ids = list(range(1801, 1830))
+    reader = Reader()
+    session = _WordsSession(observations=[search(ids[:5], candidates(ids, ids[:5]))],
+                            seconds_left=seconds_left)
+    loop = _words_loop(reader=reader)
+    shaped = loop._shape_reply(draft(ids[:5]), SCOPE, session, None)
+    accepted = dict(next(detail for kind, detail in session.events if kind == "reply_accepted"))
+    if read:
+        assert reader.waits == [min(session.limits.tool_timeout_seconds,
+                                    seconds_left - al.WORDS_RESERVE_SECONDS)]
+        assert accepted["browse"] == br.OPENED
+    else:
+        assert reader.asked == [] and accepted["browse"] == br.NO_TIME
+        assert [rc.product_id_from_row_id(row["id"])
+                for row in rc.payload_rows(shaped.payload)[0]] == ids[:5]
+
+
+def test_a_single_buyable_product_is_a_focus_never_a_list():
+    """The reviewer's case: sold-out products ahead of the one in stock. Naming
+    that one — alone, or beside one that cannot be bought — is a focus."""
+    ids = list(range(1901, 1930))
+    obs = [search(ids[:5], candidates(ids, ids[:5]), unorderable=ids[1:5])]
+    reader = Reader()
+    for chosen in ([ids[0]], [ids[0], ids[1]], ids[:5]):
+        eligible, reason = br.eligibility(draft(chosen), obs, scope=SCOPE,
+                                          search_tool_names=("search_products",))
+        assert eligible is None and reason == br.MODEL_PICK, chosen
+        composed, reason = br.open_browse(draft(chosen), obs, scope=SCOPE, runtime=runtime(reader),
+                                          timeout_seconds=5)
+        assert composed is None and reason == br.MODEL_PICK
+    assert reader.asked == []
+
+
+def test_a_pick_from_one_search_is_not_extended_under_another_that_overlaps_it():
+    """Two of search A's five buyable products, compared, are a pick — even when
+    a later search B shows those two beside products that cannot be bought."""
+    a = list(range(2001, 2030))
+    b_window = a[:2] + [2101, 2102, 2103]
+    obs = [search(a[:5], candidates(a, a[:5]), call_id="s1"),
+           search(b_window, candidates(b_window + [2104, 2105, 2106], b_window), call_id="s2",
+                  unorderable=[2101, 2102, 2103])]
+    _none, reason = br.eligibility(draft(a[:2]), obs, scope=SCOPE,
+                                   search_tool_names=("search_products",))
+    assert reason == br.MODEL_PICK
+    # Naming every buyable product of A is A's results: B shares only those two.
+    eligible, reason = br.eligibility(draft(a[:5]), obs, scope=SCOPE,
+                                      search_tool_names=("search_products",))
+    assert reason == br.ELIGIBLE and eligible.call_id == "s1"
 
 
 def test_a_capped_result_is_never_called_complete():

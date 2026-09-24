@@ -38,8 +38,8 @@ What a list never does
   merchant's — the list's button and the "More" row — are the model's, given
   when the browse was opened and carried on the stored row for later pages.
 * It never extends the model's own pick. A selector that leaves out a product
-  the search showed it and the customer could buy is a choice, and a choice is
-  never widened into the search it came from.
+  a search showed it and the customer could buy is a choice, and so is a
+  single product; a choice is never widened into the search it came from.
 """
 from __future__ import annotations
 
@@ -78,6 +78,8 @@ NOTHING_MORE = "search_had_nothing_more"
 # button or its "More" row, even when asked. The platform has none of its own.
 WORDS_MISSING = "paging_words_missing"
 ROWS_UNAVAILABLE = "browse_rows_unavailable"
+# Too little of the turn was left to read page one and still reserve the reply.
+NO_TIME = "browse_no_time_to_read"
 NAMED_NOT_LISTED = "named_product_not_listable"
 ELIGIBLE = "browse_eligible"
 
@@ -149,6 +151,20 @@ def _meta(*, page: int, offset: int, shown: int, unavailable: int, has_next: boo
             "complete": bool(complete), "stored": int(stored)}
 
 
+def _searches(observations: Sequence[Any], scope: Any,
+              search_tool_names: Sequence[str]) -> List[Tuple[sc.SearchCandidates, str]]:
+    """Every usable search this turn made, most recent first, with its call id."""
+    found: List[Tuple[sc.SearchCandidates, str]] = []
+    for obs in reversed(list(observations or ())):
+        candidates, _why = sc.from_observation(
+            obs, tenant_id=scope.tenant_id, namespace=scope.namespace,
+            conversation_id=scope.conversation_id, turn_id=scope.turn_id,
+            search_tool_names=search_tool_names)
+        if candidates is not None:
+            found.append((candidates, str(getattr(obs, "call_id", "") or "")))
+    return found
+
+
 def _search_for(requested: Sequence[int], observations: Sequence[Any], scope: Any,
                 search_tool_names: Sequence[str]) -> Tuple[Optional[sc.SearchCandidates], str]:
     """The one search whose model window holds every product the model named.
@@ -157,13 +173,9 @@ def _search_for(requested: Sequence[int], observations: Sequence[Any], scope: An
     searches belong to no single result, so there is nothing to page.
     """
     wanted = set(int(pid) for pid in requested)
-    for obs in reversed(list(observations or ())):
-        candidates, _why = sc.from_observation(
-            obs, tenant_id=scope.tenant_id, namespace=scope.namespace,
-            conversation_id=scope.conversation_id, turn_id=scope.turn_id,
-            search_tool_names=search_tool_names)
-        if candidates is not None and wanted <= set(candidates.window_ids):
-            return candidates, str(getattr(obs, "call_id", "") or "")
+    for candidates, call_id in _searches(observations, scope, search_tool_names):
+        if wanted <= set(candidates.window_ids):
+            return candidates, call_id
     return None, ""
 
 
@@ -199,14 +211,18 @@ def eligibility(draft: Any, observations: Sequence[Any], *, scope: Any,
     """Whether the selector the model asked for is a search's results that continue.
 
     Decided from structure alone — the products the model named, the typed
-    result of the search it named them from, and the catalogue values that
-    search returned — and never from any word in the draft. Three things must
-    hold:
+    results of the searches it saw, and the catalogue values those searches
+    returned — and never from any word in the draft. All of these must hold:
 
+    * the selector names at least two products — one product is a focus, and a
+      focus is never a list the platform widens;
     * every product named comes from one search's window;
-    * every product that window showed the model and the customer can buy now
-      is named — a selector that leaves one out is the model's own pick, and a
-      pick is never extended;
+    * every search this turn that showed the model any product it named had
+      every one of its buyable products named — a selector that leaves out a
+      product the customer could buy, in any search it drew from, is the
+      model's own pick (a recommendation, a comparison), and a pick is never
+      extended;
+    * that window held at least two products the customer can buy now;
     * the stored result holds products beyond the window.
 
     Pure: it reads nothing, so the loop can ask it before a reply is shaped.
@@ -214,12 +230,21 @@ def eligibility(draft: Any, observations: Sequence[Any], *, scope: Any,
     requested = rc.requested_product_ids(draft)
     if not requested:
         return None, NO_SELECTOR
+    named = set(int(pid) for pid in requested)
+    if len(named) < rc.MIN_CHOICES:
+        return None, MODEL_PICK
     candidates, call_id = _search_for(requested, observations, scope, search_tool_names)
     if candidates is None:
         return None, NO_CONTINUATION
     observed = rc.observed_products(observations)
-    buyable = {pid for pid in candidates.window_ids if pid in observed and _listable(observed[pid])}
-    if not buyable or not buyable <= set(int(pid) for pid in requested):
+
+    def buyable(search: sc.SearchCandidates) -> set:
+        return {pid for pid in search.window_ids if pid in observed and _listable(observed[pid])}
+
+    for search, _call in _searches(observations, scope, search_tool_names):
+        if named & set(search.window_ids) and not buyable(search) <= named:
+            return None, MODEL_PICK
+    if len(buyable(candidates)) < rc.MIN_CHOICES:
         return None, MODEL_PICK
     if not candidates.extends_beyond_window:
         return None, NOTHING_MORE
@@ -417,7 +442,7 @@ def page_as_lines(draft: Any, page: BrowsePage) -> Any:
 __all__ = [
     "BROWSE_FAILED", "BUTTON_FIELD", "BrowsePage", "BrowseRuntime", "Composed", "ELIGIBLE", "Eligible",
     "FACTS_KEY", "MODEL_PICK", "MORE_FIELD", "NAMED_NOT_LISTED", "NOTHING_MORE", "NO_CONTINUATION",
-    "NO_SELECTOR", "OPENED", "PAGE", "PAGE_AS_LINES", "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE",
+    "NO_SELECTOR", "NO_TIME", "OPENED", "PAGE", "PAGE_AS_LINES", "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE",
     "WITHHELD_KEY", "WORDS_MISSING", "WORDS_NEEDED", "continue_browse", "eligibility", "open_browse",
     "page_as_lines", "refusal_facts", "resolve_tap", "words_needed_detail",
 ]

@@ -29,14 +29,19 @@ never handles an offset, an order or a token.
 
 ### Whether a list pages is structure, never wording
 
-`browse.eligibility` decides it from three facts and no word in the draft:
+`browse.eligibility` decides it from structure and no word in the draft:
 
-1. every product the selector names comes from one search's window;
-2. every product that window showed the model **and the customer can buy now**
-   is named — a selector that leaves one out is the model's own pick (a
+1. the selector names at least two products — one product is a focus, never a
+   list the platform widens;
+2. every product it names comes from one search's window;
+3. every search this turn that showed the model any product it named had
+   every one of its products **the customer can buy now** named — a selector
+   that leaves one out, in any search it drew from, is the model's own pick (a
    recommendation, a comparison), and a pick is never extended
    (`selector_is_the_models_pick`);
-3. the stored result holds products beyond the window.
+4. that window held at least two buyable products (sold-out products ordered
+   ahead of the one in stock do not make it a browse);
+5. the stored result holds products beyond the window.
 
 A search the model narrowed below the full window (`limit` < 5) asked for a
 few products, not for the merchant's range: it carries no continuation and no
@@ -52,9 +57,12 @@ answer. Anything else — no reply, a lookup, a refused reply, a provider that
 fails or times out — sends the reply already verified, shaped exactly as the
 model asked; only a stop that would have ended the turn anyway (cancellation,
 lost ownership, a concurrent invocation, the deadline) still ends it. Nothing
-is asked without a step left and `provider_timeout + 5 s` of the deadline, nor
-twice in a turn (a resumed invocation reads the request from its restored
-feedback). A list whose words never come records `paging_words_missing`; the
+is asked without two steps left (so a resumed invocation can still answer if
+this one is lost mid-step), without `provider_timeout + tool_timeout + 5 s` of
+the deadline (the step, page one's read and the reservation), nor twice in a
+turn (a resumed invocation reads the request from its restored feedback).
+Page one is read only in the time before the reservation's own 5 s; with less,
+the reply offers the model's selector (`browse_no_time_to_read`). A list whose words never come records `paging_words_missing`; the
 platform never writes its own. The outcome of the step is on the turn report
 as `paging_words`.
 
@@ -220,7 +228,7 @@ page**; model-requested shape; focused product → Card; candidates → List; te
 The "More" row's title and the list's button are customer-facing words, and the
 platform has none of its own. Both are the model's, given when the browse was
 opened, and stored with the browse for later pages. A browse is **not opened**
-without both (`paging_without_button_word`): the channel sender substitutes a
+without both (`paging_words_missing`): the channel sender substitutes a
 fixed Arabic phrase for an empty list button, and a list the platform composes
 must never reach that fallback. Titles are bounded to what WhatsApp renders
 (24 and 20 characters).
