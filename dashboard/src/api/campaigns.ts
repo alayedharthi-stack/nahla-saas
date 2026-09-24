@@ -65,6 +65,15 @@ export type CampaignLifecycle =
    *  scheduler continues it automatically once capacity returns. See
    *  ``capacity_wait``. */
   | 'waiting_for_capacity'
+  /** Meta rejected sends with its per-minute limit: paused for a recorded
+   *  backoff and continued automatically after it. See ``capacity_wait``. */
+  | 'rate_limit_backoff'
+  /** Meta declined to deliver marketing to many recipients (131049): the
+   *  post-accept breaker stopped the run. Not resumed automatically;
+   *  ``throttle.clears_at`` says when a resume can send again. */
+  | 'marketing_delivery_blocked'
+  /** Another post-accept breaker (e.g. spam rate limit). See ``throttle``. */
+  | 'provider_throttled'
   | 'unknown'
 
 /** Canonical per-campaign analytics derived from ``CampaignSendLog``.
@@ -146,6 +155,16 @@ export interface CampaignCapacityWait {
   limit_source?: string | null
 }
 
+/** Meta's post-accept breaker for the campaign's messaging scope, live. */
+export interface CampaignThrottle {
+  key: string
+  count: number
+  threshold: number
+  window_minutes: number
+  /** When enough counted failures leave the window for a resume to send. */
+  clears_at: string
+}
+
 export interface CampaignExecution {
   worker_running: boolean
   heartbeat_at?: string | null
@@ -199,7 +218,11 @@ export interface CampaignRecord {
   /** Lease-backed: is a worker really sending this campaign now? */
   execution?: CampaignExecution
   pause_reason?: string | null
+  /** Why the run stopped, in Arabic (Nahla's own pause reason). */
+  pause_reason_ar?: string | null
   capacity_wait?: CampaignCapacityWait | null
+  /** Present while a post-accept breaker is tripped; null once cleared. */
+  throttle?: CampaignThrottle | null
   created_at: string | null
   launched_at: string | null
   /** Wave/Batch — `immediate` for legacy / small campaigns,
@@ -901,6 +924,8 @@ export const campaignsApi = {
       revived_zombies?: number
       /** Present with ``reason='already_running'``. */
       execution?: CampaignExecution
+      /** Present with ``reason='provider_throttled'``: nothing was started. */
+      throttle?: CampaignThrottle
     }>(
       `/campaigns/${id}/dispatch-now`,
       { method: 'POST' },
