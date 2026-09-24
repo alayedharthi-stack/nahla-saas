@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 from starlette.requests import Request
 
+from core.tenant import DEFAULT_AI
 from models import Base, Integration, Tenant, TenantSettings
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import agent_provider as ap
@@ -112,7 +113,8 @@ def run_input(monkeypatch):
                                      recipient="test-recipient", model="configured-test-model"),
             customer_name=""))
         call = calls[-1]
-        assert call["system"] == seam._instructions().strip()
+        # The name is data beside the customer's turn, never part of the instructions.
+        assert "assistant_name" not in call["system"]
         assert call["audit_context"]["model"] == "configured-test-model"
         block = call["messages"][0]["content"][0]["text"]
         return json.loads(block.split("\n", 1)[1].rsplit("\n", 1)[0])
@@ -130,14 +132,13 @@ def test_saved_custom_name_reaches_the_provider_without_cross_tenant_leakage(ses
 
 
 @pytest.mark.parametrize("stored", [None, {}, {"assistant_name": ""}, {"assistant_name": "  "}])
-@pytest.mark.parametrize("language,expected", [("ar", "نحلة"), ("en", "NAHLAH")])
-def test_missing_and_blank_names_use_existing_conversation_language(
-        sessions, run_input, stored, language, expected):
+@pytest.mark.parametrize("language", ["ar", "en", ""])
+def test_missing_and_blank_names_use_the_platforms_own_default(sessions, run_input, stored, language):
     with sessions() as db:
         if stored is not None:
             db.add(TenantSettings(tenant_id=701, ai_settings=stored))
             db.commit()
-        assert run_input(db, language=language)["assistant_name"] == expected
+        assert run_input(db, language=language)["assistant_name"] == DEFAULT_AI["assistant_name"]
 
 
 def test_next_turn_reads_rename_even_with_a_preloaded_orm_object(sessions, run_input):
@@ -151,10 +152,30 @@ def test_next_turn_reads_rename_even_with_a_preloaded_orm_object(sessions, run_i
         assert run_input(db)["assistant_name"] == "ياسمين"
 
 
-def test_settings_read_failure_is_not_misreported_as_a_missing_name(sessions, run_input, monkeypatch):
+def test_settings_read_failure_is_not_misreported_and_the_turn_still_goes(
+        sessions, run_input, monkeypatch, caplog):
+    """A failed read is neither a missing name nor a dropped turn: the model is
+    reached without the name, and the failure is logged."""
     with sessions() as db:
+        real_query = db.query
+
         def unreadable(*args, **kwargs):
-            raise RuntimeError("synthetic settings read failure")
+            if args and "ai_settings" in str(args[0]):
+                raise RuntimeError("synthetic settings read failure")
+            return real_query(*args, **kwargs)
         monkeypatch.setattr(db, "query", unreadable)
-        with pytest.raises(RuntimeError, match="synthetic settings read failure"):
-            run_input(db)
+        with caplog.at_level("ERROR"):
+            facts = run_input(db)
+        assert "assistant_name" not in facts
+        assert "assistant name unreadable" in caplog.text
+
+
+@pytest.mark.parametrize("stored", ["وردة", ["وردة"], '{"assistant_name": "وردة"}'])
+def test_settings_that_are_not_an_object_leave_the_name_out(sessions, run_input, stored, caplog):
+    with sessions() as db:
+        db.add(TenantSettings(tenant_id=701, ai_settings=stored))
+        db.commit()
+        with caplog.at_level("ERROR"):
+            facts = run_input(db)
+        assert "assistant_name" not in facts
+        assert "not an object" in caplog.text
