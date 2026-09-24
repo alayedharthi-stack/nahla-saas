@@ -146,6 +146,19 @@ INBOX_RETENTION = timedelta(days=7)
 PAUSE_MERCHANT_STOP = "merchant_stop"
 PAUSE_MESSAGING_LIMIT = "messaging_limit_reached"
 PAUSE_PROVIDER_THROTTLING = "provider_throttling"
+# Meta rejected sends before accepting them with a retryable per-minute
+# limit (codes 4 / 17 / 32 / 130429): a temporary backoff that the
+# scheduler continues on its own — unlike post-accept delivery blocks.
+PAUSE_PROVIDER_RATE_LIMITED = "provider_rate_limited"
+# Only Meta's per-minute limit earns a timed backoff; any other retryable
+# code repeating (unknown, service errors, …) stops for the merchant.
+RATE_LIMIT_BUCKETS = frozenset({"rate_limit"})
+PAUSE_PROVIDER_REPEATED_ERROR = "provider_repeated_error"
+RATE_LIMIT_BACKOFF_BASE = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MINUTES", 5))
+RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MAX_MINUTES", 60))
+# A run that ends for no recorded reason while recipients are still queued
+# (e.g. a same-code breaker) is paused, never "completed".
+PAUSE_RUN_ENDED_WITH_QUEUE = "run_ended_with_queue"
 PAUSE_UNCERTAIN = "uncertain_sends"
 PAUSE_LEASE_LOST = "lease_lost"
 
@@ -1743,6 +1756,15 @@ def record_capacity_wait(campaign: Any, budget: Optional[MessagingBudget], *,
     return wait
 
 
+def store_capacity_wait(campaign: Any, wait: Dict[str, Any]) -> None:
+    """Write back a (modified) wait record (stage only; caller commits)."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    tv = dict(campaign.template_variables or {})
+    tv[CAPACITY_WAIT_KEY] = dict(wait)
+    campaign.template_variables = tv
+    flag_modified(campaign, "template_variables")
+
+
 def clear_capacity_wait(campaign: Any) -> None:
     from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     tv = dict(campaign.template_variables or {})
@@ -1758,16 +1780,54 @@ def capacity_wait(campaign: Any) -> Optional[Dict[str, Any]]:
     return w if isinstance(w, dict) else None
 
 
-def authorized_capacity_wait(template_variables: Any) -> Optional[Dict[str, Any]]:
+# Pauses the scheduler may continue on its own, once their recorded wait
+# has passed. Post-accept delivery blocks (marketing_blocked, spam) are
+# deliberately not here: they need the merchant.
+AUTO_RESUME_REASONS = frozenset({PAUSE_MESSAGING_LIMIT, PAUSE_PROVIDER_RATE_LIMITED})
+
+
+def record_rate_limit_wait(campaign: Any, *, detail: str,
+                           now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Persist a backoff after Meta's per-minute limit rejected sends:
+    ``RATE_LIMIT_BACKOFF_BASE`` doubling for each consecutive backoff, capped
+    at ``RATE_LIMIT_BACKOFF_MAX`` (stage only; caller commits)."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    now = now or utcnow()
+    prev = capacity_wait(campaign) or {}
+    # A stale record left from an earlier backoff can only lengthen this
+    # one (never shorten it or re-send anything) — the safe direction.
+    attempt = int(prev.get("attempt", 0)) + 1 if prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED else 1
+    delay = min(RATE_LIMIT_BACKOFF_BASE * (2 ** (attempt - 1)), RATE_LIMIT_BACKOFF_MAX)
+    wait = {
+        "reason": PAUSE_PROVIDER_RATE_LIMITED,
+        "authority": CAPACITY_WAIT_AUTHORITY,
+        "since": now.isoformat(),
+        "next_eligible_at": (now + delay).isoformat(),
+        "next_eligible_exact": False,
+        "attempt": attempt,
+        "detail": (detail or "")[:200],
+    }
+    tv = dict(campaign.template_variables or {})
+    tv[CAPACITY_WAIT_KEY] = wait
+    campaign.template_variables = tv
+    flag_modified(campaign, "template_variables")
+    return wait
+
+
+def authorized_capacity_wait(template_variables: Any,
+                             reason: str = PAUSE_MESSAGING_LIMIT) -> Optional[Dict[str, Any]]:
     """The recorded wait, only when it authorises an automatic resume: written
-    by a dispatch run of this version (``CAPACITY_WAIT_AUTHORITY``) for the
-    shared messaging limit, with a parseable ``next_eligible_at``. Anything
-    else -- no record, a record from an older build, or a malformed one --
-    returns ``None``: the campaign waits for the merchant."""
+    by a dispatch run of this version (``CAPACITY_WAIT_AUTHORITY``) for
+    ``reason`` (one of ``AUTO_RESUME_REASONS``), with a parseable
+    ``next_eligible_at``. Anything else -- no record, a record from an
+    older build, another reason, or a malformed one -- returns ``None``:
+    the campaign waits for the merchant."""
     w = template_variables.get(CAPACITY_WAIT_KEY) if isinstance(template_variables, dict) else None
     if not isinstance(w, dict):
         return None
-    if w.get("authority") != CAPACITY_WAIT_AUTHORITY or w.get("reason") != PAUSE_MESSAGING_LIMIT:
+    if reason not in AUTO_RESUME_REASONS:
+        return None
+    if w.get("authority") != CAPACITY_WAIT_AUTHORITY or w.get("reason") != reason:
         return None
     try:
         datetime.fromisoformat(str(w.get("next_eligible_at")))
@@ -1798,6 +1858,48 @@ def post_accept_throttle(db: Session, scope_key: Optional[str], *,
         if int(cnt) >= POST_ACCEPT_BREAKER_THRESHOLDS.get(key, 1 << 30):
             return str(key), int(cnt)
     return None
+
+
+def post_accept_throttle_status(db: Session, scope_key: Optional[str], *,
+                                now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """The post-accept breaker as it stands now, or None when it is clear.
+
+    The breaker counts Meta's post-accept failures of the whole messaging
+    scope over a sliding ``POST_ACCEPT_BREAKER_WINDOW`` — not per run — so
+    a run started while it is tripped stops at its first recipient
+    without sending. ``clears_at`` is when enough of the counted failures
+    leave the window for the count to fall below the threshold (receipts
+    that arrive later can push it back)."""
+    if not scope_key:
+        return None
+    now = now or utcnow()
+    since = now - POST_ACCEPT_BREAKER_WINDOW
+    tripped = post_accept_throttle(db, scope_key, now=now)
+    if tripped is None:
+        return None
+    key, count = tripped
+    threshold = POST_ACCEPT_BREAKER_THRESHOLDS[key]
+    times = [
+        _naive(t) for (t,) in
+        db.query(CampaignSendAttempt.failed_at)
+        .filter(
+            CampaignSendAttempt.messaging_scope_key == scope_key,
+            CampaignSendAttempt.failed_at >= since,
+            CampaignSendAttempt.post_accept_error_code == key,
+        )
+        .order_by(CampaignSendAttempt.failed_at)
+        .all()
+    ]
+    # Below the threshold once count - k < threshold, i.e. after the
+    # (count - threshold + 1) oldest have left the window.
+    k = max(1, len(times) - threshold + 1)
+    # The window includes its lower bound, so the count drops only just
+    # after this instant.
+    clears_at = (times[k - 1] + POST_ACCEPT_BREAKER_WINDOW + timedelta(seconds=1)
+                 if len(times) >= k else now)
+    return {"key": key, "count": count, "threshold": threshold,
+            "window_minutes": int(POST_ACCEPT_BREAKER_WINDOW.total_seconds() // 60),
+            "clears_at": clears_at.isoformat()}
 
 
 __all__ = [name for name in dir() if not name.startswith("_")]
