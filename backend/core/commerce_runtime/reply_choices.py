@@ -58,6 +58,9 @@ ROW_ID_PREFIX = "nahla:choice:"
 PRODUCT_REF_PREFIX = "catalog:product:"
 
 MAX_BUTTON_LABEL = 20
+# Meta truncates a list row title. The affordance's word is bounded to what the
+# channel renders whole, exactly as the rows' titles are.
+MAX_ROW_TITLE = 24
 
 # Closed reasons, for the pilot log and for tests.
 NOT_REQUESTED = "not_requested"
@@ -71,6 +74,16 @@ OFFERED = "offered"
 # answered first; the options here still follow the text as lines, so nothing
 # the model meant to offer is lost.
 TAP_ANSWERED_FIRST = "verified_tap_answered_first"
+# The options did not fit one list and were paged: nine products and one
+# affordance that reaches the rest. The affordance is not a product and carries
+# no merchant values; see ``navigation``.
+PAGED = "paged"
+# ``TOO_MANY`` keeps its meaning exactly: more options than the channel shows,
+# and no way to page them — no stored continuation, or no word for the
+# affordance that would carry it. The whole selector is withheld and every
+# option follows the text as a line, which is what happened before paging
+# existed and loses nothing. Why paging did not engage is the navigation
+# module's to log; the reply's reason stays the one the reader already knows.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -157,6 +170,24 @@ def requested_button(draft: Any) -> str:
     return " ".join(str(request.get("button") or "").split())[:MAX_BUTTON_LABEL]
 
 
+def requested_more_label(draft: Any) -> str:
+    """The word the model chose for the affordance that reaches the next page.
+
+    Customer-facing wording, so it is the model's, in the customer's own
+    language — the same rule the card's button word follows, and for the same
+    reason: the platform has no phrase of its own and will not invent one in
+    whatever language it happens to be written in. Without a word there is no
+    affordance, and therefore no paging.
+    """
+    payload = getattr(draft, "payload", None)
+    if not isinstance(payload, Mapping):
+        return ""
+    request = payload.get(REQUESTED_KEY)
+    if not isinstance(request, Mapping):
+        return ""
+    return " ".join(str(request.get("more_label") or "").split())[:MAX_ROW_TITLE]
+
+
 def observed_products(observations: Sequence[Any]) -> Dict[int, Mapping[str, Any]]:
     """Every catalogue product this turn's tool results actually returned.
 
@@ -230,23 +261,30 @@ def _requested_products(draft: Any, observations: Sequence[Any]) -> List[Mapping
             if product_id in observed]
 
 
-def selection(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ChoiceSelection], str]:
+def selection(draft: Any, observations: Sequence[Any], *,
+              page: Optional[Any] = None) -> Tuple[Optional[ChoiceSelection], str]:
     """The selector this draft may carry, and why there is none when there is not.
 
     Called after verification, so anything refused here is a display limit
     rather than a truth problem. The options themselves are not refused with
     it: see ``finalize``, which carries them into the text instead.
+
+    ``page`` is a stored continuation, when the platform made one: the products
+    this page shows, and the token that reaches the next. It changes only how
+    many rows are composed and adds one affordance at the end — every value the
+    customer reads on a product row still comes from this turn's observations,
+    and the affordance carries none.
     """
     requested = requested_product_ids(draft)
     if not requested:
         return None, NOT_REQUESTED
     if len(requested) < MIN_CHOICES:
         return None, TOO_FEW
-    if len(requested) > MAX_CHOICES:
-        return None, TOO_MANY
     products = _requested_products(draft, observations)
     if len(products) != len(requested):
         return None, NOT_OBSERVED
+    if len(requested) > MAX_CHOICES:
+        return _paged_selection(draft, products, page)
     rows, complete = _wire_rows(products)
     if not rows or not complete:
         return None, INCOMPLETE
@@ -254,6 +292,39 @@ def selection(draft: Any, observations: Sequence[Any]) -> Tuple[Optional[ChoiceS
                            product_ids=tuple(int(str(row["id"])[len(ROW_ID_PREFIX):])
                                              for row in rows),
                            button=requested_button(draft)), OFFERED
+
+
+def _paged_selection(draft: Any, products: Sequence[Mapping[str, Any]],
+                     page: Optional[Any]) -> Tuple[Optional[ChoiceSelection], str]:
+    """One page of a browse too long for a list, and the way to the rest.
+
+    Fails closed to the old behaviour on anything missing: no stored
+    continuation, no next page, or no word for the affordance means the whole
+    selector is withheld and every option is carried as a line instead. A
+    partial list with no way onward would hide options the customer asked for.
+    """
+    label = requested_more_label(draft)
+    if page is None or not getattr(page, "has_next", False) or not label:
+        return None, TOO_MANY
+    from core.commerce_runtime import navigation as nav  # noqa: PLC0415
+
+    shown = {int(item.get("product_id") or 0): item for item in products}
+    ordered = [shown[pid] for pid in getattr(page, "product_ids", ()) if pid in shown]
+    if len(ordered) != len(getattr(page, "product_ids", ())) or not ordered:
+        # The stored page names a product this turn did not read. Nothing is
+        # guessed and nothing partial is shown.
+        return None, TOO_MANY
+    rows, complete = _wire_rows(ordered)
+    if not rows or not complete:
+        return None, INCOMPLETE
+    # The affordance. Its id is in the navigation namespace, so no resolver can
+    # read it as a product; it carries the model's word and nothing else — no
+    # price, no title of the merchant's, no invented identity.
+    rows.append({"id": nav.row_id(page.next_token), "title": label})
+    return ChoiceSelection(rows=tuple(rows),
+                           product_ids=tuple(int(item.get("product_id") or 0)
+                                             for item in ordered),
+                           button=requested_button(draft)), PAGED
 
 
 def option_line(row: Mapping[str, Any]) -> str:
@@ -291,7 +362,7 @@ def options_as_text(text: str, rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def finalize(draft: Any, observations: Sequence[Any], *,
-             withhold: str = "") -> Tuple[Any, str]:
+             withhold: str = "", page: Optional[Any] = None) -> Tuple[Any, str]:
     """The draft as it will be delivered, with its selector or with its options.
 
     A verified selector makes the reply ``rich`` and leaves the text exactly as
@@ -307,7 +378,7 @@ def finalize(draft: Any, observations: Sequence[Any], *,
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
 
-    chosen, reason = selection(draft, observations)
+    chosen, reason = selection(draft, observations, page=page)
     if withhold and chosen is not None:
         # The platform decided this turn answers the customer's own selection
         # instead. The rows are not offered; the options still are, below.
@@ -364,7 +435,8 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
-    "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX",
+    "MAX_ROW_TITLE", "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED",
+    "PAGED", "PRODUCT_REF_PREFIX", "requested_more_label",
     "TAP_ANSWERED_FIRST",
     "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
     "observed_products", "option_line", "options_as_text",

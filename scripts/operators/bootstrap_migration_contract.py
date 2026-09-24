@@ -23,16 +23,27 @@ ADDRESS_ALEMBIC_HEAD = "0110"
 # Shipment tracking extends the address branch. It replaces 0110 as a head;
 # it does not merge the 0092 validation or 0111 application siblings.
 SHIPMENT_ALEMBIC_HEAD = "0112"
+# The navigation snapshot extends the same branch one further. It replaces 0112
+# as a head for exactly the same reason, and merges nothing: the 0092 validation
+# and 0111 application siblings are untouched, so bootstrap stays pinned to 0093
+# and bare ``head`` stays ambiguous — which is the point of naming every target.
+NAVIGATION_ALEMBIC_HEAD = "0113"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
 # remains pinned to 0093 and must never use bare ``head``.
 BASE_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
 ADDRESS_REPOSITORY_ALEMBIC_HEADS = BASE_REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
-REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
+SHIPMENT_REPOSITORY_ALEMBIC_HEADS = frozenset(
+    {"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
+REPOSITORY_ALEMBIC_HEADS = frozenset(
+    {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
+    # A checkout that predates the navigation snapshot is still a supported
+    # topology, so both are accepted rather than one replacing the other.
+    SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
