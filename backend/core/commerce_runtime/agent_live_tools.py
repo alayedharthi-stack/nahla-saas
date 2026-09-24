@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -379,7 +380,12 @@ def _search_candidates(binding: LiveToolBinding, scope: at.ToolScope, query: str
     from modules.ai.commerce_agent_v2.tools.catalog import search_product_candidates_impl
 
     try:
-        read = search_product_candidates_impl(binding.context, query=query, limit=sc.CANDIDATE_CAP)
+        # In a savepoint: this read shares the session every later tool call
+        # in the turn reads on, and a failed statement must not leave that
+        # session's transaction aborted under them.
+        with _savepoint(binding):
+            read = search_product_candidates_impl(binding.context, query=query,
+                                                  limit=sc.CANDIDATE_CAP)
         candidates = sc.SearchCandidates(
             tenant_id=int(scope.tenant_id), namespace=str(scope.namespace),
             conversation_id=int(scope.conversation_id), turn_id=int(scope.turn_id),
@@ -397,6 +403,13 @@ def _search_candidates(binding: LiveToolBinding, scope: at.ToolScope, query: str
                     len(candidates.product_ids))
         return None
     return candidates
+
+
+def _savepoint(binding: LiveToolBinding) -> Any:
+    """A savepoint on the binding's session, for a read the platform makes on it."""
+    db = getattr(binding.context, "db", None)
+    begin_nested = getattr(db, "begin_nested", None)
+    return begin_nested() if callable(begin_nested) else contextlib.nullcontext()
 
 
 # ── Platform-only list rows ──────────────────────────────────────────────────
@@ -463,7 +476,8 @@ def read_list_rows(binding: LiveToolBinding, scope: at.ToolScope, product_ids: S
         binding.check(scope)
         binding.enter()
         try:
-            snapshots, missing = get_products_for_listing_impl(binding.context, wanted)
+            with _savepoint(binding):
+                snapshots, missing = get_products_for_listing_impl(binding.context, wanted)
             return tuple(_row_view(s) for s in snapshots), tuple(int(m) for m in missing)
         finally:
             binding.leave()

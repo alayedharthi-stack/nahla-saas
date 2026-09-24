@@ -58,9 +58,9 @@ TENANT, CONVERSATION, TURN = 7, 70, 700
 SCOPE = at.ToolScope(tenant_id=TENANT, namespace="live", conversation_id=CONVERSATION, turn_id=TURN)
 
 
-def product(product_id: int) -> Dict[str, Any]:
+def product(product_id: int, *, orderable: bool = True) -> Dict[str, Any]:
     return {"product_id": product_id, "title": f"{TITLES[product_id % len(TITLES)]} {product_id}",
-            "price": str(100 + product_id), "currency": "SAR",
+            "price": str(100 + product_id), "currency": "SAR", "orderable": orderable,
             "evidence_ref": rc.product_ref(product_id)}
 
 
@@ -74,8 +74,8 @@ def candidates(ids: Sequence[int], window: Sequence[int], *, complete: bool = Tr
 
 
 def search(window: Sequence[int], platform: Any, *, call_id: str = "s1",
-           tool: str = "search_products") -> ac.ToolObservation:
-    rows = [product(i) for i in window]
+           tool: str = "search_products", unorderable: Sequence[int] = ()) -> ac.ToolObservation:
+    rows = [product(i, orderable=i not in unorderable) for i in window]
     return ac.ToolObservation(call_id=call_id, tool_name=tool, ok=True,
                               result={"status": "ok", "found": True, "products": rows},
                               error_code=None, error=None,
@@ -99,6 +99,7 @@ class Reader:
     """A stand-in for the trusted catalogue read, recording what it was asked."""
 
     gone: Sequence[int] = ()
+    unorderable: Sequence[int] = ()
     fail: bool = False
     asked: List[List[int]] = dataclasses.field(default_factory=list)
 
@@ -106,8 +107,10 @@ class Reader:
         self.asked.append(list(ids))
         if self.fail:
             return alt.ListRowsRead(ok=False, error="timeout")
-        return alt.ListRowsRead(ok=True, products=tuple(product(i) for i in ids if i not in self.gone),
-                                missing=tuple(i for i in ids if i in self.gone))
+        return alt.ListRowsRead(
+            ok=True, products=tuple(product(i, orderable=i not in self.unorderable)
+                                    for i in ids if i not in self.gone),
+            missing=tuple(i for i in ids if i in self.gone))
 
 
 def runtime(reader: Reader) -> br.BrowseRuntime:
@@ -238,6 +241,11 @@ def test_the_contract_never_reaches_the_model():
                              [cp.to_payload() for cp in ac.checkpoint_observations([obs])]])
     for hidden in ids[5:]:
         assert f'"product_id": {hidden}' not in serialized
+    # Nothing of the contract's own shape either: its field names, or the
+    # stored result as a list, would be how a leak serialises.
+    for field in ("product_ids", "window_ids", "query_digest", "complete", "SearchCandidates"):
+        assert field not in serialized
+    assert json.dumps(ids) not in serialized and json.dumps(ids)[1:-1] not in serialized
     assert ac.observation_digest(obs) == ac.observation_digest(dataclasses.replace(obs, platform=None))
     assert all(restored.platform is None
                for restored in (cp.restore() for cp in ac.checkpoint_observations([obs])))
@@ -344,8 +352,11 @@ def test_a_capped_result_is_never_called_complete():
         draft(ids[:5]), [search(ids[:5], candidates(ids, ids[:5], complete=False))],
         scope=SCOPE, runtime=runtime(Reader()), timeout_seconds=5)
     assert composed.plan.mint.complete is False and composed.navigation["complete"] is False
-    # Even a capped result whose stored part is all visible extends beyond it.
-    assert candidates(ids[:5], ids[:5], complete=False).extends_beyond_window
+    # Only what is stored can be shown: an incomplete result no longer than the
+    # window — a general browse whose formatting window held few orderable
+    # products — offers nothing more, and the model is not told that it does.
+    assert not candidates(ids[:3], ids[:3], complete=False).extends_beyond_window
+    assert candidates(ids[:6], ids[:5], complete=False).extends_beyond_window
 
 
 def test_a_product_gone_since_the_search_is_counted_never_replaced():
@@ -356,6 +367,35 @@ def test_a_product_gone_since_the_search_is_counted_never_replaced():
     assert listed(composed.selection) == [pid for pid in ids[:9] if pid != ids[7]]
     assert composed.navigation["unavailable"] == 1
     assert composed.plan.mint.page_offset == 9, "the boundary does not move for a missing product"
+
+
+def test_the_platform_never_lists_a_product_that_cannot_be_bought_now():
+    """Hidden, archived and sold-out products stay off the rows the platform adds.
+
+    The model may still name one it was shown flagged unorderable — its own
+    judgement, as it always was — but the platform never adds one itself, and
+    counts what it left out rather than hiding the gap.
+    """
+    ids = list(range(1101, 1130))
+    reader = Reader(unorderable=[ids[6], ids[7]])
+    obs = [search(ids[:5], candidates(ids, ids[:5]), unorderable=[ids[1]])]
+    composed, reason = br.open_browse(draft(ids[:5]), obs, scope=SCOPE, runtime=runtime(reader),
+                                      timeout_seconds=5)
+    assert reason == br.OPENED
+    assert listed(composed.selection) == [ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[8]]
+    assert composed.navigation["unavailable"] == 2
+    assert composed.row_refs == tuple(rc.product_ref(pid) for pid in listed(composed.selection))
+
+
+def test_a_product_the_model_named_that_cannot_become_a_row_declines_the_browse():
+    ids = list(range(1201, 1230))
+    obs = [search(ids[:5], candidates(ids, ids[:5]))]
+    obs[0] = dataclasses.replace(obs[0], result={**obs[0].result, "products": [
+        {**row, "title": ""} if row["product_id"] == ids[2] else row
+        for row in obs[0].result["products"]]})
+    composed, reason = br.open_browse(draft(ids[:5]), obs, scope=SCOPE, runtime=runtime(Reader()),
+                                      timeout_seconds=5)
+    assert composed is None and reason == br.NAMED_NOT_LISTED
 
 
 # ── Continuing a browse ──────────────────────────────────────────────────────
@@ -394,7 +434,27 @@ def test_the_final_page_offers_no_more_and_a_capped_one_says_so():
     assert facts["more_matches_than_the_list_holds"] is True
 
 
-@pytest.mark.parametrize("status", [nav.NOT_FOUND, nav.REPLAYED, nav.EXPIRED, nav.UNAVAILABLE])
+def test_a_later_page_hidden_since_the_search_is_counted_and_never_listed():
+    ids = list(range(1301, 1331))
+    page, facts = br.resolve_tap(peek=lambda: _continuation(ids, 9),
+                                 read_rows=Reader(unorderable=[ids[10], ids[11]]),
+                                 scope=SCOPE, timeout_seconds=5)
+    assert facts["products_on_this_page"] == 7 and facts["no_longer_available"] == 2
+    assert ids[10] not in listed(br.continue_browse(page).selection)
+
+
+def test_a_page_with_nothing_left_and_nothing_after_goes_as_text_and_is_still_spent():
+    ids = list(range(1401, 1420))      # nineteen: page two is the last
+    page, facts = br.resolve_tap(peek=lambda: _continuation(ids, 9), read_rows=Reader(gone=ids[9:]),
+                                 scope=SCOPE, timeout_seconds=5)
+    composed = br.continue_browse(page)
+    assert facts["products_on_this_page"] == 0 and facts["more_pages_after_this"] is False
+    assert composed.selection is None and composed.reason == br.PAGE_EMPTY
+    assert composed.plan.spend == "tapped" and composed.plan.mint is None
+
+
+@pytest.mark.parametrize("status", [nav.NOT_FOUND, nav.REPLAYED, nav.EXPIRED, nav.UNAVAILABLE,
+                                    nav.SPENT_BY_THIS_TURN])
 def test_a_refused_tap_is_a_named_fact_and_no_page_and_reads_nothing(status):
     reader = Reader()
     page, facts = br.resolve_tap(peek=lambda: nav.Continuation(status=status), read_rows=reader,

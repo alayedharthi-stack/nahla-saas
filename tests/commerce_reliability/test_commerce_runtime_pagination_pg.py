@@ -721,7 +721,7 @@ def test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_noth
     model = LiteralModel(lambda _c, _m: _step([_reply("More options:")]), each_call=expire)
     report, transport, _model = _tap_more(shop, conversation, more, model=model)
     assert transport.sent[0].get(rc.CHOICES_KEY) is None
-    assert transport.sent[0][rc.WITHHELD_KEY] == br.PAGE_AS_LINES
+    assert transport.sent[0][br.WITHHELD_KEY] == br.PAGE_AS_LINES
     assert TITLES[SHIRTS] in transport.sent[0]["text"]
     assert shop.token_row(token)["consumed_at"] is None
     assert shop.tokens_for(conversation) == rows_before, "no successor was minted"
@@ -754,3 +754,162 @@ def test_without_the_relation_the_turn_is_exactly_what_it_was(pg_admin_dsn: str)
         nav.reset_schema_probe()
         engine.dispose()
         _drop_database(pg_admin_dsn, name)
+
+
+# ── What the platform lists is what can be bought now ────────────────────────
+
+
+def test_hidden_and_sold_out_products_are_never_rows_the_platform_adds(shop: Shop):
+    """The stored result keeps its membership; what is listed is decided when shown.
+
+    One product hidden by the merchant and one sold out, among the rows the
+    platform adds to page one and on page two: neither is listed, both are
+    counted, and nothing takes their place.
+    """
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    hidden, sold_out, later_hidden = ids[6], ids[7], ids[11]
+    with shop.engine.begin() as conn:
+        conn.execute(text("UPDATE products SET merchant_hidden_at = now() WHERE id = :p"),
+                     {"p": hidden})
+        # Sold out by quantity: still flagged in stock, so the search order —
+        # stocked first — does not move, and only orderability changes.
+        conn.execute(text("UPDATE products SET stock_quantity = 0 WHERE id = :p"), {"p": sold_out})
+    try:
+        _report, first = shop.turn(conversation, browse(SHIRTS))
+        products, more, _button = _rows(first.sent[0])
+        assert products == [pid for pid in ids[:9] if pid not in (hidden, sold_out)]
+        assert first.sent[0][rc.CHOICES_KEY][rc.NAVIGATION_KEY]["unavailable"] == 2
+        assert first.sent[0][rc.CHOICES_KEY][rc.ROW_EVIDENCE_KEY] == [
+            rc.product_ref(pid) for pid in products]
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET merchant_hidden_at = now() WHERE id = :p"),
+                         {"p": later_hidden})
+        _report, second, model = _tap_more(shop, conversation, more)
+        page_two, _more, _button = _rows(second.sent[0])
+        assert later_hidden not in page_two and page_two == [pid for pid in ids[9:18]
+                                                              if pid != later_hidden]
+        assert _facts(model)[br.FACTS_KEY]["no_longer_available"] == 1
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET merchant_hidden_at = NULL, stock_quantity = 5 "
+                              "WHERE id = ANY(:p)"), {"p": [hidden, sold_out, later_hidden]})
+
+
+def test_a_tap_on_a_platform_row_hidden_since_it_was_sent_is_no_selection(shop: Shop):
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(SHIRTS))
+    products, _more, _button = _rows(first.sent[0])
+    seventh = products[6]
+    with shop.engine.begin() as conn:
+        conn.execute(text("UPDATE products SET merchant_hidden_at = now() WHERE id = :p"),
+                     {"p": seventh})
+    try:
+        model = answer("Let me check.", card={"button_label": "View"})
+        _report, transport = shop.turn(
+            conversation, model, question="row seven",
+            metadata={"list_reply_id": rc.row_id(seventh), "list_reply_title": "row seven"})
+        assert "customer_tapped" not in model.context_block()
+        assert rcard.payload_card(transport.sent[0]) is None
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET merchant_hidden_at = NULL WHERE id = :p"),
+                         {"p": seventh})
+
+
+# ── A navigation write the database refuses ──────────────────────────────────
+
+
+def test_a_page_one_token_the_database_refuses_leaves_exactly_the_models_selector(shop: Shop):
+    """The mint fails inside the reservation; nothing it would have written is.
+
+    A trigger refuses every insert into the navigation relation. The
+    reservation carrying page one is refused whole, and the answer is reserved
+    again as it would be without paging: the products the model named, no
+    "More" row, and no token anywhere.
+    """
+    conversation = shop.conversation()
+    with shop.engine.begin() as conn:
+        conn.execute(text("""
+            CREATE OR REPLACE FUNCTION refuse_navigation() RETURNS trigger AS $$
+            BEGIN RAISE EXCEPTION 'navigation refused for this case'; END $$ LANGUAGE plpgsql"""))
+        conn.execute(text(f"CREATE TRIGGER refuse_navigation BEFORE INSERT ON {nm.NAVIGATION_TABLE} "
+                          "FOR EACH ROW EXECUTE FUNCTION refuse_navigation()"))
+    try:
+        before = shop.tokens_for(conversation)
+        report, transport = shop.turn(conversation, browse(SHIRTS))
+        products, more, _button = _rows(transport.sent[0])
+        assert more is None and products == shop.products[SHIRTS][:5]
+        assert report.choices_outcome == rc.OFFERED and report.browse_outcome is None
+        assert shop.tokens_for(conversation) == before
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text(f"DROP TRIGGER refuse_navigation ON {nm.NAVIGATION_TABLE}"))
+            conn.execute(text("DROP FUNCTION refuse_navigation()"))
+
+
+def test_a_page_that_cannot_be_spent_still_outranks_the_models_own_selector(shop: Shop):
+    """The degraded path keeps the precedence of the normal one.
+
+    The token expires while the model answers, and the model asked for a
+    selector of its own. The page is still the answer — as lines — and the
+    model's selector stands down to lines as well: no list goes out at all.
+    """
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    token = nav.token_from_row_id(more["id"])
+    watches = shop.products[WATCHES]
+
+    def expire() -> None:
+        with shop.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {nm.NAVIGATION_TABLE} SET expires_at = now() - interval "
+                              "'1 second' WHERE token = :t"), {"t": token})
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=WATCHES)])
+        return _step([_reply("Also these.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in watches[:2]],
+                             choices={"product_ids": watches[:2], "button": BUTTON})])
+
+    _report, transport, _model = _tap_more(shop, conversation, more,
+                                           model=LiteralModel(script, each_call=expire))
+    assert transport.sent[0].get(rc.CHOICES_KEY) is None
+    assert transport.sent[0][br.WITHHELD_KEY] == br.PAGE_AS_LINES
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+    assert TITLES[BAGS] in transport.sent[0]["text"] and TITLES[WATCHES] in transport.sent[0]["text"]
+    assert shop.token_row(token)["consumed_at"] is None
+
+
+def test_a_candidate_read_that_fails_leaves_the_turns_session_usable(shop: Shop, monkeypatch):
+    """The platform's read shares the session the model's tools read on.
+
+    It fails here with a real statement error. Without its savepoint the
+    session's transaction would be left aborted, and the model's next read in
+    the same turn would fail with it. The search still answers, the model is
+    told nothing about more results, and the next read succeeds.
+    """
+    from modules.ai.commerce_agent_v2.tools import catalog
+
+    def failing(context, query, limit):
+        context.db.execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(catalog, "search_product_candidates_impl", failing)
+    conversation = shop.conversation()
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        first = _last_search_result(messages)["result"]["products"][0]["product_id"]
+        if call == 2:
+            return _step([_tool_use("d1", "get_product_details", product_id=first)])
+        return _step([_reply("This one.", commerce=True, refs=[f"catalog:product:{first}"])])
+
+    model = LiteralModel(script)
+    report, _transport = shop.turn(conversation, model)
+    assert "more_results" not in model.search_result()["result"]
+    details = [json.loads(block["content"]) for block in model.calls[-1]["messages"][-1]["content"]
+               if isinstance(block, Mapping) and block.get("type") == "tool_result"]
+    assert details and details[-1]["tool"] == "get_product_details" and details[-1]["ok"] is True
+    assert report.tools_called == ("search_products", "get_product_details")

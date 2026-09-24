@@ -297,6 +297,7 @@ def _with_products_shown_earlier(
     turn_id: int,
     context_preamble: Optional[Mapping[str, Any]],
     inbound_metadata: Optional[Mapping[str, Any]] = None,
+    paging: bool = False,
 ) -> Tuple[Dict[str, Any], pp.PresentationContext]:
     """Carry this conversation's recently shown products into the turn.
 
@@ -326,10 +327,12 @@ def _with_products_shown_earlier(
         if shown.products:
             binding.context.authorize_products(shown.product_ids, titles=shown.titles)
             preamble["products_shown_earlier"] = shown.as_facts()
+        # Only where paging exists can a row have been sent that no reply
+        # cited; elsewhere the tap is verified exactly as it always was.
         tapped = _tapped_product(
             inbound_metadata, shown,
-            reread=lambda product_id: rp.product_still_in_catalog(
-                session, tenant_id=int(tenant_id), product_id=int(product_id)))
+            reread=(lambda product_id: rp.product_still_in_catalog(
+                session, tenant_id=int(tenant_id), product_id=int(product_id))) if paging else None)
         if tapped is not None:
             preamble["customer_tapped"] = tapped
             # A row the platform composed on a page is tappable without ever
@@ -449,7 +452,8 @@ def _browse_continuation(
         page, facts = br.resolve_tap(
             peek=lambda: nav.peek(engine, token=token, tenant_id=int(tenant_id),
                                   namespace=NAMESPACE,
-                                  conversation_id=int(runtime_conversation_id)),
+                                  conversation_id=int(runtime_conversation_id),
+                                  turn_id=int(turn_id)),
             read_rows=lambda s, ids, wait: alt.read_list_rows(binding, s, ids, timeout_seconds=wait),
             scope=scope, timeout_seconds=timeout_seconds)
     except Exception as exc:  # noqa: BLE001 - a navigation that cannot be read is no page
@@ -711,15 +715,16 @@ def run_commerce_runtime_turn(
         # bind to instead of a phrase to search for. Identity only: every fact
         # still has to be read by a tool in this turn and cited as this turn's
         # evidence. Inside the try, so the session below is always retired.
+        # Paging exists only where the navigation relation does (revision
+        # 0113). Without it nothing below reads a candidate, mentions more
+        # results, offers a "More" word, stores a token or re-reads a row no
+        # reply cited.
+        paging = nav.schema_available(engine)
+        binding.paging_available = paging
         preamble, presentation = _with_products_shown_earlier(
             binding, session, tenant_id=int(tenant_id), conversation_id=int(conversation_id),
             turn_id=turn_id, context_preamble=context_preamble,
-            inbound_metadata=inbound_metadata)
-        # Paging exists only where the navigation relation does (revision
-        # 0113). Without it nothing below reads a candidate, mentions more
-        # results, offers a "More" word or stores a token.
-        paging = nav.schema_available(engine)
-        binding.paging_available = paging
+            inbound_metadata=inbound_metadata, paging=paging)
         effective_budget = budget if budget is not None else ac.LoopBudget()
         navigation_facts, browse_page = _browse_continuation(
             binding, engine, tenant_id=int(tenant_id),

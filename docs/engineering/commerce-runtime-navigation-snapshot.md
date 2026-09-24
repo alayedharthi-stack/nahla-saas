@@ -41,6 +41,10 @@ the search matched.
 | `query_digest`, `method` | which search it was (a digest, never the customer's words) and which strategy matched |
 | `product_ids` | every match up to `CANDIDATE_CAP` = 50, in the search's total order |
 | `complete` | **proven**: true only when the read got back fewer matches than it asked for |
+
+The model is told `more_results: true` only when the stored result is longer
+than its window — what can actually be shown, not what may exist beyond the
+cap.
 | `window_ids` | the products the model's tool result carried |
 
 It travels on `ToolObservation.platform`, a field the provider never sees:
@@ -114,11 +118,40 @@ reply is written. So:
 * two turns racing on one token cannot both win: the spend is one conditional
   `UPDATE … WHERE consumed_at IS NULL AND expires_at > now()`.
 
-If the store refuses (`claim_lost`, `not_stored`), nothing was written; the
-loop shapes the reply again without navigation and reserves once more. For a
-later page that means its products, read moments ago, follow the model's text
-as lines (`browse_page_as_lines`) — the answer to "More" is never an empty
-sentence.
+If the store refuses (`claim_lost`, `not_stored`, `store_error`), nothing was
+written; the loop shapes the reply again without navigation and reserves once
+more. For a later page that means its products, read moments ago, follow the
+model's text as lines (`navigation_withheld: browse_page_as_lines`) — the
+answer to "More" is never an empty sentence — and a selector the model asked
+for still stands down for the page, exactly as on the normal path. For page
+one it means exactly the selector the model asked for. Any unexpected failure
+while composing a list is `browse_failed` and the same fallback: paging is an
+affordance, never a reason a turn goes unanswered.
+
+The platform's own reads on the turn's shared tool session — the candidate
+read and the list-row hydration — run inside a savepoint, so a failed statement
+cannot leave that session's transaction aborted under the model's later tool
+calls.
+
+### What the platform lists is what can be bought now
+
+The stored result keeps the search's membership — orderable and
+non-orderable matches alike, because the model's window carries both. What the
+platform **adds to a list itself** — rows 6–9 of page one and every later page —
+is held to the catalogue's single orderability rule (`orderable`, which is
+`can_checkout`: a merchant's hide, a Meta archive and stock included), read at
+the moment the page is shown. A product that fails it is counted in
+`unavailable` / `no_longer_available` and never listed or replaced. A product
+the **model** named from its window is shown as the model chose, as before.
+
+A tap on a row no reply cited is verified against the rows actually sent and
+re-read now under the same rule; a product hidden or sold out since the list
+was sent resolves to no selection. This re-read exists only where paging does.
+
+Every platform-composed list carries `choices.row_evidence_refs` — the
+`catalog:product:<id>` references of the reads its row values came from — so a
+price on a row the model never saw is as auditable as a price in a cited reply.
+They are audit, not citation: they never become the reply's `evidence_refs`.
 
 ### Every refusal fails closed, by name
 
@@ -130,6 +163,7 @@ sentence.
 | another conversation's or tenant's token | `not_found` | no page |
 | a string nobody minted | `not_found` | no page |
 | unreadable store or catalogue | `unavailable` | no page |
+| spent by this same turn (a re-entry after its reservation) | `spent_by_this_turn` | the reserved reply is reused |
 
 A refusal never becomes a search, a product selection or a card: the platform
 runs no fallback, and the turn is still answered on the model's own text.
@@ -255,5 +289,17 @@ paths, the same pattern a withheld selector already uses.
 * A general browse (empty query) that is not exhaustive within its formatting
   window is stored as not complete, even when the remaining rows are all
   unorderable.
-* Candidate reads add one statement to every search while paging is on — see
-  the performance section of the PR.
+* While paging is on, every search pays for the candidate read: an ids-only
+  query, a tenant-ownership count and a savepoint for a text search; two reads
+  of up to 71 rows (variants in one `selectinload`) for the general browse.
+  Measured figures are in the PR.
+* Both foreign keys have no `ON DELETE`, like every other runtime relation:
+  a navigation row blocks deleting its tenant or runtime conversation until
+  the sweep removes it (at most ≈ 7 days).
+* The schema probe is cached per process, as the runtime's own is: applying
+  0113 — or a transient probe failure — takes effect at the next start.
+* The "More" word and the list button are the model's, but, like the existing
+  `button`, they are not run through reply verification's code checks; both
+  are bounded to what the channel renders.
+* A non-final page all of whose products became unavailable is a list holding
+  only the "More" row; the model is told the page has none.

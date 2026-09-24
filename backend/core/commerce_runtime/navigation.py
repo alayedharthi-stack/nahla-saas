@@ -59,6 +59,9 @@ RESOLVED = "resolved"              # a live token of this conversation's
 NOT_FOUND = "not_found"            # forged, not this conversation's, or never minted
 EXPIRED = "expired"
 REPLAYED = "replayed"
+# Spent by the very turn asking — a re-entry after that turn's own reply was
+# reserved. Not a replay: the page went out with that reply.
+SPENT_BY_THIS_TURN = "spent_by_this_turn"
 UNAVAILABLE = "unavailable"        # the store could not be read, or does not exist here
 
 # Bytes of entropy behind a token. Long enough that guessing is not a strategy;
@@ -202,7 +205,7 @@ def _stored_ids(raw: Any) -> Tuple[int, ...]:
 
 
 def peek(engine: Any, *, token: str, tenant_id: int, namespace: str,
-         conversation_id: int) -> Continuation:
+         conversation_id: int, turn_id: Optional[int] = None) -> Continuation:
     """What ``token`` opens in this conversation, read without spending it.
 
     Scoped to the tenant, namespace and **runtime** conversation the turn was
@@ -218,7 +221,7 @@ def peek(engine: Any, *, token: str, tenant_id: int, namespace: str,
         select(_TABLE.c.series, _TABLE.c.product_ids, _TABLE.c.page_offset, _TABLE.c.page_size,
                _TABLE.c.complete, _TABLE.c.more_label, _TABLE.c.button_label,
                _TABLE.c.origin_turn_id, _TABLE.c.origin_call_id, _TABLE.c.search_method,
-               _TABLE.c.query_digest, _TABLE.c.consumed_at,
+               _TABLE.c.query_digest, _TABLE.c.consumed_at, _TABLE.c.consumed_by_turn_id,
                (_TABLE.c.expires_at > func.now()).label("live"))
         .where(_TABLE.c.token == wanted, _TABLE.c.tenant_id == int(tenant_id),
                _TABLE.c.namespace == str(namespace),
@@ -234,6 +237,8 @@ def peek(engine: Any, *, token: str, tenant_id: int, namespace: str,
     if row is None:
         return Continuation(status=NOT_FOUND)
     if row.consumed_at is not None:
+        if turn_id is not None and row.consumed_by_turn_id == int(turn_id):
+            return Continuation(status=SPENT_BY_THIS_TURN)
         return Continuation(status=REPLAYED)
     if not row.live:
         return Continuation(status=EXPIRED)
@@ -488,7 +493,8 @@ def scheduler_state() -> Dict[str, Any]:
 
 __all__ = [
     "CLAIM_LOST", "Continuation", "EXPIRED", "Mint", "NOT_FOUND", "NOT_STORED",
-    "NavigationNotPersisted", "PageBounds", "Plan", "REPLAYED", "RESOLVED", "SWEEP_BATCH",
+    "NavigationNotPersisted", "PageBounds", "Plan", "REPLAYED", "RESOLVED", "SPENT_BY_THIS_TURN",
+    "SWEEP_BATCH",
     "STORE_ERROR", "SWEEP_INTERVAL_SECONDS", "UNAVAILABLE", "apply", "is_navigation_row", "new_token",
     "page_bounds", "peek", "reset_schema_probe", "row_id", "run_navigation_sweep_scheduler",
     "scheduler_state", "schema_available", "sweep", "sweep_until_clean", "token_from_row_id",

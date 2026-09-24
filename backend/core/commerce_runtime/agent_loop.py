@@ -313,26 +313,32 @@ class AgentLoop:
         page = presentation.browse_page if presentation is not None else None
         composed: Optional[br.Composed] = None
         browse_outcome = ""
-        if shape.reason == pp.NAVIGATION_PAGE and page is not None:
-            if navigation_enabled:
-                composed = br.continue_browse(page)
-                browse_outcome = composed.reason
-            else:
-                # The page could not be spent with this reply. Its products,
-                # read moments ago, still follow the model's text as lines, so
-                # the answer to "More" is not an empty sentence.
-                draft = br.page_as_lines(draft, page)
-                browse_outcome = br.PAGE_AS_LINES
-        elif (navigation_enabled and self._browse is not None and shape.kind == pp.SHAPE_LIST
-              and shape.reason == pp.MODEL_REQUESTED):
-            composed, browse_outcome = br.open_browse(
-                draft, session.observations, scope=scope, runtime=self._browse,
-                timeout_seconds=session.wait_for(session.limits.tool_timeout_seconds))
+        try:
+            if shape.reason == pp.NAVIGATION_PAGE and page is not None:
+                if navigation_enabled:
+                    composed = br.continue_browse(page)
+                    browse_outcome = composed.reason
+                else:
+                    # The page could not be spent with this reply. Its products,
+                    # read moments ago, still follow the model's text as lines, so
+                    # the answer to "More" is not an empty sentence.
+                    draft = br.page_as_lines(draft, page)
+                    browse_outcome = br.PAGE_AS_LINES
+            elif (navigation_enabled and self._browse is not None and shape.kind == pp.SHAPE_LIST
+                  and shape.reason == pp.MODEL_REQUESTED):
+                composed, browse_outcome = br.open_browse(
+                    draft, session.observations, scope=scope, runtime=self._browse,
+                    timeout_seconds=session.wait_for(session.limits.tool_timeout_seconds))
+        except Exception as exc:  # noqa: BLE001 - paging is an affordance; the answer still goes
+            # A composition that fails for any reason is a list not paged, never
+            # a turn not answered: the reply is shaped as it would be without it.
+            session.record("browse_failed", {"error": type(exc).__name__})
+            composed, browse_outcome = None, br.BROWSE_FAILED
 
         if composed is not None and composed.selection is not None:
             draft, choices = rc.finalize_composed(
                 draft, session.observations, composed.selection, composed.reason,
-                navigation=composed.navigation,
+                navigation=composed.navigation, row_refs=composed.row_refs,
                 stand_down=rc.NAVIGATION_ANSWERED_FIRST if shape.reason == pp.NAVIGATION_PAGE else "")
             session.navigation_plan = composed.plan
         else:
@@ -346,7 +352,12 @@ class AgentLoop:
             # no photo still gets the selector the model offered rather than
             # neither shape.
             withhold = ""
-            if shape.withhold_selector and shape.reason != pp.NAVIGATION_PAGE:
+            if shape.withhold_selector and shape.reason == pp.NAVIGATION_PAGE:
+                # The tapped page is still the answer, as lines or not at all;
+                # the model's own selector stands down for it exactly as it
+                # does when the page is a list.
+                withhold = rc.NAVIGATION_ANSWERED_FIRST
+            elif shape.withhold_selector:
                 card_composed, _reason = rcard.card(draft, session.observations,
                                                     determined_product_id=shape.determined_product_id)
                 withhold = rc.TAP_ANSWERED_FIRST if card_composed is not None else ""

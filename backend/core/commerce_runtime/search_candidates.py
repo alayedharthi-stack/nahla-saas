@@ -108,12 +108,15 @@ class SearchCandidates:
 
     @property
     def extends_beyond_window(self) -> bool:
-        """Whether this search matched products the model's window did not carry.
+        """Whether the stored result holds products the model's window did not carry.
 
-        True when the stored result is longer than the window, and also when it
-        is not complete: a cap reached is a proof that more exist.
+        Only what is stored counts. A result that is not complete may have more
+        matches beyond it, but nothing beyond what is stored can ever be shown,
+        so an incomplete result no longer than the window — a general browse
+        whose formatting window held few orderable products — offers nothing
+        more, and the model is not told that it does.
         """
-        return len(self.product_ids) > len(self.window_ids) or not self.complete
+        return len(self.product_ids) > len(self.window_ids)
 
     def bound_to(self, *, tenant_id: int, namespace: str, conversation_id: int,
                  turn_id: int) -> bool:

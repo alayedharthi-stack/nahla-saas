@@ -39,6 +39,11 @@ from core.commerce_runtime import navigation as nav
 from core.commerce_runtime import reply_choices as rc
 from core.commerce_runtime import search_candidates as sc
 
+# Why a page the customer tapped for went out as lines rather than a list,
+# on the delivered payload. Its own key: the model's selector standing down
+# for the page records under ``choices_withheld`` beside it.
+WITHHELD_KEY = "navigation_withheld"
+
 # Closed outcomes a reply's list can record.
 OPENED = "browse_opened"          # page one of a stored browse; "More" reaches page two
 WHOLE = "browse_offered_whole"    # the search's whole result fits one list; nothing stored
@@ -47,6 +52,8 @@ PAGE_EMPTY = "browse_page_empty"  # a later page none of whose products can be s
 # A later page whose token could not be spent with the reply: its products,
 # read moments ago, follow the model's text as lines, and nothing is minted.
 PAGE_AS_LINES = "browse_page_as_lines"
+# Composing the list failed unexpectedly; the reply is shaped without paging.
+BROWSE_FAILED = "browse_failed"
 
 # Why a browse was not opened. The reply then offers exactly the selector the
 # model asked for, as it always has.
@@ -85,6 +92,30 @@ class Composed:
     reason: str
     navigation: Mapping[str, Any]
     plan: nav.Plan
+    # The evidence behind every value the rows state: ``catalog:product:<id>``
+    # as the trusted read returned it at composition. Carried on the delivered
+    # payload so a price on a platform-composed row is as auditable as a price
+    # in a cited reply.
+    row_refs: Tuple[str, ...] = ()
+
+
+def _listable(view: Mapping[str, Any]) -> bool:
+    """Whether the platform may put this product on a list it composes itself.
+
+    Only a product the customer can buy **now**, by the catalogue's own single
+    rule (``orderable``: ``can_checkout``, which already includes a merchant's
+    hide, a Meta archive and stock). The model may still name a product it was
+    shown flagged unorderable — that is its judgement, as it always was — but
+    the platform never adds one on its own.
+    """
+    return bool(view.get("orderable"))
+
+
+def _row_refs(products: Sequence[Mapping[str, Any]], listed: Sequence[int]) -> List[str]:
+    """The evidence reference of every product a composed list states values for."""
+    wanted = set(int(pid) for pid in listed)
+    return [str(view.get("evidence_ref") or rc.product_ref(view.get("product_id")))
+            for view in products if int(view.get("product_id") or 0) in wanted]
 
 
 def _meta(*, page: int, offset: int, shown: int, unavailable: int, has_next: bool,
@@ -151,7 +182,9 @@ def open_browse(draft: Any, observations: Sequence[Any], *, scope: Any,
     by_id: Dict[int, Mapping[str, Any]] = {pid: observed[pid] for pid in page_ids if pid in observed}
     for view in getattr(read, "products", ()) or ():
         by_id[int(view["product_id"])] = view
-    products = [by_id[pid] for pid in page_ids if pid in by_id]
+    named = set(int(pid) for pid in requested)
+    products = [by_id[pid] for pid in page_ids
+                if pid in by_id and (pid in named or _listable(by_id[pid]))]
     rows, _dropped = rc.wire_rows(products, start_position=1)
     listed = [rc.product_id_from_row_id(row["id"]) for row in rows]
     if any(int(pid) not in listed for pid in requested):
@@ -171,7 +204,8 @@ def open_browse(draft: Any, observations: Sequence[Any], *, scope: Any,
                  unavailable=len([pid for pid in page_ids if pid not in listed]),
                  has_next=bounds.has_next, complete=candidates.complete, stored=len(stored))
     reason = OPENED if bounds.has_next else WHOLE
-    return Composed(selection=selection, reason=reason, navigation=meta, plan=nav.Plan(mint=mint)), reason
+    return Composed(selection=selection, reason=reason, navigation=meta, plan=nav.Plan(mint=mint),
+                    row_refs=tuple(_row_refs(products, listed))), reason
 
 
 @dataclasses.dataclass(frozen=True)
@@ -221,7 +255,10 @@ def resolve_tap(*, peek: Callable[[], nav.Continuation], read_rows: ReadRows, sc
     if not getattr(read, "ok", False):
         return None, refusal_facts(nav.UNAVAILABLE)
     by_id = {int(view["product_id"]): view for view in getattr(read, "products", ()) or ()}
-    found = [by_id[pid] for pid in page_ids if pid in by_id]
+    # Membership is the stored result's; what may be shown is decided now. A
+    # product hidden, archived or sold out since the search is counted as no
+    # longer available, never listed and never replaced.
+    found = [by_id[pid] for pid in page_ids if pid in by_id and _listable(by_id[pid])]
     rows, dropped = rc.wire_rows(found, start_position=continuation.bounds().start + 1)
     listed = {rc.product_id_from_row_id(row["id"]) for row in rows}
     products = tuple(view for view in found if int(view["product_id"]) in listed)
@@ -264,7 +301,8 @@ def continue_browse(page: BrowsePage) -> Composed:
         return Composed(selection=None, reason=PAGE_EMPTY, navigation=meta, plan=plan)
     selection = rc.ChoiceSelection(rows=tuple(rows), product_ids=tuple(listed),
                                    button=continuation.button_label)
-    return Composed(selection=selection, reason=PAGE, navigation=meta, plan=plan)
+    return Composed(selection=selection, reason=PAGE, navigation=meta, plan=plan,
+                    row_refs=tuple(_row_refs(page.products, listed)))
 
 
 def page_as_lines(draft: Any, page: BrowsePage) -> Any:
@@ -281,14 +319,14 @@ def page_as_lines(draft: Any, page: BrowsePage) -> Any:
     if not rows:
         return draft
     payload = dict(getattr(draft, "payload", None) or {})
-    payload[rc.WITHHELD_KEY] = PAGE_AS_LINES
+    payload[WITHHELD_KEY] = PAGE_AS_LINES
     return dataclasses.replace(draft, text=rc.options_as_text(getattr(draft, "text", ""), rows),
                                payload=ac.public_copy(payload))
 
 
 __all__ = [
-    "BrowsePage", "BrowseRuntime", "Composed", "FACTS_KEY", "NAMED_NOT_LISTED", "NOTHING_MORE",
+    "BROWSE_FAILED", "BrowsePage", "BrowseRuntime", "Composed", "FACTS_KEY", "NAMED_NOT_LISTED", "NOTHING_MORE",
     "NOT_ASKED", "NO_BUTTON_WORD", "NO_CONTINUATION", "OPENED", "PAGE", "PAGE_AS_LINES",
-    "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE", "continue_browse", "open_browse",
+    "PAGE_EMPTY", "ROWS_UNAVAILABLE", "WHOLE", "WITHHELD_KEY", "continue_browse", "open_browse",
     "page_as_lines", "refusal_facts", "resolve_tap",
 ]

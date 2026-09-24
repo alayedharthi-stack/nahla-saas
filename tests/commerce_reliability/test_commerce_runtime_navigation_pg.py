@@ -217,15 +217,15 @@ def test_the_pages_walk_the_whole_browse_in_the_order_it_was_shown(navdb: Nav, t
     assert 1 + walked == pages
 
 
-def test_the_stored_order_is_what_page_two_shows_even_if_the_catalogue_moves(navdb: Nav):
-    """Page two reads the stored result. There is no second search to disagree with it."""
+def test_a_token_spent_by_this_turn_reads_as_its_own_not_as_a_replay(navdb: Nav):
+    """A re-entry after the turn's own reservation is not a replay of it."""
     conversation = navdb.conversation(navdb.tenant_a)
-    ids = list(range(301, 331))
-    token = navdb.open(navdb.tenant_a, conversation, ids)
-    with navdb.engine.begin() as conn:
-        conn.execute(text("UPDATE tenants SET name = name || ' (moved)' WHERE id = :t"),
-                     {"t": navdb.tenant_a})
-    assert navdb.peek(navdb.tenant_a, conversation, token).page_ids() == tuple(ids[9:18])
+    token = navdb.open(navdb.tenant_a, conversation, list(range(311, 341)))
+    navdb.apply(navdb.tenant_a, conversation, nav.Plan(spend=token), turn_id=41)
+    assert nav.peek(navdb.engine, token=token, tenant_id=navdb.tenant_a, namespace=LIVE,
+                    conversation_id=conversation, turn_id=41).status == nav.SPENT_BY_THIS_TURN
+    assert nav.peek(navdb.engine, token=token, tenant_id=navdb.tenant_a, namespace=LIVE,
+                    conversation_id=conversation, turn_id=42).status == nav.REPLAYED
 
 
 # ── Refusals ─────────────────────────────────────────────────────────────────

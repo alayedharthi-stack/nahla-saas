@@ -382,14 +382,27 @@ def _still_in_catalog(db: Any, *, tenant_id: int, product_ids: Sequence[int]) ->
 
 
 def product_still_in_catalog(db: Any, *, tenant_id: int, product_id: int) -> Optional[ShownProduct]:
-    """One product, re-read in the tenant's catalogue now, or ``None``.
+    """One product, re-read in the tenant's catalogue now, if it can still be bought.
 
     For a row this conversation offered that no reply cited — a row the
     platform composed on a page of a browse. Being offered as a row is what
-    makes a tap on it verifiable; this is the same re-read the cited products
-    get, so a product the merchant removed, or one that was never this
-    tenant's, still resolves to nothing.
+    makes a tap on it verifiable, and the platform only ever composes rows for
+    orderable products; so the re-read holds it to the same rule, now. A
+    product the merchant has since hidden, archived, sold out or removed — or
+    one that was never this tenant's — resolves to nothing.
     """
+    from core.store_knowledge import CatalogContextBuilder  # noqa: PLC0415
+
+    try:
+        row = CatalogContextBuilder(db, int(tenant_id)).get_by_id(int(product_id))
+    except Exception as exc:  # noqa: BLE001 - one unreadable row is not the turn's failure
+        logger.warning("[COMMERCE_RUNTIME] tapped row unreadable tenant=%s error=%s",
+                       tenant_id, type(exc).__name__)
+        return None
+    if not isinstance(row, Mapping) or int(row.get("id") or 0) != int(product_id):
+        return None
+    if not row.get("orderable"):
+        return None
     found = _still_in_catalog(db, tenant_id=int(tenant_id), product_ids=[int(product_id)])
     return found[0] if found else None
 

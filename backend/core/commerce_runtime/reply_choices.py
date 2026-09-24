@@ -84,6 +84,10 @@ NAVIGATION_ANSWERED_FIRST = "navigation_page_answered_first"
 # available, whether another page follows, and whether the stored result was
 # complete. Integers and booleans only — never a token, never a product value.
 NAVIGATION_KEY = "navigation"
+# The evidence references behind the values a platform-composed list's rows
+# state, as the trusted read returned them. Audit, not citation: they are the
+# platform's own reads, so they never become the reply's ``evidence_refs``.
+ROW_EVIDENCE_KEY = "row_evidence_refs"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -400,7 +404,8 @@ def wire_rows(products: Sequence[Mapping[str, Any]], *,
 
 def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSelection, reason: str, *,
                       navigation: Optional[Mapping[str, Any]] = None,
-                      stand_down: str = "") -> Tuple[Any, str]:
+                      stand_down: str = "",
+                      row_refs: Sequence[str] = ()) -> Tuple[Any, str]:
     """The draft as it will be delivered, carrying a list the platform composed.
 
     The model's text is not replaced. When the model asked for a selector of
@@ -424,6 +429,8 @@ def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSel
     composed = chosen.as_payload()
     if navigation:
         composed[NAVIGATION_KEY] = dict(navigation)
+    if row_refs:
+        composed[ROW_EVIDENCE_KEY] = [str(ref) for ref in row_refs]
     payload[CHOICES_KEY] = composed
     return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value, text=text,
                                payload=ac.public_copy(payload)), reason
@@ -463,7 +470,8 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
     "MAX_ROW_TITLE", "MIN_CHOICES", "NAVIGATION_ANSWERED_FIRST", "NAVIGATION_KEY",
-    "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX", "finalize_composed",
+    "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX", "ROW_EVIDENCE_KEY",
+    "finalize_composed",
     "requested_more_label", "wire_rows",
     "TAP_ANSWERED_FIRST",
     "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
