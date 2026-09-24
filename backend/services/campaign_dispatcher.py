@@ -2060,6 +2060,11 @@ async def _dispatch_queued_rows(
                         # history: stop the run rather than guess.
                         ctx.pause(ledger.PAUSE_EVIDENCE_UNREADABLE, claim.evidence or "")
                         break
+                    if claim.reason == ledger.EVIDENCE_UNRESOLVED:
+                        # History that could be anyone's: stop the run with
+                        # every row still queued until it is resolved.
+                        ctx.pause(ledger.PAUSE_EVIDENCE_UNRESOLVED, claim.evidence or "")
+                        break
                     continue
                 attempt = claim.attempt
 

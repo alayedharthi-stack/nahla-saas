@@ -498,14 +498,20 @@ def _copy(Session, ids, *, phone=None, wamid="w.hist", conversation=True, event_
     db.close()
 
 
-def test_a_copy_nobody_can_be_tied_to_blocks_the_whole_campaign(dbf, fake_meta):
+def test_a_copy_nobody_can_be_tied_to_pauses_the_campaign_with_rows_queued(dbf, fake_meta):
+    """It could be anyone's: nobody is sent, and nobody is skipped for good —
+    the run pauses and every row stays queued until it is resolved."""
     ids = _seed(dbf, phones=[X, Y])
     _copy(dbf, ids, phone=None, wamid="w.orphan", conversation=False)
     meta = fake_meta(FakeMeta())
     _dispatch(dbf, ids, times=2)
     assert meta.calls == []
-    assert {_row(dbf, ids.campaign_id, p) for p in (X, Y)} == {
-        (ledger.LOG_SKIPPED_SEND_GUARD, "message_events_unplaceable_copy")}
+    assert {_row(dbf, ids.campaign_id, p)[0] for p in (X, Y)} == {"queued"}
+    db = dbf()
+    lease = db.get(CampaignDispatchLease, ids.campaign_id)
+    assert (lease.pause_reason, lease.pause_detail) == (
+        ledger.PAUSE_EVIDENCE_UNRESOLVED, "message_events_unplaceable_copy")
+    db.close()
 
 
 def test_a_copy_without_a_conversation_is_placed_by_its_wamid(dbf, fake_meta):

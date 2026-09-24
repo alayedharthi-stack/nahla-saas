@@ -413,6 +413,12 @@ LOG_SKIPPED_SEND_GUARD = "skipped_send_guard"
 PRIOR_SEND_ERROR = "prior_send_evidence"
 EVIDENCE_UNREADABLE = "evidence_unreadable"
 PAUSE_EVIDENCE_UNREADABLE = "evidence_unreadable"
+# Evidence that concerns the whole campaign rather than one recipient (a
+# copy nobody can be tied to could be anyone's): the run pauses and every
+# row stays queued, instead of each recipient being skipped for good.
+EVIDENCE_UNRESOLVED = "evidence_unresolved"
+PAUSE_EVIDENCE_UNRESOLVED = "evidence_unresolved"
+CAMPAIGN_WIDE_EVIDENCE = frozenset({"message_events_unplaceable_copy"})
 
 # Attempt states that prove the request produced no accepted copy: Meta
 # answered with an error (rejected), the transport failed before the
@@ -741,6 +747,10 @@ def claim_recipient(
         logger.error("[campaign_ledger] campaign=%d row=%d evidence unreadable: %s",
                      campaign_id, log_id, type(exc).__name__)
         return ClaimResult(None, EVIDENCE_UNREADABLE, budget, evidence=type(exc).__name__)
+    if why in CAMPAIGN_WIDE_EVIDENCE:
+        db.rollback()
+        logger.error("[campaign_ledger] campaign=%d paused: %s", campaign_id, why)
+        return ClaimResult(None, EVIDENCE_UNRESOLVED, budget, evidence=why)
     if why:
         # Refused durably: the row leaves the queue with its reason, so no
         # later run, resume or retry picks it up again.
