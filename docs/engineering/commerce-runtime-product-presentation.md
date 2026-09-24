@@ -49,6 +49,9 @@ browse, so it never becomes a Card or a row on its own.
 Exactly this order, first match wins:
 
 1. **A verified fresh product-row selection** → hydrate → **Card**.
+1b. **A verified "More" tap** on a list this conversation sent → the **next
+   page** of that list, from its stored order
+   (`commerce-runtime-navigation-snapshot.md`).
 2. **A valid model-requested shape** that is consistent with evidence and
    policy.
 3. **A focused product** from a deliberate `get_product_details` → **Card**,
@@ -198,10 +201,12 @@ materialises only `models.Base`, so a new `RuntimeBase` relation is dormant
 until applied). Bundling a dormant table into this policy change would let CI
 prove a behaviour production does not yet have.
 
-Until it lands, `>10` keeps its current honest behaviour: the selector is
-withheld whole (`more_options_than_the_channel_shows`) and **every** option
-follows the model's sentence as a line of the merchant's own values. No option
-is trimmed, and nothing is faked.
+Where revision 0113 is not applied, `>10` keeps its honest behaviour: the
+selector is withheld whole (`more_options_than_the_channel_shows`) and
+**every** option follows the model's sentence as a line of the merchant's own
+values. No option is trimmed, and nothing is faked. Where it is applied, a
+search's whole result is paged by the platform — the model still names only
+what it was shown — as `commerce-runtime-navigation-snapshot.md` describes.
 
 ## Rule 3 — recent-card suppression rests on a send, and loses to a tap
 

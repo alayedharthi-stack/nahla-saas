@@ -272,6 +272,24 @@ def test_a_spend_whose_reply_was_not_reserved_leaves_the_token_spendable(navdb: 
     assert navdb.rows() == before, "the rolled-back mint must not have survived"
 
 
+def test_a_store_that_refuses_the_spend_is_named_and_spends_nothing(navdb: Nav):
+    """A database error on the spend is a refusal like any other, never a crash:
+    the reservation is made again without the page, and the token is intact."""
+    conversation = navdb.conversation(navdb.tenant_a)
+    token = navdb.open(navdb.tenant_a, conversation, list(range(581, 611)))
+    with navdb.engine.connect() as conn:
+        transaction = conn.begin()
+        moment = conn.execute(text("SELECT now()")).scalar_one()
+        with pytest.raises(Exception):
+            conn.execute(text("SELECT 1/0"))           # the transaction is now aborted
+        with pytest.raises(nav.NavigationNotPersisted) as refused:
+            nav.apply(conn, nav.Plan(spend=token), tenant_id=navdb.tenant_a, namespace=LIVE,
+                      conversation_id=conversation, turn_id=11, db_now=moment)
+        transaction.rollback()
+    assert refused.value.reason == nav.STORE_ERROR
+    assert navdb.peek(navdb.tenant_a, conversation, token).resolved
+
+
 def test_two_taps_racing_on_one_token_produce_exactly_one_page(navdb: Nav):
     """Two independent connections, both past the read, racing to spend."""
     conversation = navdb.conversation(navdb.tenant_a)
@@ -323,6 +341,11 @@ def test_a_token_minted_for_another_tenant_is_not_found_here(navdb: Nav):
     assert navdb.peek(navdb.tenant_a, theirs, token).status == nav.NOT_FOUND
     with pytest.raises(nav.NavigationNotPersisted):
         navdb.apply(navdb.tenant_a, ours, nav.Plan(spend=token))
+    # The tenant guard on its own: the right conversation named under the wrong
+    # tenant. Conversation ids are unique across tenants, so only this case
+    # proves the tenant check itself is load-bearing rather than redundant.
+    with pytest.raises(nav.NavigationNotPersisted):
+        navdb.apply(navdb.tenant_a, theirs, nav.Plan(spend=token))
     # ... and it is still spendable where it belongs.
     assert navdb.peek(navdb.tenant_b, theirs, token).resolved
     navdb.apply(navdb.tenant_b, theirs, nav.Plan(spend=token))

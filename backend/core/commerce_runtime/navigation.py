@@ -86,6 +86,7 @@ class NavigationNotPersisted(Exception):
 # Why ``apply`` refused, closed.
 CLAIM_LOST = "claim_lost"          # the token was spent or expired after it was read
 NOT_STORED = "not_stored"          # the next page's token could not be written
+STORE_ERROR = "store_error"        # the store refused the spend itself
 
 
 def new_token() -> str:
@@ -301,13 +302,21 @@ def apply(conn: Any, plan: Plan, *, tenant_id: int, namespace: str, conversation
     scope = [_TABLE.c.tenant_id == int(tenant_id), _TABLE.c.namespace == str(namespace),
              _TABLE.c.conversation_id == int(conversation_id)]
     if plan.spend:
-        claimed = conn.execute(
-            _TABLE.update()
-            .where(_TABLE.c.token == plan.spend, *scope, _TABLE.c.consumed_at.is_(None),
-                   _TABLE.c.expires_at > moment)
-            .values(consumed_at=moment, consumed_by_turn_id=int(turn_id))
-            .returning(_TABLE.c.id)
-        ).first()
+        try:
+            claimed = conn.execute(
+                _TABLE.update()
+                .where(_TABLE.c.token == plan.spend, *scope, _TABLE.c.consumed_at.is_(None),
+                       _TABLE.c.expires_at > moment)
+                .values(consumed_at=moment, consumed_by_turn_id=int(turn_id))
+                .returning(_TABLE.c.id)
+            ).first()
+        except SQLAlchemyError as exc:
+            # A store that cannot be written is a page that cannot be spent:
+            # the reservation is refused whole and made again without it,
+            # rather than the turn failing with no answer at all.
+            logger.warning("[COMMERCE_RUNTIME] navigation token not spendable tenant=%s error=%s",
+                           tenant_id, type(exc).__name__)
+            raise NavigationNotPersisted(STORE_ERROR) from exc
         if claimed is None:
             raise NavigationNotPersisted(CLAIM_LOST)
     mint = plan.mint
@@ -480,7 +489,7 @@ def scheduler_state() -> Dict[str, Any]:
 __all__ = [
     "CLAIM_LOST", "Continuation", "EXPIRED", "Mint", "NOT_FOUND", "NOT_STORED",
     "NavigationNotPersisted", "PageBounds", "Plan", "REPLAYED", "RESOLVED", "SWEEP_BATCH",
-    "SWEEP_INTERVAL_SECONDS", "UNAVAILABLE", "apply", "is_navigation_row", "new_token",
+    "STORE_ERROR", "SWEEP_INTERVAL_SECONDS", "UNAVAILABLE", "apply", "is_navigation_row", "new_token",
     "page_bounds", "peek", "reset_schema_probe", "row_id", "run_navigation_sweep_scheduler",
     "scheduler_state", "schema_available", "sweep", "sweep_until_clean", "token_from_row_id",
 ]
