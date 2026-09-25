@@ -823,6 +823,42 @@ def test_each_shape_declares_itself_an_addition_over_the_text_not_a_replacement(
     assert "never a replacement" in declarations["tool"]
 
 
+def test_the_declaration_says_what_each_shape_already_shows():
+    """Tenant 1, 25 September: beside a selector the text listed five products
+    with prices and sizes the rows already carried, and beside a card it gave the
+    photo's raw address. The declaration had said only that each shape is an
+    addition; it never said what the shape shows. These are those facts, as
+    ``choice_rows`` and ``reply_card`` implement them."""
+    declarations = _declarations()
+    for fact in ("name", "price", "options"):
+        assert fact in declarations["tool"], fact
+    for fact in ("title", "price", "options"):
+        assert fact in declarations["choices"], fact
+    assert "photo" in declarations["card"] and "page" in declarations["card"]
+
+
+def test_the_text_is_released_from_repeating_the_shape_never_from_answering():
+    declarations = _declarations()
+    assert "need not repeat what the shape already shows" in declarations["tool"]
+    # The text still answers, with whatever detail the turn calls for.
+    for duty in ("introduction", "explanation", "comparison", "as much detail"):
+        assert duty in declarations["tool"], duty
+    assert "need not list them again" in declarations["choices"]
+    assert "web address unless the customer asked for a link" in declarations["card"]
+    assert "carries the answer by itself" not in declarations["tool"]
+
+
+def test_the_fallbacks_the_declaration_promises_are_the_ones_implemented():
+    """A shorter text is safe only because a selector that cannot be shown
+    becomes lines, and a card that cannot be shown leaves the text alone — both
+    stated, so the model can tell which case it is writing for."""
+    declarations = _declarations()
+    assert "adds its rows to the text as lines" in declarations["choices"]
+    for condition in ("photo", "https page link", "button_label", "text is all the customer receives"):
+        assert condition in declarations["card"], condition
+    assert rcard.NO_IMAGE and rcard.INSECURE_LINK and rcard.NO_LABEL
+
+
 def test_the_declaration_still_says_nothing_about_when_to_reach_for_either():
     """Deliberately unstated, and guarded so it stays that way. Telling the
     model which customer turn deserves a selector would be routing the
