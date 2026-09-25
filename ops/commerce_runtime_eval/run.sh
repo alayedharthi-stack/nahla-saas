@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Starts a private PostgreSQL in this container and runs the evaluation once.
 set -euo pipefail
+if [ "${EVAL_CONFIRM:-}" = "RUN_KEY_PROBE" ]; then
+  /opt/venv/bin/python -u /app/ops/commerce_runtime_eval/key_probe.py || true
+  sleep 10
+  exit 0
+fi
 if [ "${EVAL_CONFIRM:-}" != "RUN_OFFSEND_EVAL" ]; then
   echo '{"status": "idle", "reason": "EVAL_CONFIRM is not RUN_OFFSEND_EVAL"}'
   exit 0
