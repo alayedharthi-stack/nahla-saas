@@ -11,7 +11,10 @@ Modes, by ``NAHLA_0113_CONFIRM``:
   wait; verifies the relation by definition afterwards and runs one bounded
   cleanup pass through the application's own sweep.
 
-Every reviewed file the migration executes is pinned by digest.
+Every reviewed file the migration executes is pinned by digest. Every step is
+bounded: the connection by a connect and TCP timeout, every read by a lock and
+statement timeout, and the whole run by a watchdog that reports the step it
+stopped in; each step announces itself, so a run that stops says where.
 """
 from __future__ import annotations
 
@@ -22,9 +25,11 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 ROOT = Path(__file__).resolve().parents[2]
 for _path in (ROOT, ROOT / "backend", ROOT / "database"):
@@ -46,10 +51,55 @@ BEFORE = {"0111", "0112"}
 AFTER = {"0111", "0113"}
 APPLY = "APPLY_VERIFIED_0113"
 INSPECT = "INSPECT"
+WATCHDOG_SECONDS = {INSPECT: 120, APPLY: 600}
+CONNECT_ARGS = {"connect_timeout": 15, "keepalives": 1, "keepalives_idle": 15,
+                "keepalives_interval": 5, "keepalives_count": 3, "tcp_user_timeout": 30000}
+_STEP = ["start"]
+# lock_not_available, query_canceled: a read that waited out its bound.
+LOCK_WAIT_SQLSTATES = {"55P03", "57014"}
+# Who holds or awaits a lock on the relations this operator reads: the kind of
+# statement only, never its text, which can carry data.
+LOCK_HOLDERS = text("""
+    SELECT a.pid, a.backend_type, a.application_name, a.state, host(a.client_addr) AS client,
+           c.relname AS relation, l.mode, l.granted,
+           extract(epoch FROM now() - a.xact_start)::int AS transaction_age_s,
+           extract(epoch FROM now() - a.state_change)::int AS state_age_s,
+           a.wait_event_type, a.wait_event,
+           upper(split_part(ltrim(a.query), ' ', 1)) AS statement_kind
+    FROM pg_locks l
+    JOIN pg_class c ON c.oid = l.relation
+    JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE l.locktype = 'relation' AND a.pid <> pg_backend_pid()
+      AND c.relname IN ('alembic_version', :table)
+    ORDER BY l.granted DESC, a.xact_start
+    LIMIT 20""")
 
 
 def emit(status, **facts):
     print(json.dumps({"status": status, **facts}, sort_keys=True), flush=True)
+
+
+def step(name):
+    _STEP[0] = name
+    emit("step", step=name)
+
+
+def arm_watchdog(seconds):
+    """Ends a run that stops anywhere, even inside a blocking driver call.
+
+    A thread rather than a signal: libpq retries an interrupted wait, so a
+    signal handler would never run while a read is blocked, but the driver
+    releases the interpreter lock while it waits, so a thread always can.
+    """
+    def expired():
+        emit("failed", error_type="WatchdogExpired", error="watchdog_expired:" + _STEP[0],
+             sqlstate="")
+        os._exit(1)
+
+    timer = threading.Timer(seconds, expired)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def validated_url(env, *, require_target):
@@ -89,11 +139,10 @@ def read_state(connection, migration, *, compare=True):
     migration verifies itself — so the transaction is an ordinary one, bounded
     by a lock wait, and always rolled back: nothing it creates persists.
     """
-    if compare:
-        connection.execute(text("SET LOCAL lock_timeout = '5s'"))
-        connection.execute(text("SET LOCAL statement_timeout = '60s'"))
-    else:
+    if not compare:
         connection.execute(text("SET TRANSACTION READ ONLY"))
+    connection.execute(text("SET LOCAL lock_timeout = '5s'"))
+    connection.execute(text("SET LOCAL statement_timeout = '60s'"))
     try:
         versions = set(connection.execute(text("SELECT version_num FROM alembic_version")).scalars())
         exists = connection.execute(text("SELECT to_regclass(:t) IS NOT NULL"),
@@ -108,8 +157,22 @@ def read_state(connection, migration, *, compare=True):
         connection.rollback()
 
 
+def report_lock_holders(engine):
+    """After a bounded read gave up waiting: who it was waiting behind."""
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SET TRANSACTION READ ONLY"))
+            connection.execute(text("SET LOCAL statement_timeout = '10s'"))
+            holders = [dict(row._mapping) for row in connection.execute(LOCK_HOLDERS, {"table": TABLE})]
+            connection.rollback()
+        emit("lock_holders", holders=holders)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic never replaces the failure it explains
+        emit("lock_holders_unavailable", error_type=type(exc).__name__)
+
+
 def bounded_sweep(engine):
     """One pass of the application's own cleanup, within its own bounds."""
+    step("cleanup")
     from core.commerce_runtime import navigation as nav  # noqa: PLC0415
 
     nav.reset_schema_probe()
@@ -125,13 +188,20 @@ def main():
     if mode not in {APPLY, INSPECT}:
         emit("idle", reason="explicit_confirmation_not_set")
         return 0
+    watchdog = arm_watchdog(WATCHDOG_SECONDS[mode])
     url, identity = validated_url(os.environ, require_target=mode == APPLY)
     verify_reviewed_files()
     migration = load_migration()
-    engine = create_engine(url, connect_args={"connect_timeout": 15})
+    engine = create_engine(url, connect_args=CONNECT_ARGS)
     try:
-        with engine.connect() as connection:
-            versions, exists, diffs = read_state(connection, migration, compare=mode != INSPECT)
+        step("read_state")
+        try:
+            with engine.connect() as connection:
+                versions, exists, diffs = read_state(connection, migration, compare=mode != INSPECT)
+        except OperationalError as exc:
+            if getattr(exc.orig, "pgcode", None) in LOCK_WAIT_SQLSTATES:
+                report_lock_holders(engine)
+            raise
         if mode == INSPECT:
             emit("inspected", target=identity, alembic_versions=sorted(versions),
                  navigation_relation_exists=exists)
@@ -148,6 +218,7 @@ def main():
             raise RuntimeError("relation_present_before_0113")
         emit("preflight_passed", target=identity, alembic_versions=sorted(versions),
              migration_sha256=REVIEWED[MIGRATION])
+        step("migrate")
         env = dict(os.environ)
         env["PGOPTIONS"] = "-c lock_timeout=5s -c statement_timeout=120s"
         result = subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0113"],
@@ -159,6 +230,7 @@ def main():
         if result.returncode:
             emit("migration_failed", returncode=result.returncode)
             return 1
+        step("verify")
         with engine.connect() as connection:
             versions, exists, diffs = read_state(connection, migration)
         if versions != AFTER or not exists or diffs:
@@ -168,6 +240,7 @@ def main():
         return 0
     finally:
         engine.dispose()
+        watchdog.cancel()
 
 
 if __name__ == "__main__":

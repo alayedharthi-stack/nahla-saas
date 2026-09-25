@@ -46,7 +46,7 @@ class OperatorTest(unittest.TestCase):
         with patch.dict(os.environ, self.env(mode), clear=True), \
              patch.object(operator, "verify_reviewed_files"), \
              patch.object(operator, "load_migration", return_value=MagicMock()), \
-             patch.object(operator, "create_engine", return_value=MagicMock()), \
+             patch.object(operator, "create_engine", return_value=MagicMock()) as engine, \
              patch.object(operator, "read_state", side_effect=states) as state, \
              patch.object(operator, "bounded_sweep", return_value={"removed": 0}) as sweep, \
              patch.object(operator.subprocess, "run", return_value=types.SimpleNamespace(
@@ -54,6 +54,7 @@ class OperatorTest(unittest.TestCase):
              contextlib.redirect_stdout(out):
             result = operator.main()
         self.state = state
+        self.engine = engine
         return result, command, sweep, out.getvalue()
 
     def test_only_explicit_0113_from_0112_and_verification_are_success(self):
@@ -102,6 +103,55 @@ class OperatorTest(unittest.TestCase):
                       ({"0111", "0112"}, True, [])):
             with self.subTest(after=after), self.assertRaisesRegex(RuntimeError, "post_migration"):
                 self.run_mocked([(operator.BEFORE, False, []), after])
+
+    def test_every_read_is_bounded_and_inspect_is_read_only(self):
+        for compare in (False, True):
+            with self.subTest(compare=compare):
+                connection = MagicMock()
+                connection.execute.return_value.scalars.return_value = ["0111", "0112"]
+                connection.execute.return_value.scalar.return_value = False
+                operator.read_state(connection, MagicMock(), compare=compare)
+                sql = [str(call.args[0]) for call in connection.execute.call_args_list]
+                self.assertIn("SET LOCAL lock_timeout = '5s'", sql)
+                self.assertIn("SET LOCAL statement_timeout = '60s'", sql)
+                self.assertEqual(sql[0] == "SET TRANSACTION READ ONLY", not compare)
+                connection.rollback.assert_called_once()
+
+    def test_the_connection_is_bounded(self):
+        result, _command, _sweep, _out = self.run_mocked([(operator.BEFORE, False, [])], mode="INSPECT")
+        self.assertEqual(result, 0)
+        self.assertEqual(operator.CONNECT_ARGS["connect_timeout"], 15)
+        self.assertIn("tcp_user_timeout", operator.CONNECT_ARGS)
+        self.assertEqual(self.engine.call_args.kwargs["connect_args"], operator.CONNECT_ARGS)
+
+    def test_a_stopped_run_is_ended_and_names_its_step(self):
+        out, exited = io.StringIO(), []
+        with patch.object(operator.os, "_exit", side_effect=exited.append), \
+                contextlib.redirect_stdout(out):
+            operator.step("read_state")
+            operator.arm_watchdog(0.05).join(2)
+        self.assertEqual(exited, [1])
+        self.assertIn('"error": "watchdog_expired:read_state"', out.getvalue())
+
+    def test_a_finished_run_disarms_its_watchdog(self):
+        with patch.object(operator, "arm_watchdog") as watchdog:
+            self.run_mocked([(operator.BEFORE, False, [])], mode="INSPECT")
+        watchdog.assert_called_once_with(operator.WATCHDOG_SECONDS["INSPECT"])
+        watchdog.return_value.cancel.assert_called_once()
+
+    def test_a_read_that_waited_out_its_bound_reports_who_it_waited_behind(self):
+        for pgcode, reported in (("55P03", True), ("57014", True), ("08006", False)):
+            with self.subTest(pgcode=pgcode):
+                error = operator.OperationalError("SELECT", {}, types.SimpleNamespace(pgcode=pgcode))
+                with patch.object(operator, "report_lock_holders") as report, \
+                        self.assertRaises(operator.OperationalError):
+                    self.run_mocked(error, mode="INSPECT")
+                self.assertEqual(report.called, reported)
+
+    def test_the_lock_report_names_kinds_never_statement_text(self):
+        sql = str(operator.LOCK_HOLDERS)
+        self.assertIn("split_part(ltrim(a.query), ' ', 1)", sql)
+        self.assertEqual(sql.count("a.query"), 1)
 
 
 if __name__ == "__main__":
