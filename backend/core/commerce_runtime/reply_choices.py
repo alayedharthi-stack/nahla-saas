@@ -265,6 +265,13 @@ def _wire_rows(products: Sequence[Mapping[str, Any]], *,
     return rows, bool(composed) and composed.complete
 
 
+def _not_listed(products: Sequence[Mapping[str, Any]],
+                already_listed: Sequence[int]) -> List[Mapping[str, Any]]:
+    """The products that are not already rows on the customer's screen, by id."""
+    listed = {int(product_id) for product_id in already_listed}
+    return [product for product in products if int(product.get("product_id") or 0) not in listed]
+
+
 def _requested_products(draft: Any, observations: Sequence[Any]) -> List[Mapping[str, Any]]:
     observed = observed_products(observations)
     return [observed[product_id] for product_id in requested_product_ids(draft)
@@ -332,7 +339,7 @@ def options_as_text(text: str, rows: Sequence[Mapping[str, Any]]) -> str:
 
 
 def finalize(draft: Any, observations: Sequence[Any], *,
-             withhold: str = "") -> Tuple[Any, str]:
+             withhold: str = "", already_listed: Sequence[int] = ()) -> Tuple[Any, str]:
     """The draft as it will be delivered, with its selector or with its options.
 
     A verified selector makes the reply ``rich`` and leaves the text exactly as
@@ -366,8 +373,12 @@ def finalize(draft: Any, observations: Sequence[Any], *,
                                          payload=ac.public_copy(payload))), reason
 
     # The selector was asked for and cannot be offered. The options themselves
-    # are still the answer, so they are carried as text rather than lost.
-    rows, _complete = _wire_rows(_requested_products(draft, observations))
+    # are still the answer, so they are carried as text rather than lost —
+    # except those already on the customer's screen as rows (``already_listed``,
+    # given only when a "More" page answered first), which a second copy would
+    # only repeat.
+    rows, _complete = _wire_rows(_not_listed(_requested_products(draft, observations),
+                                             already_listed))
     text = options_as_text(getattr(draft, "text", ""), rows)
     if rows:
         payload[WITHHELD_KEY] = reason
@@ -406,14 +417,19 @@ def wire_rows(products: Sequence[Mapping[str, Any]], *,
 def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSelection, reason: str, *,
                       navigation: Optional[Mapping[str, Any]] = None,
                       stand_down: str = "",
-                      row_refs: Sequence[str] = ()) -> Tuple[Any, str]:
+                      row_refs: Sequence[str] = (),
+                      already_listed: Sequence[int] = ()) -> Tuple[Any, str]:
     """The draft as it will be delivered, carrying a list the platform composed.
 
     The model's text is not replaced. When the model asked for a selector of
     its own and the platform is answering something else first — the next
     page the customer tapped for — ``stand_down`` names why, the model's
     selector is not offered, and its options follow the text as lines exactly
-    as ``finalize`` carries any withheld selector's options.
+    as ``finalize`` carries any withheld selector's options — except those this
+    customer already has as rows (``already_listed``: this page's rows and the
+    rows this conversation sent earlier, by id). A second copy as lines is the
+    duplication Tenant 1 saw on 25 September, and it carries nothing the rows do
+    not; a product that was never a row still follows as a line.
     """
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
@@ -423,10 +439,13 @@ def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSel
                                if key != REQUESTED_KEY}
     text = getattr(draft, "text", "")
     if stand_down and requested_product_ids(draft):
-        withheld_rows, _complete = _wire_rows(_requested_products(draft, observations))
+        withheld_rows, _complete = _wire_rows(
+            _not_listed(_requested_products(draft, observations), already_listed))
         text = options_as_text(text, withheld_rows)
-        if withheld_rows:
-            payload[WITHHELD_KEY] = stand_down
+        # Recorded whether or not any line followed: a selector that stood
+        # down with every option already on screen is still a stand-down, and
+        # production must be able to tell it from a reply that asked for none.
+        payload[WITHHELD_KEY] = stand_down
     composed = chosen.as_payload()
     if navigation:
         composed[NAVIGATION_KEY] = dict(navigation)

@@ -135,6 +135,11 @@ class PresentationContext:
     # selection: it chooses the reply's *shape* — the next page — and nothing
     # about any product.
     browse_page: Optional[Any] = None
+    # Products this conversation actually sent as selectable rows, within the
+    # browsing lapse (``recent_products.ShownProducts.offered_as_rows``). Used
+    # only so a stood-down selector does not repeat, as lines, a product the
+    # customer already has as a row. Never a reason to hide anything else.
+    rows_already_sent: Tuple[int, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)

@@ -873,6 +873,75 @@ def test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page(s
     assert TITLES[WATCHES] in transport.sent[0]["text"], "its options follow the text as lines"
 
 
+def test_a_stood_down_selector_repeats_nothing_the_browse_already_listed(shop: Shop):
+    """Tenant 1-shaped, 25 September: on a "More" turn the model offered the
+    first page's products again. The page is the answer; those products are
+    already rows on the customer's screen, so they do not come back as lines.
+    A product outside this browse still does — nothing the model meant to offer
+    is lost."""
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    first_page, more, _button = _rows(first.sent[0])
+    watch = shop.products[WATCHES][0]
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=BAGS),
+                          _tool_use("s2", "search_products", query=WATCHES)])
+        offered = [first_page[0], first_page[1], watch]
+        return _step([_reply("Here you go.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in offered],
+                             choices={"product_ids": offered, "button": BUTTON})])
+
+    report, transport, _model = _tap_more(shop, conversation, more, model=LiteralModel(script))
+    products, _more, _button = _rows(transport.sent[0])
+    assert products == shop.products[BAGS][9:11], "the tapped page is still the answer's shape"
+    body = transport.sent[0]["text"]
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+    assert TITLES[WATCHES] in body, "a product outside this browse still follows as a line"
+    assert f"{TITLES[BAGS]} 1" not in body and f"{TITLES[BAGS]} 2" not in body, \
+        "products the browse already listed are not repeated under the text"
+
+
+def test_a_product_never_shown_as_a_row_still_follows_as_a_line_on_a_more_turn(shop: Shop):
+    """Only rows the customer actually has are left out of the stood-down lines.
+
+    A shirt is sold out when page one is built, so it is never a row; it is back
+    in stock by the "More" tap and the model offers it with a shirt that was a
+    row. The row is not repeated; the never-shown shirt follows as a line."""
+    conversation = shop.conversation()
+    shirts = shop.products[SHIRTS]
+    hidden = shirts[1]
+    with shop.engine.begin() as conn:
+        conn.execute(text("UPDATE products SET in_stock = false, stock_quantity = 0 WHERE id = :p"),
+                     {"p": hidden})
+    try:
+        _report, first = shop.turn(conversation, browse(SHIRTS))
+        first_page, more, _button = _rows(first.sent[0])
+        assert hidden not in first_page
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET in_stock = true, stock_quantity = 5 WHERE id = :p"),
+                         {"p": hidden})
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        offered = [first_page[0], hidden]
+        return _step([_reply("Here you go.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in offered],
+                             choices={"product_ids": offered, "button": BUTTON})])
+
+    _report, transport, _model = _tap_more(shop, conversation, more, model=LiteralModel(script))
+    body = transport.sent[0]["text"]
+    lines = [line for line in body.splitlines() if TITLES[SHIRTS] in line]
+    assert len(lines) == 1, body
+    assert f"{TITLES[SHIRTS]} 2" in lines[0], "the surviving line is the never-shown shirt"
+    assert f"{TITLES[SHIRTS]} 1 " not in body and not body.rstrip().endswith(f"{TITLES[SHIRTS]} 1"), \
+        "the shirt that was already a row is not repeated"
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+
+
 def test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_nothing(shop: Shop):
     """The token expires while the model is answering.
 
@@ -1019,6 +1088,39 @@ def test_a_page_one_token_the_database_refuses_leaves_exactly_the_models_selecto
         with shop.engine.begin() as conn:
             conn.execute(text(f"DROP TRIGGER refuse_navigation ON {nm.NAVIGATION_TABLE}"))
             conn.execute(text("DROP FUNCTION refuse_navigation()"))
+
+
+def test_a_page_sent_as_lines_does_not_print_the_models_copy_of_it_again(shop: Shop):
+    """The token expires while the model answers, so the page goes as lines. The
+    model also offered one of that page's products: it is printed once, with the
+    page; a product outside the browse still follows."""
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    _products, more, _button = _rows(first.sent[0])
+    token = nav.token_from_row_id(more["id"])
+    page_bag = shop.products[BAGS][9]
+    watch = shop.products[WATCHES][0]
+
+    def expire() -> None:
+        with shop.engine.begin() as conn:
+            conn.execute(text(f"UPDATE {nm.NAVIGATION_TABLE} SET expires_at = now() - interval "
+                              "'1 second' WHERE token = :t"), {"t": token})
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=f"{TITLES[BAGS]} 10"),
+                          _tool_use("s2", "search_products", query=WATCHES)])
+        offered = [page_bag, watch]
+        return _step([_reply("Also these.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in offered],
+                             choices={"product_ids": offered, "button": BUTTON})])
+
+    _report, transport, _model = _tap_more(shop, conversation, more,
+                                           model=LiteralModel(script, each_call=expire))
+    body = transport.sent[0]["text"]
+    assert transport.sent[0][br.WITHHELD_KEY] == br.PAGE_AS_LINES
+    assert body.count(f"{TITLES[BAGS]} 10") == 1, body
+    assert TITLES[WATCHES] in body
 
 
 def test_a_page_that_cannot_be_spent_still_outranks_the_models_own_selector(shop: Shop):

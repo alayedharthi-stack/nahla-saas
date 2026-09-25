@@ -347,7 +347,8 @@ def _with_products_shown_earlier(
                 titles={int(tapped["product_id"]): str(tapped.get("title") or "")})
         presentation = pp.PresentationContext(
             tapped_product_id=(int(tapped.get("product_id")) if tapped else None),
-            last_card_product_id=shown.last_card_product_id)
+            last_card_product_id=shown.last_card_product_id,
+            rows_already_sent=tuple(int(p) for p in shown.offered_as_rows))
     except Exception as exc:  # noqa: BLE001 - the aid is never the turn's precondition
         logger.warning("[COMMERCE_RUNTIME] browsing context unavailable turn=%s error=%s",
                        turn_id, type(exc).__name__)

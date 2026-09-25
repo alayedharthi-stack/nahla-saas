@@ -191,3 +191,18 @@ def test_an_empty_base_refuses_rather_than_composing_its_own(monkeypatch):
     monkeypatch.setattr(pi, "COMMERCE_AGENT_INSTRUCTIONS", "   ", raising=True)
     with pytest.raises(ValueError):
         pi.build_pilot_instructions()
+
+
+def test_the_owner_approved_clauses_name_the_settings_and_the_shapes_without_a_field():
+    """Clauses 3 and 4 (owner-approved, 25 September 2026). They point at the
+    context the platform delivers and at what a list row and a card already
+    show. They name no optional reply field (the guard above), and no sentence
+    to send (the guard below)."""
+    addendum = pi.PILOT_REPLY_ADDENDUM
+    for key in ("reply_language", "reply_tone", "conversation_context"):
+        assert key in addendum, key
+    assert "choices" not in addendum and "card" not in addendum
+    for shown in ("اسم المنتج", "مختصرًا", "سعره", "بعض خياراته", "صورته", "صفحته",
+                  "لا يتسع له الصف"):
+        assert shown in addendum, shown
+    assert "إلا إذا طلب العميل الرابط" in addendum
