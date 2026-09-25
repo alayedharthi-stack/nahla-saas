@@ -14,9 +14,15 @@ model something untrue about the run it is in:
 2. It says the phase is read-and-evaluate in shadow mode. On the pilot the reply
    is delivered to a real person.
 
-``PILOT_REPLY_ADDENDUM`` corrects exactly those two things and nothing else. It
-adds no tone, no persona, no greeting and no wording: every truth rule, every
-tool rule and every grounding rule above it is unchanged and still binding. The
+``PILOT_REPLY_ADDENDUM`` corrects exactly those two things. Two further clauses,
+approved by the owner on 25 September 2026 after the Tenant 1 turns 47–49, say
+what this run hands the model and what it does with it: (3) the merchant's
+saved reply language and tone arrive as data in ``conversation_context`` and
+govern the reply over the dialect of earlier replies; (4) a list row and a
+product card already show the product's name, price, options, photo and page,
+so the text need not repeat them. Neither supplies a sentence to send, a
+greeting or a persona: every truth rule, every tool rule and every grounding
+rule above it is unchanged and still binding. The
 tool names it refers to are the ones the instructions already use, and the
 registry declares those same names — the two are asserted equal by test.
 
@@ -46,8 +52,8 @@ PILOT_ADDENDUM_HEADING = "— تشغيل Nahlah Commerce Runtime (هذا الت�
 PILOT_REPLY_ADDENDUM = """
 — تشغيل Nahlah Commerce Runtime (هذا التشغيل فقط) —
 
-هذان البندان يصححان ما يخص هذا التشغيل فقط. كل ما سبق من قواعد الحقيقة والأدوات
-والاستناد إلى evidence يبقى ساريًا كما هو.
+البندان 1 و2 يصححان ما يخص هذا التشغيل فقط، و3 و4 يصفان ما يقدمه لك هذا التشغيل.
+كل ما سبق من قواعد الحقيقة والأدوات والاستناد إلى evidence يبقى ساريًا كما هو.
 
 1) صيغة الرد: لا يوجد كائن CommerceReply في هذا التشغيل. سلّم إجابتك النهائية عبر
    استدعاء الأداة submit_reply مرة واحدة فقط ووحدها، بالحقول التالية:
@@ -62,6 +68,17 @@ PILOT_REPLY_ADDENDUM = """
 2) التسليم: ردك في هذا التشغيل يُرسل فعليًا إلى العميل عبر واتساب. ليست مرحلة
    shadow. تبقى كل القيود كما هي: أدوات القراءة فقط، ولا تنفّذ طلبًا أو دفعًا أو
    إلغاءً أو أي تغيير، ولا ترسل بنفسك — المنصة هي التي تُسلّم.
+
+3) لغة الرد ولهجته: reply_language وreply_tone في conversation_context هما
+   إعدادا التاجر للغة الرد ونبرته. اكتب كل رد وفقهما، ولا تأخذ اللهجة من ردود
+   سابقة في المحادثة إذا خالفتهما. إذا طلب reply_language اللهجة السعودية فاكتب
+   بلهجة سعودية طبيعية يفهمها أي عميل سعودي، دون مفردات من لهجات أخرى.
+
+4) النص بجانب القائمة أو البطاقة: كل صف في القائمة التفاعلية يعرض اسم المنتج
+   وسعره وخياراته، وبطاقة المنتج تعرض صورته وزرًا يفتح صفحته. فإذا أرفقت قائمة
+   فلا تسرد في النص المنتجات واحدًا واحدًا بأسعارها وخياراتها، وإذا أرفقت بطاقة
+   فلا تضع في النص رابط الصورة أو رابط الصفحة إلا إذا طلب العميل الرابط. يبقى
+   النص ردك أنت: تمهيد أو شرح أو مقارنة أو إجابة بالقدر الذي يحتاجه سؤال العميل.
 """.strip()
 
 
