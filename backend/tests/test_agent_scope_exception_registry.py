@@ -191,9 +191,9 @@ def test_an_entry_without_an_exact_path_grants_nothing(repo) -> None:
 
 def test_the_committed_registry_is_auditable_and_names_only_what_it_claims() -> None:
     """This repository's own registry, checked against the same rules the guard
-    applies. It is empty today and that is the point: merging the mechanism
-    grants nothing, because a grant needs a digest and a digest needs the
-    implementation diff it authorises."""
+    applies: every grant names one existing file, the digests of the change it
+    authorises, an expiry the guard can parse, and an https link to the
+    owner's approval."""
     import datetime  # noqa: PLC0415
 
     payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
@@ -210,12 +210,70 @@ def test_the_committed_registry_is_auditable_and_names_only_what_it_claims() -> 
         assert entry["owner_approval_ref"].startswith("https://"), entry["exception_id"]
 
 
-def test_merging_this_registry_grants_nothing_today() -> None:
-    """Stated as a test because the review caught the claim being wrong once.
-    An earlier draft carried a live whole-file grant while the PR said merging
-    granted nothing; it would have excused that path on every later branch."""
+# Every grant this registry makes, by id: one exact file, the two blobs that
+# bind it, and the owner's recorded approval. A grant not listed here is one
+# nobody approved. Stated as a test because the review once caught the
+# registry's claim about itself being wrong: an earlier draft carried a live
+# whole-file grant while its PR said merging granted nothing.
+APPROVED_GRANTS = {
+    "AGENT-SCOPE-1145-CATALOG-SEARCH-ORDER": {
+        "exact_file_scope": ["backend/core/store_knowledge.py"],
+        "base_content_sha256": "181b4a45ce3471ef55b999fb45d1b7f045c441597155f0705b5ba2025a8c00c0",
+        "authorized_content_sha256": ["38483be4f46ccda419e44f2b07eba7bd32dea9197b1929ce33b9ed8e0794b362"],
+        "owner_approval_ref":
+            "https://github.com/alayedharthi-stack/nahla-saas/pull/1148#issuecomment-5823798563",
+        "expires_at": "2026-10-31",
+    },
+}
+
+
+def test_the_registry_grants_exactly_the_owner_approved_entries() -> None:
     payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
-    assert payload["exceptions"] == []
+    # By list, not by a mapping: a second entry reusing an approved id — for
+    # another file, with other digests — is an extra grant, and a mapping keyed
+    # by id would keep one of the two and hide the other.
+    assert [entry["exception_id"] for entry in payload["exceptions"]] == list(APPROVED_GRANTS)
+    granted = {entry["exception_id"]: entry for entry in payload["exceptions"]}
+    for exception_id, approved in APPROVED_GRANTS.items():
+        for field, value in approved.items():
+            assert granted[exception_id][field] == value, (exception_id, field)
+
+
+def test_entries_awaiting_owner_approval_are_complete_and_approve_nothing() -> None:
+    """A proposal names everything the owner decides on — the file, both blobs,
+    the task, the expiry — and carries no approval of its own: the approval
+    link is the owner's to add, and only when the entry moves into
+    ``exceptions``. An entry cannot be proposed and granted at once."""
+    import datetime  # noqa: PLC0415
+
+    payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
+    awaiting = (payload.get("_awaiting_owner_approval") or {}).get("entries") or []
+    granted_ids = {entry["exception_id"] for entry in payload["exceptions"]}
+    for entry in awaiting:
+        assert entry["exception_id"] not in granted_ids, entry["exception_id"]
+        assert entry.get("owner_approval_ref") is None, entry["exception_id"]
+        for field in ("exception_id", "task_scope", "expires_at"):
+            assert isinstance(entry.get(field), str) and entry[field].strip(), field
+        datetime.datetime.strptime(entry["expires_at"], "%Y-%m-%d")
+        assert len(entry["exact_file_scope"]) == 1
+        assert (REPO_ROOT / entry["exact_file_scope"][0]).exists()
+        for digest in [entry["base_content_sha256"], *entry["authorized_content_sha256"]]:
+            assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+        assert len(entry["authorized_content_sha256"]) == 1
+
+
+def test_an_entry_awaiting_owner_approval_grants_nothing(tmp_path: Path) -> None:
+    """Through the real guard: an entry for exactly this change, on BASE and
+    complete in every field — even an approval link — but waiting rather than
+    in ``exceptions``, leaves the path protected. The refusal is the scope
+    violation itself, not a registry the guard could not read."""
+    entry = _valid_entry(authorized_content_sha256=[_sha256(AUTHORISED_BODY)])
+    run = _guarded_repo(tmp_path, {"_awaiting_owner_approval": {"entries": [entry]},
+                                   "exceptions": []})
+    _edit_guarded_file(tmp_path, run, AUTHORISED_BODY)
+    with pytest.raises(AssertionError) as refused:
+        _run_guard(tmp_path)
+    assert not isinstance(refused.value, ScopeExceptionRegistryMalformed)
 
 
 def test_the_guard_still_protects_every_path_no_exception_names() -> None:
@@ -234,10 +292,14 @@ def test_the_guard_still_protects_every_path_no_exception_names() -> None:
     assert "pytest.skip" not in source.split("def test_branch_diff_excludes")[1]
     assert "HEAD:" not in source
 
-    granted = set(guard._scope_exceptions_on_base())
+    granted = guard._scope_exceptions_on_base()
     assert "backend/routers/coupons.py" not in granted
     assert "backend/services/promotion_engine.py" not in granted
-    assert "backend/core/store_knowledge.py" not in granted
+    # Excused only by its one owner-approved grant, and only while this
+    # branch's committed content is the content that grant names.
+    if "backend/core/store_knowledge.py" in granted:
+        assert (granted["backend/core/store_knowledge.py"]["exception_id"]
+                == "AGENT-SCOPE-1145-CATALOG-SEARCH-ORDER")
 
 
 # ── Through the real guard, not the reader ───────────────────────────────────
