@@ -162,6 +162,79 @@ def test_only_a_phone_and_tenant_bound_approved_customer_name_reaches_the_provid
         assert "verified_customer_name" not in run_input(db, customer_id=None)
 
 
+def test_a_legacy_row_without_status_metadata_is_judged_by_its_recorded_source(
+        sessions, run_input):
+    """Rows synced before the identity resolver carry no status, only a source
+    or an acquisition channel. The existing resolver infers the status from it;
+    nothing here adds a rule. A synced ecommerce name is approved, a WhatsApp
+    lead's name is a proposal, and a row with no source is not approved."""
+    with sessions() as db:
+        db.add_all([
+            # perfume-store customer synced from the store; number stored only locally
+            Customer(id=811, tenant_id=701, name="نورة عبدالله", phone="0500000001",
+                     acquisition_channel="salla", extra_metadata={}),
+            Customer(id=812, tenant_id=701, name="Nora 🌸", phone="0500000002",
+                     acquisition_channel="whatsapp_inbound", extra_metadata={}),
+            Customer(id=813, tenant_id=701, name="أحمد سالم", phone="0500000003",
+                     extra_metadata={}),
+            Customer(id=814, tenant_id=701, name="سارة محمد", phone="0500000004",
+                     extra_metadata={"name_source": "salla_sync"}),
+        ])
+        db.commit()
+    with sessions() as db:
+        assert run_input(db, customer_id=811)["verified_customer_name"] == "نورة عبدالله"
+        assert "verified_customer_name" not in run_input(
+            db, customer_id=812, recipient="+966500000002")
+        assert "verified_customer_name" not in run_input(
+            db, customer_id=813, recipient="+966500000003")
+        assert run_input(db, customer_id=814,
+                         recipient="+966500000004")["verified_customer_name"] == "سارة محمد"
+
+
+def test_a_rejected_or_cleared_name_never_reaches_the_provider(sessions, run_input):
+    with sessions() as db:
+        db.add_all([
+            Customer(id=821, tenant_id=701, name="الحمد لله", phone="0500000001",
+                     extra_metadata={"customer_name_source": "customer_message",
+                                     "customer_name_status": "rejected"}),
+            Customer(id=822, tenant_id=701, name=None, phone="0500000002",
+                     extra_metadata={"customer_name_source": "salla_order",
+                                     "customer_name_status": "verified",
+                                     "manual_name_cleared": True}),
+        ])
+        db.commit()
+    with sessions() as db:
+        assert "verified_customer_name" not in run_input(db, customer_id=821)
+        assert "verified_customer_name" not in run_input(
+            db, customer_id=822, recipient="+966500000002")
+
+
+def test_a_failed_name_read_keeps_the_turn_and_its_session(sessions, run_input, monkeypatch):
+    """The name is one fact; losing it must not cost the turn, and the session
+    that holds the inbound turn stays usable with its pending work intact."""
+    import core.customer_identity_resolver as resolver
+
+    with sessions() as db:
+        db.add(Customer(id=831, tenant_id=701, name="نورة", phone="0500000001",
+                        normalized_phone="+966500000001",
+                        extra_metadata={"customer_name_status": "verified"}))
+        db.commit()
+
+    def broken(_customer):
+        raise RuntimeError("identity unreadable")
+
+    monkeypatch.setattr(resolver, "read_customer_identity", broken)
+    with sessions() as db:
+        pending = Customer(id=832, tenant_id=701, name="عميل جديد", phone="0500000009")
+        db.add(pending)
+        facts = run_input(db, customer_id=831)
+        assert "verified_customer_name" not in facts
+        assert facts["assistant_name"]                       # the rest of the context still went
+        db.commit()
+    with sessions() as db:
+        assert db.get(Customer, 832) is not None             # nothing pending was lost
+
+
 def test_saved_custom_name_reaches_the_provider_without_cross_tenant_leakage(sessions, run_input):
     save_name(sessions, 701, "وردة")
     save_name(sessions, 702, "Atlas")

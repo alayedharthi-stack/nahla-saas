@@ -2809,3 +2809,45 @@ def test_an_unreadable_assistant_name_leaves_the_turns_session_usable_and_unflus
         assert conn.execute(text(
             "SELECT count(*) FROM information_schema.columns "
             "WHERE table_name = 'tenant_settings' AND column_name = 'ai_settings'")).scalar() == 1
+
+
+def test_an_unreadable_customer_name_leaves_the_turns_session_usable_and_unflushed(pilot):
+    """The same guarantee for the customer-name read #1154 added on the webhook's
+    session: a SELECT that fails inside PostgreSQL costs the turn the name and
+    nothing else — the transaction is not aborted, and nothing pending is flushed.
+    The control shows the same failure without the savepoint does abort it."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from models import Tenant  # noqa: PLC0415
+    from services import commerce_runtime_pilot as seam  # noqa: PLC0415
+
+    factory = sessionmaker(bind=pilot.engine, autoflush=False, expire_on_commit=False)
+    convo = SimpleNamespace(customer_id=pilot.customer_id)
+    control = factory()
+    try:
+        control.execute(text("ALTER TABLE customers RENAME COLUMN normalized_phone TO np_gone"))
+        with pytest.raises(Exception):
+            control.execute(text("SELECT normalized_phone FROM customers LIMIT 1"))
+        with pytest.raises(Exception):
+            control.execute(text("SELECT 1"))            # aborted: why the savepoint exists
+    finally:
+        control.rollback()
+        control.close()
+    db = factory()
+    try:
+        pending = Tenant(name="متجر ملابس تجريبي")
+        db.add(pending)
+        # The read now fails inside PostgreSQL; the rename rolls back with the test.
+        db.execute(text("ALTER TABLE customers RENAME COLUMN normalized_phone TO np_gone"))
+        assert seam._approved_customer_name(db, pilot.tenant_a, convo, PHONE) == ""
+        assert pending in db.new, "the read flushed the session's pending state"
+        assert db.execute(text("SELECT 1")).scalar() == 1, "the turn's transaction was aborted"
+        db.flush()
+        assert pending.id is not None
+    finally:
+        db.rollback()
+        db.close()
+    with pilot.engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name = 'customers' AND column_name = 'normalized_phone'")).scalar() == 1
