@@ -2486,7 +2486,8 @@ def test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged(pilot):
     Stripping only the selector left a refused **card** payload untouched, so
     the transport — which reads the shape off the payload — composed the very
     same card again. That is the same message twice, not a recovery. The
-    customer's answer is the text, and the text is what goes out.
+    customer's answer is the model's text with the verified page URL, and the
+    card's photo is never exposed as a raw URL.
     """
     with _card_reservation(pilot, "الساعة متوفرة بسعر 540 ريال.") as reservation:
         with pilot.owned(turn_id=reservation.turn_id) as token:
@@ -2509,8 +2510,17 @@ def test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged(pilot):
         sent = text_transport.sent[0]
         assert rcard.payload_card(sent) is None, "the refused card was sent again"
         assert sent[rcard.WITHHELD_KEY] == "provider_rejected_the_card"
-        # Nothing of the answer was lost: the card carried no words of its own.
+        # The payload preserves the model's sentence; transport adds the
+        # merchant URL only on this proven text recovery.
         assert sent["text"] == "الساعة متوفرة بسعر 540 ريال."
+        assert sent[rcard.LINK_FALLBACK_KEY] == "https://demostore.example.test/p/1"
+        outgoing = []
+        transport = entry.whatsapp_reply_transport(
+            lambda _to, body: (outgoing.append(body) or ("ok", "wamid.TEXT", 200)),
+            lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected list")),
+            recipient="+966500000001")
+        transport(sent)
+        assert outgoing == ["الساعة متوفرة بسعر 540 ريال.\nhttps://demostore.example.test/p/1"]
         assert [a.kind for a in pilot.attempts(reservation.turn_id)] == [
             lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
 

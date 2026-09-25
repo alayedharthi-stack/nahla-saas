@@ -24,6 +24,7 @@ from core.commerce_runtime import agent_contracts as ac  # noqa: E402
 from core.commerce_runtime import ledger_contracts as lc  # noqa: E402
 from core.commerce_runtime import reply_card as rcard  # noqa: E402
 from core.commerce_runtime import reply_choices as rc  # noqa: E402
+from core.commerce_runtime import runtime_entry as entry  # noqa: E402
 
 IMAGE = "https://cdn.example.test/nWzD/m1JuFPTZeyNjtDm9pNK32.jpg"
 LINK = "https://demostore.example.test/dev-/فستان/p398551325"
@@ -101,27 +102,52 @@ def test_a_product_with_no_photo_withholds_the_card_and_keeps_the_answer() -> No
     assert rcard.payload_card(final.payload) is None
     assert final.text == "القميص متوفر"
     assert final.payload[rcard.WITHHELD_KEY] == rcard.NO_IMAGE
+    assert final.payload[rcard.LINK_FALLBACK_KEY] == LINK
+
+
+def test_no_photo_sends_one_verified_page_url_only_with_the_text_fallback() -> None:
+    handbag = product(41, "شنطة يد جلد", image_url="",
+                      product_url="https://shop.example.test/p/handbag")
+    written = "الشنطة متوفرة، وتقدرين تشوفينها من الرابط."
+    # A product the platform focused on remains eligible even when the model
+    # supplied no button word, which was the real-model no-photo outcome.
+    final, reason = rcard.finalize(draft(None, label="", text=written), [lookup(handbag)],
+                                   selector_offered=False, determined_product_id=41)
+    assert reason == rcard.NO_IMAGE and final.text == written
+    sent = []
+    transport = entry.whatsapp_reply_transport(
+        lambda _to, body: (sent.append(body) or ("ok", "wamid.TEXT", 200)),
+        lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected list")),
+        recipient="+966500000001")
+    transport({"text": final.text, **final.payload})
+    assert sent == [written + "\nhttps://shop.example.test/p/handbag"]
+    assert rcard.text_with_fallback_url({"text": sent[0], **final.payload}) == sent[0]
+    assert rcard.text_with_fallback_url({"text": written + "\n\n", **final.payload}) == (
+        written + "\n\nhttps://shop.example.test/p/handbag")
 
 
 def test_a_product_with_no_link_withholds_the_card() -> None:
     bare = product(42, "حذاء رياضي أبيض", product_url="")
-    _final, reason = rcard.finalize(draft(42), [lookup(bare)], selector_offered=False)
+    final, reason = rcard.finalize(draft(42), [lookup(bare)], selector_offered=False)
     assert reason == rcard.NO_LINK
+    assert rcard.LINK_FALLBACK_KEY not in final.payload
 
 
 def test_a_plain_http_link_is_refused_rather_than_upgraded() -> None:
     """Guessing a scheme onto a merchant's own URL is inventing it."""
     insecure = product(43, "عطر ورد 100ml", product_url="http://demostore.example.test/p43")
-    _final, reason = rcard.finalize(draft(43), [lookup(insecure)], selector_offered=False)
+    final, reason = rcard.finalize(draft(43), [lookup(insecure)], selector_offered=False)
     assert reason == rcard.INSECURE_LINK
+    assert rcard.LINK_FALLBACK_KEY not in final.payload
 
 
 def test_no_button_word_means_no_card_rather_than_a_platform_phrase() -> None:
     """Meta requires text on the button, and the platform supplies none of its
     own — a fixed word here would be a customer-facing constant nobody
     approved, which is the rule the selector already follows."""
-    _final, reason = rcard.finalize(draft(23, label=""), [lookup(DRESS)], selector_offered=False)
+    final, reason = rcard.finalize(draft(23, label=""), [lookup(DRESS)], selector_offered=False)
     assert reason == rcard.NO_LABEL
+    assert final.payload[rcard.LINK_FALLBACK_KEY] == LINK
 
 
 # ── A card and a selector are not offered together ───────────────────────────
