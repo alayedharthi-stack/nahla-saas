@@ -191,9 +191,9 @@ def test_an_entry_without_an_exact_path_grants_nothing(repo) -> None:
 
 def test_the_committed_registry_is_auditable_and_names_only_what_it_claims() -> None:
     """This repository's own registry, checked against the same rules the guard
-    applies. It is empty today and that is the point: merging the mechanism
-    grants nothing, because a grant needs a digest and a digest needs the
-    implementation diff it authorises."""
+    applies: every grant names one existing file, the digests of the change it
+    authorises, an expiry the guard can parse, and an https link to the
+    owner's approval."""
     import datetime  # noqa: PLC0415
 
     payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
@@ -229,8 +229,11 @@ APPROVED_GRANTS = {
 
 def test_the_registry_grants_exactly_the_owner_approved_entries() -> None:
     payload = json.loads((REPO_ROOT / SCOPE_EXCEPTIONS_REL).read_text(encoding="utf-8"))
+    # By list, not by a mapping: a second entry reusing an approved id — for
+    # another file, with other digests — is an extra grant, and a mapping keyed
+    # by id would keep one of the two and hide the other.
+    assert [entry["exception_id"] for entry in payload["exceptions"]] == list(APPROVED_GRANTS)
     granted = {entry["exception_id"]: entry for entry in payload["exceptions"]}
-    assert set(granted) == set(APPROVED_GRANTS)
     for exception_id, approved in APPROVED_GRANTS.items():
         for field, value in approved.items():
             assert granted[exception_id][field] == value, (exception_id, field)
