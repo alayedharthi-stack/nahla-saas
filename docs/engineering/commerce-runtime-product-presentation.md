@@ -113,7 +113,10 @@ changes, hydration changes with it, because it *is* the contract.
 
 **Fail closed, with a name.** Hydration that does not return a product, or a
 product whose image or link cannot be proven `https`, yields **Text** and a
-named reason on the delivered payload — never a Card built from a guess:
+named reason on the delivered payload — never a Card built from a guess. When
+the product page URL itself is a verified HTTPS value, text delivery adds that
+bare URL as a structured link, without changing any model words. No URL is
+invented when the product page is absent or unsafe:
 
 | reason | meaning |
 |---|---|
@@ -139,7 +142,9 @@ for the other:
 
 The platform has no word of its own and will not invent one: **no word, no
 Card**, whoever chose the product. The answer still goes out, with
-`no_button_label_offered` on the payload.
+`no_button_label_offered` on the payload. A verified product page can still
+follow the unchanged model text as a bare link; it is not a substitute button
+word.
 
 This is not a formality. The channel sender substitutes a fixed Arabic phrase
 for an empty label —
@@ -216,6 +221,14 @@ nothing new was selected. It must therefore rest on evidence that a Card was
 that the provider refused, or that a crash left undispatched, is not a Card the
 customer saw.
 
+After a **proven** rich-send rejection, the ledger permits one text recovery.
+The refused Card's verified merchant URL is carried into that recovery as data,
+and only the text sender adds the URL below the model's unchanged answer.
+An unknown send is never retried, so this does not risk a second copy of a
+Card that may have reached the customer. The wire audit marks the added URL as
+`wire_text_differs_from_reserved_intent`; the withheld reason stays on the
+recovery payload. A successful Card never gets a second raw URL from the platform.
+
 The evidence is the accepted send's own record: the product id of the card is
 persisted on the outbound message **only when the provider accepted it and
 returned a message id**, alongside the row ids that are already persisted the
@@ -243,8 +256,9 @@ model's divergence first:
   text need not repeat them (and still introduces, explains, compares or answers
   in as much detail as the turn needs), that a selector which cannot be shown
   becomes lines under the text, and that a card needs a photo, an https page
-  link and a button word — otherwise the text is all the customer receives. A
-  link in the text stays the model's choice whenever the customer asks for one.
+  link and a button word. If no Card reaches the customer, a verified merchant
+  page URL can accompany the unchanged model text as a bare link. A link beside
+  a successfully delivered Card remains the model's choice when asked for one.
 * **The merchant's language was never delivered.** Like the assistant name
   before #1147, ``default_language`` and ``reply_tone`` stayed on the legacy
   path. ``commerce_runtime_pilot._context_preamble`` now reads them once per

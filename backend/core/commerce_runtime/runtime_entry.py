@@ -921,8 +921,8 @@ def _recover_without_the_selector(
     if str(getattr(sequence, "intent_kind", "") or "") != lc.DeliveryKind.RICH.value:
         return None
     # Whichever rich shape the provider refused is the one that has to go. A
-    # list is dropped to its options as lines; a card is dropped to the text it
-    # always carried. Re-sending the refused shape unchanged would be the same
+    # list is dropped to its options as lines; a card is dropped to text with
+    # its verified page URL. Re-sending the refused shape unchanged would be the same
     # message twice, not a recovery — which is what happened when only the
     # selector was stripped and a refused card went back out identical.
     payload = rc.text_only_payload(intent_payload)
@@ -1036,7 +1036,13 @@ def whatsapp_reply_transport(send: Any, send_list: Any, *, recipient: str,
             return _sent(classification, wamid, http_status)
         rows, button = rc.payload_rows(payload)
         if not rows or send_list is None:
-            return text_only(payload)
+            # The card was withheld during composition or rejected by Meta.
+            # Its product-page URL is a structured merchant fact, not a second
+            # model sentence. Only text delivery exposes it; a successful card
+            # already has the URL in its button. The wire audit records the
+            # difference from the reserved model text.
+            body = rcard.text_with_fallback_url(payload)
+            return text_only({**payload, "text": body})
         classification, wamid, http_status = send_list(
             recipient, str(payload.get("text") or ""), rows, button)
         return _sent(classification, wamid, http_status)

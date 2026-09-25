@@ -13,11 +13,11 @@ names without having looked it up this turn is withheld
 (``card_without_evidence``): the card would open a link the turn never read.
 
 A card is an affordance **over** the answer, never the answer itself. When the
-channel will not take it — no photo, no product link, a product not observed —
-the *card* is withheld and the *answer* is not: the model's text goes out
-unchanged, carrying whatever it already said. The reason rides on the delivered
-payload as ``card_withheld`` so it is auditable in production rather than only
-in a log line.
+channel will not take it, the model's answer stays intact. If this turn read a
+usable merchant product URL, a text-only delivery carries that URL as a bare
+structured fact, including after a *proven* provider rejection of the card.
+An unknown send is never retried. The reason rides on the delivered payload as
+``card_withheld`` so it is auditable in production rather than only in a log.
 
 Why this fits the delivery ledger unchanged: WhatsApp's interactive ``cta_url``
 message carries an image header, a body and a URL button **in one message**, so
@@ -36,6 +36,9 @@ from core.commerce_runtime import reply_choices as rc
 REQUESTED_KEY = "requested_card"
 CARD_KEY = "card"
 WITHHELD_KEY = "card_withheld"
+# A verified product page, frozen with the intent when no card can be shown.
+# The transport adds it only to a text send, never beside a delivered card.
+LINK_FALLBACK_KEY = "card_link_fallback_url"
 
 # Meta truncates a CTA button label, so the model's word is bounded to what the
 # channel will render whole. The platform has no label of its own to fall back
@@ -221,6 +224,19 @@ def payload_card(payload: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return card_view
 
 
+def fallback_url(payload: Mapping[str, Any]) -> str:
+    """The observed HTTPS product page reserved for a text-only delivery."""
+    return _https(payload.get(LINK_FALLBACK_KEY)) if isinstance(payload, Mapping) else ""
+
+
+def text_with_fallback_url(payload: Mapping[str, Any]) -> str:
+    """Keep every model word and add one verified URL when the card is absent."""
+    written = str(payload.get("text") or "")
+    url = fallback_url(payload)
+    if not url or url in written or payload_card(payload) is not None:
+        return written
+    separator = "" if written.endswith("\n") else "\n"
+    return f"{written}{separator}{url}" if written else url
 
 # Both were asked for. A customer who still has to choose between products is
 # not helped by one product's photo, so the selector is the one that goes out
@@ -271,6 +287,18 @@ def finalize(draft: Any, observations: Sequence[Any], *,
     if reason == NOT_REQUESTED and not asked and not determined:
         return draft, reason
     payload[WITHHELD_KEY] = reason
+    # The model may reasonably have left out a raw URL because it expected
+    # the card's button. A missing/insecure photo or missing button word must
+    # not leave the customer with a sentence pointing to a link that vanished.
+    # The merchant's page URL, if any, comes from this turn's observed product.
+    # No link is inferred from customer prose or from the model's prose.
+    identified = (determined_product_id if determined_product_id is not None
+                  else requested_product_id(draft))
+    if reason in {NO_IMAGE, INSECURE_LINK, NO_LABEL} and identified is not None:
+        observed = rc.observed_products(observations).get(int(identified)) or {}
+        url = _https(observed.get("product_url"))
+        if url:
+            payload[LINK_FALLBACK_KEY] = url
     return dataclasses.replace(draft, payload=ac.public_copy(payload)), reason
 
 
@@ -298,20 +326,23 @@ def note_withheld(draft: Any, reason: str) -> Any:
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """The same reply without its card, for the bounded recovery attempt.
 
-    Nothing of the answer is lost: the card carried no words of its own, so
-    removing it leaves the model's text exactly as it was written.
+    Nothing of the answer is lost: the model's text stays as written. The card's
+    merchant URL is kept as a structured fallback for the text transport, which
+    only runs after a proven rejection of the rich send.
     """
     out = {key: value for key, value in dict(payload or {}).items() if key != CARD_KEY}
-    if payload_card(payload) is not None:
+    card_view = payload_card(payload)
+    if card_view is not None:
         out[WITHHELD_KEY] = "provider_rejected_the_card"
+        out[LINK_FALLBACK_KEY] = card_view["button_url"]
     return out
 
 
 __all__ = [
     "CARD_KEY", "INSECURE_LINK", "MAX_BUTTON_LABEL", "NOT_OBSERVED", "NOT_REQUESTED",
-    "NO_IMAGE", "NO_LABEL", "NO_LINK", "OFFERED", "REQUESTED_KEY", "WITHHELD_KEY",
+    "LINK_FALLBACK_KEY", "NO_IMAGE", "NO_LABEL", "NO_LINK", "OFFERED", "REQUESTED_KEY", "WITHHELD_KEY",
     "SELECTOR_PREFERRED",
     "ProductCard", "card", "finalize", "note_withheld", "payload_card", "requested_label",
-    "requested_product_id", "text_only_payload",
+    "requested_product_id", "fallback_url", "text_only_payload", "text_with_fallback_url",
     "unobserved_card",
 ]
