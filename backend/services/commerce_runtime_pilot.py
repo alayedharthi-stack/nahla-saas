@@ -51,10 +51,12 @@ WIRE_UNOBSERVED = "wire_text_unobserved"
 UNFINISHED_PREFIX = "unfinished_"
 OWNED_PREFIX = "owned_"
 
-# The reply tones the settings dashboard offers (``dashboard/src/api/settings.ts``).
-# The saved word is carried as data only when it is one of these; the API
-# accepts any string, and a free-text value is not a tone.
-DASHBOARD_TONES = frozenset({"friendly", "professional", "sales"})
+# The reply tones the merchant settings surfaces offer: the dashboard
+# (``dashboard/src/api/settings.ts``) and the Salla app settings
+# (``routers/salla_app_settings``: friendly|formal|marketing; ``formal`` has a
+# platform meaning in TONE_MAP). The saved word is carried as data only when it is
+# one of these; the API accepts any string, and a free-text value is not a tone.
+DASHBOARD_TONES = frozenset({"friendly", "professional", "sales", "marketing"})
 
 # Refusals that mean the runtime was never in this conversation at all. Asking
 # whether it holds unfinished work would be a query for every inbound message

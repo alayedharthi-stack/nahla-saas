@@ -72,8 +72,9 @@ REPLY_TOOL_DESCRIPTION = (
     "photo and a button to its page. Each is an addition over the text, never a "
     "replacement for it: the customer reads the text together with the shape, so the "
     "text need not repeat what the shape already shows, and says whatever this turn "
-    "calls for beside it — an introduction, an explanation, a comparison, an answer, "
-    "or what a row has no room for — in as much detail as that needs. Neither is required, and the customer may always answer "
+    "calls for beside it — an introduction, an explanation, a comparison, an answer "
+    "— in as much detail as that needs, including what a row has no room for when "
+    "the customer asks about it. Neither is required, and the customer may always answer "
     "by typing."
 )
 
@@ -106,7 +107,7 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 "Name products only; each row shows the product's short title, current price "
                 "and a few of its options, taken from the merchant's own records as this turn "
                 "read them, so the text need not list them again; what a row has no room for "
-                "can still be said in the text. Two to ten products, each looked up in this turn "
+                "is the text's to say when the customer asks about it. Two to ten products, each looked up in this turn "
                 "and cited in evidence_refs. The selector is an addition over the text, never "
                 "a replacement for it, and is never required; the customer can always reply "
                 "by typing. If the channel cannot show it, the platform adds its rows to the "

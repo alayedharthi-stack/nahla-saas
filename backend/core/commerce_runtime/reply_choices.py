@@ -442,8 +442,10 @@ def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSel
         withheld_rows, _complete = _wire_rows(
             _not_listed(_requested_products(draft, observations), already_listed))
         text = options_as_text(text, withheld_rows)
-        if withheld_rows:
-            payload[WITHHELD_KEY] = stand_down
+        # Recorded whether or not any line followed: a selector that stood
+        # down with every option already on screen is still a stand-down, and
+        # production must be able to tell it from a reply that asked for none.
+        payload[WITHHELD_KEY] = stand_down
     composed = chosen.as_payload()
     if navigation:
         composed[NAVIGATION_KEY] = dict(navigation)
