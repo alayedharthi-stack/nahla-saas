@@ -1173,7 +1173,7 @@ def test_the_seam_hands_the_grant_s_identity_to_the_admission_check(configured, 
                 wa_msg_id="wamid.grant.identity", inbound_metadata=None, trace=None,
                 decision=SimpleNamespace(connection_ref=f"wa:{PHONE_ID}", connection_id="1",
                                          recipient=RECIPIENT, model="model-x"),
-                customer_name="", recovery_grant=runner.current_grant()))
+                recovery_grant=runner.current_grant()))
     assert captured["barrier"](object()) is False
     assert asked == [{"tenant_id": db.tenant_id, "entry_id": record.id,
                       "channel_connection_ref": f"wa:{PHONE_ID}",

@@ -264,10 +264,56 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
     return style
 
 
-def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -> Dict[str, Any]:
+def _approved_customer_name(db: Any, tenant_id: int, convo: Any,
+                            recipient: str) -> str:
+    """Read the approved name of the customer bound to this WhatsApp turn.
+
+    The conversation's customer id alone cannot establish identity: a stale
+    association or a proposed WhatsApp profile label must not be introduced to
+    the model as a verified personal name.
+    """
+    customer_id = getattr(convo, "customer_id", None)
+    if not customer_id:
+        return ""
+    from core.customer_display import (  # noqa: PLC0415
+        approved_personalization_customer_name_or_fallback,
+    )
+    from core.customer_identity_resolver import read_customer_identity  # noqa: PLC0415
+    from models import Customer  # noqa: PLC0415
+    from utils.phone_utils import normalize_phone_compat  # noqa: PLC0415
+
+    expected_phone = normalize_phone_compat(recipient)
+    if not expected_phone:
+        return ""
+    connection = getattr(db, "connection", None)
+    try:
+        # A failed read must not invalidate the session holding the inbound
+        # turn; begin a connection savepoint without flushing pending writes.
+        with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
+            customer = db.query(Customer).filter(
+                Customer.id == int(customer_id),
+                Customer.tenant_id == int(tenant_id),
+            ).one_or_none()
+            if customer is None:
+                return ""
+            stored_phone = normalize_phone_compat(
+                getattr(customer, "normalized_phone", None) or getattr(customer, "phone", None)
+            )
+            if stored_phone != expected_phone:
+                return ""
+            return approved_personalization_customer_name_or_fallback(
+                read_customer_identity(customer), fallback="",
+            )
+    except Exception as exc:  # noqa: BLE001 - a name read cannot silence the turn
+        logger.warning("[COMMERCE_RUNTIME_PILOT] customer name unavailable tenant=%s error=%s",
+                       tenant_id, type(exc).__name__)
+        return ""
+
+
+def _context_preamble(db: Any, tenant_id: int, convo: Any, recipient: str) -> Dict[str, Any]:
     """Trusted facts the platform hands the model as data, never as wording."""
     preamble: Dict[str, Any] = {"channel": "whatsapp"}
-    name = str(customer_name or "").strip()
+    name = _approved_customer_name(db, tenant_id, convo, recipient)
     if name:
         preamble["verified_customer_name"] = name
     language = str(getattr(convo, "language", "") or "").strip()
@@ -887,7 +933,6 @@ async def maybe_handle_with_commerce_runtime(
     trace: Any,
     legacy_already_answered: bool,
     ai_gate_skipped: bool,
-    customer_name: str = "",
 ) -> PilotResult:
     """Route this inbound turn, and run it here when the pilot owns it."""
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
@@ -1004,7 +1049,7 @@ async def maybe_handle_with_commerce_runtime(
         return await _own_turn(
             db=db, tenant_id=int(tenant_id), phone_id=phone_id, to=to, text=text, convo=convo,
             wa_msg_id=wa_msg_id, inbound_metadata=inbound_metadata, trace=trace,
-            decision=decision, customer_name=customer_name, recovery_grant=grant,
+            decision=decision, recovery_grant=grant,
         )
     except Exception:  # noqa: BLE001 - the turn stays ours; it is simply a failed turn
         logger.exception("[COMMERCE_RUNTIME_PILOT] turn failed after the route was taken tenant=%s",
@@ -1109,7 +1154,6 @@ async def _own_turn(
     inbound_metadata: Optional[Dict[str, Any]],
     trace: Any,
     decision: Any,
-    customer_name: str,
     recovery_grant: Any = None,
 ) -> PilotResult:
     from core.commerce_runtime import pilot_guard  # noqa: PLC0415
@@ -1149,7 +1193,8 @@ async def _own_turn(
                 provider_message_id=str(recovery_grant.provider_message_id))
         return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
 
-    context_preamble = _context_preamble(db, int(tenant_id), convo, customer_name)
+    context_preamble = _context_preamble(db, int(tenant_id), convo,
+                                         str(decision.recipient))
 
     def run() -> Any:
         return entry.run_commerce_runtime_turn(

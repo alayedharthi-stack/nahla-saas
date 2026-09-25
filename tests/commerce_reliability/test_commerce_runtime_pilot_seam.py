@@ -57,11 +57,43 @@ class _Query:
     def first(self) -> Any:
         return self._row
 
+    def one_or_none(self) -> Any:
+        return self._row
+
     def scalar(self) -> Any:
         return None  # These seam fixtures have no merchant identity setting.
 
     def all(self) -> List[Any]:
         return [] if self._row is None else [self._row]
+
+
+# The customer rows this tenant's store holds. Empty — no linked customer — is
+# the state every case but the customer-name ones runs in.
+CUSTOMERS: List[Any] = []
+
+
+class _CustomerQuery(_Query):
+    """The customer read, honouring the equality filters the seam applies.
+
+    The seam must scope the row by the conversation's customer id **and** the
+    tenant; ignoring the filters here would let a test pass with a row of
+    another store.
+    """
+
+    def __init__(self, rows: List[Any]) -> None:
+        super().__init__(None)
+        self._rows = rows
+        self._criteria: List[Any] = []
+
+    def filter(self, *criteria: Any) -> "_CustomerQuery":
+        self._criteria.extend(criteria)
+        return self
+
+    def one_or_none(self) -> Any:
+        found = [row for row in self._rows
+                 if all(getattr(row, c.left.key) == c.right.value for c in self._criteria)]
+        assert len(found) <= 1
+        return found[0] if found else None
 
 
 class _Db:
@@ -73,6 +105,8 @@ class _Db:
             return _Query(BARRIER[0])
         if name in {"HandoverWorker", "DeferredInbound"}:
             return _Query(None)
+        if name == "Customer":
+            return _CustomerQuery(CUSTOMERS)
         return _Query(_Connection())
 
 
@@ -142,6 +176,7 @@ read: List[Dict[str, Any]] = []
 def _clear_reads() -> None:
     read.clear()
     BARRIER[0] = None
+    CUSTOMERS.clear()
 
 
 def draining_barrier() -> Any:
@@ -157,7 +192,7 @@ def call(*, trace: Optional[_Trace] = None, text: str = "عندكم حذاء؟",
         db=_Db(), tenant_id=TENANT, phone_id=PHONE_ID, to=OWNER_PHONE, text=text,
         convo=_Convo(), wa_msg_id="wamid.INBOUND", inbound_metadata={"k": "v"},
         trace=trace or _Trace(), legacy_already_answered=legacy_answered,
-        ai_gate_skipped=gate_skipped, customer_name="نورة عبدالله",
+        ai_gate_skipped=gate_skipped,
     ))
 
 
@@ -225,10 +260,77 @@ def test_a_permitted_turn_is_run_with_the_verified_scope_and_the_recorded_conver
     assert passed["instructions"].strip()              # the existing instructions, not composed here
     assert passed["budget"].max_steps <= pg.MAX_STEPS_CEILING
     assert passed["model"] == MODEL                    # the configured one, not a resolved default
-    assert passed["context_preamble"]["verified_customer_name"] == "نورة عبدالله"
+    assert "verified_customer_name" not in passed["context_preamble"]  # no linked customer row
     # The prior turns, with the message being answered not shown twice.
     assert passed["history"] == [{"role": "user", "text": "سؤال سابق"},
                                  {"role": "assistant", "text": "جواب سابق"}]
+
+
+# ── The verified customer name, through the WhatsApp entry ───────────────────
+
+
+def _customer(**fields: Any) -> Any:
+    """A customer row in its real shape; a returning shoe-store customer by default."""
+    from types import SimpleNamespace
+
+    row: Dict[str, Any] = {
+        "id": _Convo.customer_id, "tenant_id": TENANT, "name": "أحمد سالم",
+        "phone": "0500000001", "normalized_phone": OWNER_PHONE, "acquisition_channel": None,
+        "extra_metadata": {"customer_name_source": "salla_order",
+                           "customer_name_status": "verified"},
+    }
+    row.update(fields)
+    return SimpleNamespace(**row)
+
+
+def test_the_approved_name_of_the_linked_customer_reaches_the_runtime_from_the_webhook(
+        enabled, monkeypatch, saved):
+    """Tenant 1, 2026-09-25, as the RCA of #1154 records it: the conversation
+    was linked to a customer with a verified ecommerce name, and the model said
+    it could not know the name — the webhook passes none and nothing read it.
+    Through the real entry the routed recipient is the one the name is bound to."""
+    CUSTOMERS.append(_customer())
+    calls = patch_runtime(monkeypatch, report())
+    call()
+    assert calls[0]["context_preamble"]["verified_customer_name"] == "أحمد سالم"
+    assert "أحمد سالم" not in calls[0]["instructions"]         # a fact, never an instruction
+
+
+@pytest.mark.parametrize("row", [
+    # A WhatsApp profile label is a proposal, never a verified personal name.
+    {"name": "Ahmed 🌙", "extra_metadata": {"customer_name_source": "whatsapp_profile",
+                                           "customer_name_status": "proposed"}},
+    # The same customer id in another store is another store's customer.
+    {"tenant_id": TENANT + 1},
+    # A row whose number is not the one this turn is answering.
+    {"phone": "0500000077", "normalized_phone": "+966500000077"},
+    # A name the resolver rejected.
+    {"name": "الحمد لله", "extra_metadata": {"customer_name_source": "customer_message",
+                                             "customer_name_status": "rejected"}},
+], ids=["proposed_profile_name", "other_tenant", "other_number", "rejected_name"])
+def test_no_unapproved_or_foreign_name_reaches_the_runtime_from_the_webhook(
+        enabled, monkeypatch, saved, row):
+    CUSTOMERS.append(_customer(**row))
+    calls = patch_runtime(monkeypatch, report())
+    result = call()
+    assert result.handled is True                              # the turn still runs
+    assert "verified_customer_name" not in calls[0]["context_preamble"]
+
+
+def test_an_unreadable_customer_row_costs_the_turn_its_name_and_nothing_else(
+        enabled, monkeypatch, saved):
+    import core.customer_identity_resolver as resolver
+
+    def broken(_customer: Any) -> Any:
+        raise RuntimeError("identity unreadable")
+
+    CUSTOMERS.append(_customer())
+    monkeypatch.setattr(resolver, "read_customer_identity", broken, raising=True)
+    calls = patch_runtime(monkeypatch, report())
+    result = call()
+    assert result.handled is True and len(calls) == 1
+    assert "verified_customer_name" not in calls[0]["context_preamble"]
+    assert calls[0]["context_preamble"]["channel"] == "whatsapp"
 
 
 def test_an_inbound_message_the_store_has_not_persisted_is_not_trimmed_from_the_history(
