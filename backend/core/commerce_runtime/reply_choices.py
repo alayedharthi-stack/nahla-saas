@@ -58,6 +58,9 @@ ROW_ID_PREFIX = "nahla:choice:"
 PRODUCT_REF_PREFIX = "catalog:product:"
 
 MAX_BUTTON_LABEL = 20
+# Meta truncates a list row title. The affordance's word is bounded to what the
+# channel renders whole, exactly as the rows' titles are.
+MAX_ROW_TITLE = 24
 
 # Closed reasons, for the pilot log and for tests.
 NOT_REQUESTED = "not_requested"
@@ -71,6 +74,20 @@ OFFERED = "offered"
 # answered first; the options here still follow the text as lines, so nothing
 # the model meant to offer is lost.
 TAP_ANSWERED_FIRST = "verified_tap_answered_first"
+# A verified tap on a list's "More" row is being answered with the next page of
+# that list. A selector the model asked for in the same reply stands down for
+# it, and its options still follow the text as lines.
+NAVIGATION_ANSWERED_FIRST = "navigation_page_answered_first"
+
+# The key a paged or platform-expanded list's own account of itself rides
+# under, inside ``choices``: which page, how many shown, how many no longer
+# available, whether another page follows, and whether the stored result was
+# complete. Integers and booleans only — never a token, never a product value.
+NAVIGATION_KEY = "navigation"
+# The evidence references behind the values a platform-composed list's rows
+# state, as the trusted read returned them. Audit, not citation: they are the
+# platform's own reads, so they never become the reply's ``evidence_refs``.
+ROW_EVIDENCE_KEY = "row_evidence_refs"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -157,6 +174,25 @@ def requested_button(draft: Any) -> str:
     return " ".join(str(request.get("button") or "").split())[:MAX_BUTTON_LABEL]
 
 
+def requested_more_label(draft: Any) -> str:
+    """The word the model chose for the affordance that reaches the next page.
+
+    Customer-facing wording, so it is the model's, in the customer's own
+    language — the same rule the card's button word follows, and for the same
+    reason: the platform has no phrase of its own and will not invent one in
+    whatever language it happens to be written in. Whether a list pages is not
+    this word's to decide; a list that pages and lacks it is asked for it once,
+    and without it has no "More" row.
+    """
+    payload = getattr(draft, "payload", None)
+    if not isinstance(payload, Mapping):
+        return ""
+    request = payload.get(REQUESTED_KEY)
+    if not isinstance(request, Mapping):
+        return ""
+    return " ".join(str(request.get("more_label") or "").split())[:MAX_ROW_TITLE]
+
+
 def observed_products(observations: Sequence[Any]) -> Dict[int, Mapping[str, Any]]:
     """Every catalogue product this turn's tool results actually returned.
 
@@ -212,9 +248,14 @@ def unobserved_choices(draft: Any, observations: Sequence[Any]) -> Tuple[int, ..
                  or product_ref(product_id) not in cited)
 
 
-def _wire_rows(products: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
-    """The rows these products compose to, and whether every one became a row."""
-    composed = cr.choice_rows(products)
+def _wire_rows(products: Sequence[Mapping[str, Any]], *,
+               start_position: int = 1) -> Tuple[List[Dict[str, Any]], bool]:
+    """The rows these products compose to, and whether every one became a row.
+
+    ``start_position`` is where this list begins in a longer one, so a numbered
+    label on a later page states its place in the whole browse.
+    """
+    composed = cr.choice_rows(products, start_position=start_position)
     rows: List[Dict[str, Any]] = []
     for row in composed.rows:
         wire: Dict[str, Any] = {"id": row_id(row.product_id), "title": row.title}
@@ -334,6 +375,68 @@ def finalize(draft: Any, observations: Sequence[Any], *,
                                payload=ac.public_copy(payload)), reason
 
 
+def _is_navigation_row(row: Mapping[str, Any]) -> bool:
+    from core.commerce_runtime import navigation as nav  # noqa: PLC0415
+
+    return nav.token_from_row_id(row.get("id")) is not None
+
+
+def wire_rows(products: Sequence[Mapping[str, Any]], *,
+              start_position: int = 1) -> Tuple[List[Dict[str, Any]], List[int]]:
+    """Rows for products the platform chose to list, and the ids that became none.
+
+    The platform-composed counterpart of the model's selector, for a list the
+    platform decided the shape of — a page of a stored browse. The same rows
+    as ``selection`` composes, from the merchant's values as a trusted read
+    returned them. A product that cannot be a row is named, not hidden.
+    """
+    rows, _complete = _wire_rows(products, start_position=start_position)
+    listed = {product_id_from_row_id(row["id"]) for row in rows}
+    dropped: List[int] = []
+    for product in products:
+        try:
+            product_id = int(product.get("product_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if product_id > 0 and product_id not in listed and product_id not in dropped:
+            dropped.append(product_id)
+    return rows, dropped
+
+
+def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSelection, reason: str, *,
+                      navigation: Optional[Mapping[str, Any]] = None,
+                      stand_down: str = "",
+                      row_refs: Sequence[str] = ()) -> Tuple[Any, str]:
+    """The draft as it will be delivered, carrying a list the platform composed.
+
+    The model's text is not replaced. When the model asked for a selector of
+    its own and the platform is answering something else first — the next
+    page the customer tapped for — ``stand_down`` names why, the model's
+    selector is not offered, and its options follow the text as lines exactly
+    as ``finalize`` carries any withheld selector's options.
+    """
+    from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
+    from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
+
+    payload: Dict[str, Any] = {key: value
+                               for key, value in dict(getattr(draft, "payload", None) or {}).items()
+                               if key != REQUESTED_KEY}
+    text = getattr(draft, "text", "")
+    if stand_down and requested_product_ids(draft):
+        withheld_rows, _complete = _wire_rows(_requested_products(draft, observations))
+        text = options_as_text(text, withheld_rows)
+        if withheld_rows:
+            payload[WITHHELD_KEY] = stand_down
+    composed = chosen.as_payload()
+    if navigation:
+        composed[NAVIGATION_KEY] = dict(navigation)
+    if row_refs:
+        composed[ROW_EVIDENCE_KEY] = [str(ref) for ref in row_refs]
+    payload[CHOICES_KEY] = composed
+    return dataclasses.replace(draft, kind=lc.DeliveryKind.RICH.value, text=text,
+                               payload=ac.public_copy(payload)), reason
+
+
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """The same reply without its selector, for the bounded recovery attempt.
 
@@ -344,6 +447,9 @@ def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """
     out = {key: value for key, value in dict(payload or {}).items() if key != CHOICES_KEY}
     rows, _button = payload_rows(payload)
+    # The affordance that reached another page is not an option: as a line it
+    # would be a word with nothing behind it. Only products become lines.
+    rows = [row for row in rows if not _is_navigation_row(row)]
     if rows:
         out["text"] = options_as_text(out.get("text", ""), rows)
         out[WITHHELD_KEY] = "provider_rejected_the_list"
@@ -364,7 +470,10 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 
 __all__ = [
     "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
-    "MIN_CHOICES", "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX",
+    "MAX_ROW_TITLE", "MIN_CHOICES", "NAVIGATION_ANSWERED_FIRST", "NAVIGATION_KEY",
+    "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX", "ROW_EVIDENCE_KEY",
+    "finalize_composed",
+    "requested_more_label", "wire_rows",
     "TAP_ANSWERED_FIRST",
     "REQUESTED_KEY", "ROW_ID_PREFIX", "TOO_FEW", "TOO_MANY", "WITHHELD_KEY", "finalize",
     "observed_products", "option_line", "options_as_text",

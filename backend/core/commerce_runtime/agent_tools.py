@@ -65,6 +65,9 @@ class FixtureCatalog:
 class ToolResult:
     result: Mapping[str, Any]
     evidence_refs: Tuple[str, ...]
+    # Typed data for the platform alone, carried to ``ToolObservation.platform``
+    # and never into ``result`` — the part the provider is shown.
+    platform: Any = None
 
 
 ToolFunction = Callable[[ToolScope, Mapping[str, Any]], ToolResult]
@@ -275,7 +278,8 @@ class ToolRegistry:
             return self._refusal(request, ac.ToolErrorCode.RESULT_TOO_LARGE.value, "the tool result exceeds the bound")
         refs = tuple(ac.validate_evidence_ref(r) for r in outcome.evidence_refs)
         return ac.ToolObservation(call_id=request.call_id, tool_name=request.tool_name, ok=True, result=result,
-                                  error_code=None, error=None, evidence_refs=refs)
+                                  error_code=None, error=None, evidence_refs=refs,
+                                  platform=getattr(outcome, "platform", None))
 
     @staticmethod
     def _notify_abandoned(tool: RegisteredTool, tool_name: str, message: str) -> None:

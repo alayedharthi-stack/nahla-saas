@@ -1409,6 +1409,14 @@ async def on_startup() -> None:
         return run_abandoned_cart_scheduler()
     _start("abandoned_cart", _f_abandoned_cart, 15)
 
+    # Commerce runtime "More" page tokens: a bounded sweep each hour removes
+    # the ones past their retention. On a database without revision 0113 the
+    # tick finds no relation and removes nothing.
+    def _f_navigation_sweep():
+        from core.commerce_runtime.navigation import run_navigation_sweep_scheduler  # noqa: PLC0415
+        return run_navigation_sweep_scheduler()
+    _start("commerce_runtime_navigation_sweep", _f_navigation_sweep, 18)
+
     # Tier 3 (≤ 30s) — periodic syncs / lower-cadence loops
     def _f_store_sync():
         from core.scheduler import run_store_sync_scheduler  # noqa: PLC0415

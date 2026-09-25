@@ -164,6 +164,38 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
     "required": ["text", "claims_commerce_facts"],
 }
 
+# The one addition paging makes to the reply declaration, declared as such. It
+# is offered only by a provider built for a database that can store a browse's
+# continuation (``paging=True``); anywhere else the model is shown exactly the
+# declaration above. What it tells the model is operational: what the word is
+# for, when the platform needs it, and how the list it appears on relates to
+# the products named. Whether a list pages is decided by the platform from the
+# products the model names and the search's own result, never from this word.
+MORE_LABEL_PROPERTY: Mapping[str, Any] = {
+    "type": "string",
+    "description": (
+        "The word on the row that opens the next page of a search's results, in the "
+        "customer's language, at most 24 characters. Give it, and button, whenever the "
+        "selector offers every product one search returned that can be bought now. If that "
+        "search matched more products than one list holds, the platform presents its results "
+        "in the search's own order, up to ten rows at a time, and composes every row itself, "
+        "including products you were not shown; this word is on the row that opens the next "
+        "page, and the platform has no wording of its own for it. A selector that offers only "
+        "some of a search's products is never extended."
+    ),
+}
+
+
+def reply_tool_schema(*, paging: bool) -> Mapping[str, Any]:
+    """The reply declaration this provider offers: with ``more_label`` only when
+    a continuation can actually be stored."""
+    if not paging:
+        return REPLY_TOOL_SCHEMA
+    schema = ac.public_copy(REPLY_TOOL_SCHEMA)
+    schema["properties"]["choices"]["properties"]["more_label"] = ac.public_copy(MORE_LABEL_PROPERTY)
+    return schema
+
+
 _INVALID_CHOICES: Dict[str, Any] = {"__invalid__": True}
 _INVALID_CARD: Dict[str, Any] = {"__invalid__": True}
 
@@ -223,6 +255,12 @@ def _requested_choices(raw: Any) -> Dict[str, Any]:
     button = raw.get("button")
     if isinstance(button, str) and button.strip():
         request["button"] = button.strip()[:rc.MAX_BUTTON_LABEL]
+    # The word for a "More" row, when the model gave one. Wording, and only
+    # wording: whether anything is paged is decided later from the products
+    # named and the search's own typed result, and this is what the row says.
+    more_label = raw.get("more_label")
+    if isinstance(more_label, str) and more_label.strip():
+        request["more_label"] = " ".join(more_label.split())[:rc.MAX_ROW_TITLE]
     return {rc.REQUESTED_KEY: request}
 
 
@@ -347,6 +385,7 @@ class AnthropicReasoningProvider:
         audit_context: Optional[Mapping[str, Any]] = None,
         context_preamble: Optional[Mapping[str, Any]] = None,
         history: Optional[Sequence[Mapping[str, Any]]] = None,
+        paging: bool = False,
     ) -> None:
         self._instructions = str(instructions or "").strip()
         if not self._instructions:
@@ -357,6 +396,7 @@ class AnthropicReasoningProvider:
         self._audit_context = dict(audit_context or {})
         self._context_preamble = dict(context_preamble or {})
         self._history = _clean_history(history)
+        self._reply_schema = reply_tool_schema(paging=bool(paging))
         # Per-invocation transcript: one entry per step, holding the raw
         # assistant blocks, the tool_use ids that step emitted (in order) and
         # whether the step was read requests or the reply channel.
@@ -392,7 +432,7 @@ class AnthropicReasoningProvider:
         tools.append({
             "name": REPLY_TOOL_NAME,
             "description": REPLY_TOOL_DESCRIPTION,
-            "input_schema": ac.public_copy(REPLY_TOOL_SCHEMA),
+            "input_schema": ac.public_copy(self._reply_schema),
         })
         messages = self._messages(request)
         wait = max(MIN_STEP_SECONDS, float(request.budget.remaining_seconds))
@@ -586,6 +626,7 @@ class AnthropicReasoningProvider:
 
 
 __all__ = [
-    "AnthropicReasoningProvider", "MAX_HISTORY_CHARS", "MAX_HISTORY_MESSAGES", "MAX_OUTPUT_TOKENS", "REPLY_TOOL_DESCRIPTION", "REPLY_TOOL_NAME",
-    "REPLY_TOOL_SCHEMA", "StepUsage",
+    "AnthropicReasoningProvider", "MAX_HISTORY_CHARS", "MAX_HISTORY_MESSAGES", "MAX_OUTPUT_TOKENS",
+    "MORE_LABEL_PROPERTY", "REPLY_TOOL_DESCRIPTION", "REPLY_TOOL_NAME",
+    "REPLY_TOOL_SCHEMA", "StepUsage", "reply_tool_schema",
 ]

@@ -26,7 +26,10 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
 
 def test_repository_accepts_only_known_parallel_head_topologies() -> None:
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0112"})
+    # 0113 (the navigation snapshot) extends the 0112 branch and replaces it as
+    # a head. The 0092 validation and 0111 application siblings are untouched,
+    # which is what keeps bootstrap pinned to 0093 rather than to bare ``head``.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0113"})
     assert repository_heads_expected({"0092", "0111"})
     assert repository_heads_expected({"0092", "0110", "0111"})
     assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)

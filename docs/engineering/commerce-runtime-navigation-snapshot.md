@@ -1,0 +1,451 @@
+# Paging a search's results — "More" through the real commerce runtime
+
+WhatsApp shows ten rows. A merchant with thirty matching products cannot be
+answered in one list, and the two honest ways to fail both cost the customer
+something: trimming to fit takes a real option away, and withholding the whole
+selector takes the tapping away. Paging is the third way.
+
+This document is the design of record. It supersedes the first draft in PR
+#1143, whose store is reused here in revised form and whose model-facing
+approach is not (see *What changed from the #1143 draft*).
+
+## The constraint that shapes everything
+
+The model reads a search through a **five-product window**
+(`agent_live_tools.MAX_SEARCH_LIMIT`, and `_GENERAL_BROWSE_EVIDENCE_LIMIT` in the
+shared catalogue tool). That bound is deliberate — it keeps the model's context
+and its turn budget small — and it is not widened. So pagination cannot depend
+on the model accumulating, repeating or ordering more than ten product ids, and
+it does not: the model never sees the rest of the result, never names it, and
+never handles an offset, an order or a token.
+
+## Three authorities, none doing another's job
+
+| | owns | how |
+|---|---|---|
+| **model** | which products the reply offers, and the words a customer reads on a list | a selector over products of one search (`choices.product_ids`), and the list's button word (`choices.button`) and "More" word (`choices.more_label`) in the customer's language |
+| **tools** | which products are candidates, and in what order | the search that produced the five-product window also hands the platform the whole ordered result, typed and scoped (`SearchCandidates`) |
+| **platform** | the presentation | which products each page shows, where a page ends, whether another follows, and what every row says — read from the catalogue at the moment it is shown |
+
+### Whether a list pages is structure, never wording
+
+`browse.eligibility` decides it from structure and no word in the draft:
+
+1. the selector names at least two products — one product is a focus, never a
+   list the platform widens;
+2. every product it names comes from one search's window;
+3. every search this turn that showed the model any product it named had
+   every one of its products **the customer can buy now** named — a selector
+   that leaves one out, in any search it drew from, is the model's own pick (a
+   recommendation, a comparison), and a pick is never extended
+   (`selector_is_the_models_pick`). "Every search" means every one the model
+   saw, typed candidates or not: a narrowed search, one restored without its
+   body (its window read from the evidence it cited), and one whose window
+   disagreed with its stored result all count, and a product whose values the
+   turn no longer holds counts as buyable — the safe reading;
+4. that window held at least two buyable products (sold-out products ordered
+   ahead of the one in stock do not make it a browse);
+5. the stored result holds products beyond the window.
+
+A search the model narrowed below the full window (`limit` < 5) asked for a
+few products, not for the merchant's range: it carries no continuation and no
+`more_results` at all.
+
+The words are the expression layer's and only that. `Eligible.words_missing`
+names which a list that will page lacks — the button always, the "More" word
+only when page one has a successor. The loop then asks the model for them
+**once** (`_ask_for_words`): its reply is shown back as not yet accepted with
+the one problem `paging_words_needed`, through the same channel verification
+uses, and it gets exactly one step. A verified reply from that step is the
+answer. Anything else — no reply, a lookup, a refused reply, a provider that
+fails or times out — sends the reply already verified, shaped exactly as the
+model asked; only a stop that would have ended the turn anyway (cancellation,
+lost ownership, a concurrent invocation, the deadline) still ends it. Nothing
+is asked without two steps left (so a resumed invocation can still answer if
+this one is lost mid-step), without `provider_timeout + tool_timeout + 5 s` of
+the deadline (the step, page one's read and the reservation), nor twice in a
+turn (a resumed invocation reads the request from its restored feedback).
+Page one is read only in the time before the reservation's own 5 s, and never
+with less than 1 s for the read; with less, the reply offers the model's
+selector (`browse_no_time_to_read`). A list whose words never come records `paging_words_missing`; the
+platform never writes its own. The outcome of the step is on the turn report
+as `paging_words`.
+
+This closes the earlier design's flaw, in which the model's optional
+`more_label` was itself the switch: a full browse without the word was never
+paged, and a two-product pick with it was.
+
+## The typed search-result contract
+
+`core/commerce_runtime/search_candidates.py`. One frozen dataclass per search:
+
+| field | meaning |
+|---|---|
+| `tenant_id`, `namespace`, `conversation_id`, `turn_id` | stamped from the loop's trusted `ToolScope`, never from an argument |
+| `query_digest`, `method` | which search it was (a digest, never the customer's words) and which strategy matched |
+| `product_ids` | every match up to `CANDIDATE_CAP` = 50, in the search's total order |
+| `complete` | **proven**: true only when the read got back fewer matches than it asked for |
+
+The model is told `more_results: true` only when the stored result is longer
+than its window — what can actually be shown, not what may exist beyond the
+cap.
+| `window_ids` | the products the model's tool result carried |
+
+It travels on `ToolObservation.platform`, a field the provider never sees:
+`provider_observations()` does not copy it, checkpoints do not persist it, the
+observation digest does not read it, and a restored observation has none.
+`from_observation` refuses candidates from anything but a successful,
+untruncated search, from another scope, or whose window is not the head of the
+stored result — every refusal a named reason. An untyped list in the same field
+is refused as `no_candidates_attached`.
+
+### Completeness and order
+
+`CatalogContextBuilder._search_steps` is now the **one** search strategy. The
+row search (`search_products`, unchanged for every caller) and the candidate
+read (`search_product_candidates`) walk the same steps and stop at the same
+first step that matches, so they cannot disagree about which search ran or how
+it ordered. The candidate read asks for `cap + 1` ids; `exhausted` is true only
+when fewer came back. Reaching the cap is never reaching the end.
+
+Two ordering defects were fixed on the way, and both are proven on PostgreSQL
+with the heap deliberately shuffled:
+
+* the full-text path selected ids `ORDER BY in_stock DESC, id` and hydrated them
+  with `id IN (...)`, which has no order: rows came back in heap order. They
+  are now returned in the selected order (`_rows_in_order`);
+* the ILIKE and Arabic-normalised paths ordered by `in_stock` alone, on which
+  every stocked product ties. `id` is now the tie-breaker
+  (`CATALOG_SEARCH_ORDER_SQL = "in_stock DESC, id"` everywhere).
+
+The general browse (empty query) offers only orderable products, and
+orderability is decided per product in Python; its candidate read formats a
+bounded window (`cap + 1 + 20`, variants loaded in one `selectinload`) and is
+exhaustive only when that window held every product.
+
+## The flow, end to end
+
+```
+search_products ─► model: ≤5 products + "more_results": true
+               └► platform: SearchCandidates (≤50 ids, complete?)
+reply(choices: ids, button?, more_label?)
+   └► browse.eligibility: the search's results that continue? (structure only)
+   └► words missing? ask the model once; else / otherwise the verified reply
+   └► browse.open_browse: page 1 = stored head (9) + "More" row
+        rows 6–9 hydrated by read_list_rows (trusted, tenant-scoped, NOT an observation)
+        reservation transaction: reply intent + mint token(page 2)        ── one commit
+tap "More"  (list_reply_id = nahla:more:<token>)
+   └► runtime_entry: peek(token) in tenant/namespace/runtime conversation — spends nothing
+        read_list_rows(page 2 ids) — the catalogue now
+        model told: browse_page {status, page_number, products_on_this_page,
+                                 no_longer_available, more_pages_after_this,
+                                 more_matches_than_the_list_holds}
+   └► policy step 1b: verified navigation tap → List
+   └► browse.continue_browse: page 2 (9) + "More" with the stored words
+        reservation transaction: reply intent + spend(token) + mint(page 3)  ── one commit
+tap "More" … final page: up to 10, no "More", token spent, nothing minted
+```
+
+Page boundaries: a page with a successor carries nine products and one "More"
+row; a final page carries up to ten. Ten matches are one list and store nothing;
+eleven are nine and two; nineteen are nine and ten.
+
+### Spent with the reply, or not at all
+
+Reading a token (`navigation.peek`) changes nothing. The spend and the next mint
+(`navigation.apply`) run as the reservation's `precondition`, on the
+transaction's own locked connection, after the conversation lock and before the
+reply is written. So:
+
+* a turn that stops before its reply is reserved spends nothing, and the
+  customer can tap again;
+* a reserved reply has spent its token and minted its successor in the same
+  commit — no row ever points at a page that was never sent;
+* two turns racing on one token cannot both win: the spend is one conditional
+  `UPDATE … WHERE consumed_at IS NULL AND expires_at > now()`.
+
+If the store refuses (`claim_lost`, `not_stored`, `store_error`), nothing was
+written; the loop shapes the reply again without navigation and reserves once
+more. For a later page that means its products, read moments ago, follow the
+model's text as lines (`navigation_withheld: browse_page_as_lines`) — the
+answer to "More" is never an empty sentence — and a selector the model asked
+for still stands down for the page, exactly as on the normal path. For page
+one it means exactly the selector the model asked for. Any unexpected failure
+while composing a list is `browse_failed` and the same fallback: paging is an
+affordance, never a reason a turn goes unanswered.
+
+The platform's own reads on the turn's shared tool session — the candidate
+read and the list-row hydration — run inside a savepoint, so a failed statement
+cannot leave that session's transaction aborted under the model's later tool
+calls.
+
+### What the platform lists is what can be bought now
+
+The stored result keeps the search's membership — orderable and
+non-orderable matches alike, because the model's window carries both. What the
+platform **adds to a list itself** — rows 6–9 of page one and every later page —
+is held to the catalogue's single orderability rule (`orderable`, which is
+`can_checkout`: a merchant's hide, a Meta archive and stock included), read at
+the moment the page is shown. A product that fails it is counted in
+`unavailable` / `no_longer_available` and never listed or replaced. A product
+the **model** named from its window is shown as the model chose, as before.
+
+A tap on a row no reply cited is verified against the rows actually sent and
+re-read now under the same rule; a product hidden or sold out since the list
+was sent resolves to no selection. This re-read exists only where paging does.
+
+Every platform-composed list carries `choices.row_evidence_refs` — the
+`catalog:product:<id>` references of the reads its row values came from — so a
+price on a row the model never saw is as auditable as a price in a cited reply.
+They are audit, not citation: they never become the reply's `evidence_refs`.
+
+### Every refusal fails closed, by name
+
+| what arrived | model is told | outcome |
+|---|---|---|
+| unspent, unexpired token of this conversation | `resolved` + page counts | the page |
+| already spent | `replayed` | no page |
+| past expiry (database clock) | `expired` | no page |
+| another conversation's or tenant's token | `not_found` | no page |
+| a string nobody minted | `not_found` | no page |
+| unreadable store or catalogue | `unavailable` | no page |
+| spent by this same turn (a re-entry after its reservation) | `spent_by_this_turn` | the reserved reply is reused |
+
+A refusal never becomes a search, a product selection or a card: the platform
+runs no fallback, and the turn is still answered on the model's own text.
+
+### Presentation authority preserved (#1140)
+
+Precedence is now: verified product tap → Card; **verified "More" tap → next
+page**; model-requested shape; focused product → Card; candidates → List; text.
+
+* A product tap on any row — including one the platform composed and nobody
+  cited — verifies against the rows actually sent, re-reads the product now,
+  and becomes a Card through the same hydration as before.
+* List-row hydration returns row views, never observations: it cannot become
+  a focused read, a selection or a card.
+* A selector the model asks for on a "More" turn stands down for the page
+  (`navigation_page_answered_first`); its options follow the text as lines.
+* Order, shipment, address and coupon products are incidental as before.
+
+### Words the platform does not have
+
+The "More" row's title and the list's button are customer-facing words, and the
+platform has none of its own. Both are the model's, given when the browse was
+opened, and stored with the browse for later pages. A browse is **not opened**
+without both (`paging_words_missing`): the channel sender substitutes a
+fixed Arabic phrase for an empty list button, and a list the platform composes
+must never reach that fallback. Titles are bounded to what WhatsApp renders
+(24 and 20 characters).
+
+## The store: revision 0113
+
+One relation, `commerce_runtime_navigation_snapshots`, on `RuntimeBase`. One row
+is one page token.
+
+| column | |
+|---|---|
+| `token` | opaque, 24 random bytes, `UNIQUE` |
+| `series` | every page of one browse |
+| `tenant_id`, `namespace`, `conversation_id` | scope; FK to `tenants` and to the runtime conversation `(id, tenant_id, namespace)` |
+| `minted_by_turn_id`, `origin_turn_id`, `origin_call_id`, `search_method`, `query_digest` | provenance |
+| `product_ids` JSONB | the whole stored result, 1–50 ids |
+| `complete` | proven completeness of the stored result |
+| `page_offset`, `page_size` | the page this token opens |
+| `more_label`, `button_label` | the model's words |
+| `expires_at`, `consumed_at`, `consumed_by_turn_id`, `created_at` | lifecycle |
+
+Checks: namespace; `product_ids` is an array of 1–50; `1 ≤ page_offset <
+len(product_ids)` (a token opens a page after the first, and one that exists);
+`1 ≤ page_size ≤ 9`; both words non-empty; `consumed_at` and
+`consumed_by_turn_id` set together. Unique `(series, page_offset)`. One index,
+on `expires_at`, for the sweep; the token is found by its own unique index.
+
+Applying: `alembic upgrade 0113` on a database at `0112`. Rolling back this
+revision only: `alembic downgrade 0113@-1`. After it the repository heads are
+`{0092, 0111, 0113}` and bootstrap stays pinned to `0093`. A pre-existing
+relation is compared **by definition** (`database/runtime_schema_guarantees.py`,
+lifted from `0111` with one foreign-key correction that a case pins) and an
+incompatible one — including the #1143 draft's shape — stops the upgrade.
+
+### Production rollout (for the owner's authorization; nothing here has run)
+
+The code is dormant without the relation, so code and schema go in separate,
+separately verifiable steps. Never `alembic upgrade head` (`0111` and `0092`
+are independent heads), and never from the application's startup.
+
+1. **Preconditions.** #1145 green on its final head, including
+   `trusted-context-layer1` once the `store_knowledge.py` owner exception
+   (#1148) is approved and on `main`; the owner's authorization for merge,
+   deploy and this migration.
+2. **Read-only pre-check** on the intended database, after the normal backup:
+   ```sql
+   SELECT version_num FROM alembic_version;                                -- must include 0112
+   SELECT to_regclass('public.commerce_runtime_navigation_snapshots');      -- must be NULL
+   ```
+   Without `0112`, stop: `upgrade 0113` would also apply `0112`, which has its
+   own rollout (`salla-shipment-tracking-migration-rollout.md`). A relation
+   already present is compared by definition and the upgrade refuses anything
+   but this exact shape.
+3. **Deploy the code.** Pagination stays off: no candidate read, no
+   `more_results`, declarations byte-for-byte unchanged, a "More" tap
+   `unavailable`, the sweep a no-op. Verify deployment SUCCESS and its SHA.
+4. **Migrate:** `alembic upgrade 0113`, run the way `0112` was. Measured on
+   PostgreSQL 16 from `{0111, 0112}`: 0.13 s, to `{0111, 0113}`. It creates one
+   empty relation; its two foreign keys take a brief `SHARE ROW EXCLUSIVE` lock
+   on `tenants` and `commerce_runtime_conversations` while they are added
+   (empty table, nothing to validate). Verify `alembic_version` includes `0113`
+   and the relation exists.
+5. **Restart the service.** The schema probe is cached per process; paging
+   starts with the new process. Verify the log line
+   `[Scheduler] commerce_runtime_navigation_sweep queued`.
+6. **Acceptance** through the real path, in an authorized test channel only.
+
+**Rollback**, each step independent:
+
+* *Behaviour, keeping the data:* redeploy the previous deployment. Earlier
+  code never reads the relation.
+* *Schema:* `alembic downgrade 0113@-1` (0.05 s; back to `{0111, 0112}`), then
+  restart. It drops the relation and so discards unfinished browses and
+  nothing else. A process still running with the probe cached finds the store
+  gone: a tap is `unavailable`, and a reply whose navigation cannot be written
+  is reserved again without it — the refused-store path the PostgreSQL suite
+  proves — until the restart.
+* *Re-apply* is the same `alembic upgrade 0113` (proven up → down → up).
+
+The exact DDL, as PostgreSQL reports it after the upgrade:
+
+```sql
+CREATE TABLE public.commerce_runtime_navigation_snapshots (
+    id bigint NOT NULL,                                   -- sequence-owned
+    token character varying(64) NOT NULL,
+    series character varying(64) NOT NULL,
+    tenant_id integer NOT NULL,
+    namespace character varying(16) NOT NULL,
+    conversation_id bigint NOT NULL,
+    minted_by_turn_id bigint NOT NULL,
+    origin_turn_id bigint NOT NULL,
+    origin_call_id character varying(128) NOT NULL,
+    search_method character varying(64) NOT NULL,
+    query_digest character varying(64) NOT NULL,
+    product_ids jsonb NOT NULL,
+    complete boolean NOT NULL,
+    page_offset integer NOT NULL,
+    page_size integer NOT NULL,
+    more_label character varying(24) NOT NULL,
+    button_label character varying(20) NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    consumed_at timestamp with time zone,
+    consumed_by_turn_id bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ck_commerce_runtime_navigation_consumed CHECK ((consumed_at IS NULL) = (consumed_by_turn_id IS NULL)),
+    CONSTRAINT ck_commerce_runtime_navigation_namespace CHECK (namespace IN ('live', 'shadow')),
+    CONSTRAINT ck_commerce_runtime_navigation_offset CHECK (page_offset >= 1 AND page_offset < jsonb_array_length(product_ids)),
+    CONSTRAINT ck_commerce_runtime_navigation_page_size CHECK (page_size >= 1 AND page_size < 10),
+    CONSTRAINT ck_commerce_runtime_navigation_products CHECK (jsonb_typeof(product_ids) = 'array'
+        AND jsonb_array_length(product_ids) >= 1 AND jsonb_array_length(product_ids) <= 50),
+    CONSTRAINT ck_commerce_runtime_navigation_words CHECK (char_length(more_label) >= 1 AND char_length(button_label) >= 1)
+);
+-- PRIMARY KEY (id); UNIQUE (series, page_offset); UNIQUE (token)
+CREATE INDEX ix_commerce_runtime_navigation_expiry ON commerce_runtime_navigation_snapshots (expires_at);
+-- FOREIGN KEY (conversation_id, tenant_id, namespace)
+--     REFERENCES commerce_runtime_conversations (id, tenant_id, namespace)
+-- FOREIGN KEY (tenant_id) REFERENCES tenants (id)
+```
+
+## Lifecycle and cleanup
+
+| stage | policy |
+|---|---|
+| mint | only when a page follows; a result that fits stores nothing |
+| expiry | 24h (`TOKEN_LIFETIME_SECONDS`), judged on the database clock |
+| single use | spent inside the reservation that shows the page |
+| retention | 6 days after expiry (`RETENTION_AFTER_EXPIRY_SECONDS`), ≈ 7 days in all |
+| cleanup | `run_navigation_sweep_scheduler`, registered in `backend/main.py` as `commerce_runtime_navigation_sweep`; every hour, passes of ≤500 rows, ≤20 passes a tick, off the event loop, never raising |
+| rollback | dropping the relation discards unfinished browses and nothing else |
+
+## Dormant until 0113 is applied
+
+`navigation.schema_available(engine)` — the relation exists with every column
+this code writes — is probed once per process. Where it is absent (production
+today: startup pins `alembic upgrade 0093`):
+
+* the search reads no candidates and its result carries no `more_results`;
+* the `search_products` declaration and the reply declaration are byte-for-byte
+  what they were (`more_label` is not offered);
+* no browse runtime is handed to the loop, and a "More" tap is `unavailable`.
+
+Applying 0113 takes effect at the next process start.
+
+## Governance
+
+```
+INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
+MODEL_CHANGED=NO
+PROMPT_CHANGED=YES   — model-facing text, only where 0113 exists:
+                       choices.more_label (reply declaration), one sentence
+                       on search_products about more_results, and the
+                       paging_words_needed problem detail the loop sends when
+                       a list that pages lacks its words
+PERSONA_CHANGED=NO
+PHRASE_MAP_CHANGED=NO
+KEYWORD_ROUTER_CHANGED=NO
+CUSTOMER_REGEX_CHANGED=NO
+```
+
+No customer-facing text is composed by the platform on any path this adds: row
+titles and descriptions are the merchant's values; the "More" row and the
+button are the model's words; the body is the model's text; the only
+transformation is option lines under the model's text on the two degraded
+paths, the same pattern a withheld selector already uses.
+
+## What changed from the #1143 draft
+
+| #1143 | now |
+|---|---|
+| the model had to name more than ten products for paging to engage | the model names only what it saw; the platform pages the typed search result |
+| `open_browse`/`continue_browse` flushed on the tool session, which is closed without commit — nothing would have persisted | writes run on the reservation transaction's connection and commit with the reply |
+| the token was spent when read; a turn that failed after reading lost the page | read with `peek`, spent only with the reserved reply |
+| `sweep()` had no caller | a startup-registered scheduler runs it |
+| no provenance, no completeness, no stored words, no spender | all four, plus integrity checks |
+| every page nine; a final page could not carry ten | final page up to ten |
+| page-one rows were the model's selection | page one is the stored head; rows 6–9 hydrated by a trusted read |
+| (first cut of this PR) the model's optional `more_label` switched paging on | eligibility is structural; the words are asked for once when missing |
+
+## Limitations
+
+* A customer who *types* about a row the model never saw ("the seventh one")
+  relies on the model's own context, which carries the products replies cited,
+  not every row sent. Taps are exact; typed positional references to
+  platform-composed rows are not resolved by the platform.
+* The words on later pages are the ones given when the browse opened; a
+  customer who switches language mid-browse sees the first language's words.
+* A browse whose first reply lacks its words costs one more model step
+  (latency of one provider call, ≈ one reply's tokens) — the price of never
+  writing the words for the model. The declaration asks for them up front, so
+  the step is the exception; `paging_words` on the turn report counts it.
+* A turn that browses broadly and then refines ("everything" → "shoes") and
+  offers every buyable shoe is read as a pick when the broad window shared a
+  shoe with others the model left out: the model's own list goes, with no
+  "More". Safe, and a coverage limit.
+* A model that names every buyable product of a search to *recommend* all of
+  them is, structurally, offering that search's results, and the list pages.
+  That is the intended reading: the platform cannot tell a pick from a browse
+  by anything but which products were named, and deliberately does not try.
+* A general browse (empty query) that is not exhaustive within its formatting
+  window is stored as not complete, even when the remaining rows are all
+  unorderable.
+* While paging is on, every search pays for the candidate read: an ids-only
+  query, a tenant-ownership count and a savepoint for a text search; two reads
+  of up to 71 rows (variants in one `selectinload`) for the general browse.
+  Measured figures are in the PR.
+* Both foreign keys have no `ON DELETE`, like every other runtime relation:
+  a navigation row blocks deleting its tenant or runtime conversation until
+  the sweep removes it (at most ≈ 7 days).
+* The schema probe is cached per process, as the runtime's own is: applying
+  0113 — or a transient probe failure — takes effect at the next start.
+* The "More" word and the list button are the model's, but, like the existing
+  `button`, they are not run through reply verification's code checks; both
+  are bounded to what the channel renders.
+* A non-final page all of whose products became unavailable is a list holding
+  only the "More" row; the model is told the page has none.

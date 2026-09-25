@@ -7,7 +7,7 @@ from typing import Any
 
 from agents import RunContextWrapper
 
-from core.store_knowledge import CatalogContextBuilder
+from core.store_knowledge import CatalogCandidates, CatalogContextBuilder
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.knowledge_retrieval import (
     SCOPE_PRODUCT,
@@ -536,6 +536,87 @@ async def get_product_details_impl(
         evidence=[evidence],
         knowledge_sections=knowledge_sections,
     )
+
+
+def _assert_catalog_ids_belong_to_tenant(
+    context: CommerceAgentContext,
+    product_ids: tuple[int, ...],
+) -> None:
+    """``_assert_catalog_rows_belong_to_tenant`` for bare ids, in one count."""
+    from sqlalchemy import func  # noqa: PLC0415
+
+    from models import Product  # noqa: PLC0415
+
+    ids = {int(pid) for pid in product_ids}
+    if not ids:
+        return
+    held = (
+        context.db.query(func.count(Product.id))
+        .filter(Product.id.in_(ids), Product.tenant_id == context.tenant_id)
+        .scalar()
+    )
+    if int(held or 0) != len(ids):
+        raise RuntimeError("catalog_service_returned_out_of_scope_product")
+
+
+def search_product_candidates_impl(
+    context: CommerceAgentContext,
+    query: str,
+    limit: int,
+) -> CatalogCandidates:
+    """Every product the search ``search_products_impl`` runs would match, in order.
+
+    Never a model tool, and never registered as one: this is the platform's
+    view of the same search, read with the same strategy, predicate and total
+    order (``CatalogContextBuilder._search_steps``), so its first *n* ids are
+    the rows a search limited to *n* returns. It reads identities only; no
+    product value is formatted, authorized or registered as evidence, because
+    nothing here is shown to anyone until a trusted read hydrates it.
+
+    An empty query is the general browse, whose membership is the orderable
+    products ``get_top_products`` offers.
+    """
+    context.assert_scope()
+    catalog = CatalogContextBuilder(context.db, context.tenant_id)
+    clean_query = str(query or "").strip()
+    candidates = (catalog.search_product_candidates(clean_query, limit) if clean_query
+                  else catalog.top_product_candidates(limit))
+    _assert_catalog_ids_belong_to_tenant(context, candidates.product_ids)
+    return candidates
+
+
+def get_products_for_listing_impl(
+    context: CommerceAgentContext,
+    product_ids: list[int],
+) -> tuple[list[ProductSnapshot], tuple[int, ...]]:
+    """The merchant's current values for products the platform is about to list.
+
+    The same read ``get_product_details_impl`` makes — tenant scope, the
+    catalogue as it is **now**, the tenant-ownership assertion and the same
+    ``_product_evidence`` projection — for several products at once and
+    without the identity guard, because the ids come from the platform's own
+    stored result rather than from the model. It deliberately does less than
+    a product read: no knowledge lookup, no authorization, no evidence
+    registered. A listed row is not a product anyone focused on.
+
+    Returns the snapshots in the order asked, and the ids this tenant's
+    catalogue no longer holds — named, never silently dropped.
+    """
+    context.assert_scope()
+    wanted: list[int] = []
+    for value in product_ids or ():
+        try:
+            pid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and pid not in wanted:
+            wanted.append(pid)
+    formatted = CatalogContextBuilder(context.db, context.tenant_id).get_by_ids(wanted)
+    rows = [formatted[pid] for pid in wanted if pid in formatted]
+    _assert_catalog_rows_belong_to_tenant(context, rows)
+    snapshots = [_product_evidence(row)[0] for row in rows]
+    missing = tuple(pid for pid in wanted if pid not in formatted)
+    return snapshots, missing
 
 
 @commerce_read_tool("search_products", is_enabled=_catalog_search_enabled)

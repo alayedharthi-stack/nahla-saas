@@ -25,6 +25,8 @@ reports an empty answer as a fact.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -83,6 +85,10 @@ class LiveToolBinding:
 
     context: Any
     link: cl.TrustedConversationLink
+    # Whether this database can hold a browse's continuation (revision 0113).
+    # Off, the search reads nothing beyond the model's window and says nothing
+    # about more results: the turn is exactly what it was before paging.
+    paging_available: bool = False
     _gate: threading.Condition = dataclasses.field(
         default_factory=threading.Condition, repr=False)
     _poisoned: Optional[str] = None
@@ -328,20 +334,175 @@ def _guarded(binding: LiveToolBinding, body: Callable[[Mapping[str, Any]], at.To
 def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
     from modules.ai.commerce_agent_v2.tools.catalog import search_products_impl
 
-    def body(arguments: Mapping[str, Any]) -> at.ToolResult:
+    def run(scope: at.ToolScope, arguments: Mapping[str, Any]) -> at.ToolResult:
+        binding.check(scope)
+        binding.enter()
+        try:
+            return body(scope, arguments)
+        finally:
+            binding.leave()
+
+    def body(scope: at.ToolScope, arguments: Mapping[str, Any]) -> at.ToolResult:
+        query = str(arguments.get("query") or "")
         limit = int(arguments.get("limit") or MAX_SEARCH_LIMIT)
         result = _run(search_products_impl(
-            binding.context, query=str(arguments.get("query") or ""), limit=min(limit, MAX_SEARCH_LIMIT)))
+            binding.context, query=query, limit=min(limit, MAX_SEARCH_LIMIT)))
         if getattr(result, "status", "") != "ok":
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
         products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
         payload: Dict[str, Any] = {"status": "ok", "found": bool(products), "products": products}
+        # A search the model narrowed below the full window asked for a few
+        # products, not for the merchant's range: it has no continuation, so no
+        # selector over it is ever extended, and it carries no more_results.
+        narrowed = limit < MAX_SEARCH_LIMIT
+        candidates = (_search_candidates(binding, scope, query, products)
+                      if binding.paging_available and not narrowed else None)
+        if candidates is not None:
+            # One boolean, and only when it is known: the model learns that the
+            # search matched more than it was shown, never what or how many.
+            payload["more_results"] = candidates.extends_beyond_window
         sections = _knowledge_view(getattr(result, "knowledge_sections", None) or ())
         if sections:
             payload["product_knowledge"] = sections
-        return at.ToolResult(result=payload, evidence_refs=_refs(getattr(result, "evidence", None) or ()))
+        return at.ToolResult(result=payload, evidence_refs=_refs(getattr(result, "evidence", None) or ()),
+                             platform=candidates)
 
-    return _guarded(binding, body)
+    return run
+
+
+def _search_candidates(binding: LiveToolBinding, scope: at.ToolScope, query: str,
+                       products: Sequence[Mapping[str, Any]]) -> Optional[Any]:
+    """The same search's whole ordered result, typed and scoped, or nothing.
+
+    Read in the tool call that produced the model's window, by the same
+    strategy and order, so the window is its head. When it is not — the
+    catalogue moved between the two reads — there is no continuation for this
+    search rather than one that disagrees with what the model was shown. A read
+    that fails costs the paging and nothing else: the model's window stands.
+    """
+    from core.commerce_runtime import search_candidates as sc
+    from modules.ai.commerce_agent_v2.tools.catalog import search_product_candidates_impl
+
+    try:
+        # In a savepoint: this read shares the session every later tool call
+        # in the turn reads on, and a failed statement must not leave that
+        # session's transaction aborted under them.
+        with _savepoint(binding):
+            read = search_product_candidates_impl(binding.context, query=query,
+                                                  limit=sc.CANDIDATE_CAP)
+        candidates = sc.SearchCandidates(
+            tenant_id=int(scope.tenant_id), namespace=str(scope.namespace),
+            conversation_id=int(scope.conversation_id), turn_id=int(scope.turn_id),
+            query_digest=sc.query_digest(query), method=str(read.method or ""),
+            product_ids=tuple(read.product_ids), complete=bool(read.exhausted),
+            window_ids=sc.window_ids({"products": list(products)}),
+        )
+    except Exception as exc:  # noqa: BLE001 - the model's window stands without a continuation
+        logger.warning("[COMMERCE_RUNTIME] search candidates unavailable tenant=%s error=%s",
+                       scope.tenant_id, type(exc).__name__)
+        return None
+    if not candidates.window_is_prefix():
+        logger.info("[COMMERCE_RUNTIME] search candidates disagree with the window tenant=%s "
+                    "window=%d candidates=%d", scope.tenant_id, len(candidates.window_ids),
+                    len(candidates.product_ids))
+        return None
+    return candidates
+
+
+def _savepoint(binding: LiveToolBinding) -> Any:
+    """A savepoint on the binding's session, for a read the platform makes on it."""
+    db = getattr(binding.context, "db", None)
+    begin_nested = getattr(db, "begin_nested", None)
+    return begin_nested() if callable(begin_nested) else contextlib.nullcontext()
+
+
+# ── Platform-only list rows ──────────────────────────────────────────────────
+
+
+@dataclasses.dataclass(frozen=True)
+class ListRowsRead:
+    """The merchant's current values for products about to be listed, or why not."""
+
+    ok: bool
+    products: Tuple[Mapping[str, Any], ...] = ()   # row views, in the order asked
+    missing: Tuple[int, ...] = ()                  # ids the catalogue no longer holds
+    error: str = ""
+
+
+def _row_view(snapshot: Any) -> Dict[str, Any]:
+    """What a list row may state, and nothing a row does not show.
+
+    The same projection as ``_product_view``, without the description, links
+    and photo a row never carries: a smaller read, not a different one.
+    """
+    return {
+        "product_id": getattr(snapshot, "product_id", None),
+        "evidence_ref": getattr(snapshot, "evidence_ref", None),
+        "title": _text(getattr(snapshot, "title", ""), 200),
+        "price": getattr(snapshot, "price", None),
+        "sale_price": getattr(snapshot, "sale_price", None),
+        "currency": getattr(snapshot, "currency", None),
+        "in_stock": getattr(snapshot, "in_stock", None),
+        "orderable": bool(getattr(snapshot, "orderable", False)),
+        "variant_options": _variant_options_view(getattr(snapshot, "variant_options", None)),
+    }
+
+
+def read_list_rows(binding: LiveToolBinding, scope: at.ToolScope, product_ids: Sequence[Any], *,
+                   timeout_seconds: float) -> ListRowsRead:
+    """Read, now and through the trusted context, the products a list will show.
+
+    Never a model tool and never in the registry the model is offered: it is
+    the platform hydrating rows it decided to show, from identities it stored
+    itself. It goes through the same binding as every tool call — the same
+    scope check, the same one-call-at-a-time session discipline, and the same
+    abandonment on timeout — and through the same catalogue read and tenant
+    assertion as ``get_product_details``. What it returns is **not** an
+    observation: it never enters the turn's evidence, never classifies as a
+    focused read, and cannot make a card.
+    """
+    from modules.ai.commerce_agent_v2.tools.catalog import get_products_for_listing_impl
+
+    wanted: List[int] = []
+    for value in product_ids or ():
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in wanted:
+            wanted.append(number)
+    if not wanted:
+        return ListRowsRead(ok=True)
+    if timeout_seconds <= 0:
+        return ListRowsRead(ok=False, error=ac.ToolErrorCode.TIMEOUT.value)
+
+    def work() -> Tuple[Tuple[Dict[str, Any], ...], Tuple[int, ...]]:
+        binding.check(scope)
+        binding.enter()
+        try:
+            with _savepoint(binding):
+                snapshots, missing = get_products_for_listing_impl(binding.context, wanted)
+            return tuple(_row_view(s) for s in snapshots), tuple(int(m) for m in missing)
+        finally:
+            binding.leave()
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(work)
+        try:
+            views, missing = future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            binding.abandon(f"list rows read did not answer within {timeout_seconds}s")
+            return ListRowsRead(ok=False, error=ac.ToolErrorCode.TIMEOUT.value)
+        except ac.ToolError as exc:
+            return ListRowsRead(ok=False, error=exc.code)
+        except Exception as exc:  # noqa: BLE001 - a failed read is a list not shown, never a crash
+            logger.warning("[COMMERCE_RUNTIME] list rows unreadable tenant=%s error=%s",
+                           scope.tenant_id, type(exc).__name__)
+            return ListRowsRead(ok=False, error=ac.ToolErrorCode.TOOL_FAILURE.value)
+    finally:
+        executor.shutdown(wait=False)
+    return ListRowsRead(ok=True, products=views, missing=missing)
 
 
 def _product_lookup(binding: LiveToolBinding) -> at.ToolFunction:
@@ -751,13 +912,28 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
 
 LIVE_TOOL_NAMES: Tuple[str, ...] = tuple(name for name, *_ in _DECLARATIONS)
 
+# The tool whose result can carry a continuation, and the one sentence its
+# declaration gains where one can be stored. A declaration change, and
+# declared as one: it is added only on a binding whose database holds the
+# continuation, so a database without revision 0113 offers the model exactly
+# the declaration it offered before.
+SEARCH_TOOL_NAME = "search_products"
+SEARCH_PAGING_NOTE = (
+    " When the search matched more products than it returned, the result has more_results "
+    "set to true; the other products are not listed."
+)
+
 
 def build_live_tools(binding: LiveToolBinding) -> Tuple[at.RegisteredTool, ...]:
     """The allowlisted read-only tools for one trusted context."""
     return tuple(
         at.RegisteredTool(
-            definition=ac.ToolDefinition(name=name, description=description, input_schema=schema,
-                                         result_kind=kind, read_only=True),
+            definition=ac.ToolDefinition(
+                name=name,
+                description=(description + SEARCH_PAGING_NOTE
+                             if name == SEARCH_TOOL_NAME and binding.paging_available
+                             else description),
+                input_schema=schema, result_kind=kind, read_only=True),
             function=factory(binding),
             # The binding owns the session these tools read on, so it is the one
             # told the instant the loop stops waiting for a call.
@@ -772,7 +948,8 @@ def build_live_registry(binding: LiveToolBinding) -> at.ToolRegistry:
 
 
 __all__ = [
-    "ABANDONED_CALL_REASON", "LIVE_TOOL_NAMES", "LiveToolBinding", "LiveToolsUnavailable",
-    "MAX_PROMOTIONS", "MAX_SEARCH_LIMIT", "PILOT_ONLY_TOOL_NAMES", "build_live_registry",
-    "build_live_tools",
+    "ABANDONED_CALL_REASON", "LIVE_TOOL_NAMES", "ListRowsRead", "LiveToolBinding",
+    "LiveToolsUnavailable", "MAX_PROMOTIONS", "MAX_SEARCH_LIMIT", "PILOT_ONLY_TOOL_NAMES",
+    "SEARCH_PAGING_NOTE", "SEARCH_TOOL_NAME", "build_live_registry", "build_live_tools",
+    "read_list_rows",
 ]

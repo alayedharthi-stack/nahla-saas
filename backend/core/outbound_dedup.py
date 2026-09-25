@@ -199,7 +199,8 @@ def _payload_signature(payload: Dict[str, Any]) -> str:
         * ``text.body`` (or ``image.link`` / ``audio.link`` etc.)
         * ``template.name`` + ``template.language.code`` +
           flattened parameter values
-        * ``interactive.body.text`` + button labels
+        * ``interactive.body.text`` + button labels, list rows and list
+          button, a card's link and label, and its header image
         * ``contacts[]`` — wa_id, phone, display name (sorted)
         * ``_nahla_inbound_id`` when present — distinct customer inbound
           events with similar bodies must not collapse into one POST.
@@ -248,6 +249,26 @@ def _payload_signature(payload: Dict[str, Any]) -> str:
                 rb = b.get("reply") or {}
                 btns.append(f"{rb.get('id')}:{rb.get('title')}")
             canon["btns"] = btns
+            # What else the customer sees, structurally. Two lists with the
+            # same sentence and different rows — page two and page three of a
+            # browse — are different messages; two cards with the same
+            # sentence and different products are too. Hashing the body alone
+            # collapsed them, skipped the second send, and reported it as
+            # delivered under the first one's wamid. A replay of the same list
+            # or card still hashes identically and is still suppressed.
+            rows = []
+            for section in (action.get("sections") or []):
+                for row in ((section or {}).get("rows") or []):
+                    rows.append(f"{(row or {}).get('id')}:{(row or {}).get('title')}")
+            if rows:
+                canon["rows"] = rows
+                canon["list_button"] = action.get("button") or ""
+            params = action.get("parameters") or {}
+            if isinstance(params, dict) and (params.get("url") or params.get("display_text")):
+                canon["cta"] = f"{params.get('display_text') or ''}:{params.get('url') or ''}"
+            header = inter.get("header") or {}
+            if isinstance(header, dict) and header.get("type") == "image":
+                canon["header_image"] = (header.get("image") or {}).get("link") or ""
         elif t == "contacts":
             contacts = payload.get("contacts") or []
             canon["contacts"] = _canonicalize_contacts_for_signature(contacts)
