@@ -57,6 +57,9 @@ class _Query:
     def first(self) -> Any:
         return self._row
 
+    def one_or_none(self) -> Any:
+        return self._row
+
     def scalar(self) -> Any:
         return None  # These seam fixtures have no merchant identity setting.
 
@@ -72,6 +75,8 @@ class _Db:
         if name == "HandoverBarrier":
             return _Query(BARRIER[0])
         if name in {"HandoverWorker", "DeferredInbound"}:
+            return _Query(None)
+        if name == "Customer":
             return _Query(None)
         return _Query(_Connection())
 
@@ -157,7 +162,7 @@ def call(*, trace: Optional[_Trace] = None, text: str = "عندكم حذاء؟",
         db=_Db(), tenant_id=TENANT, phone_id=PHONE_ID, to=OWNER_PHONE, text=text,
         convo=_Convo(), wa_msg_id="wamid.INBOUND", inbound_metadata={"k": "v"},
         trace=trace or _Trace(), legacy_already_answered=legacy_answered,
-        ai_gate_skipped=gate_skipped, customer_name="نورة عبدالله",
+        ai_gate_skipped=gate_skipped,
     ))
 
 
@@ -225,7 +230,7 @@ def test_a_permitted_turn_is_run_with_the_verified_scope_and_the_recorded_conver
     assert passed["instructions"].strip()              # the existing instructions, not composed here
     assert passed["budget"].max_steps <= pg.MAX_STEPS_CEILING
     assert passed["model"] == MODEL                    # the configured one, not a resolved default
-    assert passed["context_preamble"]["verified_customer_name"] == "نورة عبدالله"
+    assert "verified_customer_name" not in passed["context_preamble"]  # no linked customer row
     # The prior turns, with the message being answered not shown twice.
     assert passed["history"] == [{"role": "user", "text": "سؤال سابق"},
                                  {"role": "assistant", "text": "جواب سابق"}]
