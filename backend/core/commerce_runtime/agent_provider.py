@@ -81,25 +81,6 @@ REPLY_TOOL_DESCRIPTION = (
 REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "properties": {
-        "text": {
-            "type": "string",
-            "description": "The answer to send to the customer, in the customer's language.",
-        },
-        "evidence_refs": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": (
-                "The evidence references from this turn's tool results that support the "
-                "text. Required when the text states any commerce fact."
-            ),
-        },
-        "claims_commerce_facts": {
-            "type": "boolean",
-            "description": (
-                "True when the text states a product, price, stock, order, shipment or "
-                "merchant fact; false for a purely conversational reply."
-            ),
-        },
         "choices": {
             "type": "object",
             "description": (
@@ -170,6 +151,25 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 },
             },
             "required": ["button_label"],
+        },
+        "text": {
+            "type": "string",
+            "description": "The answer to send to the customer, in the customer's language.",
+        },
+        "evidence_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "The evidence references from this turn's tool results that support the "
+                "text. Required when the text states any commerce fact."
+            ),
+        },
+        "claims_commerce_facts": {
+            "type": "boolean",
+            "description": (
+                "True when the text states a product, price, stock, order, shipment or "
+                "merchant fact; false for a purely conversational reply."
+            ),
         },
     },
     "required": ["text", "claims_commerce_facts"],
