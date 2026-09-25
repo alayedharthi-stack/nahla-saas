@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime as _dt
 import hashlib
@@ -131,7 +132,42 @@ def _instructions() -> str:
     return build_pilot_instructions()
 
 
-def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
+def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
+    """The name the merchant saved for its assistant, or the platform's own when none is.
+
+    Read from the column each turn — never a cached ORM entity or merged
+    defaults. ``None`` when the setting could not be read, or is not an object:
+    the turn then goes without the name rather than with a guessed one, and it
+    still goes. This runs after the route was taken and before admission, so a
+    failure here escaping would leave a customer unanswered and nothing
+    recorded — the one outcome this runtime must never produce.
+    """
+    from core.tenant import DEFAULT_AI  # noqa: PLC0415
+    from models import TenantSettings  # noqa: PLC0415
+
+    connection = getattr(db, "connection", None)
+    try:
+        # A connection savepoint: a read that fails in the database leaves the
+        # turn's session usable, and — unlike Session.begin_nested — it flushes
+        # nothing the session is holding.
+        with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
+            settings = db.query(TenantSettings.ai_settings).filter(
+                TenantSettings.tenant_id == int(tenant_id)).scalar()
+    except Exception as exc:  # noqa: BLE001 - the turn is answered without the name
+        logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable tenant=%s error=%s",
+                     tenant_id, type(exc).__name__)
+        return None
+    if settings is None:
+        settings = {}
+    configured = settings.get("assistant_name") if isinstance(settings, Mapping) else None
+    if not isinstance(settings, Mapping) or not isinstance(configured, (str, type(None))):
+        logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
+                     "name tenant=%s", tenant_id)
+        return None
+    return configured if (configured or "").strip() else str(DEFAULT_AI["assistant_name"])
+
+
+def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -> Dict[str, Any]:
     """Trusted facts the platform hands the model as data, never as wording."""
     preamble: Dict[str, Any] = {"channel": "whatsapp"}
     name = str(customer_name or "").strip()
@@ -140,6 +176,9 @@ def _context_preamble(convo: Any, customer_name: str) -> Dict[str, Any]:
     language = str(getattr(convo, "language", "") or "").strip()
     if language:
         preamble["conversation_language"] = language
+    assistant_name = _saved_assistant_name(db, tenant_id)
+    if assistant_name is not None:
+        preamble["assistant_name"] = assistant_name
     return preamble
 
 
@@ -1011,6 +1050,8 @@ async def _own_turn(
                 provider_message_id=str(recovery_grant.provider_message_id))
         return handover.admits_new_work_on(conn, tenant_id=int(tenant_id))
 
+    context_preamble = _context_preamble(db, int(tenant_id), convo, customer_name)
+
     def run() -> Any:
         return entry.run_commerce_runtime_turn(
             engine=engine,
@@ -1031,7 +1072,7 @@ async def _own_turn(
             model=str(decision.model or ""),
             admission_barrier=admission_barrier,
             budget=pilot_guard.pilot_budget(),
-            context_preamble=_context_preamble(convo, customer_name),
+            context_preamble=context_preamble,
             history=_prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
                                  phone=to, current_text=text),
         )
