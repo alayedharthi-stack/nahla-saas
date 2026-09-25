@@ -670,12 +670,12 @@
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_stood_down_selector_repeats_nothing_the_browse_already_listed",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_product_never_shown_as_a_row_still_follows_as_a_line_on_a_more_turn",
-        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_page_sent_as_lines_does_not_print_the_models_copy_of_it_again",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_nothing",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_without_the_relation_the_turn_is_exactly_what_it_was",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_hidden_and_sold_out_products_are_never_rows_the_platform_adds",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_tap_on_a_platform_row_hidden_since_it_was_sent_is_no_selection",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_page_one_token_the_database_refuses_leaves_exactly_the_models_selector",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_page_sent_as_lines_does_not_print_the_models_copy_of_it_again",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_page_that_cannot_be_spent_still_outranks_the_models_own_selector",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_candidate_read_that_fails_leaves_the_turns_session_usable"
       ]
