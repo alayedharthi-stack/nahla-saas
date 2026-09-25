@@ -65,11 +65,15 @@ REPLY_TOOL_DESCRIPTION = (
     "on its own, when no further lookup is needed. Every commerce fact in the "
     "text must come from a tool result observed in this turn, and every "
     "evidence reference listed must be one those results returned. The text "
-    "carries the answer by itself. Two optional structured shapes may accompany "
-    "it, each built by the platform from the merchant's own records, for products "
-    "you looked up this turn: a tappable selector, or a single product card with "
-    "its photo and a button to its page. Each is an addition over the text, never a "
-    "replacement for it; neither is required, and the customer may always answer "
+    "carries the answer. Two optional structured shapes may accompany it, each "
+    "built by the platform from the merchant's own records, for products you "
+    "looked up this turn: a tappable selector whose rows show each product's name, "
+    "price and options, or a single product card with its photo and a button to its "
+    "page. Each is an addition over the text, never a replacement for it: the "
+    "customer reads the text together with the shape, so the text need not repeat "
+    "what the shape already shows, and says whatever this turn calls for beside it "
+    "— an introduction, an explanation, a comparison, an answer — in as much "
+    "detail as that needs. Neither is required, and the customer may always answer "
     "by typing."
 )
 
@@ -99,12 +103,13 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
             "type": "object",
             "description": (
                 "Optional. Offer these products as a tappable selector beside the text. "
-                "Name products only; their titles, prices and options are taken from the "
-                "merchant's own records as this turn read them. Two to ten products, each "
-                "looked up in this turn and cited in evidence_refs. The selector is an "
-                "addition over the text, never a replacement for it, and is never "
-                "required; the customer can always reply by typing. It is not sent "
-                "together with card."
+                "Name products only; each row shows the product's title, price and options, "
+                "taken from the merchant's own records as this turn read them, so the text "
+                "need not list them again. Two to ten products, each looked up in this turn "
+                "and cited in evidence_refs. The selector is an addition over the text, never "
+                "a replacement for it, and is never required; the customer can always reply "
+                "by typing. If the channel cannot show it, the platform adds its rows to the "
+                "text as lines, so nothing offered is lost. It is not sent together with card."
             ),
             "properties": {
                 "product_ids": {
@@ -129,9 +134,13 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
             "description": (
                 "Optional. Show a product as a card beside the text: its photo, and a "
                 "button that opens its page. The photo and the link are taken from the "
-                "merchant's own records as this turn read them. The card is an addition "
-                "over the text, never a replacement for it, and is never required. A "
-                "card is not sent when a selector is offered in the same reply.\n"
+                "merchant's own records as this turn read them, so the text need not give "
+                "the photo's or the page's web address unless the customer asked for a "
+                "link. A card needs a photo and an https page link in those records, and "
+                "your button_label; without them no card is shown and the text is all the "
+                "customer receives. The card is an addition over the text, never a "
+                "replacement for it, and is never required. A card is not sent when a "
+                "selector is offered in the same reply.\n"
                 "button_label is the only required field, and it is the one thing here "
                 "the customer reads: give it whenever this reply is about a product the "
                 "customer may want to open, even when you do not name a product "

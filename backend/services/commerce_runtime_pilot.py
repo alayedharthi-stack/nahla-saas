@@ -132,17 +132,17 @@ def _instructions() -> str:
     return build_pilot_instructions()
 
 
-def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
-    """The name the merchant saved for its assistant, or the platform's own when none is.
+def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
+    """The AI settings the merchant saved, as stored — ``{}`` when none are.
 
     Read from the column each turn — never a cached ORM entity or merged
-    defaults. ``None`` when the setting could not be read, or is not an object:
-    the turn then goes without the name rather than with a guessed one, and it
-    still goes. This runs after the route was taken and before admission, so a
-    failure here escaping would leave a customer unanswered and nothing
-    recorded — the one outcome this runtime must never produce.
+    defaults. ``None`` when the settings could not be read, or are not an
+    object: the turn then goes without anything derived from them rather than
+    with a guess, and it still goes. This runs after the route was taken and
+    before admission, so a failure here escaping would leave a customer
+    unanswered and nothing recorded — the one outcome this runtime must never
+    produce.
     """
-    from core.tenant import DEFAULT_AI  # noqa: PLC0415
     from models import TenantSettings  # noqa: PLC0415
 
     connection = getattr(db, "connection", None)
@@ -153,18 +153,92 @@ def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
         with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
             settings = db.query(TenantSettings.ai_settings).filter(
                 TenantSettings.tenant_id == int(tenant_id)).scalar()
-    except Exception as exc:  # noqa: BLE001 - the turn is answered without the name
+    except Exception as exc:  # noqa: BLE001 - the turn is answered without them
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable tenant=%s error=%s",
                      tenant_id, type(exc).__name__)
         return None
     if settings is None:
-        settings = {}
-    configured = settings.get("assistant_name") if isinstance(settings, Mapping) else None
-    if not isinstance(settings, Mapping) or not isinstance(configured, (str, type(None))):
+        return {}
+    if not isinstance(settings, Mapping):
+        logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
+                     "name tenant=%s", tenant_id)
+        return None
+    return settings
+
+
+def _assistant_name_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Optional[str]:
+    """The saved name, the platform's own when none is saved, ``None`` when unusable."""
+    from core.tenant import DEFAULT_AI  # noqa: PLC0415
+
+    if settings is None:
+        return None
+    configured = settings.get("assistant_name")
+    if not isinstance(configured, (str, type(None))):
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
                      "name tenant=%s", tenant_id)
         return None
     return configured if (configured or "").strip() else str(DEFAULT_AI["assistant_name"])
+
+
+def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
+    """The name the merchant saved for its assistant, or the platform's own when none is."""
+    return _assistant_name_in(_saved_ai_settings(db, tenant_id), tenant_id)
+
+
+def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Dict[str, str]:
+    """The reply language and tone the merchant chose, as the platform defines them.
+
+    Only the two structured choices, and only in the meaning the platform
+    already gives them on its legacy path (``tenant_overlay``): one definition
+    of what "arabic" or "friendly" asks of a reply, whichever runtime answers.
+    A merchant who chose English or both languages is told exactly that; no
+    dialect is inferred from anything else. Missing or blank means the
+    platform's own default, exactly as for the name.
+
+    Deliberately not carried, and why:
+
+    * ``reply_length`` — every meaning the platform defines for it is a line
+      cap, and a cap would decide how much detail a comparison or a requested
+      explanation may carry, which is the model's to judge.
+    * ``owner_instructions`` and ``assistant_role`` — free text. The default
+      ones already mix a line cap, a gendered persona and style advice, and a
+      merchant's may carry operational claims the truth rules exist to keep out
+      of the reply. Carrying them needs a reviewed scope of its own.
+
+    A language value the platform defines no meaning for is left out rather
+    than guessed. A tone the platform defines no meaning for — the dashboard's
+    ``professional`` and ``sales`` — is carried as the merchant saved it: the
+    choice is theirs, and the word names it.
+    """
+    from core.tenant import DEFAULT_AI  # noqa: PLC0415
+    from modules.ai.prompts.tenant_overlay import LANGUAGE_MAP, TONE_MAP  # noqa: PLC0415
+
+    style: Dict[str, str] = {}
+    if settings is None:
+        return style
+
+    def chosen(key: str) -> Optional[str]:
+        value = settings.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            value = DEFAULT_AI.get(key)
+        if not isinstance(value, str) or not value.strip():
+            logger.warning("[COMMERCE_RUNTIME_PILOT] reply %s setting is not text tenant=%s",
+                           key, tenant_id)
+            return None
+        return value.strip()
+
+    language = chosen("default_language")
+    if language is not None:
+        meaning = LANGUAGE_MAP.get(language)
+        if meaning:
+            style["reply_language"] = meaning
+        else:
+            logger.warning("[COMMERCE_RUNTIME_PILOT] reply language setting has no platform "
+                           "meaning tenant=%s", tenant_id)
+    tone = chosen("reply_tone")
+    if tone is not None:
+        style["reply_tone"] = TONE_MAP.get(tone) or tone
+    return style
 
 
 def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -> Dict[str, Any]:
@@ -176,9 +250,11 @@ def _context_preamble(db: Any, tenant_id: int, convo: Any, customer_name: str) -
     language = str(getattr(convo, "language", "") or "").strip()
     if language:
         preamble["conversation_language"] = language
-    assistant_name = _saved_assistant_name(db, tenant_id)
+    settings = _saved_ai_settings(db, tenant_id)
+    assistant_name = _assistant_name_in(settings, tenant_id)
     if assistant_name is not None:
         preamble["assistant_name"] = assistant_name
+    preamble.update(_reply_style_in(settings, tenant_id))
     return preamble
 
 
