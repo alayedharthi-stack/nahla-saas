@@ -227,6 +227,39 @@ step 1 and suppression at step 3. A customer who taps a product again is asking
 for it again; answering that with suppressed presentation would be the platform
 overruling an explicit selection.
 
+## Rule 4 — a Card the provider refused leaves its page with the text
+
+Tenant 33, 24–25 September 2026: Meta refused a product Card synchronously
+with `#131053 Media upload error — WebP image uploads are not currently
+supported`. On 24 September the recovery re-sent the same Card and was refused
+again, so the customer received nothing; after the recovery learned to drop the
+Card (sequences 48 and 49 on 25 September), the text arrived — without the page
+the model had written its sentence around.
+
+After a **proven** rejection (HTTP 4xx) of a Card the model offered, the one
+ledger-bounded text recovery therefore sends the model's words unchanged and,
+on one added line, the page address that Card's button held. Nothing is added
+when:
+
+* the text already gives that page, in any encoding;
+* the address has no host, or holds whitespace or a control character;
+* adding it would make the outbound sanitiser rewrite the body (an
+  external-research or leakage fingerprint), so the addition can never be why a
+  valid answer is replaced by the send path's own wording.
+
+An unknown send is never recovered, and a Card withheld at compose time (no
+photo, no link, no button word, a product not observed) is not touched by this
+rule: no production turn has shown one of those losing a link the model
+expected, and the model is told that without them the text is all the customer
+receives. The recovery payload records the address as `card_link_appended`; the
+turn names the addition in `text_additions`; the stored message lists it in
+`final_transform_reasons` as `provider_rejected_card_page_link_as_text` — and a
+refused list's options as `provider_rejected_list_options_as_lines` — ahead of
+any sanitiser layer that also changed the body.
+
+A page or photo address longer than the product view's bound is left out whole
+rather than cut: a cut address opens a page nobody published.
+
 ## The text beside a shape, and the language it is written in
 
 Tenant 1, 25 September 2026 (turns 47–49): the text beside a list restated

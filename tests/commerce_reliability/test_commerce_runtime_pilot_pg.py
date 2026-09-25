@@ -2486,7 +2486,8 @@ def test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged(pilot):
     Stripping only the selector left a refused **card** payload untouched, so
     the transport — which reads the shape off the payload — composed the very
     same card again. That is the same message twice, not a recovery. The
-    customer's answer is the text, and the text is what goes out.
+    customer's answer is the text, and the text is what goes out — followed by
+    the page the refused card's button would have opened.
     """
     with _card_reservation(pilot, "الساعة متوفرة بسعر 540 ريال.") as reservation:
         with pilot.owned(turn_id=reservation.turn_id) as token:
@@ -2509,10 +2510,73 @@ def test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged(pilot):
         sent = text_transport.sent[0]
         assert rcard.payload_card(sent) is None, "the refused card was sent again"
         assert sent[rcard.WITHHELD_KEY] == "provider_rejected_the_card"
-        # Nothing of the answer was lost: the card carried no words of its own.
-        assert sent["text"] == "الساعة متوفرة بسعر 540 ريال."
+        # Every model word is kept; the card's verified page follows on its own
+        # line, and the addition is recorded on the recovery payload.
+        assert sent["text"] == "الساعة متوفرة بسعر 540 ريال.\nhttps://demostore.example.test/p/1"
+        assert sent[rcard.LINK_APPENDED_KEY] == "https://demostore.example.test/p/1"
         assert [a.kind for a in pilot.attempts(reservation.turn_id)] == [
             lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
+
+
+def rejected_webp() -> lc.SendResponse:
+    """Meta's synchronous refusal of a card whose photo header is WebP."""
+    return lc.SendResponse(http_status=400, body={"error": {"code": "131053"}})
+
+
+def test_a_card_refused_for_its_photo_reaches_the_customer_as_text_with_its_page(pilot):
+    """Tenant 33, 2026-09-25: a product card was refused with #131053 ("WebP
+    image uploads are not currently supported"); the recovered text went out
+    and the page the model expected the button to open did not. A generic
+    handbag here, end to end on real rows: search, card, refusal, recovery.
+
+    The text transport receives every model word plus the card's own verified
+    page on one added line, and the turn names that addition, so the stored
+    transcript can say why the transmitted text is longer than the intent.
+    """
+    page = "https://shop.example.test/ar/handbag/p41"
+    with pilot.engine.begin() as conn:
+        bag = int(conn.execute(
+            text("INSERT INTO products (tenant_id, external_id, title, description, price, "
+                 "in_stock, stock_quantity, metadata) VALUES (:t, :x, :ti, :d, 229, true, 3, "
+                 "CAST(:m AS JSONB)) RETURNING id"),
+            {"t": pilot.tenant_a, "x": "SKU-" + uuid.uuid4().hex[:8], "ti": "شنطة يد جلد",
+             "d": "شنطة يد جلد بني",
+             "m": json.dumps({"image_url": "https://cdn.example.test/bag.webp",
+                              "product_url": page})}).scalar_one())
+    written = "الشنطة متوفرة باللون البني وسعرها 229 ريال."
+    ref = f"catalog:product:{bag}"
+    card_reply = reply(written, refs=(ref,), commerce=True, call_id="r1")
+    card_reply["input"]["card"] = {"product_id": bag, "button_label": "عرض الشنطة"}
+    transport = Transport([rejected_webp(), accepted("wamid.BAG_TEXT")])
+    try:
+        report = pilot.run(answers=[
+            step([tool_use("t1", "search_products", query="شنطة يد", limit=5)]),
+            step([card_reply]),
+        ], transport=transport, budget=_pilot_budget(4), question="عندكم شنطة يد؟")
+    finally:
+        with pilot.engine.begin() as conn:
+            conn.execute(text("DELETE FROM products WHERE id = :p"), {"p": bag})
+    assert rcard.payload_card(transport.sent[0]) is not None       # the card was offered
+    assert rcard.payload_card(transport.sent[1]) is None           # and not sent twice
+    assert transport.sent[1]["text"] == f"{written}\n{page}"
+    assert report.recovery_status == dd.SENT_ACCEPTED
+    assert report.provider_message_id == "wamid.BAG_TEXT"
+    assert report.reply_text == written                            # the intent is unchanged
+    assert report.text_additions == (rcard.LINK_APPENDED_REASON,)
+    assert report.card_product_id is None                          # no card reached anyone
+    assert [a.kind for a in pilot.attempts(report.turn_id)] == [
+        lc.DeliveryKind.RICH.value, lc.DeliveryKind.TEXT.value]
+
+
+def test_a_refused_list_names_its_options_as_the_recovery_s_addition(pilot):
+    """The same record for the other refused shape: the options that follow
+    the sentence are the platform's addition, and the turn says so."""
+    with _two_products(pilot) as extra:
+        report = pilot.run(answers=_offer(pilot, [pilot.product_id, extra[0]]),
+                           transport=Transport([rejected(), accepted("wamid.TEXT")]),
+                           budget=_pilot_budget(4))
+    assert report.recovery_status == dd.SENT_ACCEPTED
+    assert report.text_additions == (entry.LIST_AS_LINES_REASON,)
 
 
 def test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller(pilot):

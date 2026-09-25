@@ -320,6 +320,8 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_another_tenants_row_id_is_never_an_identity_here",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_rejection_this_call_did_not_make_still_reaches_the_customer",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_refused_card_is_recovered_as_text_and_never_re_sent_unchanged",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_card_refused_for_its_photo_reaches_the_customer_as_text_with_its_page",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_refused_list_names_its_options_as_the_recovery_s_addition",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_second_recovery_is_refused_by_the_ledger_not_by_the_caller",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_accepted_list_permits_no_recovery_at_the_ledger_either",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_tap_naming_a_product_that_was_only_talked_about_is_not_a_tap",
