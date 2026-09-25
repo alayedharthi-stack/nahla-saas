@@ -86,6 +86,9 @@ class _DeadlinePassed(Exception):
 # read and this much left, so the reply is still reserved however the step
 # asked for ends; and page one is read only in the time before it.
 WORDS_RESERVE_SECONDS = 5.0
+# Less than this for page one's read is a read that would only time out and
+# spend the binding's session for nothing; the model's selector goes instead.
+MIN_PAGE_READ_SECONDS = 1.0
 
 # Stops that end the step asked for a paged list's words without ending the
 # turn: the reply verified before it is still the answer. Every other stop —
@@ -449,7 +452,7 @@ class AgentLoop:
                 # own; a list that cannot be read in it is the model's selector.
                 read_for = min(float(session.limits.tool_timeout_seconds),
                                session.remaining_seconds() - WORDS_RESERVE_SECONDS)
-                if read_for > 0:
+                if read_for >= MIN_PAGE_READ_SECONDS:
                     composed, browse_outcome = br.open_browse(
                         draft, session.observations, scope=scope, runtime=self._browse,
                         timeout_seconds=read_for)

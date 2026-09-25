@@ -38,7 +38,11 @@ never handles an offset, an order or a token.
    every one of its products **the customer can buy now** named — a selector
    that leaves one out, in any search it drew from, is the model's own pick (a
    recommendation, a comparison), and a pick is never extended
-   (`selector_is_the_models_pick`);
+   (`selector_is_the_models_pick`). "Every search" means every one the model
+   saw, typed candidates or not: a narrowed search, one restored without its
+   body (its window read from the evidence it cited), and one whose window
+   disagreed with its stored result all count, and a product whose values the
+   turn no longer holds counts as buyable — the safe reading;
 4. that window held at least two buyable products (sold-out products ordered
    ahead of the one in stock do not make it a browse);
 5. the stored result holds products beyond the window.
@@ -61,8 +65,9 @@ is asked without two steps left (so a resumed invocation can still answer if
 this one is lost mid-step), without `provider_timeout + tool_timeout + 5 s` of
 the deadline (the step, page one's read and the reservation), nor twice in a
 turn (a resumed invocation reads the request from its restored feedback).
-Page one is read only in the time before the reservation's own 5 s; with less,
-the reply offers the model's selector (`browse_no_time_to_read`). A list whose words never come records `paging_words_missing`; the
+Page one is read only in the time before the reservation's own 5 s, and never
+with less than 1 s for the read; with less, the reply offers the model's
+selector (`browse_no_time_to_read`). A list whose words never come records `paging_words_missing`; the
 platform never writes its own. The outcome of the step is on the turn report
 as `paging_words`.
 
@@ -419,6 +424,10 @@ paths, the same pattern a withheld selector already uses.
   (latency of one provider call, ≈ one reply's tokens) — the price of never
   writing the words for the model. The declaration asks for them up front, so
   the step is the exception; `paging_words` on the turn report counts it.
+* A turn that browses broadly and then refines ("everything" → "shoes") and
+  offers every buyable shoe is read as a pick when the broad window shared a
+  shoe with others the model left out: the model's own list goes, with no
+  "More". Safe, and a coverage limit.
 * A model that names every buyable product of a search to *recommend* all of
   them is, structurally, offering that search's results, and the list pages.
   That is the intended reading: the platform cannot tell a pick from a browse

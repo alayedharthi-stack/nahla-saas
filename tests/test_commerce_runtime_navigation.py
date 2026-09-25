@@ -512,8 +512,10 @@ def test_the_loop_asks_for_words_only_for_a_list_that_pages_and_only_once(case, 
     assert loop._paging_words_missing(request, SCOPE, session, None) == expected
 
 
-@pytest.mark.parametrize("seconds_left,read", [(60.0, True), (al.WORDS_RESERVE_SECONDS + 1.0, True),
-                                               (al.WORDS_RESERVE_SECONDS - 0.5, False)])
+@pytest.mark.parametrize("seconds_left,read", [
+    (60.0, True), (al.WORDS_RESERVE_SECONDS + al.MIN_PAGE_READ_SECONDS, True),
+    (al.WORDS_RESERVE_SECONDS + al.MIN_PAGE_READ_SECONDS / 2, False),
+    (al.WORDS_RESERVE_SECONDS - 0.5, False)])
 def test_page_one_is_read_only_in_the_time_before_the_reservation(seconds_left, read):
     """A late reply must still be reserved: page one's catalogue read never
     takes the time the reservation needs, and without it the reply offers the
@@ -566,6 +568,32 @@ def test_a_pick_from_one_search_is_not_extended_under_another_that_overlaps_it()
     eligible, reason = br.eligibility(draft(a[:5]), obs, scope=SCOPE,
                                       search_tool_names=("search_products",))
     assert reason == br.ELIGIBLE and eligible.call_id == "s1"
+
+
+@pytest.mark.parametrize("earlier", ["narrowed", "restored_without_body", "window_disagrees"])
+def test_a_pick_from_a_search_without_candidates_is_still_a_pick(earlier):
+    """The overlap rule reads every search the model saw, not only those that
+    can continue: a narrowed search, one restored without its body, and one
+    whose window disagreed with its stored result all showed it products."""
+    a = [2201, 2202, 2203]
+    b_window = a[:2] + [2301, 2302, 2303]
+    if earlier == "narrowed":
+        first = search(a, None, call_id="s1")
+    elif earlier == "restored_without_body":
+        first = ac.ToolObservation(call_id="s1", tool_name="search_products", ok=True, result=None,
+                                   error_code=None, error=None,
+                                   evidence_refs=tuple(rc.product_ref(pid) for pid in a),
+                                   restored=True, body_truncated=True)
+    else:
+        first = search(a, candidates(list(reversed(a)) + [2204], [a[0]]), call_id="s1")
+    later = search(b_window[:5], candidates(b_window[:5] + [2304, 2305, 2306], b_window[:5]),
+                   call_id="s2", unorderable=[2301, 2302, 2303])
+    _none, reason = br.eligibility(draft(a[:2]), [first, later], scope=SCOPE,
+                                   search_tool_names=("search_products",))
+    assert reason == br.MODEL_PICK
+    composed, reason = br.open_browse(draft(a[:2]), [first, later], scope=SCOPE,
+                                      runtime=runtime(Reader()), timeout_seconds=5)
+    assert composed is None and reason == br.MODEL_PICK
 
 
 def test_a_capped_result_is_never_called_complete():

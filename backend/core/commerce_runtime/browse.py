@@ -165,6 +165,38 @@ def _searches(observations: Sequence[Any], scope: Any,
     return found
 
 
+def _seen_windows(observations: Sequence[Any], search_tool_names: Sequence[str]) -> List[Tuple[int, ...]]:
+    """The products every search this turn showed the model, typed candidates or not.
+
+    Read from the result body the model was given, or — for one whose body was
+    not kept, as a resumed invocation restores it — from the evidence it cited.
+    A narrowed search, a restored one, or one whose window disagreed with its
+    typed result has no continuation, but the model saw its products all the
+    same, and a pick from it is still a pick.
+    """
+    names = set(search_tool_names)
+    windows: List[Tuple[int, ...]] = []
+    for obs in observations or ():
+        if not getattr(obs, "ok", False) or str(getattr(obs, "tool_name", "") or "") not in names:
+            continue
+        window = sc.window_ids(getattr(obs, "result", None))
+        if not window:
+            ids = []
+            for ref in getattr(obs, "evidence_refs", ()) or ():
+                text = str(ref or "")
+                if text.startswith(rc.PRODUCT_REF_PREFIX):
+                    try:
+                        product_id = int(text[len(rc.PRODUCT_REF_PREFIX):])
+                    except ValueError:
+                        continue
+                    if product_id > 0 and product_id not in ids:
+                        ids.append(product_id)
+            window = tuple(ids)
+        if window:
+            windows.append(window)
+    return windows
+
+
 def _search_for(requested: Sequence[int], observations: Sequence[Any], scope: Any,
                 search_tool_names: Sequence[str]) -> Tuple[Optional[sc.SearchCandidates], str]:
     """The one search whose model window holds every product the model named.
@@ -217,11 +249,12 @@ def eligibility(draft: Any, observations: Sequence[Any], *, scope: Any,
     * the selector names at least two products — one product is a focus, and a
       focus is never a list the platform widens;
     * every product named comes from one search's window;
-    * every search this turn that showed the model any product it named had
-      every one of its buyable products named — a selector that leaves out a
-      product the customer could buy, in any search it drew from, is the
-      model's own pick (a recommendation, a comparison), and a pick is never
-      extended;
+    * every search this turn that showed the model any product it named — with
+      typed candidates or without: narrowed, restored, or disagreeing with its
+      stored result — had every one of its buyable products named. A selector
+      that leaves out a product the customer could buy, in any search it drew
+      from, is the model's own pick (a recommendation, a comparison), and a
+      pick is never extended;
     * that window held at least two products the customer can buy now;
     * the stored result holds products beyond the window.
 
@@ -238,13 +271,16 @@ def eligibility(draft: Any, observations: Sequence[Any], *, scope: Any,
         return None, NO_CONTINUATION
     observed = rc.observed_products(observations)
 
-    def buyable(search: sc.SearchCandidates) -> set:
-        return {pid for pid in search.window_ids if pid in observed and _listable(observed[pid])}
+    def buyable(window: Sequence[int], *, unknown_is_buyable: bool) -> set:
+        # A product whose values this turn no longer holds counts as buyable
+        # when deciding whether the model left it out: the safe reading.
+        return {pid for pid in window
+                if (_listable(observed[pid]) if pid in observed else unknown_is_buyable)}
 
-    for search, _call in _searches(observations, scope, search_tool_names):
-        if named & set(search.window_ids) and not buyable(search) <= named:
+    for window in _seen_windows(observations, search_tool_names):
+        if named & set(window) and not buyable(window, unknown_is_buyable=True) <= named:
             return None, MODEL_PICK
-    if len(buyable(candidates)) < rc.MIN_CHOICES:
+    if len(buyable(candidates.window_ids, unknown_is_buyable=False)) < rc.MIN_CHOICES:
         return None, MODEL_PICK
     if not candidates.extends_beyond_window:
         return None, NOTHING_MORE
