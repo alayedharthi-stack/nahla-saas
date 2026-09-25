@@ -406,14 +406,19 @@ def wire_rows(products: Sequence[Mapping[str, Any]], *,
 def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSelection, reason: str, *,
                       navigation: Optional[Mapping[str, Any]] = None,
                       stand_down: str = "",
-                      row_refs: Sequence[str] = ()) -> Tuple[Any, str]:
+                      row_refs: Sequence[str] = (),
+                      already_listed: Sequence[int] = ()) -> Tuple[Any, str]:
     """The draft as it will be delivered, carrying a list the platform composed.
 
     The model's text is not replaced. When the model asked for a selector of
     its own and the platform is answering something else first — the next
     page the customer tapped for — ``stand_down`` names why, the model's
     selector is not offered, and its options follow the text as lines exactly
-    as ``finalize`` carries any withheld selector's options.
+    as ``finalize`` carries any withheld selector's options — except those this
+    browse has already listed (``already_listed``: this page and the ones before
+    it, by id). Those are on the customer's screen as rows already; a second copy
+    as lines is the duplication Tenant 1 saw on 25 September, and it carries
+    nothing the rows do not. The stand-down itself is recorded either way.
     """
     from core.commerce_runtime import agent_contracts as ac  # noqa: PLC0415
     from core.commerce_runtime import ledger_contracts as lc  # noqa: PLC0415
@@ -423,10 +428,12 @@ def finalize_composed(draft: Any, observations: Sequence[Any], chosen: ChoiceSel
                                if key != REQUESTED_KEY}
     text = getattr(draft, "text", "")
     if stand_down and requested_product_ids(draft):
-        withheld_rows, _complete = _wire_rows(_requested_products(draft, observations))
+        listed = {int(product_id) for product_id in already_listed}
+        withheld = [product for product in _requested_products(draft, observations)
+                    if int(product.get("product_id") or 0) not in listed]
+        withheld_rows, _complete = _wire_rows(withheld)
         text = options_as_text(text, withheld_rows)
-        if withheld_rows:
-            payload[WITHHELD_KEY] = stand_down
+        payload[WITHHELD_KEY] = stand_down
     composed = chosen.as_payload()
     if navigation:
         composed[NAVIGATION_KEY] = dict(navigation)

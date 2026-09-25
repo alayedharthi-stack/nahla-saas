@@ -873,6 +873,36 @@ def test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page(s
     assert TITLES[WATCHES] in transport.sent[0]["text"], "its options follow the text as lines"
 
 
+def test_a_stood_down_selector_repeats_nothing_the_browse_already_listed(shop: Shop):
+    """Tenant 1-shaped, 25 September: on a "More" turn the model offered the
+    first page's products again. The page is the answer; those products are
+    already rows on the customer's screen, so they do not come back as lines.
+    A product outside this browse still does — nothing the model meant to offer
+    is lost."""
+    conversation = shop.conversation()
+    _report, first = shop.turn(conversation, browse(BAGS))
+    first_page, more, _button = _rows(first.sent[0])
+    watch = shop.products[WATCHES][0]
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=BAGS),
+                          _tool_use("s2", "search_products", query=WATCHES)])
+        offered = [first_page[0], first_page[1], watch]
+        return _step([_reply("Here you go.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in offered],
+                             choices={"product_ids": offered, "button": BUTTON})])
+
+    report, transport, _model = _tap_more(shop, conversation, more, model=LiteralModel(script))
+    products, _more, _button = _rows(transport.sent[0])
+    assert products == shop.products[BAGS][9:11], "the tapped page is still the answer's shape"
+    body = transport.sent[0]["text"]
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+    assert TITLES[WATCHES] in body, "a product outside this browse still follows as a line"
+    assert f"{TITLES[BAGS]} 1" not in body and f"{TITLES[BAGS]} 2" not in body, \
+        "products the browse already listed are not repeated under the text"
+
+
 def test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_nothing(shop: Shop):
     """The token expires while the model is answering.
 

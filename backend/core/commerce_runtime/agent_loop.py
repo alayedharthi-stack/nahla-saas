@@ -468,7 +468,8 @@ class AgentLoop:
             draft, choices = rc.finalize_composed(
                 draft, session.observations, composed.selection, composed.reason,
                 navigation=composed.navigation, row_refs=composed.row_refs,
-                stand_down=rc.NAVIGATION_ANSWERED_FIRST if shape.reason == pp.NAVIGATION_PAGE else "")
+                stand_down=rc.NAVIGATION_ANSWERED_FIRST if shape.reason == pp.NAVIGATION_PAGE else "",
+                already_listed=composed.already_listed)
             session.navigation_plan = composed.plan
         else:
             if composed is not None:
