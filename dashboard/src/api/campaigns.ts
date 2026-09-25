@@ -68,6 +68,7 @@ export type CampaignLifecycle =
   /** Meta rejected sends with its per-minute limit: paused for a recorded
    *  backoff and continued automatically after it. See ``capacity_wait``. */
   | 'rate_limit_backoff'
+  | 'marketing_delivery_backoff'
   /** Meta declined to deliver marketing to many recipients (131049): the
    *  post-accept breaker stopped the run. Not resumed automatically;
    *  ``throttle.clears_at`` says when a resume can send again. */

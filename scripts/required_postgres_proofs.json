@@ -707,6 +707,45 @@
         "tests/commerce_reliability/test_catalog_search_order_pg.py::test_the_general_browse_candidates_follow_its_own_order",
         "tests/commerce_reliability/test_catalog_search_order_pg.py::test_a_listing_read_is_two_statements_and_this_tenants_only"
       ]
+    },
+    {
+      "id": "campaign_marketing_continuation",
+      "kind": "proof",
+      "module": "tests/test_campaign_marketing_continuation.py",
+      "origin": "Owner request 2026-09-25: start-once automatic campaign continuation, typed marketing cooldown and guarded unsent queue",
+      "required_env": {
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/test_campaign_marketing_continuation.py::test_cooldown_is_durable_and_not_just_the_breaker_window[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_cooldown_is_durable_and_not_just_the_breaker_window[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_late_marketing_receipts_extend_wait_without_any_send[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_late_marketing_receipts_extend_wait_without_any_send[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_spam_block_takes_precedence_over_marketing_and_requires_action[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_spam_block_takes_precedence_over_marketing_and_requires_action[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_manual_stop_wins_even_after_cooldown[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_manual_stop_wins_even_after_cooldown[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_or_untyped_pause_never_gains_automatic_authority[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_or_untyped_pause_never_gains_automatic_authority[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_capacity_wait_preserves_marketing_backoff_and_never_resends_accepted[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_capacity_wait_preserves_marketing_backoff_and_never_resends_accepted[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_another_live_worker_prevents_continuation[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_another_live_worker_prevents_continuation[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_backoff_counter_survives_capacity_wait_and_is_bounded[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_backoff_counter_survives_capacity_wait_and_is_bounded[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_stop_during_tier_refresh_is_not_overwritten[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_stop_during_tier_refresh_is_not_overwritten[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_tier_upgrade_is_checked_without_waiting_for_old_24h_slot[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_tier_upgrade_is_checked_without_waiting_for_old_24h_slot[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_unreadable_breaker_never_becomes_permission_to_send[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_unreadable_breaker_never_becomes_permission_to_send[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_two_scheduler_workers_do_not_duplicate_recipients[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_two_scheduler_workers_do_not_duplicate_recipients[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_is_scoped_idempotent_and_preserves_queue[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_is_scoped_idempotent_and_preserves_queue[postgres]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_refuses_changed_pause_or_manual_stop[sqlite]",
+        "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_refuses_changed_pause_or_manual_stop[postgres]"
+      ]
     }
   ]
 }

@@ -132,6 +132,7 @@ const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
   paused: 'amber',
   waiting_for_capacity: 'blue',
   rate_limit_backoff: 'blue',
+  marketing_delivery_backoff: 'amber',
   marketing_delivery_blocked: 'amber',
   provider_throttled: 'amber',
   unknown: 'slate',
@@ -3391,10 +3392,11 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 : health.capacityResumeSoon}
             </p>
           )}
-          {lifecycleKey === 'rate_limit_backoff' && (
+          {(lifecycleKey === 'rate_limit_backoff' || lifecycleKey === 'marketing_delivery_backoff') && (
             <p className="text-[10px] text-blue-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>
               {campaign.capacity_wait?.next_eligible_at
-                ? health.rateLimitResumeAt.replace('{time}', formatUtcTime(campaign.capacity_wait.next_eligible_at, lang))
+                ? (lifecycleKey === 'marketing_delivery_backoff' ? health.marketingResumeAt : health.rateLimitResumeAt)
+                    .replace('{time}', formatUtcTime(campaign.capacity_wait.next_eligible_at, lang))
                 : health.pauseReasons.provider_rate_limited}
             </p>
           )}

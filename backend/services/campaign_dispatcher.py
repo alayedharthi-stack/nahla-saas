@@ -479,6 +479,9 @@ async def _dispatch_campaign_with_lease(
         db.commit()
         return _empty_result(error=err)
 
+    # Campaigns must not require a dashboard visit to discover a tier upgrade.
+    from routers.whatsapp_connect import _maybe_refresh_meta_tier  # noqa: PLC0415
+    await _maybe_refresh_meta_tier(db, tenant_id, max_age_seconds=900)
     wa_conn = _get_wa_connection(db, tenant_id)
     if not wa_conn:
         err = "لا يوجد اتصال واتساب نشط"
@@ -1817,9 +1820,19 @@ def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
 def _note_capacity_wait(campaign: Campaign, ctx: "DispatchRunContext") -> None:
     """A run stopped by Meta's shared messaging limit is waiting for
     capacity, not failed or merchant-paused: persist when it may continue
-    so the scheduler resumes it. Any other outcome clears the wait."""
+    so the scheduler resumes it. A typed marketing breaker gets a separate
+    increasing cooldown; spam/unknown/uncertain outcomes clear the wait."""
     from services import campaign_send_ledger as ledger  # noqa: PLC0415
     if ctx.lease_lost:
+        return
+    if (ctx.pause_reason == ledger.PAUSE_PROVIDER_THROTTLING
+            and ctx.post_accept_error_key == "marketing_blocked"):
+        wait = ledger.record_marketing_wait(campaign)
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d waiting after marketing delivery refusals "
+            "until %s (attempt %d); untouched recipients only", campaign.id,
+            wait["next_eligible_at"], wait["attempt"],
+        )
         return
     if ctx.pause_reason == ledger.PAUSE_PROVIDER_RATE_LIMITED:
         wait = ledger.record_rate_limit_wait(campaign, detail=ctx.pause_detail)
@@ -1851,6 +1864,7 @@ class DispatchRunContext:
         self.lease_lost = False
         # Budget snapshot when Meta's shared messaging limit stopped the run.
         self.capacity: Any = None
+        self.post_accept_error_key: Optional[str] = None
 
     def pause(self, reason: str, detail: str = "") -> None:
         if self.pause_reason is None:
@@ -2002,6 +2016,7 @@ async def _dispatch_queued_rows(
                     break
                 throttle = ledger.post_accept_throttle(db, scope_key)
                 if throttle is not None:
+                    ctx.post_accept_error_key = throttle[0]
                     _tstat = ledger.post_accept_throttle_status(db, scope_key) or {}
                     ctx.pause(
                         ledger.PAUSE_PROVIDER_THROTTLING,
@@ -2771,20 +2786,20 @@ async def _get_auto_coupon(
 
 
 async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Continue every campaign that Meta's shared messaging limit paused,
+    """Continue campaigns with an authoritative capacity/rate/marketing wait,
     once the limit has room again. Called by the scheduler; durable because
     everything it needs is in the database (campaign status, the lease's
     pause reason and stop flag, the recorded ``_capacity_wait``).
 
     A campaign continues only when all of these hold:
 
-    * ``status='paused'`` with lease ``pause_reason='messaging_limit_reached'``
+    * ``status='paused'`` with an explicitly supported automatic pause reason
       and no merchant stop (a stop/pause always wins — it needs the
       merchant's own resume);
     * a wait record written by a dispatch run of this version
       (``authorized_capacity_wait``). The pause columns alone are not
       authority: a campaign paused by an older build, or paused for any
-      other reason, continues only on the merchant's explicit resume, and
+      unsupported reason, continues only on the merchant's explicit resume, and
       this loop never writes a record for it;
     * no worker holds the lease;
     * its ``next_eligible_at`` has passed;
@@ -2826,14 +2841,49 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
             continue
         due = wait["next_eligible_at"]
         due_at = ledger._naive(datetime.fromisoformat(due))
-        if now < due_at:
+        check_at = due_at
+        if lease.pause_reason == ledger.PAUSE_MESSAGING_LIMIT:
+            # Recheck tier upgrades while waiting for a rolling-window slot.
+            # Keep the displayed eligibility estimate separate from polling.
+            try:
+                since = ledger._naive(datetime.fromisoformat(wait["since"]))
+                check_at = min(due_at, since + ledger.CAPACITY_RECHECK_INTERVAL)
+            except (KeyError, TypeError, ValueError):
+                pass  # old valid records retain their original deadline
+        if now < check_at:
             entry.update(action="waiting", next_eligible_at=due)
+            continue
+        from routers.whatsapp_connect import _maybe_refresh_meta_tier  # noqa: PLC0415
+        await _maybe_refresh_meta_tier(db, campaign.tenant_id, max_age_seconds=900)
+        # The refresh can yield/commit. Re-read state: merchant stop, another
+        # scheduler, cancellation or a live worker always wins.
+        db.refresh(campaign)
+        db.refresh(lease)
+        if (campaign.status != "paused" or lease.stop_requested_at is not None
+                or ledger.lease_is_live(lease, now=ledger.utcnow())
+                or ledger.authorized_capacity_wait(campaign.template_variables, lease.pause_reason) != wait):
+            entry["action"] = "state_changed"
             continue
         requeue = (lease.pause_reason == ledger.PAUSE_PROVIDER_RATE_LIMITED
                    or bool(wait.get("requeue_rate_limited")))
         wa_conn = _get_wa_connection(db, campaign.tenant_id)
         if wa_conn is None:
             entry["action"] = "no_connection"
+            continue
+        # Re-read the shared breaker before changing state or requeueing.
+        # New/late receipts may have appeared during the durable cooldown.
+        throttle = ledger.post_accept_throttle(db, ledger.messaging_scope_key(wa_conn), now=now)
+        if throttle is not None:
+            lease.pause_reason = ledger.PAUSE_PROVIDER_THROTTLING
+            lease.pause_detail = f"post_accept {throttle[0]} x{throttle[1]}"
+            lease.paused_at = now
+            if throttle[0] == "marketing_blocked":
+                wait = ledger.record_marketing_wait(campaign, now=now)
+                entry.update(action="marketing_wait", next_eligible_at=wait["next_eligible_at"])
+            else:
+                ledger.clear_capacity_wait(campaign)
+                entry.update(action="provider_action_required", error_key=throttle[0])
+            db.commit()
             continue
         budget = ledger.messaging_budget(db, wa_conn, now=now)
         if budget.budget is not None and budget.used >= budget.budget:

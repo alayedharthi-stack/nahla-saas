@@ -156,6 +156,11 @@ RATE_LIMIT_BUCKETS = frozenset({"rate_limit"})
 PAUSE_PROVIDER_REPEATED_ERROR = "provider_repeated_error"
 RATE_LIMIT_BACKOFF_BASE = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MINUTES", 5))
 RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MAX_MINUTES", 60))
+# Continue untouched recipients, never retry an accepted 131049 copy. These
+# delays are Nahla policy, not a prediction of when Meta will deliver again.
+MARKETING_BACKOFF_BASE = timedelta(hours=1)
+MARKETING_BACKOFF_MAX = timedelta(hours=24)
+MARKETING_BACKOFF_KEY = "_marketing_continuation_attempt"
 # A run that ends for no recorded reason while recipients are still queued
 # (e.g. a same-code breaker) is paused, never "completed".
 PAUSE_RUN_ENDED_WITH_QUEUE = "run_ended_with_queue"
@@ -1781,9 +1786,44 @@ def capacity_wait(campaign: Any) -> Optional[Dict[str, Any]]:
 
 
 # Pauses the scheduler may continue on its own, once their recorded wait
-# has passed. Post-accept delivery blocks (marketing_blocked, spam) are
-# deliberately not here: they need the merchant.
-AUTO_RESUME_REASONS = frozenset({PAUSE_MESSAGING_LIMIT, PAUSE_PROVIDER_RATE_LIMITED})
+# has passed. provider_throttling additionally requires an explicit, typed
+# marketing-only wait below. Spam/uncertain/legacy pauses remain manual.
+AUTO_RESUME_REASONS = frozenset({
+    PAUSE_MESSAGING_LIMIT, PAUSE_PROVIDER_RATE_LIMITED, PAUSE_PROVIDER_THROTTLING,
+})
+
+
+def record_marketing_wait(campaign: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Durable, increasing cooldown for untouched recipients after 131049.
+
+    The counter survives intervening capacity/rate waits and restarts. Never
+    requeue accepted/uncertain copies; normal claim guards still own admission.
+    """
+    now = now or utcnow()
+    tv = dict(campaign.template_variables or {})
+    try:
+        attempt = max(0, min(24, int(tv.get(MARKETING_BACKOFF_KEY, 0)))) + 1
+    except (ValueError, TypeError, OverflowError):
+        attempt = 25  # malformed state can lengthen a wait, never shorten it
+    delay = min(MARKETING_BACKOFF_BASE * (2 ** min(attempt - 1, 5)), MARKETING_BACKOFF_MAX)
+    wait = {
+        "reason": PAUSE_PROVIDER_THROTTLING,
+        "authority": CAPACITY_WAIT_AUTHORITY,
+        "error_key": "marketing_blocked",
+        "continuation": "untouched_recipients_only",
+        "since": now.isoformat(),
+        "next_eligible_at": (now + delay).isoformat(),
+        "next_eligible_exact": False,
+        "attempt": attempt,
+    }
+    prev = capacity_wait(campaign) or {}
+    if (prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED
+            or prev.get("requeue_rate_limited")):
+        wait["requeue_rate_limited"] = True
+    tv[MARKETING_BACKOFF_KEY] = attempt
+    campaign.template_variables = tv
+    store_capacity_wait(campaign, wait)
+    return wait
 
 
 def record_rate_limit_wait(campaign: Any, *, detail: str,
@@ -1829,6 +1869,11 @@ def authorized_capacity_wait(template_variables: Any,
         return None
     if w.get("authority") != CAPACITY_WAIT_AUTHORITY or w.get("reason") != reason:
         return None
+    if reason == PAUSE_PROVIDER_THROTTLING and (
+        w.get("error_key") != "marketing_blocked"
+        or w.get("continuation") != "untouched_recipients_only"
+    ):
+        return None
     try:
         datetime.fromisoformat(str(w.get("next_eligible_at")))
     except ValueError:
@@ -1854,7 +1899,9 @@ def post_accept_throttle(db: Session, scope_key: Optional[str], *,
         .group_by(CampaignSendAttempt.post_accept_error_code)
         .all()
     )
-    for key, cnt in rows:
+    # A concurrent spam/rate block must never be masked by a 131049 block
+    # and accidentally earn automatic marketing continuation.
+    for key, cnt in sorted(rows, key=lambda row: (row[0] == "marketing_blocked", row[0])):
         if int(cnt) >= POST_ACCEPT_BREAKER_THRESHOLDS.get(key, 1 << 30):
             return str(key), int(cnt)
     return None

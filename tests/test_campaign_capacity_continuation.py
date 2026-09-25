@@ -628,7 +628,8 @@ def test_other_pauses_never_auto_resume_even_with_a_valid_record(dbf, fake_meta,
         "reason": ledger.PAUSE_MESSAGING_LIMIT, "authority": _AUTH,
         "next_eligible_at": _PAST})
     meta = fake_meta(FakeMeta())
-    assert [a for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == []
+    actions = [a["action"] for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id]
+    assert actions in ([], ["needs_merchant_resume"])
     assert meta.calls == []
     assert _campaign(dbf, ids.campaign_id).status == "paused"
 

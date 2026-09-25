@@ -566,6 +566,9 @@ def _campaign_to_dict(
             and authorized_capacity_wait(c.template_variables, "provider_rate_limited") is not None
         ):
             lifecycle = "rate_limit_backoff"
+        elif (pr == "provider_throttling" and not stopped
+              and authorized_capacity_wait(c.template_variables, pr) is not None):
+            lifecycle = "marketing_delivery_backoff"
         elif pr == "provider_throttling":
             detail = str((execution or {}).get("pause_detail") or "")
             lifecycle = ("marketing_delivery_blocked" if "marketing_blocked" in detail
@@ -670,7 +673,7 @@ def _campaign_to_dict(
             {k: (tpl_vars.get("_capacity_wait") or {}).get(k) for k in (
                 "next_eligible_at", "next_eligible_exact", "used_24h", "budget", "limit",
                 "limit_source")}
-            if lifecycle in ("waiting_for_capacity", "rate_limit_backoff") else None
+            if lifecycle in ("waiting_for_capacity", "rate_limit_backoff", "marketing_delivery_backoff") else None
         ),
         # Meta's post-accept breaker, live: what tripped it and when a
         # resume can proceed (None when it has cleared).
