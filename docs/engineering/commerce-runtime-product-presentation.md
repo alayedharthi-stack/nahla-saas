@@ -227,6 +227,39 @@ step 1 and suppression at step 3. A customer who taps a product again is asking
 for it again; answering that with suppressed presentation would be the platform
 overruling an explicit selection.
 
+## The text beside a shape, and the language it is written in
+
+Tenant 1, 25 September 2026 (turns 47–49): the text beside a list restated
+every row's price and sizes, the text beside a card carried the photo's raw
+address, and replies drifted out of Saudi Arabic («هسع», «شنو»). None was the
+model's divergence first:
+
+* **What a shape shows was never declared.** The reply tool said the text
+  "carries the answer by itself" and that each shape is an addition; it never
+  said a row shows the product's title, price and options, or that a card shows
+  the photo and opens the page. The declaration now states those facts, that the
+  text need not repeat them (and still introduces, explains, compares or answers
+  in as much detail as the turn needs), that a selector which cannot be shown
+  becomes lines under the text, and that a card needs a photo, an https page
+  link and a button word — otherwise the text is all the customer receives. A
+  link in the text stays the model's choice whenever the customer asks for one.
+* **The merchant's language was never delivered.** Like the assistant name
+  before #1147, ``default_language`` and ``reply_tone`` stayed on the legacy
+  path. ``commerce_runtime_pilot._context_preamble`` now reads them once per
+  turn with the name and hands the model their platform meaning
+  (``tenant_overlay.LANGUAGE_MAP`` / ``TONE_MAP``) as ``reply_language`` and
+  ``reply_tone`` in ``conversation_context``. ``arabic`` means Saudi colloquial
+  Arabic, as it always has on the legacy path; ``english`` and ``bilingual``
+  mean exactly that — nothing is inferred from a country. ``reply_length``
+  (every meaning is a line cap) and the free-text ``owner_instructions`` /
+  ``assistant_role`` are not carried; carrying them needs its own reviewed
+  scope.
+
+Nothing rewrites, trims or replaces the model's text on any path. Evidence:
+``tests/test_commerce_runtime_reply_style.py`` and the declaration cases in
+``tests/commerce_reliability/test_commerce_runtime_agent_provider.py``; the
+real-model before/after comparison is recorded on the PR.
+
 ## What this does not touch
 
 Model, prompt, persona, tool schema and the model's text are all unchanged. The
