@@ -2781,3 +2781,31 @@ def test_a_code_recording_no_declaration_is_still_refused_on_postgres(pilot):
     assert report.stop_reason == ac.StopReason.VERIFICATION_FAILED.value
     assert "unknown_evidence" in dict(report.stop_detail)["problems"]
     assert transport.sent == [] and report.processing_outcome == c.ProcessingOutcome.FAILED.value
+
+
+def test_an_unreadable_assistant_name_leaves_the_turns_session_usable_and_unflushed(pilot):
+    """On PostgreSQL a failed statement aborts the transaction it ran in. The
+    settings read runs in a connection savepoint, so a SELECT that fails in the
+    database leaves the webhook's session usable for everything the turn still
+    does on it — and the savepoint flushes nothing the session was holding."""
+    from models import Tenant  # noqa: PLC0415
+    from services import commerce_runtime_pilot as seam  # noqa: PLC0415
+
+    db = sessionmaker(bind=pilot.engine, autoflush=False, expire_on_commit=False)()
+    try:
+        pending = Tenant(name="متجر تجريبي عام")
+        db.add(pending)
+        # The read now fails inside PostgreSQL; the rename rolls back with the test.
+        db.execute(text("ALTER TABLE tenant_settings RENAME COLUMN ai_settings TO ai_settings_gone"))
+        assert seam._saved_assistant_name(db, pilot.tenant_a) is None
+        assert pending in db.new, "the read flushed the session's pending state"
+        assert db.execute(text("SELECT 1")).scalar() == 1, "the turn's transaction was aborted"
+        db.flush()
+        assert pending.id is not None
+    finally:
+        db.rollback()
+        db.close()
+    with pilot.engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name = 'tenant_settings' AND column_name = 'ai_settings'")).scalar() == 1

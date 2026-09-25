@@ -57,6 +57,9 @@ class _Query:
     def first(self) -> Any:
         return self._row
 
+    def scalar(self) -> Any:
+        return None  # These seam fixtures have no merchant identity setting.
+
     def all(self) -> List[Any]:
         return [] if self._row is None else [self._row]
 
