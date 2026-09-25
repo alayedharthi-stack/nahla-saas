@@ -202,6 +202,7 @@ def test_the_owner_approved_clauses_name_the_settings_and_the_shapes_without_a_f
     for key in ("reply_language", "reply_tone", "conversation_context"):
         assert key in addendum, key
     assert "choices" not in addendum and "card" not in addendum
-    for shown in ("اسم المنتج", "سعره", "خياراته", "صورته", "صفحته"):
+    for shown in ("اسم المنتج", "مختصرًا", "سعره", "بعض خياراته", "صورته", "صفحته",
+                  "ما لا يتسع له الصف"):
         assert shown in addendum, shown
     assert "إلا إذا طلب العميل الرابط" in addendum

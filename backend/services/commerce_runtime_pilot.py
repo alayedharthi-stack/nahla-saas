@@ -51,6 +51,11 @@ WIRE_UNOBSERVED = "wire_text_unobserved"
 UNFINISHED_PREFIX = "unfinished_"
 OWNED_PREFIX = "owned_"
 
+# The reply tones the settings dashboard offers (``dashboard/src/api/settings.ts``).
+# The saved word is carried as data only when it is one of these; the API
+# accepts any string, and a free-text value is not a tone.
+DASHBOARD_TONES = frozenset({"friendly", "professional", "sales"})
+
 # Refusals that mean the runtime was never in this conversation at all. Asking
 # whether it holds unfinished work would be a query for every inbound message
 # on the platform, so these answer without one.
@@ -154,7 +159,8 @@ def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
             settings = db.query(TenantSettings.ai_settings).filter(
                 TenantSettings.tenant_id == int(tenant_id)).scalar()
     except Exception as exc:  # noqa: BLE001 - the turn is answered without them
-        logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable tenant=%s error=%s",
+        logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable (AI settings read "
+                     "failed; reply style omitted too) tenant=%s error=%s",
                      tenant_id, type(exc).__name__)
         return None
     if settings is None:
@@ -206,9 +212,10 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
       of the reply. Carrying them needs a reviewed scope of its own.
 
     A language value the platform defines no meaning for is left out rather
-    than guessed. A tone the platform defines no meaning for — the dashboard's
-    ``professional`` and ``sales`` — is carried as the merchant saved it: the
-    choice is theirs, and the word names it.
+    than guessed. A tone the platform defines no meaning for is carried as the
+    saved word only when it is one of the dashboard's own choices
+    (``DASHBOARD_TONES``); anything else in that field is free text, which this
+    channel never carries.
     """
     from core.tenant import DEFAULT_AI  # noqa: PLC0415
     from modules.ai.prompts.tenant_overlay import LANGUAGE_MAP, TONE_MAP  # noqa: PLC0415
@@ -237,7 +244,13 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
                            "meaning tenant=%s", tenant_id)
     tone = chosen("reply_tone")
     if tone is not None:
-        style["reply_tone"] = TONE_MAP.get(tone) or tone
+        if TONE_MAP.get(tone):
+            style["reply_tone"] = TONE_MAP[tone]
+        elif tone in DASHBOARD_TONES:
+            style["reply_tone"] = tone
+        else:
+            logger.warning("[COMMERCE_RUNTIME_PILOT] reply tone setting is not a dashboard "
+                           "choice tenant=%s", tenant_id)
     return style
 
 

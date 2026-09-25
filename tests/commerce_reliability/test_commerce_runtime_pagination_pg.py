@@ -903,6 +903,42 @@ def test_a_stood_down_selector_repeats_nothing_the_browse_already_listed(shop: S
         "products the browse already listed are not repeated under the text"
 
 
+def test_a_product_never_shown_as_a_row_still_follows_as_a_line_on_a_more_turn(shop: Shop):
+    """Only rows the customer actually has are left out of the stood-down lines.
+
+    A shirt is sold out when page one is built, so it is never a row; it is back
+    in stock by the "More" tap and the model offers it with a shirt that was a
+    row. The row is not repeated; the never-shown shirt follows as a line."""
+    conversation = shop.conversation()
+    shirts = shop.products[SHIRTS]
+    hidden = shirts[1]
+    with shop.engine.begin() as conn:
+        conn.execute(text("UPDATE products SET in_stock = false, stock_quantity = 0 WHERE id = :p"),
+                     {"p": hidden})
+    try:
+        _report, first = shop.turn(conversation, browse(SHIRTS))
+        first_page, more, _button = _rows(first.sent[0])
+        assert hidden not in first_page
+    finally:
+        with shop.engine.begin() as conn:
+            conn.execute(text("UPDATE products SET in_stock = true, stock_quantity = 5 WHERE id = :p"),
+                         {"p": hidden})
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        offered = [first_page[0], hidden]
+        return _step([_reply("Here you go.", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in offered],
+                             choices={"product_ids": offered, "button": BUTTON})])
+
+    _report, transport, _model = _tap_more(shop, conversation, more, model=LiteralModel(script))
+    body = transport.sent[0]["text"]
+    lines = [line for line in body.splitlines() if TITLES[SHIRTS] in line]
+    assert len(lines) == 1, body
+    assert transport.sent[0][rc.WITHHELD_KEY] == rc.NAVIGATION_ANSWERED_FIRST
+
+
 def test_a_page_that_cannot_be_spent_with_its_reply_goes_as_lines_and_mints_nothing(shop: Shop):
     """The token expires while the model is answering.
 

@@ -234,7 +234,9 @@ every row's price and sizes, the text beside a card carried the photo's raw
 address, and replies drifted out of Saudi Arabic («هسع», «شنو»). None was the
 model's divergence first:
 
-* **What a shape shows was never declared.** The reply tool said the text
+* **What a shape shows was never declared.** (Rows are bounded — a short title,
+  the current price and a few options — so the text stays free to say what a row
+  has no room for.) The reply tool said the text
   "carries the answer by itself" and that each shape is an addition; it never
   said a row shows the product's title, price and options, or that a card shows
   the photo and opens the page. The declaration now states those facts, that the
@@ -255,6 +257,12 @@ model's divergence first:
   ``assistant_role`` are not carried; carrying them needs its own reviewed
   scope.
 
+On a "More" turn the model's own selector stands down for the page, and its
+options follow as lines only if they are not already rows on the customer's
+screen (this page's rows, or rows the conversation sent earlier —
+``ShownProducts.offered_as_rows``). A product that was never a row still
+follows as a line.
+
 Nothing rewrites, trims or replaces the model's text on any path. Evidence:
 ``tests/test_commerce_runtime_reply_style.py`` and the declaration cases in
 ``tests/commerce_reliability/test_commerce_runtime_agent_provider.py``; the
@@ -262,7 +270,9 @@ real-model before/after comparison is recorded on the PR.
 
 ## What this does not touch
 
-Model, prompt, persona, tool schema and the model's text are all unchanged. The
+The policy itself changes no model, persona or model text. (The reply tool's
+descriptions and two pilot-only instruction clauses were changed on 25 September
+2026 with the owner's approval — see the section above.) The
 policy runs after verification, chooses a shape, and composes structured
 payloads from the merchant's own values. Every reason it can reach is a closed
 constant, carried on the delivered payload and in the pilot log, so the shape of

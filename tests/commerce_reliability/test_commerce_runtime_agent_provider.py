@@ -832,8 +832,11 @@ def test_the_declaration_says_what_each_shape_already_shows():
     declarations = _declarations()
     for fact in ("name", "price", "options"):
         assert fact in declarations["tool"], fact
-    for fact in ("title", "price", "options"):
+    for fact in ("short title", "current price", "a few of its options"):
         assert fact in declarations["choices"], fact
+    # A row is bounded; what it cannot hold stays the text's to say.
+    assert "what a row has no room for" in declarations["choices"]
+    assert "what a row has no room for" in declarations["tool"]
     assert "photo" in declarations["card"] and "page" in declarations["card"]
 
 
@@ -854,7 +857,8 @@ def test_the_fallbacks_the_declaration_promises_are_the_ones_implemented():
     stated, so the model can tell which case it is writing for."""
     declarations = _declarations()
     assert "adds its rows to the text as lines" in declarations["choices"]
-    for condition in ("photo", "https page link", "button_label", "text is all the customer receives"):
+    for condition in ("https photo", "https page link", "button_label",
+                      "text is all the customer receives"):
         assert condition in declarations["card"], condition
     assert rcard.NO_IMAGE and rcard.INSECURE_LINK and rcard.NO_LABEL
 

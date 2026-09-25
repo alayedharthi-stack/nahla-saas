@@ -122,10 +122,9 @@ class Composed:
     # payload so a price on a platform-composed row is as auditable as a price
     # in a cited reply.
     row_refs: Tuple[str, ...] = ()
-    # The products this browse has listed to the customer up to and including
-    # this page, in its stored order. A selector the model asked for on the same
-    # turn stands down for the page; its options that are already here need no
-    # second copy as lines under the text.
+    # The products this page actually renders as rows. A selector the model
+    # asked for on the same turn stands down for the page; its options that are
+    # rows here (or were sent as rows earlier) need no second copy as lines.
     already_listed: Tuple[int, ...] = ()
 
 
@@ -459,7 +458,7 @@ def continue_browse(page: BrowsePage) -> Composed:
                                    button=continuation.button_label)
     return Composed(selection=selection, reason=PAGE, navigation=meta, plan=plan,
                     row_refs=tuple(_row_refs(page.products, listed)),
-                    already_listed=tuple(int(p) for p in continuation.product_ids[:bounds.end]))
+                    already_listed=tuple(listed))
 
 
 def page_as_lines(draft: Any, page: BrowsePage) -> Any:

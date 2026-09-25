@@ -464,12 +464,16 @@ class AgentLoop:
             session.record("browse_failed", {"error": type(exc).__name__})
             composed, browse_outcome = None, br.BROWSE_FAILED
 
+        # Rows the customer already has on screen: sent earlier in this
+        # conversation, or on the page this reply answers with. A stood-down
+        # selector's options that are among them are not repeated as lines.
+        sent_rows = tuple(presentation.rows_already_sent) if presentation is not None else ()
         if composed is not None and composed.selection is not None:
             draft, choices = rc.finalize_composed(
                 draft, session.observations, composed.selection, composed.reason,
                 navigation=composed.navigation, row_refs=composed.row_refs,
                 stand_down=rc.NAVIGATION_ANSWERED_FIRST if shape.reason == pp.NAVIGATION_PAGE else "",
-                already_listed=composed.already_listed)
+                already_listed=composed.already_listed + sent_rows)
             session.navigation_plan = composed.plan
         else:
             if composed is not None:
@@ -491,7 +495,12 @@ class AgentLoop:
                 card_composed, _reason = rcard.card(draft, session.observations,
                                                     determined_product_id=shape.determined_product_id)
                 withhold = rc.TAP_ANSWERED_FIRST if card_composed is not None else ""
-            draft, choices = rc.finalize(draft, session.observations, withhold=withhold)
+            on_screen: Tuple[int, ...] = ()
+            if withhold == rc.NAVIGATION_ANSWERED_FIRST:
+                page_ids = tuple(int(p.get("product_id") or 0) for p in (page.products if page else ()))
+                on_screen = page_ids + sent_rows
+            draft, choices = rc.finalize(draft, session.observations, withhold=withhold,
+                                         already_listed=on_screen)
         # A card is the same split for the shape that follows a choice rather
         # than offering one. The selector wins when both are on the table: a
         # customer who still has to choose is not helped by one product's photo.
