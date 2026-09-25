@@ -19,6 +19,12 @@ unchanged, carrying whatever it already said. The reason rides on the delivered
 payload as ``card_withheld`` so it is auditable in production rather than only
 in a log line.
 
+One case differs: a card the provider **refused** after the model offered it.
+The model wrote its text expecting the button to carry the page, so the bounded
+text recovery carries that same verified page address on a line of its own
+(``card_link_appended``). Nothing else about the answer changes, and no address
+is added that the card did not already hold.
+
 Why this fits the delivery ledger unchanged: WhatsApp's interactive ``cta_url``
 message carries an image header, a body and a URL button **in one message**, so
 a card is one send, exactly as an interactive list is. The loop still reserves
@@ -27,6 +33,9 @@ one delivery intent per turn and the ledger still records one receipt.
 from __future__ import annotations
 
 import dataclasses
+import re
+import unicodedata
+import urllib.parse
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from core.commerce_runtime import reply_choices as rc
@@ -36,6 +45,12 @@ from core.commerce_runtime import reply_choices as rc
 REQUESTED_KEY = "requested_card"
 CARD_KEY = "card"
 WITHHELD_KEY = "card_withheld"
+PROVIDER_REJECTED = "provider_rejected_the_card"
+# The refused card's page, as the recovery text carries it. Its presence on the
+# recovery payload is the record that the platform added it.
+LINK_APPENDED_KEY = "card_link_appended"
+# The transform reason the transcript records for that addition.
+LINK_APPENDED_REASON = "provider_rejected_card_page_link_as_text"
 
 # Meta truncates a CTA button label, so the model's word is bounded to what the
 # channel will render whole. The platform has no label of its own to fall back
@@ -295,22 +310,100 @@ def note_withheld(draft: Any, reason: str) -> Any:
     return dataclasses.replace(draft, payload=ac.public_copy(payload))
 
 
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_TRAILING = ".,;:!?)]}»،؛"
+
+
+def _page_link(value: Any) -> str:
+    """The card's page address when a customer can open it as a text link.
+
+    The card already required ``https``. As a line of text it must also name a
+    host and hold no whitespace or control character, which a button never
+    exposes but a customer's client would render as a broken address. An
+    address as long as the product view's bound may have been cut there, and a
+    cut address is not repeated as a fact.
+    """
+    from core.commerce_runtime.agent_live_tools import MAX_LINK_CHARS  # noqa: PLC0415
+
+    url = _https(value)
+    if not url or len(url) >= MAX_LINK_CHARS:
+        return ""
+    if any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in url):
+        return ""
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+    return url if "." in host else ""
+
+
+def _comparable(url: str) -> str:
+    """One page however it is written: decoded, host case-folded, no trailing
+    slash or sentence punctuation."""
+    text = urllib.parse.unquote(str(url or "").strip()).rstrip(_TRAILING).rstrip("/")
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return text
+    return urllib.parse.urlunsplit((parts.scheme.lower(), parts.netloc.lower(),
+                                    parts.path, parts.query, parts.fragment))
+
+
+def _carries(text: str, url: str) -> bool:
+    """Whether the model's text already gives this page, in any encoding."""
+    if url in text:
+        return True
+    target = _comparable(url)
+    return any(_comparable(found) == target for found in _URL_IN_TEXT.findall(text))
+
+
+def _reaches_the_wire_intact(body: str, link: str) -> bool:
+    """Whether the send path would transmit this body with the link as written.
+
+    Asked of the send path's own rules (``outbound_text_rewrite_rule``), in the
+    state that rewrites the most — no handoff active — so the platform's
+    addition can never be why a valid answer is scrubbed, replaced, or carries
+    a broken address. A body any rule would touch gets no link.
+    """
+    from core.outbound_sanitizer import outbound_text_rewrite_rule  # noqa: PLC0415
+    from core.wa_link_buttons import strip_empty_markdown_links  # noqa: PLC0415
+
+    return outbound_text_rewrite_rule(body) is None and link in strip_empty_markdown_links(body)
+
+
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     """The same reply without its card, for the bounded recovery attempt.
 
-    Nothing of the answer is lost: the card carried no words of its own, so
-    removing it leaves the model's text exactly as it was written.
+    The model's words stay exactly as written. It offered the card expecting its
+    button to open the product page, so after the provider refused the card the
+    same verified address follows the text on its own line — unless the text
+    already gives it, the address is not one a customer can open as text, or
+    the send path would not transmit the body with it intact. The added address
+    is recorded as ``card_link_appended``.
     """
     out = {key: value for key, value in dict(payload or {}).items() if key != CARD_KEY}
-    if payload_card(payload) is not None:
-        out[WITHHELD_KEY] = "provider_rejected_the_card"
+    card_view = payload_card(payload)
+    if card_view is None:
+        return out
+    out[WITHHELD_KEY] = PROVIDER_REJECTED
+    written = str(out.get("text") or "")
+    link = _page_link(card_view.get("button_url"))
+    if not written.strip() or not link or _carries(written, link):
+        return out
+    separator = "" if written.endswith("\n") else "\n"
+    body = f"{written}{separator}{link}"
+    if not _reaches_the_wire_intact(body, link):
+        return out
+    out["text"] = body
+    out[LINK_APPENDED_KEY] = link
     return out
 
 
 __all__ = [
-    "CARD_KEY", "INSECURE_LINK", "MAX_BUTTON_LABEL", "NOT_OBSERVED", "NOT_REQUESTED",
-    "NO_IMAGE", "NO_LABEL", "NO_LINK", "OFFERED", "REQUESTED_KEY", "WITHHELD_KEY",
-    "SELECTOR_PREFERRED",
+    "CARD_KEY", "INSECURE_LINK", "LINK_APPENDED_KEY", "LINK_APPENDED_REASON",
+    "MAX_BUTTON_LABEL", "NOT_OBSERVED", "NOT_REQUESTED",
+    "NO_IMAGE", "NO_LABEL", "NO_LINK", "OFFERED", "PROVIDER_REJECTED", "REQUESTED_KEY",
+    "WITHHELD_KEY", "SELECTOR_PREFERRED",
     "ProductCard", "card", "finalize", "note_withheld", "payload_card", "requested_label",
     "requested_product_id", "text_only_payload",
     "unobserved_card",

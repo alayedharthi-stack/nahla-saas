@@ -156,6 +156,10 @@ class TurnReport:
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
     recovery_status: Optional[str] = None     # the bounded rich-to-text attempt, when one was made
+    # What that recovery added to the model's words, by name — a refused list's
+    # options as lines, a refused card's page — so the transcript records why
+    # the transmitted text is longer than the reserved intent.
+    text_additions: Tuple[str, ...] = ()
     provider_message_id: Optional[str] = None
     processing_outcome: Optional[str] = None
     transport_outcome: Optional[str] = None
@@ -182,6 +186,7 @@ class TurnReport:
         fields["tools_called"] = ",".join(self.tools_called)
         fields["evidence_refs"] = ",".join(self.evidence_refs)
         fields["choice_row_ids"] = ",".join(self.choice_row_ids)
+        fields["text_additions"] = ",".join(self.text_additions)
         fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
@@ -871,6 +876,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         transport=transport, owner_id=owner_id)
     if recovery is not None:
         common["recovery_status"] = recovery.status
+        common["text_additions"] = _recovery_payload(intent_payload)[1]
         # The recovery is the send that reached the customer, and it carried
         # neither rows nor a card. Reporting the withheld ones would let a later
         # tap verify against a list nobody received, and a later suppression
@@ -892,6 +898,30 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                       customer_reach=getattr(terminal, "customer_reach", None), **common)
 
 
+LIST_AS_LINES_REASON = "provider_rejected_list_options_as_lines"
+
+
+def _recovery_payload(intent_payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], Tuple[str, ...]]:
+    """The text-only recovery of a refused rich reply, and what it added.
+
+    Whichever rich shape the provider refused is the one that has to go. A list
+    is dropped to its options as lines; a card to the text it carried plus the
+    page its button would have opened. Re-sending the refused shape unchanged
+    would be the same message twice, not a recovery — which is what happened
+    when only the selector was stripped and a refused card went back out
+    identical. Each addition to the model's words is named, never implied.
+    """
+    additions = []
+    payload = rc.text_only_payload(intent_payload)
+    if str(payload.get("text") or "") != str(intent_payload.get("text") or ""):
+        additions.append(LIST_AS_LINES_REASON)
+    if rcard.payload_card(payload) is not None:
+        payload = rcard.text_only_payload(payload)
+        if payload.get(rcard.LINK_APPENDED_KEY):
+            additions.append(rcard.LINK_APPENDED_REASON)
+    return payload, tuple(additions)
+
+
 def _recover_without_the_selector(
     *, ledgers: LedgerRepository, tenant_id: int, runtime_conversation_id: int,
     token: c.OwnershipToken, dispatch: dd.DispatchOutcome, sequence: Any,
@@ -911,23 +941,18 @@ def _recover_without_the_selector(
     trust: the ledger re-reads the outcome, the attempt kind and the bound, and
     an accepted, unknown or already-recovered reservation permits nothing.
 
-    The reply itself is unchanged — same text, same evidence, no selector and
+    The model's words are unchanged — same text, same evidence, no selector and
     no card — so a provider that will not render the rows, or will not take the
-    image header, costs the customer the tapping and nothing else. A recovery that is itself refused leaves the first outcome
-    standing rather than inventing a better one.
+    image header (a WebP photo is refused outright, #131053), costs the customer
+    the tapping and nothing else: the rows follow as lines and the card's page as
+    a link, each named in ``_recovery_payload``. A recovery that is itself
+    refused leaves the first outcome standing rather than inventing a better one.
     """
     if dispatch.status != dd.SENT_REJECTED:
         return None
     if str(getattr(sequence, "intent_kind", "") or "") != lc.DeliveryKind.RICH.value:
         return None
-    # Whichever rich shape the provider refused is the one that has to go. A
-    # list is dropped to its options as lines; a card is dropped to the text it
-    # always carried. Re-sending the refused shape unchanged would be the same
-    # message twice, not a recovery — which is what happened when only the
-    # selector was stripped and a refused card went back out identical.
-    payload = rc.text_only_payload(intent_payload)
-    if rcard.payload_card(payload) is not None:
-        payload = rcard.text_only_payload(payload)
+    payload, _additions = _recovery_payload(intent_payload)
     if not str(payload.get("text") or "").strip():
         return None
     recovery = dd.dispatch_delivery_recovery(

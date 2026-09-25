@@ -118,13 +118,21 @@ class WireObservation:
         self.duplicate_suppressed = bool(duplicate_suppressed)
         self.row_ids = [str(value) for value in (row_ids or ()) if str(value or "").strip()]
 
-    def resolve(self, intent: str) -> Tuple[str, bool, List[str]]:
-        """``(text_to_store, transformed, reasons)`` for one accepted send."""
+    def resolve(self, intent: str,
+                additions: Sequence[str] = ()) -> Tuple[str, bool, List[str]]:
+        """``(text_to_store, transformed, reasons)`` for one accepted send.
+
+        ``additions`` are what the runtime itself added to the model's words
+        before the send path saw them (a refused card's page, a refused list's
+        options). They are named first, so a sanitiser change on the same send
+        can never hide them.
+        """
+        named = [str(reason) for reason in additions if str(reason or "").strip()]
         if not self.observed:
             # Not observed is not unchanged. Say so rather than certify a text
             # nobody read back.
-            return str(intent or ""), True, [WIRE_UNOBSERVED]
-        reasons = list(self.reasons)
+            return str(intent or ""), True, list(dict.fromkeys([WIRE_UNOBSERVED, *named]))
+        reasons = list(dict.fromkeys([*named, *self.reasons]))
         if self.text != str(intent or "") and not reasons:
             reasons = ["wire_text_differs_from_reserved_intent"]
         return self.text, bool(reasons), reasons
@@ -1299,7 +1307,8 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                     report.turn_id)
         return
     intent = str(getattr(report, "reply_text", "") or "")
-    text, transformed, reasons = wire.resolve(intent)
+    text, transformed, reasons = wire.resolve(
+        intent, additions=tuple(getattr(report, "text_additions", ()) or ()))
     try:
         trace.mark_outbound_sent(source=TRACE_SOURCE, length=len(text))
     except Exception:  # noqa: BLE001 - tracing must not change what happened

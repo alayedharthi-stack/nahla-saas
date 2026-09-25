@@ -12,6 +12,7 @@ shirt, shoe and perfume rows.
 from __future__ import annotations
 
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -24,6 +25,7 @@ from core.commerce_runtime import agent_contracts as ac  # noqa: E402
 from core.commerce_runtime import ledger_contracts as lc  # noqa: E402
 from core.commerce_runtime import reply_card as rcard  # noqa: E402
 from core.commerce_runtime import reply_choices as rc  # noqa: E402
+from core.commerce_runtime import runtime_entry as entry  # noqa: E402
 
 IMAGE = "https://cdn.example.test/nWzD/m1JuFPTZeyNjtDm9pNK32.jpg"
 LINK = "https://demostore.example.test/dev-/فستان/p398551325"
@@ -154,6 +156,113 @@ def test_the_recovery_payload_drops_the_card_and_keeps_every_word() -> None:
     assert rcard.payload_card(recovered) is None
     assert recovered.get("text", final.text) == final.payload.get("text", "هذا الفستان")
     assert recovered[rcard.WITHHELD_KEY] == "provider_rejected_the_card"
+
+
+# ── A card the provider refused: its page follows the unchanged text ─────────
+#
+# Tenant 33, 2026-09-25 (sequences 48, 49): Meta refused a product card with
+# #131053 "WebP image uploads are not currently supported", and the recovered
+# text reached the customer without the page the model expected the button to
+# open. Generic merchants below; the rule is not about one store's catalogue.
+
+BAG_PAGE = "https://shop.example.test/ar/شنطة-يد-جلد/p41"
+
+
+def _refused(text: str, button_url: str = BAG_PAGE) -> Dict[str, Any]:
+    """The reserved intent of a card turn, as the ledger stores it."""
+    return {"text": text, rcard.CARD_KEY: {"product_id": 41,
+                                          "image_url": "https://cdn.example.test/bag.webp",
+                                          "button_url": button_url, "button_label": "عرض"}}
+
+
+def test_a_refused_card_carries_its_page_once_below_the_unchanged_text() -> None:
+    written = "الشنطة متوفرة باللون البني وسعرها 229 ريال."
+    recovered = rcard.text_only_payload(_refused(written))
+    assert rcard.payload_card(recovered) is None
+    assert recovered[rcard.WITHHELD_KEY] == rcard.PROVIDER_REJECTED
+    assert recovered["text"].startswith(written)                       # every model word kept
+    assert recovered["text"][len(written):] == "\n" + BAG_PAGE          # one line, the card's page
+    assert recovered[rcard.LINK_APPENDED_KEY] == BAG_PAGE
+
+
+def test_a_page_the_text_already_gives_is_not_given_twice() -> None:
+    encoded = urllib.parse.quote(BAG_PAGE, safe=":/")
+    for written in (f"تفضلي الرابط: {BAG_PAGE}",
+                    f"تفضلي الرابط: {encoded}",                          # percent-encoded
+                    f"تفضلي الرابط ({BAG_PAGE}/).",                       # slash and punctuation
+                    f"تفضلي الرابط: {BAG_PAGE.replace('shop.', 'SHOP.')}"):  # host case
+        recovered = rcard.text_only_payload(_refused(written))
+        assert recovered["text"] == written, written
+        assert rcard.LINK_APPENDED_KEY not in recovered
+
+
+def test_a_page_address_a_customer_cannot_open_as_text_is_not_added() -> None:
+    for page in ("https://", "https://shop", "https://shop.example.test/p/شنطة يد",
+                 "https://shop.example.test/p/41‏"):
+        recovered = rcard.text_only_payload(_refused("القميص متوفر.", button_url=page))
+        assert recovered["text"] == "القميص متوفر.", page
+        assert recovered[rcard.WITHHELD_KEY] == rcard.PROVIDER_REJECTED
+
+
+SEND_PATH_REWRITES = {
+    # every rule the send path applies to a text body, one address each
+    "external_research": "https://shop.example.test/p/%25D8%25B9%25D8%25B7%25D8%25B1",
+    "leakage_firewall_word": "https://shop.example.test/p/debug-kit",
+    "leakage_firewall_field": "https://shop.example.test/p/perfume?intent=buy",
+    # independent review of #1155: a slug the handoff-promise scrub matches is
+    # cut to ``https://shop.example.test/p/`` when no handoff is active
+    "handoff_promise": "https://shop.example.test/p/سيتمتحويلك",
+    "internal_marker": "https://shop.example.test/p/[SKU_A1]",
+}
+
+
+def test_a_page_the_send_path_would_rewrite_is_not_added() -> None:
+    """The addition must never be why valid model text is scrubbed or replaced
+    by the send path's own wording, nor arrive as a broken address. The check
+    is the send path's own rules, not a list kept here."""
+    from core.outbound_sanitizer import outbound_text_rewrite_rule
+
+    written = "عطر الورد متوفر بسعر 180 ريال."
+    for rule, page in SEND_PATH_REWRITES.items():
+        assert outbound_text_rewrite_rule(f"{written}\n{page}") is not None, rule
+        recovered = rcard.text_only_payload(_refused(written, button_url=page))
+        assert recovered["text"] == written, rule
+        assert rcard.LINK_APPENDED_KEY not in recovered, rule
+    added = rcard.text_only_payload(_refused(written))["text"]
+    assert added.endswith(BAG_PAGE) and outbound_text_rewrite_rule(added) is None
+
+
+def test_a_page_address_at_the_product_view_bound_may_be_cut_and_is_not_repeated() -> None:
+    """The product view cuts a page address at its bound; an address that long
+    may be a cut one, which opens a page nobody published."""
+    from types import SimpleNamespace
+
+    from core.commerce_runtime import agent_live_tools as live
+
+    slug = urllib.parse.quote("فستان-سهرة-طويل-مطرز-بالخرز-مع-أكمام-شيفون-وحزام-ساتان-لون-كحلي")
+    long_page = f"https://shop.example.test/ar/{slug}/p398551325"
+    assert len(long_page) > live.MAX_LINK_CHARS
+    seen = live._product_view(SimpleNamespace(product_url=long_page))["product_url"]
+    assert len(seen) == live.MAX_LINK_CHARS                          # cut by the view
+    recovered = rcard.text_only_payload(_refused("الفستان متوفر.", button_url=seen))
+    assert recovered["text"] == "الفستان متوفر."
+    whole = "https://shop.example.test/p/" + "a" * (live.MAX_LINK_CHARS - 29)
+    assert len(whole) == live.MAX_LINK_CHARS - 1
+    assert rcard.text_only_payload(_refused("الفستان متوفر.", button_url=whole))["text"].endswith(whole)
+
+
+def test_a_recovery_without_words_or_without_a_card_adds_nothing() -> None:
+    assert rcard.LINK_APPENDED_KEY not in rcard.text_only_payload(_refused(""))
+    plain = {"text": "أهلاً", "choices_withheld": "x"}
+    assert rcard.text_only_payload(plain) == plain
+
+
+def test_the_recovery_names_each_addition_to_the_models_words() -> None:
+    card_payload, card_added = entry._recovery_payload(_refused("الشنطة متوفرة."))
+    assert card_added == (rcard.LINK_APPENDED_REASON,)
+    assert card_payload["text"].endswith(BAG_PAGE)
+    unchanged, nothing = entry._recovery_payload(_refused("رابطها " + BAG_PAGE))
+    assert nothing == () and unchanged["text"] == "رابطها " + BAG_PAGE
 
 
 def test_a_stored_card_missing_a_field_is_not_sent() -> None:

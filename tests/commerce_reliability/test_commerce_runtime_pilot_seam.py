@@ -8,7 +8,7 @@ back — not even by an exception. No database, no model, no network.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -489,6 +489,51 @@ def test_a_send_path_that_rewrote_the_body_stores_what_was_transmitted(
     assert "outbound_payload_sanitizer" in meta["final_transform_reasons"]
     assert meta["final_customer_text_source"] == "llm_postprocess"
     assert trace.marked == [{"source": seam.TRACE_SOURCE, "length": len("النص بعد التنقية")}]
+
+
+def run_recovery_through_transport(monkeypatch: pytest.MonkeyPatch, intent: str,
+                                   recovered: str, additions: Tuple[str, ...]) -> None:
+    """The runtime's bounded recovery: the intent stays, a longer text is handed on."""
+    def run_turn(**kwargs: Any) -> Any:
+        response = kwargs["transport"]({"text": recovered})
+        assert response.http_status == 200
+        return report(reply_text=intent, provider_message_id="wamid.WIRE",
+                      recovery_status="accepted", text_additions=additions)
+
+    monkeypatch.setattr(entry, "run_commerce_runtime_turn", run_turn, raising=True)
+
+
+def test_a_refused_card_s_page_is_named_as_the_platform_s_addition(enabled, monkeypatch, saved):
+    """The stored row says why it is longer than the intent, by name — not the
+    generic "wire differs" — so an auditor can tell it from a sanitiser rewrite."""
+    from core.commerce_runtime import reply_card as rcard
+
+    written = "القميص متوفر بمقاس M و L."
+    sent_text = written + "\nhttps://shop.example.test/p/shirt"
+    wire_send(monkeypatch)
+    run_recovery_through_transport(monkeypatch, written, sent_text, (rcard.LINK_APPENDED_REASON,))
+    call()
+    row = saved[0]
+    assert row["body"] == sent_text                         # what the customer received
+    meta = row["extra_metadata"]
+    assert meta["final_text_transformed"] is True
+    assert meta["final_transform_reasons"] == [rcard.LINK_APPENDED_REASON]
+    assert meta["final_customer_text_source"] == "llm_postprocess"
+    assert meta["compose_source"] == "llm"
+
+
+def test_the_platform_s_addition_stays_named_when_the_sanitiser_also_changed_the_body(
+        enabled, monkeypatch, saved):
+    from core.commerce_runtime import reply_card as rcard
+
+    written = "العطر متوفر."
+    wire_send(monkeypatch, transmitted="العطر متوفر (بعد التنقية)")
+    run_recovery_through_transport(monkeypatch, written,
+                                   written + "\nhttps://shop.example.test/p/perfume",
+                                   (rcard.LINK_APPENDED_REASON,))
+    call()
+    reasons = saved[0]["extra_metadata"]["final_transform_reasons"]
+    assert reasons == [rcard.LINK_APPENDED_REASON, "outbound_payload_sanitizer"]
 
 
 def test_the_reserved_intent_stays_identifiable_beside_the_transmitted_text(

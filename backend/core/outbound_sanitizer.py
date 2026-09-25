@@ -1174,6 +1174,36 @@ def maybe_scrub_unkept_asset_promise(
     return rewritten, True, asset_class
 
 
+def outbound_text_rewrite_rule(text: str) -> Optional[str]:
+    """The first send-path rule that would rewrite this text body, or ``None``.
+
+    For a caller that adds platform content to a reply and must know, before
+    adding it, that it reaches the customer as written. It is composed only of
+    the detectors the send path itself applies to a text body, in the state
+    that rewrites the most — the leakage firewall, the external-research
+    fingerprints, the handoff-promise scrub as it runs when no handoff is
+    active, and the provider's internal-marker scrub — so it carries no
+    pattern of its own and cannot drift from the rules it reports on. The
+    empty-link and whitespace tidy changes no content and is not reported.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    from core.ai_libraries import scrub_internal_markers  # noqa: PLC0415
+    from core.outbound_leakage_firewall import contains_outbound_leak  # noqa: PLC0415
+
+    leak = contains_outbound_leak(text)
+    if leak:
+        return f"leakage_firewall:{leak}"
+    research = contains_leakage_markers(text)
+    if research:
+        return f"external_research:{research}"
+    if contains_handoff_promise(text):
+        return "handoff_promise"
+    if scrub_internal_markers(text) != text:
+        return "internal_marker"
+    return None
+
+
 __all__ = [
     "SAFE_FALLBACK_TEXT",
     "ASSET_LINK",
@@ -1190,6 +1220,7 @@ __all__ = [
     "extract_natural_segment",
     "maybe_scrub_handoff_promise",
     "maybe_scrub_unkept_asset_promise",
+    "outbound_text_rewrite_rule",
     "sanitize_outbound_payload",
     "sanitize_outbound_text",
 ]
