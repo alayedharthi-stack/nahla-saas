@@ -1664,7 +1664,8 @@ async def _ensure_portfolio_id(conn: Any, ctx: Any, tenant_id: int) -> bool:
     return True
 
 
-async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:
+async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int, *,
+                                   max_age_seconds: Optional[int] = None) -> None:
     """Fetch Meta tier from Graph API if cached data is missing or stale."""
     import logging as _log  # noqa: PLC0415
     _logger = _log.getLogger("nahla.whatsapp.tier")
@@ -1678,7 +1679,8 @@ async def _maybe_refresh_meta_tier(db: "Session", tenant_id: int) -> None:
         last = conn.meta_tier_updated_at
         if last and last.tzinfo is None:
             last = last.replace(tzinfo=tz.utc)
-        fresh = bool(last and (now - last).total_seconds() < _META_TIER_STALE_HOURS * 3600)
+        max_age = _META_TIER_STALE_HOURS * 3600 if max_age_seconds is None else max_age_seconds
+        fresh = bool(last and (now - last).total_seconds() < max_age)
         missing_portfolio = not (conn.business_manager_id or conn.meta_business_account_id)
         if fresh and not missing_portfolio:
             return

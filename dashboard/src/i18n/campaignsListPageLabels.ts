@@ -60,6 +60,7 @@ export interface CampaignsListLabels {
     paused: string
     waiting_for_capacity: string
     rate_limit_backoff: string
+    marketing_delivery_backoff: string
     marketing_delivery_blocked: string
     provider_throttled: string
     unknown: string
@@ -78,6 +79,7 @@ export interface CampaignsListLabels {
     capacityResumeAt: string
     capacityResumeSoon: string
     rateLimitResumeAt: string
+    marketingResumeAt: string
     throttleClearsAt: string
     throttleCleared: string
   }
@@ -715,6 +717,7 @@ export const campaignsListEn: CampaignsListLabels = {
     paused: 'Paused',
     waiting_for_capacity: 'Waiting for Meta messaging capacity',
     rate_limit_backoff: 'Meta asked to slow down — continues automatically',
+    marketing_delivery_backoff: 'Waiting after marketing delivery refusals — automatic continuation',
     marketing_delivery_blocked: 'Meta is not delivering marketing to many recipients — stopped',
     provider_throttled: 'Meta is throttling this number — stopped',
     unknown: 'Unknown',
@@ -742,6 +745,7 @@ export const campaignsListEn: CampaignsListLabels = {
     },
     capacityResumeAt: 'Meta daily limit reached — continues automatically around {time}',
     capacityResumeSoon: 'Meta daily limit reached — continues automatically when capacity returns',
+    marketingResumeAt: 'Automatically rechecks around {time}, then continues unsent recipients if eligible. Delivery is not guaranteed.',
     rateLimitResumeAt: 'Meta asked to slow down — continues automatically around {time}',
     throttleClearsAt: '{count} Meta delivery failures ({key}) in the last {minutes} min — a resume can send again from {time}; it will not resume on its own',
     throttleCleared: 'The Meta failure window has cleared — you can resume',
@@ -970,6 +974,7 @@ export const campaignsListAr: CampaignsListLabels = {
     paused: 'متوقفة مؤقتاً',
     waiting_for_capacity: 'بانتظار سعة المراسلة من Meta',
     rate_limit_backoff: 'طلبت Meta إبطاء الإرسال — تُستأنف تلقائياً',
+    marketing_delivery_backoff: 'انتظار بعد منع التسليم التسويقي — استكمال تلقائي',
     marketing_delivery_blocked: 'Meta لا تسلّم الرسائل التسويقية لعدد كبير من المستلمين — متوقفة',
     provider_throttled: 'Meta تقيّد الإرسال من هذا الرقم — متوقفة',
     unknown: 'غير معروفة',
@@ -997,6 +1002,7 @@ export const campaignsListAr: CampaignsListLabels = {
     },
     capacityResumeAt: 'بلغت حد Meta اليومي — تُستأنف تلقائياً قرابة {time}',
     capacityResumeSoon: 'بلغت حد Meta اليومي — تُستأنف تلقائياً عند توفر السعة',
+    marketingResumeAt: 'إعادة فحص تلقائية قرابة {time}، ثم استكمال من لم تُقبل رسائلهم عند السماح. الوصول غير مضمون.',
     rateLimitResumeAt: 'طلبت Meta إبطاء الإرسال — تُستأنف تلقائياً قرابة {time}',
     throttleClearsAt: '{count} رسالة لم تسلّمها Meta ({key}) خلال آخر {minutes} دقيقة — يمكن الاستئناف من {time}، ولن تُستأنف تلقائياً',
     throttleCleared: 'انقضت نافذة إخفاقات Meta — يمكن استئناف الإرسال',

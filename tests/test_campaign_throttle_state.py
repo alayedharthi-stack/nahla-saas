@@ -1,6 +1,6 @@
 """Meta throttling: why a campaign stopped is reported truthfully, a
 temporary per-minute limit backs off and continues on its own, a delivery
-block (131049) does not, and a run never ends "completed" with recipients
+block (131049) cools down before continuing untouched recipients, and a run never ends "completed" with recipients
 still queued. Real leased dispatch path, scripted Meta, SQLite and
 PostgreSQL; generic merchant data, no real sends.
 """
@@ -189,11 +189,11 @@ def test_a_delivery_block_is_shown_as_one_not_as_wait_a_minute(dbf, fake_meta, w
     fake_meta(FakeMeta())
     world.dispatch(dbf, ids.campaign_id)
     payload = _cap._lifecycle(dbf, ids.campaign_id)
-    assert payload["lifecycle"] == "marketing_delivery_blocked"
+    assert payload["lifecycle"] == "marketing_delivery_backoff"
     assert payload["last_error_key"] != "rate_limit"
     assert "انتظر دقيقة" not in (payload["last_error_ar"] or "")
-    assert "131049" in payload["pause_reason_ar"]
-    assert payload["throttle"]["key"] == "marketing_blocked" and payload["throttle_checked"] is True
+    assert payload["capacity_wait"]["next_eligible_at"]
+    assert payload["capacity_wait"]["next_eligible_exact"] is False
 
 
 def test_negative_control_the_meta_classifier_misreads_the_internal_token():
@@ -249,16 +249,16 @@ def test_consecutive_rate_limits_back_off_longer(dbf, fake_meta, world):
     assert timedelta(minutes=9) < due - _now() <= 2 * ledger.RATE_LIMIT_BACKOFF_BASE
 
 
-def test_a_delivery_block_is_never_resumed_by_the_scheduler(dbf, fake_meta, world):
-    """131049 is Meta declining to deliver marketing: no periodic resume."""
+def test_marketing_cooldown_continues_only_untouched_recipients(dbf, fake_meta, world):
+    """Owner-authorized continuation; never retry a previously accepted copy."""
     ids = _seed(dbf, phones=PHONES[:3])
     _post_accept_failures(dbf, ids, 25)
     meta = fake_meta(FakeMeta())
     world.dispatch(dbf, ids.campaign_id)
     _age_failures(dbf, 16)
     _cap._age_window(dbf, hours=1)
-    assert [a for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == []
-    assert meta.calls == []
+    assert [a["action"] for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == ["resumed"]
+    assert sorted(meta.calls) == sorted(PHONES[:3])
 
 
 def test_negative_control_the_old_breaker_ended_a_rate_limited_run_as_completed(
@@ -409,5 +409,5 @@ def test_without_a_connection_the_block_is_never_shown_as_cleared(dbf, fake_meta
     _age_failures(dbf, 16)                               # the window has in fact cleared
     monkeypatch.setattr(disp, "_get_wa_connection", lambda db, tenant_id: None)
     payload = _cap._lifecycle(dbf, ids.campaign_id)
-    assert payload["lifecycle"] == "marketing_delivery_blocked"
+    assert payload["lifecycle"] == "marketing_delivery_backoff"
     assert payload["throttle"] is None and payload["throttle_checked"] is False
