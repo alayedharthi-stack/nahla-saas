@@ -1,0 +1,7 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -u scripts/operators/campaign35_adoption_runner.py"
+restartPolicyType = "NEVER"
