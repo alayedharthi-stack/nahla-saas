@@ -204,22 +204,51 @@ def test_a_page_address_a_customer_cannot_open_as_text_is_not_added() -> None:
         assert recovered[rcard.WITHHELD_KEY] == rcard.PROVIDER_REJECTED
 
 
+SEND_PATH_REWRITES = {
+    # every rule the send path applies to a text body, one address each
+    "external_research": "https://shop.example.test/p/%25D8%25B9%25D8%25B7%25D8%25B1",
+    "leakage_firewall_word": "https://shop.example.test/p/debug-kit",
+    "leakage_firewall_field": "https://shop.example.test/p/perfume?intent=buy",
+    # independent review of #1155: a slug the handoff-promise scrub matches is
+    # cut to ``https://shop.example.test/p/`` when no handoff is active
+    "handoff_promise": "https://shop.example.test/p/سيتمتحويلك",
+    "internal_marker": "https://shop.example.test/p/[SKU_A1]",
+}
+
+
 def test_a_page_the_send_path_would_rewrite_is_not_added() -> None:
     """The addition must never be why valid model text is scrubbed or replaced
-    by the sanitiser's own wording: a double-encoded address matches the
-    external-research fingerprint, a path word the leakage firewall."""
-    from core.outbound_leakage_firewall import contains_outbound_leak
-    from core.outbound_sanitizer import contains_leakage_markers
+    by the send path's own wording, nor arrive as a broken address. The check
+    is the send path's own rules, not a list kept here."""
+    from core.outbound_sanitizer import outbound_text_rewrite_rule
 
     written = "عطر الورد متوفر بسعر 180 ريال."
-    for page in ("https://shop.example.test/p/%25D8%25B9%25D8%25B7%25D8%25B1",
-                 "https://shop.example.test/p/debug-kit",
-                 "https://shop.example.test/p/perfume?intent=buy"):
+    for rule, page in SEND_PATH_REWRITES.items():
+        assert outbound_text_rewrite_rule(f"{written}\n{page}") is not None, rule
         recovered = rcard.text_only_payload(_refused(written, button_url=page))
-        assert recovered["text"] == written, page
-        assert rcard.LINK_APPENDED_KEY not in recovered
+        assert recovered["text"] == written, rule
+        assert rcard.LINK_APPENDED_KEY not in recovered, rule
     added = rcard.text_only_payload(_refused(written))["text"]
-    assert contains_outbound_leak(added) is None and contains_leakage_markers(added) is None
+    assert added.endswith(BAG_PAGE) and outbound_text_rewrite_rule(added) is None
+
+
+def test_a_page_address_at_the_product_view_bound_may_be_cut_and_is_not_repeated() -> None:
+    """The product view cuts a page address at its bound; an address that long
+    may be a cut one, which opens a page nobody published."""
+    from types import SimpleNamespace
+
+    from core.commerce_runtime import agent_live_tools as live
+
+    slug = urllib.parse.quote("فستان-سهرة-طويل-مطرز-بالخرز-مع-أكمام-شيفون-وحزام-ساتان-لون-كحلي")
+    long_page = f"https://shop.example.test/ar/{slug}/p398551325"
+    assert len(long_page) > live.MAX_LINK_CHARS
+    seen = live._product_view(SimpleNamespace(product_url=long_page))["product_url"]
+    assert len(seen) == live.MAX_LINK_CHARS                          # cut by the view
+    recovered = rcard.text_only_payload(_refused("الفستان متوفر.", button_url=seen))
+    assert recovered["text"] == "الفستان متوفر."
+    whole = "https://shop.example.test/p/" + "a" * (live.MAX_LINK_CHARS - 29)
+    assert len(whole) == live.MAX_LINK_CHARS - 1
+    assert rcard.text_only_payload(_refused("الفستان متوفر.", button_url=whole))["text"].endswith(whole)
 
 
 def test_a_recovery_without_words_or_without_a_card_adds_nothing() -> None:

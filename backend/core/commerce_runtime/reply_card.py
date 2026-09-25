@@ -319,10 +319,16 @@ def _page_link(value: Any) -> str:
 
     The card already required ``https``. As a line of text it must also name a
     host and hold no whitespace or control character, which a button never
-    exposes but a customer's client would render as a broken address.
+    exposes but a customer's client would render as a broken address. An
+    address as long as the product view's bound may have been cut there, and a
+    cut address is not repeated as a fact.
     """
+    from core.commerce_runtime.agent_live_tools import MAX_LINK_CHARS  # noqa: PLC0415
+
     url = _https(value)
-    if not url or any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in url):
+    if not url or len(url) >= MAX_LINK_CHARS:
+        return ""
+    if any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in url):
         return ""
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
@@ -351,17 +357,18 @@ def _carries(text: str, url: str) -> bool:
     return any(_comparable(found) == target for found in _URL_IN_TEXT.findall(text))
 
 
-def _rewritten_on_the_wire(text: str) -> bool:
-    """Whether the outbound sanitiser would rewrite this body.
+def _reaches_the_wire_intact(body: str, link: str) -> bool:
+    """Whether the send path would transmit this body with the link as written.
 
-    The same two fingerprint sets every send passes through. A link that trips
-    either is not added, so the platform's addition can never be the reason a
-    valid answer is scrubbed or replaced by the send path's own wording.
+    Asked of the send path's own rules (``outbound_text_rewrite_rule``), in the
+    state that rewrites the most — no handoff active — so the platform's
+    addition can never be why a valid answer is scrubbed, replaced, or carries
+    a broken address. A body any rule would touch gets no link.
     """
-    from core.outbound_leakage_firewall import contains_outbound_leak  # noqa: PLC0415
-    from core.outbound_sanitizer import contains_leakage_markers  # noqa: PLC0415
+    from core.outbound_sanitizer import outbound_text_rewrite_rule  # noqa: PLC0415
+    from core.wa_link_buttons import strip_empty_markdown_links  # noqa: PLC0415
 
-    return bool(contains_outbound_leak(text) or contains_leakage_markers(text))
+    return outbound_text_rewrite_rule(body) is None and link in strip_empty_markdown_links(body)
 
 
 def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -371,8 +378,8 @@ def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     button to open the product page, so after the provider refused the card the
     same verified address follows the text on its own line — unless the text
     already gives it, the address is not one a customer can open as text, or
-    adding it would make the send path rewrite the answer. The added address is
-    recorded as ``card_link_appended``.
+    the send path would not transmit the body with it intact. The added address
+    is recorded as ``card_link_appended``.
     """
     out = {key: value for key, value in dict(payload or {}).items() if key != CARD_KEY}
     card_view = payload_card(payload)
@@ -385,7 +392,7 @@ def text_only_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         return out
     separator = "" if written.endswith("\n") else "\n"
     body = f"{written}{separator}{link}"
-    if _rewritten_on_the_wire(body):
+    if not _reaches_the_wire_intact(body, link):
         return out
     out["text"] = body
     out[LINK_APPENDED_KEY] = link

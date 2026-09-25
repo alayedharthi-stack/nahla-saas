@@ -755,29 +755,6 @@ def test_the_product_view_carries_the_options_the_customer_can_buy_now(binding, 
     assert products[1]["variant_options"] == {} and products[1]["variants_in_stock"] is None
 
 
-def test_a_link_beyond_the_bound_is_left_out_whole_never_cut(binding, monkeypatch):
-    """A cut page address opens a page nobody published, and the card button,
-    the model and a refused card's text link would all carry it as a fact.
-    Generic clothing and perfume rows: a long percent-encoded Arabic slug is an
-    ordinary storefront shape, not one store's."""
-    import urllib.parse
-
-    slug = urllib.parse.quote("فستان-سهرة-طويل-مطرز-بالخرز-مع-أكمام-شيفون-وحزام-ساتان-لون-كحلي")
-    long_page = f"https://shop.example.test/ar/{slug}/p398551325"
-    long_photo = f"https://cdn.example.test/{slug}.jpg"
-    assert len(long_page) > alt.MAX_LINK_CHARS and len(long_photo) > alt.MAX_LINK_CHARS
-    patch_impl(monkeypatch, "catalog", "search_products_impl",
-               async_returning(result("ok", products=[
-                   product(1, product_url=long_page, image_url=long_photo),
-                   product(2, title="عطر ورد 100ml"),
-               ], evidence=[Record("catalog:product:1"), Record("catalog:product:2")],
-                   knowledge_sections=[])))
-    first, second = run(binding, "search_products", {"query": "فستان"}).result["products"]
-    assert first["product_url"] == "" and first["image_url"] == ""
-    assert second["product_url"] == "https://example.test/p/1"
-    assert second["image_url"] == "https://example.test/i/1.jpg"
-
-
 def test_the_product_view_bounds_the_variant_options_it_forwards(binding, monkeypatch):
     many = {f"خيار{i}": [f"قيمة{j}" for j in range(20)] for i in range(10)}
     patch_impl(monkeypatch, "catalog", "search_products_impl",

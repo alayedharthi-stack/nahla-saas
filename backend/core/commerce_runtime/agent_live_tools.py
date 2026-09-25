@@ -248,16 +248,10 @@ def _text(value: Any, limit: int) -> str:
     return text[:limit]
 
 
-# A cut address is not a shorter address: it opens a page nobody published, and
-# the card button, the model and any text link would all carry it as a fact.
-# Beyond the bound a link is left out whole, which every reader already treats
-# as "no link" (``product_has_no_link`` / ``product_has_no_image`` on a card).
+# The bound the product view cuts a page or photo address to. An address that
+# reaches it may have been cut, so a refused card's text recovery does not
+# repeat one (``reply_card``).
 MAX_LINK_CHARS = 300
-
-
-def _link(value: Any) -> str:
-    text = str(value or "").strip()
-    return text if len(text) <= MAX_LINK_CHARS else ""
 
 
 def _refs(records: Sequence[Any]) -> Tuple[str, ...]:
@@ -290,8 +284,8 @@ def _product_view(snapshot: Any) -> Dict[str, Any]:
         "in_stock": getattr(snapshot, "in_stock", None),
         "stock_quantity": getattr(snapshot, "stock_quantity", None),
         "orderable": bool(getattr(snapshot, "orderable", False)),
-        "product_url": _link(getattr(snapshot, "product_url", "")),
-        "image_url": _link(getattr(snapshot, "image_url", "")),
+        "product_url": _text(getattr(snapshot, "product_url", ""), MAX_LINK_CHARS),
+        "image_url": _text(getattr(snapshot, "image_url", ""), MAX_LINK_CHARS),
         # Colours, sizes and other options the customer can actually buy now,
         # so an attribute in the reply comes from the merchant's variants.
         "variant_options": _variant_options_view(getattr(snapshot, "variant_options", None)),

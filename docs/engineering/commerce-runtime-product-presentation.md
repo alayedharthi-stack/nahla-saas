@@ -242,10 +242,18 @@ on one added line, the page address that Card's button held. Nothing is added
 when:
 
 * the text already gives that page, in any encoding;
-* the address has no host, or holds whitespace or a control character;
-* adding it would make the outbound sanitiser rewrite the body (an
-  external-research or leakage fingerprint), so the addition can never be why a
-  valid answer is replaced by the send path's own wording.
+* the address has no host, holds whitespace or a control character, or is as
+  long as the product view's bound (300 characters) and so may have been cut
+  there;
+* any rule the send path applies to a text body would rewrite the body with it
+  — the leakage firewall, the external-research fingerprints, the
+  handoff-promise scrub as it runs when no handoff is active, or the provider's
+  internal-marker scrub. The recovery asks those rules themselves
+  (`outbound_sanitizer.outbound_text_rewrite_rule`), not a list of its own, so
+  the addition can never be why a valid answer is replaced by the send path's
+  own wording or reaches the customer as a cut address. The independent review
+  of #1155 found the case this closes: a slug the handoff scrub matches
+  (`…/p/سيتمتحويلك`) was cut to `https://…/p/`.
 
 An unknown send is never recovered, and a Card withheld at compose time (no
 photo, no link, no button word, a product not observed) is not touched by this
@@ -257,8 +265,10 @@ turn names the addition in `text_additions`; the stored message lists it in
 refused list's options as `provider_rejected_list_options_as_lines` — ahead of
 any sanitiser layer that also changed the body.
 
-A page or photo address longer than the product view's bound is left out whole
-rather than cut: a cut address opens a page nobody published.
+The product view still cuts a longer page or photo address at its bound, for a
+Card button as before. Whether to leave such an address out whole instead is a
+separate change: it alters what Cards and the model receive, and how many
+catalogue addresses reach the bound has not been measured.
 
 ## The text beside a shape, and the language it is written in
 
