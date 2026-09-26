@@ -196,15 +196,56 @@ def test_an_empty_base_refuses_rather_than_composing_its_own(monkeypatch):
 
 
 def test_the_owner_approved_clauses_name_the_settings_and_the_shapes_without_a_field():
-    """Clauses 3 and 4 (owner-approved, 25 September 2026). They point at the
+    """Clauses 3 and 4 (owner-approved, 25 September 2026; clause 3 extended to
+    the Arabic-dialect setting on 26 September 2026). They point at the
     context the platform delivers and at what a list row and a card already
     show. They name no optional reply field (the guard above), and no sentence
     to send (the guard below)."""
     addendum = pi.PILOT_REPLY_ADDENDUM
-    for key in ("reply_language", "reply_tone", "conversation_context"):
+    for key in ("reply_language", "reply_dialect", "reply_tone", "conversation_context"):
         assert key in addendum, key
     assert "choices" not in addendum and "card" not in addendum
     for shown in ("اسم المنتج", "مختصرًا", "سعره", "بعض خياراته", "صورته", "صفحته",
                   "لا يتسع له الصف"):
         assert shown in addendum, shown
     assert "إلا إذا طلب العميل الرابط" in addendum
+
+
+def _clause(number: int) -> str:
+    """One numbered clause of the addendum, whitespace-normalised."""
+    addendum = pi.PILOT_REPLY_ADDENDUM
+    start = addendum.index(f"\n{number}) ")
+    end = addendum.find(f"\n{number + 1}) ", start)
+    return " ".join(addendum[start:end if end != -1 else None].split())
+
+
+def test_clause_3_makes_the_current_settings_the_reference_over_earlier_replies():
+    """Clause 3, extended on 26 September 2026 (owner-approved) for the separate
+    Arabic-dialect setting. It points at the three settings the platform
+    delivers, makes the merchant's current values the reference over earlier
+    replies (not over what the customer asks for now), keeps the language as the sole judge of Arabic or English,
+    and applies the dialect to Arabic replies only."""
+    clause = _clause(3)
+    for key in ("reply_language", "reply_dialect", "reply_tone", "conversation_context"):
+        assert key in clause, key
+    # The current settings are the reference; earlier replies are not.
+    assert "الحالية" in clause and "وحدها" not in clause
+    assert "ردود سابقة" in clause and "لا تأخذ اللغة أو اللهجة" in clause
+    # The language decides Arabic or English; the dialect never changes that.
+    assert "reply_language يحدد متى تردّ بالعربية ومتى بالإنجليزية" in clause
+    assert "اللهجة لا تغيّر لغة الرد" in clause
+    # The dialect governs every Arabic reply; Saudi applies only without one.
+    assert "إذا وُجد reply_dialect فاتبعه في كل رد عربي" in clause
+    assert clause.index("وإن لم يوجد") < clause.index("السعودية")
+
+
+def test_clause_3_names_no_other_dialect_and_carries_no_dialect_meaning():
+    """What each dialect means is data the platform delivers per merchant
+    (``core.reply_dialect``), never text written into the shared instructions."""
+    from core.reply_dialect import ARABIC_DIALECT_MEANING  # noqa: PLC0415
+
+    addendum = pi.PILOT_REPLY_ADDENDUM
+    for meaning in ARABIC_DIALECT_MEANING.values():
+        assert meaning not in addendum
+    for other in ("العراقية", "المصرية", "الشامية", "الفصحى"):
+        assert other not in addendum, other

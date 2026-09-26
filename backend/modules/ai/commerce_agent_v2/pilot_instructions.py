@@ -20,11 +20,17 @@ what this run hands the model and what it does with it: (3) the merchant's
 saved reply language and tone arrive as data in ``conversation_context`` and
 govern the reply over the dialect of earlier replies; (4) a list row and a
 product card already show the product's name, price, options, photo and page,
-so the text need not repeat them. Neither supplies a sentence to send, a
-greeting or a persona: every truth rule, every tool rule and every grounding
-rule above it is unchanged and still binding. The
-tool names it refers to are the ones the instructions already use, and the
-registry declares those same names — the two are asserted equal by test.
+so the text need not repeat them. On 26 September 2026 the owner approved
+extending clause 3 to follow the separate Arabic-dialect setting
+(stored in the tenant settings' metadata, delivered as ``reply_dialect`` in the meaning
+``core.reply_dialect`` defines): the merchant's current settings are the
+reference for language and dialect, however earlier replies were written;
+``reply_language`` alone decides Arabic or English; and the dialect governs
+Arabic replies only. Neither clause supplies a sentence to send, a greeting or
+a persona: every truth rule, every tool rule and every grounding rule above it
+is unchanged and still binding. The tool names it refers to are the ones the
+instructions already use, and the registry declares those same names — the two
+are asserted equal by test.
 
 This is a narrow, documented, pilot-only adaptation. It is not applied to the
 legacy path, and ``COMMERCE_AGENT_INSTRUCTIONS`` is not modified.
@@ -69,10 +75,14 @@ PILOT_REPLY_ADDENDUM = """
    shadow. تبقى كل القيود كما هي: أدوات القراءة فقط، ولا تنفّذ طلبًا أو دفعًا أو
    إلغاءً أو أي تغيير، ولا ترسل بنفسك — المنصة هي التي تُسلّم.
 
-3) لغة الرد ولهجته: reply_language وreply_tone في conversation_context هما
-   إعدادا التاجر للغة الرد ونبرته. اكتب كل رد وفقهما، ولا تأخذ اللهجة من ردود
-   سابقة في المحادثة إذا خالفتهما. إذا طلب reply_language اللهجة السعودية فاكتب
-   بلهجة سعودية طبيعية يفهمها أي عميل سعودي، دون مفردات من لهجات أخرى.
+3) لغة الرد ولهجته: reply_language وreply_dialect وreply_tone في
+   conversation_context هي إعدادات التاجر الحالية للغة الرد ولهجته العربية
+   ونبرته. اكتب كل رد وفقها، ولا تأخذ اللغة أو اللهجة من ردود سابقة في
+   المحادثة إذا خالفتها. reply_language يحدد متى تردّ بالعربية ومتى
+   بالإنجليزية. إذا وُجد reply_dialect فاتبعه في كل رد عربي؛ وإن لم يوجد وطلب
+   reply_language اللهجة السعودية فاكتب بلهجة سعودية طبيعية يفهمها أي عميل
+   سعودي. لا تخلط مفردات من لهجات أخرى، واللهجة لا تغيّر لغة الرد: إذا كان الرد
+   بالإنجليزية فاكتبه بالإنجليزية.
 
 4) النص بجانب القائمة أو البطاقة: كل صف في القائمة التفاعلية يعرض اسم المنتج
    مختصرًا وسعره الحالي وبعض خياراته، وبطاقة المنتج تعرض صورته وزرًا يفتح صفحته.

@@ -32,7 +32,7 @@ import {
   MerchantKnowledgePolicies,
   ResponseQualityData,
 } from '../api/automations'
-import { settingsApi, type AISettings, type StoreAIMode } from '../api/settings'
+import { settingsApi, type AISettings, type ArabicDialectReach, type StoreAIMode } from '../api/settings'
 import { playgroundApi, type PlaygroundDryRunResponse } from '../api/playground'
 import { CategoryBadges, OperationalFactWarning } from './knowledge/aiSettingsHints'
 import { StructuredContactsCutoverBanner } from '../components/operations/StructuredContactsCutoverBanner'
@@ -148,8 +148,17 @@ function resolveStoreAIMode(ai: AISettings): StoreAIMode {
   return ai.store_ai_enabled === false ? 'off' : 'on'
 }
 
+// What the Arabic-dialect field reaches, by the server's own reading of which
+// conversations the new commerce agent answers for this store.
+const DIALECT_HINT: Record<ArabicDialectReach, string> = {
+  all_conversations: 'تُطبَّق على الردود العربية فقط، وتبقى لغة الرد حسب «لغة الردود».',
+  runtime_conversations: 'تُطبَّق على الردود العربية في المحادثات التي يتولاها وكيل المتجر الجديد؛ وبقية المحادثات باللهجة السعودية.',
+  none: 'لا تُطبَّق بعد على متجرك: وكيل المتجر الجديد غير مفعّل له، والردود الحالية باللهجة السعودية.',
+}
+
 function AISettingsPanel() {
   const [ai, setAi]       = useState<AISettings | null>(null)
+  const [dialectReach, setDialectReach] = useState<ArabicDialectReach>('none')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving]   = useState(false)
   const [saved, setSaved]     = useState(false)
@@ -162,6 +171,7 @@ function AISettingsPanel() {
     settingsApi.getAll()
       .then(s => {
         setAi(s.ai)
+        setDialectReach(s.arabic_dialect_reach ?? 'none')
         setTestNumbersText((s.ai.ai_test_allowed_numbers ?? []).join('\n'))
       })
       .catch(() => setError('تعذّر تحميل إعدادات الذكاء'))
@@ -361,11 +371,31 @@ function AISettingsPanel() {
               <option value="detailed">تفصيلي وشامل</option>
             </select>
           </Field>
-          <Field label="لغة الردود">
+          {/* Each label states which language the assistant is told to answer in
+              (backend tenant_overlay.LANGUAGE_MAP). Both single-language options
+              also answer a customer who writes in the other language, so neither
+              may read "only". The dialect is its own setting (next field). */}
+          <Field label="لغة الردود" hint="اللهجة تُحدَّد في حقل «اللهجة العربية».">
             <select className="input" value={ai.default_language} onChange={e => patch({ default_language: e.target.value as AISettings['default_language'] })}>
-              <option value="arabic">عربي فقط</option>
-              <option value="english">إنجليزي فقط</option>
-              <option value="bilingual">ثنائي اللغة</option>
+              <option value="arabic">العربية — وبالإنجليزية لمن يبدأ بها أو يطلبها</option>
+              <option value="english">الإنجليزية — وبالعربية لمن يكتب بها</option>
+              <option value="bilingual">لغة العميل (عربية أو إنجليزية)</option>
+            </select>
+          </Field>
+          {/* Independent of the language (backend core/reply_dialect.py). The empty
+              option shows the effective value when nothing is chosen: the
+              "arabic" language option means Saudi colloquial by default; the
+              other two name no dialect. Only the new commerce agent reads the
+              setting, so the server says which conversations it reaches
+              (arabic_dialect_reach) and the field says so too. */}
+          <Field label="اللهجة العربية" hint={DIALECT_HINT[dialectReach]}>
+            <select className="input" disabled={dialectReach === 'none'} value={ai.arabic_dialect ?? ''} onChange={e => patch({ arabic_dialect: e.target.value as NonNullable<AISettings['arabic_dialect']> })}>
+              <option value="">{ai.default_language === 'arabic' ? 'افتراضي: السعودية' : 'افتراضي: بلا لهجة محددة'}</option>
+              <option value="saudi">السعودية</option>
+              <option value="iraqi">العراقية</option>
+              <option value="egyptian">المصرية</option>
+              <option value="levantine">الشامية</option>
+              <option value="fusha">الفصحى</option>
             </select>
           </Field>
           <div className="sm:col-span-2">
