@@ -455,6 +455,25 @@ def build_confirmation_fallback_payload(to_phone: str) -> Dict[str, Any]:
     return build_text_payload(to_phone, CONFIRMATION_FALLBACK_MSG_AR)
 
 
+def is_unsubscribe_notice_payload(payload: Any) -> bool:
+    """Closed consent-notice allowlist, never an arbitrary AI-send bypass.
+
+    Compare the complete wire payload (including buttons and recipient).
+    Only the four existing consent notices qualify; extra fields fail closed.
+    """
+    if not isinstance(payload, dict):
+        return False
+    recipient = payload.get("to")
+    if not isinstance(recipient, str) or not recipient.strip():
+        return False
+    return any(payload == allowed for allowed in (
+        build_confirmation_payload(recipient),
+        build_confirmation_fallback_payload(recipient),
+        build_text_payload(recipient, FINAL_UNSUBSCRIBED_MSG_AR),
+        build_text_payload(recipient, CANCELLED_UNSUB_MSG_AR),
+    ))
+
+
 # ── Marketing-footer helper for templates ───────────────────────────────────
 
 def ensure_marketing_footer(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
