@@ -197,7 +197,7 @@ class TestOpenClosedWindowDispatch:
     @patch("core.automation_engine.send_lifecycle_whatsapp_template", new_callable=AsyncMock)
     @patch("core.commerce_lifecycle.order_updates.resolve_lifecycle_template_for_send")
     @patch("core.merchant_capabilities.resolve_merchant_capabilities")
-    def test_open_window_sends_session_body_only(
+    def test_open_window_order_confirmation_keeps_approved_template_and_total(
         self,
         mock_caps,
         mock_resolve_tpl,
@@ -206,7 +206,7 @@ class TestOpenClosedWindowDispatch:
     ):
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = _approved_template()
-        mock_session_send.return_value = ("sent", {"wa_message_id": "wamid.session.1"})
+        mock_template_send.return_value = ("sent", {"wa_message_id": "wamid.template.1"})
 
         db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         db.add(
@@ -221,15 +221,18 @@ class TestOpenClosedWindowDispatch:
         db.commit()
 
         result = _run_async(
-            dispatch_external_lifecycle_notification(**_dispatch_kwargs(db, _generic_order()))
+            dispatch_external_lifecycle_notification(
+                **_dispatch_kwargs(db, _generic_order(total="249.00"))
+            )
         )
         assert result.dispatched is True
-        mock_session_send.assert_awaited_once()
-        mock_template_send.assert_not_awaited()
+        mock_template_send.assert_awaited_once()
+        mock_session_send.assert_not_awaited()
+        assert mock_template_send.await_args.args[4]["total"] == "249.00"
 
         row = db.query(CommerceLifecycleNotificationLedger).one()
-        assert row.send_method == "session_message"
-        assert (row.dispatch_decision_json or {}).get("send_method") == "session_message"
+        assert row.send_method == "approved_template"
+        assert (row.dispatch_decision_json or {}).get("send_method") == "approved_template"
         assert row.send_state == "sent"
 
     @patch("core.automation_engine.send_lifecycle_whatsapp_session_body", new_callable=AsyncMock)
@@ -420,7 +423,7 @@ class TestOpenClosedWindowDispatch:
     ):
         mock_caps.return_value = _merchant_caps()
         mock_resolve_tpl.return_value = _approved_template()
-        mock_session_send.return_value = ("sent", {"wa_message_id": "wamid.session.once"})
+        mock_template_send.return_value = ("sent", {"wa_message_id": "wamid.template.once"})
 
         db, _ = _make_db(CommerceLifecycleNotificationLedger, WaConversationWindow, TenantSettings)
         db.add(
@@ -446,11 +449,11 @@ class TestOpenClosedWindowDispatch:
 
         assert first.dispatched is True
         assert second.duplicate is True
-        mock_session_send.assert_awaited_once()
-        mock_template_send.assert_not_awaited()
+        mock_session_send.assert_not_awaited()
+        mock_template_send.assert_awaited_once()
         rows = db.query(CommerceLifecycleNotificationLedger).all()
         assert len(rows) == 1
-        assert rows[0].send_method == "session_message"
+        assert rows[0].send_method == "approved_template"
 
 
 class TestConditionalReclaimWithSendMethod:
