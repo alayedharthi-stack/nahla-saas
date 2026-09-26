@@ -257,8 +257,10 @@ def test_clause_5_covers_both_cases_and_names_no_phrase():
     a product request is the likelier reading the model searches and answers
     and never asks whether a product is meant; a message clearly not about
     products is answered as it is, without a search; only when neither reading
-    prevails does it ask; and an empty search for such a phrase says only that
-    the text matched no product. It quotes no customer phrase — no word list,
+    prevails does it ask. The form of asking whether something exists does not
+    by itself make a product request, and an empty search for a phrase that
+    names no kind of product is met with a question, not with "nothing by that
+    name". It quotes no customer phrase — no word list,
     not even the observed one — and supplies no reply."""
     clause = _clause(5)
     assert "في سياق المحادثة قبل أن تبحث" in clause
@@ -266,8 +268,10 @@ def test_clause_5_covers_both_cases_and_names_no_phrase():
     assert "ولا تسأله هل يقصد منتجًا" in clause
     assert "فردّ عليها بما يناسبها دون بحث" in clause
     assert "وإذا لم يترجّح لك أحد المعنيين فاستوضح قصده" in clause
-    assert "لا أن العميل سأل عن منتج غير موجود" in clause
-    assert "بدل أن تجزم بعدم وجوده" in clause
+    assert "لا تجعل الرسالة طلب منتج ما لم يكن المسؤول عنه مما يُباع" in clause
+    assert "بعبارة لا تدل على نوع من المنتجات فلم تطابق شيئًا" in clause
+    assert "فلا تقل إن المتجر لا يملك شيئًا بهذا الاسم" in clause
+    assert "فاسأله عمّا يقصد" in clause
     for quote in ("«", "»", '"'):
         assert quote not in clause, quote
     for observed in ("عيال", "محمد", "عندك", "عندكم"):
