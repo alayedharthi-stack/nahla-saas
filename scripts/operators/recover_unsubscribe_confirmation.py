@@ -95,6 +95,7 @@ async def recover(db, *, tenant_id, customer_id, phone, expected_pending_at=None
     db.commit()
     if ok:
         from core.conversation_engine import StateManager
+        from core.outbound_send_status import build_provider_send_block
         convo = (db.query(Conversation).filter_by(tenant_id=tenant_id, customer_id=customer_id)
                  .order_by(Conversation.id.desc()).first())
         StateManager.save_message(
@@ -102,7 +103,9 @@ async def recover(db, *, tenant_id, customer_id, phone, expected_pending_at=None
             conversation_id=getattr(convo, "id", None),
             extra_metadata={"compose_source": "security_exact_text",
                             "chosen_path": "unsubscribe_confirmation_recovery",
-                            "provider_send": {"classification": "ok", "wamid": result.get("wamid")}},
+                            "provider_send": build_provider_send_block(
+                                classification="ok", response_body=result.get("response_body"),
+                                wamid=result.get("wamid"), operation="unsubscribe_recovery")},
         )
     return {"action": claim["status"], "wamid": result.get("wamid"),
             "classification": result.get("classification"), "recipient_verified": True}
