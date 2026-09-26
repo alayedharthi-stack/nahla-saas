@@ -21,6 +21,11 @@ logger = logging.getLogger("nahla.brain.promotion_truth")
 
 
 _MAX_SHAREABLE = 8
+# Rows a read with ``read_first`` looks at. Expired and campaign-only rows are
+# already out of it, and the rows the caller would accept come first, so the
+# bound only caps a store whose acceptable-looking rows are mostly refused on
+# their metadata (another customer's code, a disabled one).
+_READ_FIRST_WINDOW = 200
 _CAMPAIGN_ONLY_CHANNELS = frozenset({"campaign", "email", "sms", "autopilot"})
 
 QUERY_OK = "ok"
@@ -421,6 +426,49 @@ def coupon_policy_for_compose(
     }
 
 
+@dataclass(frozen=True)
+class CouponReadScope:
+    """The coupons a caller will accept, to be read before any other.
+
+    ``valid_until_at_least``: a code expiring earlier is not acceptable.
+    ``levels``: acceptable rungs; a code on no rung is always in scope, an
+    empty tuple accepts codes on no rung only, and ``None`` accepts any rung.
+    """
+
+    valid_until_at_least: datetime
+    levels: Optional[Tuple[str, ...]] = None
+
+
+def _read_first_clauses(coupon: Any, now: datetime, scope: CouponReadScope) -> Tuple[List[Any], Any]:
+    """``(filters, wanted)`` for a read that puts ``scope`` first.
+
+    The filters drop only rows the row-by-row checks below refuse anyway — an
+    expired code, a campaign-only one — so nothing the unscoped read could
+    return is lost. ``wanted`` orders the rows the caller would accept ahead of
+    the rest; the rest still follow, so a caller that counts why rows were
+    refused still meets them when there is room.
+    """
+    from sqlalchemy import and_, func, or_, true  # noqa: PLC0415
+
+    def naive(moment: datetime) -> datetime:
+        # ``expires_at`` is stored without a zone and read as UTC (``_as_utc``).
+        return moment.astimezone(timezone.utc).replace(tzinfo=None)
+
+    channel = func.lower(func.trim(func.coalesce(coupon.allocation_channel, "")))
+    filters = [
+        or_(coupon.expires_at.is_(None), coupon.expires_at >= naive(now)),
+        channel.notin_(sorted(_CAMPAIGN_ONLY_CHANNELS)),
+    ]
+    edge = max(_as_utc(scope.valid_until_at_least) or now, now)
+    lasts = or_(coupon.expires_at.is_(None), coupon.expires_at >= naive(edge))
+    if scope.levels is None:
+        on_rung = true()
+    else:
+        levels = sorted({str(level or "").strip().lower() for level in scope.levels} - {""})
+        on_rung = func.lower(func.trim(func.coalesce(coupon.coupon_level, ""))).in_(["", *levels])
+    return filters, and_(lasts, on_rung)
+
+
 def resolve_shareable_promotions(
     db: Any,
     tenant_id: int,
@@ -428,12 +476,21 @@ def resolve_shareable_promotions(
     now: Optional[datetime] = None,
     limit: int = _MAX_SHAREABLE,
     customer_id: Optional[int] = None,
+    read_first: Optional[CouponReadScope] = None,
 ) -> PromotionTruthResult:
     """Load currently valid shareable coupons/offers for one tenant at query time.
 
     A coupon issued to one customer (a personal code) is shareable only when
     ``customer_id`` names that customer; without a customer, or for any other
     customer, it is left out. Store-wide codes are unaffected.
+
+    The coupon read looks at a window of rows and judges them after the cut.
+    Unscoped, the window is the tenant's newest rows, whatever they are: a
+    store whose newest rows are expired, or sit on a rung the caller refuses,
+    can hide every code the caller would accept. ``read_first`` names what the
+    caller accepts; expired and campaign-only rows are then left out before the
+    cut, and the acceptable rows are read first, newest first, followed by the
+    rest. Every row is still judged row by row exactly as without it.
     """
     tid = int(tenant_id or 0)
     audience = int(customer_id) if customer_id not in (None, "", 0) else None
@@ -464,13 +521,17 @@ def resolve_shareable_promotions(
     try:
         from models import Coupon  # noqa: PLC0415
 
-        rows = (
-            db.query(Coupon)
-            .filter(Coupon.tenant_id == tid)
-            .order_by(Coupon.id.desc())
-            .limit(max(int(limit) * 3, int(limit)))
-            .all()
-        )
+        from sqlalchemy import case  # noqa: PLC0415
+
+        query = db.query(Coupon).filter(Coupon.tenant_id == tid)
+        window = max(int(limit) * 3, int(limit))
+        if read_first is None:
+            query = query.order_by(Coupon.id.desc())
+        else:
+            filters, wanted = _read_first_clauses(Coupon, now_, read_first)
+            query = query.filter(*filters).order_by(case((wanted, 0), else_=1), Coupon.id.desc())
+            window = max(window, _READ_FIRST_WINDOW)
+        rows = query.limit(window).all()
         coupon_source = SOURCE_OK
     except Exception as exc:  # noqa: silent-ok — coupon source fail-open; other sources still queried unless session is poisoned
         coupon_source = SOURCE_FAILED
@@ -617,6 +678,7 @@ def resolve_shareable_promotions(
 
 __all__ = [
     "coupon_policy_for_compose",
+    "CouponReadScope",
     "GENERATION_ABSENT",
     "GENERATION_FAILED",
     "GENERATION_NOT_QUERIED",

@@ -207,7 +207,10 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # as are the flow through the real runtime and the one
                    # total order the pages are cut from.
                    "commerce_runtime_navigation", "commerce_runtime_pagination",
-                   "catalog_search_order", "campaign_marketing_continuation"]
+                   "catalog_search_order", "campaign_marketing_continuation",
+                   # A coupon the customer could be given is read before the
+                   # resolver's window is cut, so newer rows cannot hide it.
+                   "promotion_scoped_read"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -233,6 +236,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "commerce_runtime_pagination": ("proof", harness_env),
         "catalog_search_order": ("proof", harness_env),
         "campaign_marketing_continuation": ("proof", {"NAHLA_RELIABILITY_PG_ADMIN_DSN": None}),
+        "promotion_scoped_read": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

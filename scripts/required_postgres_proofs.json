@@ -749,6 +749,22 @@
         "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_refuses_changed_pause_or_manual_stop[sqlite]",
         "tests/test_campaign_marketing_continuation.py::test_legacy_adoption_refuses_changed_pause_or_manual_stop[postgres]"
       ]
+    },
+    {
+      "id": "promotion_scoped_read",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_promotion_scoped_read_pg.py",
+      "origin": "Coupon read scope — the promotion tool reads the codes it could keep (served rung or none, valid past the merchant's minimum) before the resolver's window is cut, so newer expired, campaign-only or other-rung rows cannot hide a qualifying code and turn it into not_found; the rest of the window still follows so withheld reasons stay named",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_qualifying_code_behind_newer_rows_it_would_refuse_is_found",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_when_nothing_qualifies_the_empty_answer_is_one_the_store_really_gave",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_the_scoped_read_is_the_head_of_what_the_projection_would_accept",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_an_unreadable_ladder_still_meets_the_codes_it_could_not_judge"
+      ]
     }
   ]
 }

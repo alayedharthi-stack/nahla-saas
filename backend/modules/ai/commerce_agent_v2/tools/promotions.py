@@ -50,6 +50,7 @@ from modules.ai.brain.commerce.promotion_truth import (
     NO_VALID_PROMOTIONS,
     PROMOTION_PARTIAL_FAILURE,
     PROMOTION_QUERY_FAILED,
+    CouponReadScope,
     resolve_shareable_promotions,
 )
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
@@ -518,10 +519,23 @@ async def list_shareable_promotions_impl(
     if level_policy_unreadable:
         logger.info("[PROMOTION_PROJECTION] tenant=%s level_ladder_unreadable=%s",
                     int(context.tenant_id), level_policy_unreadable)
-    truth = resolve_shareable_promotions(context.db, int(context.tenant_id), limit=bounded,
-                                         customer_id=customer_id)
     min_hours = _min_remaining_hours(policy)
-    cutoff = _now() + timedelta(hours=min_hours) if min_hours > 0 else None
+    now = _now()
+    cutoff = now + timedelta(hours=min_hours) if min_hours > 0 else None
+    # What this call could keep is read before anything else. Without it the
+    # resolver judges only the store's newest rows, and a store whose newest
+    # codes sit on rungs this customer is not served, or expire before the
+    # merchant's minimum, hides every code it would accept — a "nothing for
+    # you" nobody established. The other rows still follow when there is room,
+    # so ``withheld`` still names the gate that took them. The rung is part of
+    # it only when the ladder was read whole; otherwise every rung is read as
+    # before, and what we could not judge is reported as ours.
+    ladder_whole = not level_policy_unreadable and not broken_rungs
+    truth = resolve_shareable_promotions(
+        context.db, int(context.tenant_id), limit=bounded, customer_id=customer_id,
+        read_first=CouponReadScope(
+            valid_until_at_least=cutoff or now,
+            levels=((served_level,) if served_level else ()) if ladder_whole else None))
     snapshots: List[PromotionSnapshot] = []
     evidence: List[EvidenceRecord] = []
     withheld: Dict[str, int] = {}
@@ -568,13 +582,17 @@ async def list_shareable_promotions_impl(
     logger.info(
         "[PROMOTION_PROJECTION] tenant=%s customer=%s considered=%d kept=%d "
         "withheld=%s standing=%s level=%s served=%s determined=%s ladder_unreadable=%s "
-        "unreadable_rungs=%s",
+        "unreadable_rungs=%s read_first=%s",
         int(context.tenant_id), "yes" if customer_id is not None else "none",
         considered, len(snapshots),
         ",".join(f"{reason}:{count}" for reason, count in sorted(withheld.items())) or "none",
         entitlement.reason, entitlement.resolved_level or "none", served_level or "none",
         entitlement.determined, level_policy_unreadable or "no",
         ",".join(broken_rungs) or "none",
+        # What the read put first before its window was cut, so an empty answer
+        # reads as "none of these" rather than "none of the newest rows".
+        (f"rung:{served_level or 'none'}" if ladder_whole else "all_rungs")
+        + (f",min_hours:{min_hours}" if cutoff is not None else ""),
     )
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
