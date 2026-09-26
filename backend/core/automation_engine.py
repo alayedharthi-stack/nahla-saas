@@ -4019,6 +4019,7 @@ async def send_lifecycle_whatsapp_session_body(
             "to": normalized_phone,
             "send_method": "session_message",
             "body_len": len(body_text),
+            "wire_payload": send_payload,
         }
     except Exception as exc:
         from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415
@@ -4356,6 +4357,7 @@ async def send_lifecycle_whatsapp_template(
             "service_key": service_key,
             "wa_message_id": wamid,
             "to": normalized_phone,
+            "wire_payload": send_payload,
         }
     except Exception as exc:
         from services.cart_recovery_failures import classify_send_exception  # noqa: PLC0415

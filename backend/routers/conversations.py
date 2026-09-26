@@ -858,7 +858,7 @@ def record_outbound_message(
     event_type: str = "system",
     customer_name: str = "",
     extra: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> Optional[int]:
     """Record an outbound message so it appears in the conversations inbox.
 
     Safe to call from any context (campaigns, automations, COD, AI
@@ -939,6 +939,7 @@ def record_outbound_message(
             event.extra_metadata = meta
         db.add(event)
         db.flush()
+        return int(event.id)
     except Exception as exc:
         # ── Surface psycopg2 details (May 2026 #19) ─────────────────
         # See ``_diag_sql_error`` in ``core/conversation_engine.py``
@@ -958,6 +959,7 @@ def record_outbound_message(
             "[record_outbound_message] tenant=%s phone=%s event=%s | %s",
             tenant_id, phone, event_type, _diag,
         )
+        return None
 
 
 def _deploy_sha_for_diagnostics() -> dict[str, str | bool | None]:

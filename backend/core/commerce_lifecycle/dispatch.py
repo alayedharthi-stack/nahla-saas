@@ -410,6 +410,11 @@ async def _execute_reserved_send(
         )
 
     payload = _build_dispatch_payload(evidence)
+    # The approved order-confirmation BODY may include the order amount.
+    # Use the persisted order fact; an empty amount must never be invented.
+    order_total = str(getattr(order, "total", None) or "").strip()
+    if order_total:
+        payload["total"] = order_total
     if intent == BusinessIntent.COD_CONFIRMATION:
         # The approved COD quick replies must remain deterministically bound
         # to the internal order, including lifecycle-reconciliation sends.
@@ -468,6 +473,20 @@ async def _execute_reserved_send(
                     tenant_id,
                     order_id,
                 )
+        from core.order_update_timeline import persist_accepted_lifecycle_send  # noqa: PLC0415
+
+        persist_accepted_lifecycle_send(
+            db,
+            tenant_id=int(tenant_id),
+            order_id=int(order_id),
+            phone=to_phone,
+            customer_name=str(evidence.customer_name or ""),
+            service_key=service_key,
+            template_name=str(template.name),
+            send_method=send_method,
+            provider_message_id=final.provider_message_id,
+            wire_payload=send_info.get("wire_payload"),
+        )
         logger.info(
             "[LifecycleDispatch] sent tenant=%s order=%s intent=%s method=%s wamid=%s",
             tenant_id,

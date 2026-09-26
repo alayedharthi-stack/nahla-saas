@@ -176,7 +176,9 @@ def build_initial_definitions() -> Tuple[BusinessIntentDefinition, ...]:
             intent=BusinessIntent.ORDER_CONFIRMED,
             required_evidence=("order_number",),
             optional_evidence=("customer_name", "customer_phone"),
-            open_window_strategy=OpenWindowStrategy.SESSION_HANDOFF,
+            # Order confirmation owns an approved IMAGE header. A free-form
+            # session body would drop that approved customer-facing content.
+            open_window_strategy=OpenWindowStrategy.MERCHANT_TEMPLATE_ONLY,
             closed_window_strategy=ClosedWindowStrategy.APPROVED_TEMPLATE,
             service_key="order_confirmation",
             template_variable_map=name_number,
