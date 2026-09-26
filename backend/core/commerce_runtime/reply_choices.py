@@ -79,6 +79,33 @@ TAP_ANSWERED_FIRST = "verified_tap_answered_first"
 # it, and its options still follow the text as lines.
 NAVIGATION_ANSWERED_FIRST = "navigation_page_answered_first"
 
+# The one problem the loop raises when the platform's presentation decision
+# found a list (several products this turn's search returned, no single focus)
+# and the model's reply offered none. Asked once, through the verification
+# feedback channel; the answer stays the model's, and a reply that still offers
+# no selector goes as it was.
+LIST_OFFER_NEEDED = "list_offer_needed"
+
+
+def list_offer_detail(product_ids: Sequence[int], *, more_results: bool) -> str:
+    """What the loop tells the model when it asks for the selector.
+
+    Addressed to the model, never shown to a customer: which products the
+    platform would list, what their rows show, which words the list needs, and
+    that the decision is still the model's. Nothing about what to say.
+    """
+    ids = ", ".join(str(int(pid)) for pid in product_ids)
+    words = "a button word" + (", and a more_label for the row that shows the next ones, "
+                               "because the search matched more products than this list holds"
+                               if more_results else "")
+    return ("Your reply answers with several products this turn's search returned and offers no "
+            "selector. If the answer offers them to the customer to choose from, submit the reply "
+            f"again with choices naming them ({ids}) and {words}, in the customer's language. "
+            "Each row shows the product's short name, current price and a few options from the "
+            "merchant's records, so the text introduces them and does not list each one with its "
+            "price. If the answer is not such an offer, submit it again unchanged.")
+
+
 # The key a paged or platform-expanded list's own account of itself rides
 # under, inside ``choices``: which page, how many shown, how many no longer
 # available, whether another page follows, and whether the stored result was
@@ -488,7 +515,8 @@ def payload_rows(payload: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], str]
 
 
 __all__ = [
-    "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "MAX_BUTTON_LABEL", "MAX_CHOICES",
+    "CHOICES_KEY", "ChoiceSelection", "INCOMPLETE", "LIST_OFFER_NEEDED", "MAX_BUTTON_LABEL",
+    "MAX_CHOICES", "list_offer_detail",
     "MAX_ROW_TITLE", "MIN_CHOICES", "NAVIGATION_ANSWERED_FIRST", "NAVIGATION_KEY",
     "NOT_OBSERVED", "NOT_REQUESTED", "OFFERED", "PRODUCT_REF_PREFIX", "ROW_EVIDENCE_KEY",
     "finalize_composed",

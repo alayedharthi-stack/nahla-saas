@@ -113,6 +113,9 @@ def _validate_arguments(schema: Mapping[str, Any], arguments: Mapping[str, Any])
                 raise ac.ToolError(ac.ToolErrorCode.INVALID_ARGUMENTS.value, f"{name} must be an integer")
             if value < int(spec.get("minimum", 0)) or value > int(spec.get("maximum", 1_000_000)):
                 raise ac.ToolError(ac.ToolErrorCode.INVALID_ARGUMENTS.value, f"{name} is out of range")
+        elif expected == "boolean":
+            if not isinstance(value, bool):
+                raise ac.ToolError(ac.ToolErrorCode.INVALID_ARGUMENTS.value, f"{name} must be a boolean")
         else:
             raise ac.ToolError(ac.ToolErrorCode.INVALID_ARGUMENTS.value, f"{name} has an unsupported type")
         cleaned[name] = value

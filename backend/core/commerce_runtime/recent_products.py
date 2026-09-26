@@ -138,6 +138,12 @@ class ShownProducts:
     # within the same lapse. ``None`` means no card was delivered recently —
     # never "a card was delivered for some product we could not name".
     last_card_product_id: Optional[int] = None
+    # Every product a reply cited within the lapse, uncapped (the replies read
+    # are still bounded by ``MAX_REPLIES_READ``). ``products`` is the at most
+    # ``MAX_PRODUCTS`` the model is handed; this is what a search asked for
+    # *other* products leaves out, so a walk through the catalogue in text
+    # does not come back to its start after ten products.
+    cited_within_lapse: Tuple[int, ...] = ()
 
     def rows_offered_in(self, provider_message_id: Any) -> Tuple[int, ...]:
         """The rows one named reply carried, or nothing if it carried none."""
@@ -283,6 +289,7 @@ def products_shown_earlier(
     moment = now if isinstance(now, datetime) else datetime.utcnow()
     lapse = max(0, int(lapse_seconds))
     current: List[int] = []
+    cited_all: List[int] = []
     offered: List[int] = []
     by_message: Dict[str, Tuple[int, ...]] = {}
     newest_citation: Optional[int] = None
@@ -322,6 +329,9 @@ def products_shown_earlier(
         for product_id in offered_here:
             if product_id not in offered:
                 offered.append(product_id)
+        for product_id in cited:
+            if product_id not in cited_all:
+                cited_all.append(product_id)
         if len(current) >= MAX_PRODUCTS:
             continue
         for product_id in cited:
@@ -330,23 +340,28 @@ def products_shown_earlier(
     current = current[:MAX_PRODUCTS]
 
     rows_offered = tuple(offered)
+    cited_recently = tuple(cited_all)
     offered_map: Dict[str, Tuple[int, ...]] = dict(by_message)
     if not cited_anything:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
-                             offered_by_message=offered_map, last_card_product_id=last_card)
+                             offered_by_message=offered_map, last_card_product_id=last_card,
+                             cited_within_lapse=cited_recently)
     if not current:
         return ShownProducts(products=(), reason=LAPSED, offered_as_rows=rows_offered,
                              offered_by_message=offered_map, last_card_product_id=last_card,
-                             seconds_since_last_product_shown=newest_citation)
+                             seconds_since_last_product_shown=newest_citation,
+                             cited_within_lapse=cited_recently)
 
     products = _still_in_catalog(db, tenant_id=tenant_id, product_ids=current)
     if not products:
         return ShownProducts(products=(), reason=NO_PRODUCTS_CITED, offered_as_rows=rows_offered,
                              offered_by_message=offered_map, last_card_product_id=last_card,
-                             seconds_since_last_product_shown=newest_citation)
+                             seconds_since_last_product_shown=newest_citation,
+                             cited_within_lapse=cited_recently)
     return ShownProducts(products=tuple(products), reason=CARRIED, offered_as_rows=rows_offered,
                          offered_by_message=offered_map, last_card_product_id=last_card,
-                         seconds_since_last_product_shown=newest_citation)
+                         seconds_since_last_product_shown=newest_citation,
+                             cited_within_lapse=cited_recently)
 
 
 def _still_in_catalog(db: Any, *, tenant_id: int, product_ids: Sequence[int]) -> List[ShownProduct]:

@@ -58,8 +58,15 @@ REPLY_TOOL_NAME = "submit_reply"
 # "already stood on its own prose, which is why a card is an affordance over it
 # rather than a part of it". A model reading that literally omits the shape
 # every time, which is what turns 27 and 28 recorded. What is stated here is
-# what the tool accepts and how each shape relates to the text; when to reach
-# for either remains the model's own judgement and is deliberately unstated.
+# what the tool accepts and how each shape relates to the text.
+#
+# One use is stated, by the owner's approval of 26 September 2026 (Tenant 1
+# turn 66: five products browsed, no selector requested, sent as text): when
+# the answer offers two or more products this turn's search returned, they are
+# offered as the selector. Whether an answer is such an offer — rather than a
+# recommendation of one product, a comparison or a question — stays the
+# model's judgement; the loop asks once when the platform's own presentation
+# decision found a list and the model offered none (``LIST_OFFER_NEEDED``).
 REPLY_TOOL_DESCRIPTION = (
     "Submit the final answer for this customer turn. Call this exactly once, "
     "on its own, when no further lookup is needed. Every commerce fact in the "
@@ -74,8 +81,10 @@ REPLY_TOOL_DESCRIPTION = (
     "text need not repeat what the shape already shows, and says whatever this turn "
     "calls for beside it — an introduction, an explanation, a comparison, an answer "
     "— in as much detail as that needs, including what a row has no room for, on "
-    "request. Neither is required, and the customer may always answer "
-    "by typing."
+    "request. When the answer offers the customer two or more products this turn's "
+    "search returned to choose from, offer them as the selector, and let the text "
+    "introduce them rather than list each one with its price. The customer may "
+    "always answer by typing."
 )
 
 REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
@@ -108,8 +117,11 @@ REPLY_TOOL_SCHEMA: Mapping[str, Any] = {
                 "and a few of its options, taken from the merchant's own records as this turn "
                 "read them, so the text need not list them again; what a row has no room for "
                 "is the text's to give on request. Two to ten products, each looked up in this turn "
-                "and cited in evidence_refs. The selector is an addition over the text, never "
-                "a replacement for it, and is never required; the customer can always reply "
+                "and cited in evidence_refs. Use it whenever the answer offers two or more "
+                "products this turn's search returned to choose from; otherwise, as for an answer "
+                "about one product, a recommendation or a question, it is optional. The selector "
+                "is an addition over "
+                "the text, never a replacement for it; the customer can always reply "
                 "by typing. If the channel cannot show it, the platform adds its rows to the "
                 "text as lines, so nothing offered is lost. It is not sent together with card."
             ),

@@ -132,6 +132,17 @@ def test_no_declared_schema_offers_a_write_a_price_or_a_quantity_the_model_could
     offered = {name for d in alt.build_live_registry(binding).definitions
                for name in (d.input_schema.get("properties") or {})}
     assert offered == {"query", "limit", "product_id", "order_number", "purpose", "order_id"}
+    # Where a continuation exists, the search also takes ``exclude_shown``: it
+    # narrows a read to products not yet shown, sets no value, writes nothing
+    # and names no product.
+    binding.paging_available = True
+    try:
+        offered = {name for d in alt.build_live_registry(binding).definitions
+                   for name in (d.input_schema.get("properties") or {})}
+    finally:
+        binding.paging_available = False
+    assert offered == {"query", "limit", "exclude_shown", "product_id", "order_number", "purpose",
+                       "order_id"}
 
 
 # ── Scope ────────────────────────────────────────────────────────────────────
