@@ -56,7 +56,13 @@ Exactly this order, first match wins:
    policy.
 3. **A focused product** from a deliberate `get_product_details` → **Card**,
    subject to recent-card suppression when there is no new selection.
-4. **Multiple candidates and no focus** → **List**.
+4. **Multiple candidates and no focus** → **List** — *decided and recorded
+   only.* The seam logs `shape=list`, `shape_reason=multiple_candidates`, but
+   rows are composed only for a model-requested selector (step 2) or a "More"
+   page (step 1b); on this step alone the customer receives the text
+   (`test_1c_a_list_the_policy_decides_on_its_own_is_recorded_but_not_composed`).
+   Composing it needs the model's text to know a list follows, which is a
+   model-facing change awaiting its own approval.
 5. Otherwise → **Text**.
 
 **The tap is first, and that is the point of it.** A tap on a row this

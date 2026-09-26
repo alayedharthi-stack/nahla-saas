@@ -244,6 +244,31 @@ def test_1b_the_policy_reaches_a_list_on_its_own_when_the_model_offers_nothing()
     assert (decided.kind, decided.reason) == (pp.SHAPE_LIST, pp.MULTIPLE_CANDIDATES)
 
 
+def test_1c_a_list_the_policy_decides_on_its_own_is_recorded_but_not_composed() -> None:
+    """The gap between step 4's decision and what the customer receives, pinned.
+
+    Five products browsed, no focus, no selector requested: the seam records
+    ``list`` / ``multiple_candidates`` for the reply and sends the text alone.
+    Only a model-requested selector, a verified "More" tap or a stood-down
+    selector is ever composed into rows; a card (step 3) is composed from the
+    decision alone, a list is not. Production turn 66 of 2026-09-25 logged the
+    same outcome (``search_products`` returned five products,
+    ``choices_outcome=not_requested``, ``choice_rows=0``).
+
+    This test describes today's behaviour, not the goal. Composing the list
+    without letting the model's text repeat every row needs a model-facing
+    change (see the PR that adds this test); when that lands, this test is the
+    one that must change.
+    """
+    final, session = run_seam(draft(cite=[11, 12, 13, 14, 15]), [browsed(11, 12, 13, 14, 15)])
+    recorded = shape_of(session)
+    assert (recorded["shape"], recorded["shape_reason"]) == (pp.SHAPE_LIST, pp.MULTIPLE_CANDIDATES)
+    rows, _button = rc.payload_rows(final.payload)
+    assert rows == [] and recorded["choices"] != rc.OFFERED
+    assert final.kind != lc.DeliveryKind.RICH.value and card_of(final) is None
+    assert final.text == "تفضل"
+
+
 # ══ 2. One search candidate is not a selection ═══════════════════════════════
 
 def test_2_a_single_search_candidate_never_becomes_a_card() -> None:
