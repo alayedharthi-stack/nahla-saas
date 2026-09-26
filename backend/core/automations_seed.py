@@ -80,43 +80,27 @@ SEED_AUTOMATIONS: List[Dict[str, Any]] = [
         "name":            "استرداد العربة المتروكة",
         "enabled":         False,
         "config": {
-            # ── Four-stage recovery workflow (premium UX) ──────────────────
+            # ── Three-stage template-only recovery workflow ────────────────
             #
-            # Stage 1 (30 min)    — Meta-approved template, dynamic URL
-            #                       button to the live cart_url. Opens a
-            #                       new marketing window if needed.
-            # Stage 2 (6 h)       — Free-form interactive message with 3
-            #                       dynamic reply buttons. Stays inside
-            #                       the existing service window when the
-            #                       customer engaged stage 1 (zero extra
-            #                       conversation cost). Falls back to the
-            #                       template if the window has closed.
-            # Stage 3 (8 h)       — Optional AI recovery turn. Disabled
-            #                       by default; the merchant can flip
-            #                       `ai_recovery_enabled=true` and tune
-            #                       the delay (8h / 10h / 12h are the
-            #                       supported presets).
-            # Stage 4 (23 h 50 m) — Final CTA-URL push with the coupon
-            #                       baked into the cart_url so the
-            #                       primary action is "open the cart with
-            #                       the discount applied". Sent BEFORE
-            #                       the 24-hour window expires so we
-            #                       don't pay for a fresh marketing
-            #                       conversation just to deliver a coupon.
+            # Stage 1 (30 min)    — Meta-approved template (cart_recovery
+            #                       step 1). Emitted by the storefront
+            #                       snippet at abandonment time.
+            # Stage 2 (6 h)       — Follow-up template (cart_recovery
+            #                       step 2). No coupon.
+            # Stage 3 (23 h 45 m) — Final coupon template (cart_recovery
+            #                       step 3). auto_coupon ON. Sent BEFORE
+            #                       the 24-hour window expires.
             #
-            # Stages 2-4 are emitted by
+            # Stages 2-3 are emitted by
             # `automation_emitters.scan_abandoned_cart_followups`, which
             # writes a NEW `cart_abandoned` AutomationEvent carrying
             # `payload.step_idx`. The engine honours that explicit index
             # (see `_active_step_for_event`) so each stage gets its own
-            # AutomationExecution row, its own template/interactive
-            # render, and its own coupon decision.
+            # AutomationExecution row and coupon decision.
             #
-            # 3 template-only stages, all auto-bound from Nahla's
-            # template library via service_key + step_number.
-            # No interactive / ai_recovery — every stage is a Meta-
-            # approved template so it works regardless of whether the
-            # customer opened a service window.
+            # All stages are template-only — auto-bound from Nahla's
+            # template library via service_key + step_number. No
+            # interactive / ai_recovery paths in the canonical seed.
             #
             # If the customer REPLIES to any stage, the flow stops
             # and the conversation is handed to AI / human support.
