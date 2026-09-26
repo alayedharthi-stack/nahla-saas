@@ -1279,7 +1279,26 @@ def test_an_answer_about_one_product_is_not_asked_for_a_list(shop: Shop):
 
     model = LiteralModel(script)
     report, transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
-    assert report.list_offer is None and len(model.calls) == 2 and _asked(model) == []
+    assert len(model.calls) == 2 and _asked(model) == []
+    assert report.list_offer == "skipped_reply_cites_fewer"
+
+
+def test_a_reply_that_names_products_without_citing_them_is_recorded_not_asked(shop: Shop):
+    """The platform reads only what the reply cites. A text that names the
+    products without citing them goes as written, and the turn report says the
+    decided list met a reply citing too few — so such a turn is visible."""
+    conversation = shop.conversation()
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        return _step([_reply("We have several shirts in blue and white.")])
+
+    model = LiteralModel(script)
+    report, transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
+    assert _asked(model) == [] and len(model.calls) == 2
+    assert transport.sent[0]["text"] == "We have several shirts in blue and white."
+    assert report.list_offer == "skipped_reply_cites_fewer"
 
 
 def test_a_comparison_of_two_read_products_is_not_widened_into_the_search(shop: Shop):

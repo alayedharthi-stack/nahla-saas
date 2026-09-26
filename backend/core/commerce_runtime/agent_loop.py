@@ -306,7 +306,9 @@ class AgentLoop:
         The products are that search's buyable ones, in its order; the flag
         says whether its stored result holds more than it showed (a "More" row
         can exist). A question that is due but cannot be asked — no step or no
-        time left — is recorded as skipped with its reason. ``()`` otherwise.
+        time left — is recorded as skipped with its reason, and so is a reply
+        that cites fewer than two of the products the decided list would offer
+        (``reply_cites_fewer``). ``()`` otherwise.
         """
         try:
             shape = pp.decide(draft=draft, observations=session.observations,
@@ -319,7 +321,15 @@ class AgentLoop:
                 session.observations, self._registry.definitions, scope,
                 self._browse.search_tool_names if self._browse is not None else ())
             cited = set(getattr(draft, "evidence_refs", ()) or ())
-            if len([pid for pid in offer if rc.product_ref(pid) in cited]) < rc.MIN_CHOICES:
+            cited_count = len([pid for pid in offer if rc.product_ref(pid) in cited])
+            if cited_count < rc.MIN_CHOICES:
+                if len(offer) >= rc.MIN_CHOICES:
+                    # Decided, but the reply cites too few of them to be read as
+                    # an offer: recorded, so a reply that names them without
+                    # citing is told apart from one about something else.
+                    session.record("list_offer_skipped", {"reason": "reply_cites_fewer",
+                                                          "cited": cited_count,
+                                                          "offered": len(offer)})
                 return (), False
         except Exception as exc:  # noqa: BLE001 - asking is an affordance; the answer still goes
             session.record("list_offer_failed", {"error": type(exc).__name__})
