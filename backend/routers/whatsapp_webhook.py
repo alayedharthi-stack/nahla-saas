@@ -2502,6 +2502,7 @@ async def _dispatch_message(
                         phone_id=phone_number_id,
                         payload=build_confirmation_payload(normalized_sender),
                         _tenant_id=resolved_tenant_id, _db=db,
+                        _unsubscribe_notice=True,
                     )
                     if ok:
                         _save_unsub_msg(CONFIRMATION_BODY_AR, "outbound")
@@ -2513,6 +2514,7 @@ async def _dispatch_message(
                             phone_id=phone_number_id,
                             payload=build_confirmation_fallback_payload(normalized_sender),
                             _tenant_id=resolved_tenant_id, _db=db,
+                            _unsubscribe_notice=True,
                         )
                         if ok:
                             _save_unsub_msg(CONFIRMATION_FALLBACK_MSG_AR, "outbound")
@@ -2559,6 +2561,7 @@ async def _dispatch_message(
                             phone_id=phone_number_id,
                             payload=build_text_payload(normalized_sender, FINAL_UNSUBSCRIBED_MSG_AR),
                             _tenant_id=resolved_tenant_id, _db=db,
+                            _unsubscribe_notice=True,
                         )
                         if _ok:
                             _save_unsub_msg(FINAL_UNSUBSCRIBED_MSG_AR, "outbound")
@@ -2582,6 +2585,7 @@ async def _dispatch_message(
                             phone_id=phone_number_id,
                             payload=build_text_payload(normalized_sender, CANCELLED_UNSUB_MSG_AR),
                             _tenant_id=resolved_tenant_id, _db=db,
+                            _unsubscribe_notice=True,
                         )
                         if _ok:
                             _save_unsub_msg(CANCELLED_UNSUB_MSG_AR, "outbound")
@@ -2600,13 +2604,14 @@ async def _dispatch_message(
                         mark_pending_unsubscribe(db, _lead, commit=True)
                     # Always (re-)send confirmation prompt so the customer
                     # never gets stuck without a way to opt out.
+                    _prompt_sent = False
                     try:
-                        await _send_unsub_confirmation_prompt()
+                        _prompt_sent = await _send_unsub_confirmation_prompt()
                     except Exception as _send_exc:
                         logger.warning("[Webhook] Failed to send confirmation prompt: %s", _send_exc)
                     logger.info(
-                        "[Webhook] UNSUBSCRIBE PENDING (sent confirmation) | tenant=%s phone=%s",
-                        resolved_tenant_id, normalized_sender,
+                        "[Webhook] UNSUBSCRIBE PENDING | tenant=%s phone=%s confirmation_sent=%s",
+                        resolved_tenant_id, normalized_sender, _prompt_sent,
                     )
                     _unsub_short_circuit = True
 
@@ -2615,14 +2620,15 @@ async def _dispatch_message(
                     _save_unsub_msg(_inbound_text, "inbound")
                     # Don't run AI/automation while pending — just nudge them
                     # again (throttled) so they see the buttons.
+                    _prompt_sent = False
                     try:
                         if should_send_pending_prompt(_lead):
-                            await _send_unsub_confirmation_prompt()
+                            _prompt_sent = await _send_unsub_confirmation_prompt()
                     except Exception as _send_exc:
                         logger.warning("[Webhook] Failed to re-send confirmation prompt: %s", _send_exc)
                     logger.info(
-                        "[Webhook] UNSUBSCRIBE STILL PENDING (resent prompt) | tenant=%s phone=%s",
-                        resolved_tenant_id, normalized_sender,
+                        "[Webhook] UNSUBSCRIBE STILL PENDING | tenant=%s phone=%s confirmation_sent=%s",
+                        resolved_tenant_id, normalized_sender, _prompt_sent,
                     )
                     _unsub_short_circuit = True
 
@@ -14946,6 +14952,7 @@ async def _post_wa(
     _store_name: str = "unknown",
     _db=None,
     _allow_manual: bool = False,
+    _unsubscribe_notice: bool = False,
     _blocked_path: str = "post_wa",
     _treat_dedup_as_success: bool = True,
     _result_sink: Optional[Dict[str, Any]] = None,
@@ -15086,7 +15093,17 @@ async def _post_wa(
             _stamp_throttled("burst_60s")
             return False
 
-        if _db is not None and _tenant_id and recipient and not _allow_manual:
+        if _unsubscribe_notice:
+            from core.automation_send_guard import evaluate_unsubscribe_notice_send  # noqa: PLC0415
+
+            _consent_block = evaluate_unsubscribe_notice_send(
+                _db, tenant_id=_tenant_id, customer_phone=recipient,
+                payload=payload, blocked_path="unsubscribe_notice",
+            )
+            if _consent_block.block:
+                return False
+
+        if _db is not None and _tenant_id and recipient and not _allow_manual and not _unsubscribe_notice:
             try:
                 from core.ai_disabled_gate import (  # noqa: PLC0415
                     evaluate_ai_disabled_send_block,
@@ -15308,6 +15325,7 @@ async def _post_wa(
                 prefer_platform=bool(wa_conn and getattr(wa_conn, "connection_type", None) == "direct"),
                 timeout=15,
                 allow_manual=_allow_manual,
+                unsubscribe_notice=_unsubscribe_notice,
                 blocked_path=_blocked_path or "post_wa",
             )
             token_source = ctx.source if ctx else None
@@ -15472,6 +15490,7 @@ async def _post_wa(
                                 ),
                                 timeout=15,
                                 allow_manual=_allow_manual,
+                                unsubscribe_notice=_unsubscribe_notice,
                                 blocked_path=_blocked_path or "post_wa",
                             )
                             logger.info(
