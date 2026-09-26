@@ -734,10 +734,14 @@ def test_a_claimed_cod_button_tap_never_reaches_the_cod_route(configured, db):
 
 
 def test_a_claimed_template_button_tap_never_reaches_the_cod_route(configured, db):
-    seen = drive_cod_button(db, msg_id="wamid.codtpl.claimed", kind="template")
+    seen = drive_cod_button(db, msg_id="wamid.codtpl.claimed", kind="template",
+                            payload="nahla_cod_confirm:155",
+                            context_wamid="wamid.cod.prompt")
     assert seen["cod"] == [] and seen["followup"] == []
     assert len(seen["handled"]) == 1
     assert seen["handled"][0]["commerce_runtime_claim"] is not None
+    assert seen["handled"][0]["inbound_metadata"]["cod_button_payload"] == "nahla_cod_confirm:155"
+    assert seen["handled"][0]["inbound_metadata"]["cod_button_context_wamid"] == "wamid.cod.prompt"
 
 
 def test_a_non_allowlisted_cod_button_tap_keeps_todays_behaviour(configured, monkeypatch, db):

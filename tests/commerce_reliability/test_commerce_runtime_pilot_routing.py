@@ -20,6 +20,7 @@ elsewhere on real PostgreSQL. What is proved *here* is placement.
 from __future__ import annotations
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import patch
 
@@ -562,7 +563,8 @@ def cod_watched(stack: ExitStack, record: Dict[str, List[Any]], *,
 
 
 def drive_cod(seen: Seen, record: Dict[str, List[Any]], *, event_id: str,
-              text: str = "نعم", claim: Any = "establish") -> Any:
+              text: str = "نعم", claim: Any = "establish",
+              inbound_metadata: Any = None) -> Any:
     """One real inbound "نعم", through the production claim and the real handler."""
     import asyncio
 
@@ -599,6 +601,7 @@ def drive_cod(seen: Seen, record: Dict[str, List[Any]], *, event_id: str,
             asyncio.run(webhook._handle_merchant_message(
                 phone_id=H.PHONE_ID, to=CUSTOMER, text=text, tenant_id=TENANT,
                 db=harness.db, wa_msg_id=event_id, commerce_runtime_claim=claims[0],
+                inbound_metadata=inbound_metadata,
             ))
     harness.claims = claims                              # type: ignore[attr-defined]
     return harness
@@ -623,6 +626,26 @@ def test_an_allowlisted_yes_is_the_runtime_s_and_never_reaches_cod(pilot_on):
     assert record["handled"] == [] and record["followup"] == []
     assert len(seen.pilot_asked) == 1                    # the runtime got the turn
     assert seen.v2_owner == []
+
+
+def test_claimed_verified_button_mutates_store_then_keeps_one_runtime_reply(pilot_on):
+    from unittest.mock import AsyncMock
+
+    seen, record = Seen(), cod_seen()
+    action = AsyncMock(return_value=("confirm", SimpleNamespace(id=169)))
+    meta = {
+        "cod_structured_button": True,
+        "cod_button_payload": "nahla_cod_confirm:169",
+        "cod_button_context_wamid": "wamid.cod.prompt",
+    }
+    with patch("services.cod_confirmation.apply_claimed_structured_cod_control", action):
+        drive_cod(seen, record, event_id="wamid.cod.confirm.169",
+                  text="تأكيد الطلب", inbound_metadata=meta)
+
+    assert action.await_count == 1
+    assert action.await_args.kwargs["button_payload"] == "nahla_cod_confirm:169"
+    assert record["handled"] == [] and record["followup"] == []
+    assert len(seen.pilot_asked) == 1
 
 
 def test_a_non_allowlisted_yes_keeps_todays_cod_behaviour(pilot_on, monkeypatch):

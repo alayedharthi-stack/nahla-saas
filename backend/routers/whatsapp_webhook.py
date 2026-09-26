@@ -2985,6 +2985,9 @@ async def _dispatch_message(
                             "button_id": btn_id,
                             "button_title": btn_txt,
                             "button_provenance": btn_id,
+                            "cod_structured_button": True,
+                            "cod_button_payload": btn_id,
+                            "cod_button_context_wamid": context_wamid,
                         },
                         commerce_runtime_claim=_runtime_claim,
                     )
@@ -3267,6 +3270,11 @@ async def _dispatch_message(
                     tenant_id=resolved_tenant_id, db=db,
                     wa_message_ts=_wa_msg_ts,
                     wa_msg_id=msg_id or None,
+                    inbound_metadata={
+                        "cod_structured_button": True,
+                        "cod_button_payload": _btn_payload,
+                        "cod_button_context_wamid": _context_wamid,
+                    },
                     commerce_runtime_claim=_runtime_claim,
                 )
                 return
@@ -5967,6 +5975,50 @@ async def _handle_merchant_message(
     # owner acting on it is the double answer the claim exists to prevent.
     # Without a claim nothing here changes at all.
     if _claim_holds:
+        # The runtime owns the customer reply, but a verified provider button
+        # also carries an operational COD instruction. Apply the Salla status
+        # mutation under this claim before composing a reply. Do not send a
+        # second, fixed follow-up or turn ordinary text into a COD action.
+        _cod_meta = inbound_metadata if isinstance(inbound_metadata, dict) else {}
+        if _cod_meta.get("cod_structured_button") is True:
+            try:
+                from services.cod_confirmation import (  # noqa: PLC0415
+                    apply_claimed_structured_cod_control,
+                )
+                _cod_decision, _cod_order = await apply_claimed_structured_cod_control(
+                    db,
+                    tenant_id=tenant_id,
+                    customer_phone=to,
+                    text=text or "",
+                    button_payload=str(_cod_meta.get("cod_button_payload") or ""),
+                    context_wamid=str(_cod_meta.get("cod_button_context_wamid") or ""),
+                )
+                if _cod_decision is not None:
+                    logger.info(
+                        "[COD_BUTTON_ROUTE] runtime_operation tenant=%s order=%s decision=%s",
+                        tenant_id, getattr(_cod_order, "id", None), _cod_decision,
+                    )
+                    if _cod_decision in {"confirm_failed", "cancel_failed"}:
+                        _persist_inbound_only(
+                            db=db, tenant_id=tenant_id, sender=to,
+                            msg_type="button", normalized_type="text",
+                            inbound_metadata=_cod_meta, wa_msg_id=wa_msg_id,
+                            drop_reason="cod_store_update_failed",
+                            placeholder_body=text or "[button]",
+                        )
+                        return
+            except Exception:
+                logger.exception(
+                    "[COD_BUTTON_ROUTE] runtime operation failed tenant=%s", tenant_id,
+                )
+                _persist_inbound_only(
+                    db=db, tenant_id=tenant_id, sender=to,
+                    msg_type="button", normalized_type="text",
+                    inbound_metadata=_cod_meta, wa_msg_id=wa_msg_id,
+                    drop_reason="cod_operation_unavailable",
+                    placeholder_body=text or "[button]",
+                )
+                return
         logger.info("[COMMERCE_RUNTIME_PILOT] cod branches skipped tenant=%s — "
                     "the runtime claimed this inbound", tenant_id)
     else:
