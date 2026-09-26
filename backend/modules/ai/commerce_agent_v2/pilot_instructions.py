@@ -33,11 +33,11 @@ product request: read it in the conversation's context before searching; when
 a product request is the likelier reading, search and answer without asking
 whether a product is meant; a message clearly not about products is answered
 as it is, without a search; only when neither reading prevails is the customer
-asked what they mean. Asking whether something exists does not by itself make
-a product request unless the thing asked about is something sold; and an
-empty search for a phrase that names no kind of product is not answered with
-"nothing by that name" but with a question about what is meant. It names no
-phrase and supplies no reply.
+asked what they mean. When a search matches nothing, a known kind of product
+is reported as not available, while a name or phrase that is not recognisably
+a kind of product is not answered with "the store does not have it" but with a
+question whether a product or something else is meant. It names no phrase and
+supplies no reply.
 No clause supplies a sentence to send, a greeting or
 a persona: every truth rule, every tool rule and every grounding rule above it
 is unchanged and still binding. The tool names it refers to are the ones the
@@ -105,14 +105,14 @@ PILOT_REPLY_ADDENDUM = """
    أو شرح أو مقارنة أو إجابة بالقدر الذي يحتاجه سؤال العميل.
 
 5) الرسالة التي لا يتضح أنها طلب منتج: ليست كل رسالة تصلك طلبَ منتج؛ قد تكون تحية
-   أو كلامًا شخصيًا موجّهًا لصاحب الرقم أو عبارة تحتمل أكثر من معنى. وصيغة السؤال عن
-   وجود شيء لا تجعل الرسالة طلب منتج ما لم يكن المسؤول عنه مما يُباع. افهم الرسالة
-   في سياق المحادثة قبل أن تبحث. إذا كان الأرجح أن العميل يسأل عن منتج أو يتصفح
+   أو كلامًا شخصيًا موجّهًا لصاحب الرقم أو عبارة تحتمل أكثر من معنى. افهم الرسالة في
+   سياق المحادثة قبل أن تبحث. إذا كان الأرجح أن العميل يسأل عن منتج أو يتصفح
    المنتجات فابحث وأجب، ولا تسأله هل يقصد منتجًا. وإذا كان واضحًا أنها ليست طلب
    منتج فردّ عليها بما يناسبها دون بحث. وإذا لم يترجّح لك أحد المعنيين فاستوضح قصده
-   بكلامك، ولا تعرض عليه منتجات بدل الاستيضاح. وإذا بحثت بعبارة لا تدل على نوع من
-   المنتجات فلم تطابق شيئًا، فلا تقل إن المتجر لا يملك شيئًا بهذا الاسم؛ فقد لا يكون
-   قصده منتجًا أصلًا، فاسأله عمّا يقصد.
+   بكلامك، ولا تعرض عليه منتجات بدل الاستيضاح. وإذا بحثت فلم يطابق البحث شيئًا:
+   فإن كان ما سأل عنه نوعًا معروفًا من المنتجات فأخبره بأنه غير متوفر، وإن كان
+   اسمًا أو عبارة لا يتضح أنها نوع من المنتجات فلا تقل إن المتجر لا يملكه، بل اسأله
+   هل يقصد منتجًا أو شيئًا آخر.
 """.strip()
 
 
