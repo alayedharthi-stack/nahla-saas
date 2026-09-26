@@ -323,7 +323,9 @@ class AgentLoop:
             cited = set(getattr(draft, "evidence_refs", ()) or ())
             cited_count = len([pid for pid in offer if rc.product_ref(pid) in cited])
             if cited_count < rc.MIN_CHOICES:
-                if len(offer) >= rc.MIN_CHOICES:
+                already_asked = any(p.code == rc.LIST_OFFER_NEEDED
+                                    for f in session.feedback for p in f.problems)
+                if len(offer) >= rc.MIN_CHOICES and not already_asked:
                     # Decided, but the reply cites too few of them to be read as
                     # an offer: recorded, so a reply that names them without
                     # citing is told apart from one about something else.

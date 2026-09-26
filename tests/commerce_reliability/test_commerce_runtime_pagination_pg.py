@@ -1281,6 +1281,8 @@ def test_an_answer_about_one_product_is_not_asked_for_a_list(shop: Shop):
     report, transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
     assert len(model.calls) == 2 and _asked(model) == []
     assert report.list_offer == "skipped_reply_cites_fewer"
+    offered = len(model.search_result()["result"]["products"])
+    assert report.list_offer_cited == f"1/{offered}"
 
 
 def test_a_reply_that_names_products_without_citing_them_is_recorded_not_asked(shop: Shop):
@@ -1299,6 +1301,8 @@ def test_a_reply_that_names_products_without_citing_them_is_recorded_not_asked(s
     assert _asked(model) == [] and len(model.calls) == 2
     assert transport.sent[0]["text"] == "We have several shirts in blue and white."
     assert report.list_offer == "skipped_reply_cites_fewer"
+    offered = len(model.search_result()["result"]["products"])
+    assert offered >= 2 and report.list_offer_cited == f"0/{offered}"
 
 
 def test_a_comparison_of_two_read_products_is_not_widened_into_the_search(shop: Shop):

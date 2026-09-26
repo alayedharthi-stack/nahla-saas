@@ -155,9 +155,14 @@ class TurnReport:
     # When the platform decided a list the model's reply did not offer, what
     # the one step that asked for it came to: ``answered`` (the model's reply
     # from that step went out, with or without a selector), why the reply
-    # before it went out instead, or ``skipped_<reason>`` when the question was
-    # due but the turn had no step or time left for it. None when not due.
+    # before it went out instead, or ``skipped_<reason>`` when it was not asked:
+    # no step or time left for a question that was due, or
+    # ``skipped_reply_cites_fewer`` when the policy decided a list and the reply
+    # cited fewer than two of its products. None when no list was decided.
     list_offer: Optional[str] = None
+    # With ``skipped_reply_cites_fewer``: "<cited>/<offered>", so a reply about
+    # one product ("1/5") is told apart from one citing none of them ("0/5").
+    list_offer_cited: Optional[str] = None
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
@@ -845,6 +850,9 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         list_offer=((str(offer.detail.get("outcome") or "") or None) if offer is not None
                     else (f"skipped_{offer_skipped.detail.get('reason')}" if offer_skipped is not None
                           else None)),
+        list_offer_cited=(f"{offer_skipped.detail.get('cited')}/{offer_skipped.detail.get('offered')}"
+                          if offer is None and offer_skipped is not None
+                          and "cited" in offer_skipped.detail else None),
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,
