@@ -166,25 +166,25 @@ def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
         # turn's session usable, and — unlike Session.begin_nested — it flushes
         # nothing the session is holding.
         with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
-            row = db.query(TenantSettings.ai_settings, TenantSettings.extra_metadata).filter(
-                TenantSettings.tenant_id == int(tenant_id)).first()
+            settings = db.query(TenantSettings.ai_settings).filter(
+                TenantSettings.tenant_id == int(tenant_id)).scalar()
+            # The Arabic dialect is stored beside the AI settings (see
+            # ``core.reply_dialect``).
+            metadata = db.query(TenantSettings.extra_metadata).filter(
+                TenantSettings.tenant_id == int(tenant_id)).scalar()
     except Exception as exc:  # noqa: BLE001 - the turn is answered without them
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable (AI settings read "
                      "failed; reply style omitted too) tenant=%s error=%s",
                      tenant_id, type(exc).__name__)
         return None
-    if row is None:
-        return {}
-    settings, metadata = row
     if settings is None:
         settings = {}
     if not isinstance(settings, Mapping):
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
                      "name tenant=%s", tenant_id)
         return None
-    # The Arabic dialect is stored beside the AI settings (see
-    # ``core.reply_dialect``); it joins them here, for this runtime only.
-    block = metadata.get("reply_style") if isinstance(metadata, Mapping) else None
+    # The dialect joins the AI settings here, for this runtime only.
+    block =metadata.get("reply_style") if isinstance(metadata, Mapping) else None
     if isinstance(block, Mapping) and "arabic_dialect" in block:
         settings = {**settings, "arabic_dialect": block.get("arabic_dialect")}
     return settings
