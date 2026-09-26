@@ -361,15 +361,29 @@ function AISettingsPanel() {
               <option value="detailed">تفصيلي وشامل</option>
             </select>
           </Field>
-          {/* Each label states what the assistant is actually told for that value
-              (backend tenant_overlay.LANGUAGE_MAP, read by both runtimes). Only
-              "arabic" carries a dialect, and it also switches to English for a
-              customer who starts in English — so it must not read "Arabic only". */}
-          <Field label="لغة الردود" hint="اللهجة السعودية تُحدَّد في الخيار الأول فقط.">
+          {/* Each label states which language the assistant is told to answer in
+              (backend tenant_overlay.LANGUAGE_MAP). Both single-language options
+              also answer a customer who writes in the other language, so neither
+              may read "only". The dialect is its own setting (next field). */}
+          <Field label="لغة الردود" hint="اللهجة تُحدَّد في حقل «اللهجة العربية».">
             <select className="input" value={ai.default_language} onChange={e => patch({ default_language: e.target.value as AISettings['default_language'] })}>
-              <option value="arabic">العربية باللهجة السعودية — وبالإنجليزية لمن يبدأ بها</option>
+              <option value="arabic">العربية — وبالإنجليزية لمن يبدأ بها</option>
               <option value="english">الإنجليزية — وبالعربية لمن يكتب بها</option>
-              <option value="bilingual">لغة العميل (عربية أو إنجليزية) — دون لهجة محددة</option>
+              <option value="bilingual">لغة العميل (عربية أو إنجليزية)</option>
+            </select>
+          </Field>
+          {/* Independent of the language (backend core/reply_dialect.py). The empty
+              option shows the effective value when nothing is chosen: the
+              "arabic" language option means Saudi colloquial by default; the
+              other two name no dialect. */}
+          <Field label="اللهجة العربية" hint="تُطبَّق على الردود العربية فقط، وتبقى لغة الرد حسب «لغة الردود».">
+            <select className="input" value={ai.arabic_dialect ?? ''} onChange={e => patch({ arabic_dialect: e.target.value as NonNullable<AISettings['arabic_dialect']> })}>
+              <option value="">{ai.default_language === 'arabic' ? 'افتراضي: السعودية' : 'افتراضي: بلا لهجة محددة'}</option>
+              <option value="saudi">السعودية</option>
+              <option value="iraqi">العراقية</option>
+              <option value="egyptian">المصرية</option>
+              <option value="levantine">الشامية</option>
+              <option value="fusha">الفصحى</option>
             </select>
           </Field>
           <div className="sm:col-span-2">

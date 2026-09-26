@@ -8,7 +8,7 @@ POST /settings/test-whatsapp — test WhatsApp connection
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -61,6 +61,11 @@ def _sales_channel_availability(db: Session, tenant_id: int) -> Dict[str, Any]:
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
+# The saved Arabic-dialect values: ``core.reply_dialect.ARABIC_DIALECTS`` plus ""
+# for "not chosen". A Literal has to be spelled out; a test holds the two equal.
+ArabicDialectIn = Literal["", "saudi", "iraqi", "egyptian", "levantine", "fusha"]
+
+
 class WhatsAppSettingsIn(BaseModel):
     business_display_name: str = ""
     phone_number: str = ""
@@ -82,6 +87,9 @@ class AISettingsIn(BaseModel):
     reply_tone: str = "friendly"
     reply_length: str = "medium"
     default_language: str = "arabic"
+    # Independent of default_language. Omitted (None) keeps the stored choice,
+    # "" clears it, and any value outside ArabicDialectIn is rejected (422).
+    arabic_dialect: Optional[ArabicDialectIn] = None
     owner_instructions: str = ""
     coupon_rules: str = ""
     escalation_rules: str = ""

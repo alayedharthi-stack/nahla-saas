@@ -61,6 +61,10 @@ DEFAULT_AI: Dict[str, Any] = {
     "reply_tone":        "friendly",
     "reply_length":      "medium",
     "default_language":  "arabic",
+    # Independent of default_language: one of core.reply_dialect.ARABIC_DIALECTS,
+    # or "" for "not chosen" (the reply language's own meaning then applies,
+    # exactly as before the setting existed).
+    "arabic_dialect":    "",
     "owner_instructions": (
         "- ردودك لا تتجاوز 3-4 أسطر في الغالب — اختصري دائماً.\n"
         "- إذا احتاج الموضوع تفصيلاً، لخّصيه في جملتين ثم اسألي: «تبي أعرفك أكثر؟»\n"

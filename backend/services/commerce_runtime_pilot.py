@@ -202,14 +202,33 @@ def _saved_assistant_name(db: Any, tenant_id: int) -> Optional[str]:
 
 
 def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Dict[str, str]:
-    """The reply language and tone the merchant chose, as the platform defines them.
+    """The reply language, Arabic dialect and tone the merchant chose, in the platform's meaning.
 
-    Only the two structured choices, and only in the meaning the platform
-    already gives them on its legacy path (``tenant_overlay``): one definition
-    of what "arabic" or "friendly" asks of a reply, whichever runtime answers.
-    A merchant who chose English or both languages is told exactly that; no
-    dialect is inferred from anything else. Missing or blank means the
-    platform's own default, exactly as for the name.
+    Only structured choices, and only in the meaning the platform gives them:
+    language and tone in the meaning they already carry on the legacy path
+    (``tenant_overlay``) — one definition of what "arabic" or "friendly" asks
+    of a reply, whichever runtime answers — and the Arabic dialect in the
+    meaning ``core.reply_dialect`` defines. Missing or blank language or tone
+    means the platform's own default, exactly as for the name.
+
+    The dialect (``arabic_dialect``) is its own setting, independent of the
+    language: the language decides when a reply is Arabic and when English,
+    the dialect how an Arabic reply is written.
+
+    * Chosen: its meaning is carried as ``reply_dialect``. With ``arabic``,
+      whose platform meaning names Saudi dialect, the language is carried as
+      ``ARABIC_WITHOUT_DIALECT`` so the two settings never contradict each
+      other; ``english`` and ``bilingual`` name no dialect and are carried
+      unchanged.
+    * Not chosen (missing or blank): exactly the behaviour before the setting
+      existed — no ``reply_dialect``; ``arabic`` keeps its own meaning (Saudi
+      colloquial), and a merchant who chose English or both languages is told
+      exactly that, with no dialect inferred from anything else.
+    * A value the platform defines no meaning for is reported and treated as
+      not chosen.
+
+    Called once per turn (``_context_preamble``), and logs once what it
+    delivered — setting values only, never customer data.
 
     Deliberately not carried, and why:
 
@@ -227,6 +246,11 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
     (``DASHBOARD_TONES``); anything else in that field is free text, which this
     channel never carries.
     """
+    from core.reply_dialect import (  # noqa: PLC0415
+        ARABIC_DIALECT_MEANING,
+        ARABIC_WITHOUT_DIALECT,
+        chosen_arabic_dialect,
+    )
     from core.tenant import DEFAULT_AI  # noqa: PLC0415
     from modules.ai.prompts.tenant_overlay import LANGUAGE_MAP, TONE_MAP  # noqa: PLC0415
 
@@ -244,14 +268,29 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
             return None
         return value.strip()
 
+    saved_dialect = settings.get("arabic_dialect")
+    dialect = chosen_arabic_dialect(saved_dialect)
+    if dialect is None and not (
+            saved_dialect is None
+            or (isinstance(saved_dialect, str) and not saved_dialect.strip())):
+        logger.warning("[COMMERCE_RUNTIME_PILOT] reply dialect setting has no platform "
+                       "meaning tenant=%s", tenant_id)
+
     language = chosen("default_language")
+    delivered_language = "none"
     if language is not None:
         meaning = LANGUAGE_MAP.get(language)
         if meaning:
-            style["reply_language"] = meaning
+            # "arabic" names Saudi dialect; a chosen dialect replaces only that.
+            style["reply_language"] = (ARABIC_WITHOUT_DIALECT
+                                       if dialect is not None and language == "arabic"
+                                       else meaning)
+            delivered_language = language
         else:
             logger.warning("[COMMERCE_RUNTIME_PILOT] reply language setting has no platform "
                            "meaning tenant=%s", tenant_id)
+    if dialect is not None:
+        style["reply_dialect"] = ARABIC_DIALECT_MEANING[dialect]
     tone = chosen("reply_tone")
     if tone is not None:
         if TONE_MAP.get(tone):
@@ -261,6 +300,12 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
         else:
             logger.warning("[COMMERCE_RUNTIME_PILOT] reply tone setting is not a dashboard "
                            "choice tenant=%s", tenant_id)
+    # What this turn's model is told, by setting value only. Unchosen "arabic"
+    # still means Saudi colloquial (LANGUAGE_MAP); unchosen english/bilingual
+    # carry no dialect at all.
+    logger.info("[COMMERCE_RUNTIME_PILOT] reply style tenant=%s language=%s dialect=%s",
+                tenant_id, delivered_language,
+                dialect or ("default_saudi" if delivered_language == "arabic" else "none"))
     return style
 
 
