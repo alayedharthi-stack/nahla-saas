@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from core.auth import require_not_support_impersonation
+from core.reply_dialect import arabic_dialect_reach, stored_arabic_dialect, with_arabic_dialect
 from core.database import get_db
 from core.secrets import apply_masks, restore_secrets
 from core.store_identity import merge_merchant_store_name_updates
@@ -66,6 +67,15 @@ def _sales_channel_availability(db: Session, tenant_id: int) -> Dict[str, Any]:
 ArabicDialectIn = Literal["", "saudi", "iraqi", "egyptian", "levantine", "fusha"]
 
 
+def _ai_with_dialect(settings: Any) -> Dict[str, Any]:
+    """The AI settings as the page edits them, with the dialect read from where
+    it is stored — a value the API would refuse reads as not chosen, so the
+    page never sends one back."""
+    ai = merge_ai_defaults(settings.ai_settings)
+    ai["arabic_dialect"] = stored_arabic_dialect(settings.extra_metadata)
+    return ai
+
+
 class WhatsAppSettingsIn(BaseModel):
     business_display_name: str = ""
     phone_number: str = ""
@@ -87,8 +97,9 @@ class AISettingsIn(BaseModel):
     reply_tone: str = "friendly"
     reply_length: str = "medium"
     default_language: str = "arabic"
-    # Independent of default_language. Omitted (None) keeps the stored choice,
-    # "" clears it, and any value outside ArabicDialectIn is rejected (422).
+    # Independent of default_language, and stored in the settings' metadata,
+    # not among ai_settings. Omitted (None) keeps the stored choice, "" clears
+    # it, and any value outside ArabicDialectIn is rejected (422).
     arabic_dialect: Optional[ArabicDialectIn] = None
     owner_instructions: str = ""
     coupon_rules: str = ""
@@ -194,7 +205,8 @@ async def get_settings(request: Request, db: Session = Depends(get_db)):
 
     return {
         "whatsapp":      apply_masks(wa,    "whatsapp"),
-        "ai":            merge_ai_defaults(settings.ai_settings),
+        "ai":            _ai_with_dialect(settings),
+        "arabic_dialect_reach": arabic_dialect_reach(tenant_id),
         "store":         apply_masks(store, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
         "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),
@@ -221,8 +233,18 @@ async def update_settings(
 
     if body.ai is not None:
         current = merge_ai_defaults(settings.ai_settings)
-        current.update(body.ai.model_dump(exclude_none=True))
+        incoming = body.ai.model_dump(exclude_none=True)
+        # The dialect is stored beside, not among, the AI settings: the legacy
+        # path hands every ai_settings key to its model and applies no dialect.
+        dialect = incoming.pop("arabic_dialect", None)
+        current.update(incoming)
+        current.pop("arabic_dialect", None)
         settings.ai_settings = current
+        if dialect is not None:
+            from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+            settings.extra_metadata = with_arabic_dialect(settings.extra_metadata, dialect)
+            flag_modified(settings, "extra_metadata")
 
     if body.store is not None:
         current  = merge_defaults(settings.store_settings, DEFAULT_STORE)
@@ -264,7 +286,8 @@ async def update_settings(
 
     return {
         "whatsapp":      apply_masks(wa_saved,    "whatsapp"),
-        "ai":            merge_ai_defaults(settings.ai_settings),
+        "ai":            _ai_with_dialect(settings),
+        "arabic_dialect_reach": arabic_dialect_reach(tenant_id),
         "store":         apply_masks(store_saved, "store"),
         "notifications": merge_defaults(settings.notification_settings, DEFAULT_NOTIFICATIONS),
         "payment_methods": load_merchant_payment_methods(db, tenant_id).to_dict(),

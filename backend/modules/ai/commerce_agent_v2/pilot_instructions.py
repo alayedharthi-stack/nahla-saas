@@ -22,8 +22,8 @@ govern the reply over the dialect of earlier replies; (4) a list row and a
 product card already show the product's name, price, options, photo and page,
 so the text need not repeat them. On 26 September 2026 the owner approved
 extending clause 3 to follow the separate Arabic-dialect setting
-(``ai_settings.arabic_dialect``, delivered as ``reply_dialect`` in the meaning
-``core.reply_dialect`` defines): the merchant's current settings are the only
+(stored in the tenant settings' metadata, delivered as ``reply_dialect`` in the meaning
+``core.reply_dialect`` defines): the merchant's current settings are the
 reference for language and dialect, however earlier replies were written;
 ``reply_language`` alone decides Arabic or English; and the dialect governs
 Arabic replies only. Neither clause supplies a sentence to send, a greeting or
@@ -77,8 +77,8 @@ PILOT_REPLY_ADDENDUM = """
 
 3) لغة الرد ولهجته: reply_language وreply_dialect وreply_tone في
    conversation_context هي إعدادات التاجر الحالية للغة الرد ولهجته العربية
-   ونبرته، وهي المرجع وحدها. اكتب كل رد وفقها، ولا تأخذ اللغة أو اللهجة من ردود
-   سابقة في المحادثة إذا خالفتها. reply_language يحدد متى تردّ بالعربية ومتى
+   ونبرته. اكتب كل رد وفقها، ولا تأخذ اللغة أو اللهجة من ردود سابقة في
+   المحادثة إذا خالفتها. reply_language يحدد متى تردّ بالعربية ومتى
    بالإنجليزية. إذا وُجد reply_dialect فاتبعه في كل رد عربي؛ وإن لم يوجد وطلب
    reply_language اللهجة السعودية فاكتب بلهجة سعودية طبيعية يفهمها أي عميل
    سعودي. لا تخلط مفردات من لهجات أخرى، واللهجة لا تغيّر لغة الرد: إذا كان الرد

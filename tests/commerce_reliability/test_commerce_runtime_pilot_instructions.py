@@ -217,17 +217,17 @@ def _clause(number: int) -> str:
     return " ".join(addendum[start:end if end != -1 else None].split())
 
 
-def test_clause_3_makes_the_current_settings_the_only_reference_for_language_and_dialect():
+def test_clause_3_makes_the_current_settings_the_reference_over_earlier_replies():
     """Clause 3, extended on 26 September 2026 (owner-approved) for the separate
     Arabic-dialect setting. It points at the three settings the platform
-    delivers, makes the merchant's current values the only reference over
-    earlier replies, keeps the language as the sole judge of Arabic or English,
+    delivers, makes the merchant's current values the reference over earlier
+    replies (not over what the customer asks for now), keeps the language as the sole judge of Arabic or English,
     and applies the dialect to Arabic replies only."""
     clause = _clause(3)
     for key in ("reply_language", "reply_dialect", "reply_tone", "conversation_context"):
         assert key in clause, key
     # The current settings are the reference; earlier replies are not.
-    assert "الحالية" in clause and "المرجع وحدها" in clause
+    assert "الحالية" in clause and "وحدها" not in clause
     assert "ردود سابقة" in clause and "لا تأخذ اللغة أو اللهجة" in clause
     # The language decides Arabic or English; the dialect never changes that.
     assert "reply_language يحدد متى تردّ بالعربية ومتى بالإنجليزية" in clause

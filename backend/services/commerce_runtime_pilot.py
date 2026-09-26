@@ -166,19 +166,27 @@ def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
         # turn's session usable, and — unlike Session.begin_nested — it flushes
         # nothing the session is holding.
         with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
-            settings = db.query(TenantSettings.ai_settings).filter(
-                TenantSettings.tenant_id == int(tenant_id)).scalar()
+            row = db.query(TenantSettings.ai_settings, TenantSettings.extra_metadata).filter(
+                TenantSettings.tenant_id == int(tenant_id)).first()
     except Exception as exc:  # noqa: BLE001 - the turn is answered without them
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable (AI settings read "
                      "failed; reply style omitted too) tenant=%s error=%s",
                      tenant_id, type(exc).__name__)
         return None
-    if settings is None:
+    if row is None:
         return {}
+    settings, metadata = row
+    if settings is None:
+        settings = {}
     if not isinstance(settings, Mapping):
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant settings are not an object with a text "
                      "name tenant=%s", tenant_id)
         return None
+    # The Arabic dialect is stored beside the AI settings (see
+    # ``core.reply_dialect``); it joins them here, for this runtime only.
+    block = metadata.get("reply_style") if isinstance(metadata, Mapping) else None
+    if isinstance(block, Mapping) and "arabic_dialect" in block:
+        settings = {**settings, "arabic_dialect": block.get("arabic_dialect")}
     return settings
 
 
@@ -281,9 +289,10 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
     if language is not None:
         meaning = LANGUAGE_MAP.get(language)
         if meaning:
-            # "arabic" names Saudi dialect; a chosen dialect replaces only that.
+            # "arabic" (and its older Arabic-label key) names Saudi dialect; a
+            # chosen dialect replaces only that.
             style["reply_language"] = (ARABIC_WITHOUT_DIALECT
-                                       if dialect is not None and language == "arabic"
+                                       if dialect is not None and language in ("arabic", "عربي")
                                        else meaning)
             delivered_language = language
         else:
@@ -305,7 +314,7 @@ def _reply_style_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Di
     # carry no dialect at all.
     logger.info("[COMMERCE_RUNTIME_PILOT] reply style tenant=%s language=%s dialect=%s",
                 tenant_id, delivered_language,
-                dialect or ("default_saudi" if delivered_language == "arabic" else "none"))
+                dialect or ("default_saudi" if delivered_language in ("arabic", "عربي") else "none"))
     return style
 
 

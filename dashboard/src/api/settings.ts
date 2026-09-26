@@ -120,9 +120,17 @@ export interface SalesChannelAvailability {
 
 import { apiCall } from './client'
 
+/**
+ * Which of the store's conversations the Arabic-dialect setting reaches, as the
+ * server computes it from the runtime's own admission settings: only the new
+ * commerce agent reads it; the previous path keeps Saudi Arabic.
+ */
+export type ArabicDialectReach = 'all_conversations' | 'runtime_conversations' | 'none'
+
 export interface AllSettings {
   whatsapp: WhatsAppSettings
   ai: AISettings
+  arabic_dialect_reach?: ArabicDialectReach
   store: StoreSettings
   notifications: NotificationSettings
   sales_channel_availability?: SalesChannelAvailability

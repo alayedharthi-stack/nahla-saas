@@ -7,7 +7,8 @@ setting alone decides when a reply is Arabic and when it is English.
 
 The stored value is one of ``ARABIC_DIALECTS``; the empty string (or the key
 being absent) means the merchant has not chosen one, and the platform then
-behaves exactly as it did before the setting existed.
+behaves exactly as it did before the setting existed. It is stored in the
+tenant settings' metadata (``REPLY_STYLE_KEY``), not among ``ai_settings``.
 
 ``ARABIC_DIALECT_MEANING`` and ``ARABIC_WITHOUT_DIALECT`` are the platform
 meanings the commerce runtime hands the model as data in
@@ -56,21 +57,77 @@ ARABIC_WITHOUT_DIALECT = (
 
 
 def chosen_arabic_dialect(value: Any) -> Optional[str]:
-    """The saved dialect when it is one the platform defines, else ``None``.
+    """The saved dialect when it is exactly one the platform defines, else ``None``.
 
-    ``None`` covers "not chosen" (missing, ``None``, blank) and any value the
-    platform gives no meaning to; the caller decides whether the latter is
-    worth reporting.
+    Exact, as the settings API accepts it: a value the API would refuse is not
+    one the runtime quietly honours. ``None`` covers "not chosen" (missing,
+    ``None``, blank) and any value the platform gives no meaning to; the
+    caller decides whether the latter is worth reporting.
     """
-    if value is None:
-        return None
-    normalized = str(value).strip().lower()
-    return normalized if normalized in ARABIC_DIALECTS else None
+    return value if isinstance(value, str) and value in ARABIC_DIALECTS else None
+
+
+# Where the choice is stored: the tenant settings' own metadata, under its own
+# namespace — not among ``ai_settings``, whose keys the legacy path hands its
+# model wholesale. The legacy path does not apply a dialect, so it must not be
+# shown one either.
+REPLY_STYLE_KEY = "reply_style"
+DIALECT_KEY = "arabic_dialect"
+
+
+def stored_arabic_dialect(extra_metadata: Any) -> str:
+    """The saved choice as the settings page shows it: a defined dialect, or ""."""
+    block = extra_metadata.get(REPLY_STYLE_KEY) if isinstance(extra_metadata, dict) else None
+    value = block.get(DIALECT_KEY) if isinstance(block, dict) else None
+    return chosen_arabic_dialect(value) or ""
+
+
+def with_arabic_dialect(extra_metadata: Any, value: str) -> Dict[str, Any]:
+    """``extra_metadata`` with the choice set to ``value`` ("" clears it)."""
+    meta = dict(extra_metadata) if isinstance(extra_metadata, dict) else {}
+    block = dict(meta.get(REPLY_STYLE_KEY) or {}) if isinstance(meta.get(REPLY_STYLE_KEY), dict) else {}
+    if value:
+        block[DIALECT_KEY] = value
+    else:
+        block.pop(DIALECT_KEY, None)
+    meta[REPLY_STYLE_KEY] = block
+    return meta
+
+
+# Which of this tenant's conversations the setting reaches. Only the commerce
+# runtime reads it; the legacy path keeps its own Saudi baseline.
+REACH_ALL = "all_conversations"
+REACH_SOME = "runtime_conversations"
+REACH_NONE = "none"
+
+
+def arabic_dialect_reach(tenant_id: Any) -> str:
+    """Whether the commerce runtime answers this tenant's conversations at all,
+    and for all of them or some, by the pilot's own admission settings."""
+    from core.commerce_runtime import pilot_guard as pg  # noqa: PLC0415
+
+    try:
+        tenant = int(tenant_id)
+    except (TypeError, ValueError):
+        return REACH_NONE
+    if not pg.pilot_enabled():
+        return REACH_NONE
+    if pg.runtime_mode() == pg.MODE_GLOBAL:
+        return REACH_NONE if tenant in pg.global_tenant_denylist() else REACH_ALL
+    return REACH_SOME if tenant in pg.tenant_allowlist() else REACH_NONE
 
 
 __all__ = [
     "ARABIC_DIALECTS",
     "ARABIC_DIALECT_MEANING",
     "ARABIC_WITHOUT_DIALECT",
+    "DIALECT_KEY",
+    "REACH_ALL",
+    "REACH_NONE",
+    "REACH_SOME",
+    "REPLY_STYLE_KEY",
+    "arabic_dialect_reach",
     "chosen_arabic_dialect",
+    "stored_arabic_dialect",
+    "with_arabic_dialect",
 ]

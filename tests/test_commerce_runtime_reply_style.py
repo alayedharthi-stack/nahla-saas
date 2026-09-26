@@ -38,6 +38,18 @@ SAUDI = "السعودية"
 PILOT_LOGGER = "nahla.commerce_runtime.pilot"
 
 
+@pytest.fixture(autouse=True)
+def _pilot_logger_enabled():
+    """Alembic's ``fileConfig``, run by a migration suite earlier in the same
+    process, disables every logger created before it. The lines asserted here
+    exist in production; this makes sure the tests can hear them."""
+    log = logging.getLogger(PILOT_LOGGER)
+    previously = log.disabled
+    log.disabled = False
+    yield
+    log.disabled = previously
+
+
 def save_ai(sessions, tenant_id, **fields):  # noqa: F811
     request = Request({"type": "http", "path": "/settings",
                        "state": {"jwt_payload": {"tenant_id": tenant_id}}})
@@ -286,11 +298,14 @@ def test_no_dialect_chosen_means_exactly_the_behaviour_before_the_setting(
     """Stored before the setting existed (missing), cleared (""), or blank: no
     ``reply_dialect`` at all, and the language carries its own meaning — which
     for ``arabic`` is Saudi colloquial, as it always was."""
-    stored = {"default_language": language, "reply_tone": "friendly"}
+    base = {"default_language": language, "reply_tone": "friendly"}
+    stored = dict(base)
+    metadata = None
     if stored_dialect != "missing":
         stored["arabic_dialect"] = stored_dialect
+        metadata = {"reply_style": {"arabic_dialect": stored_dialect}}
     with sessions() as db:
-        db.add(TenantSettings(tenant_id=701, ai_settings=stored))
+        db.add(TenantSettings(tenant_id=701, ai_settings=base, extra_metadata=metadata))
         db.commit()
         facts = run_input(db, 701)
     assert "reply_dialect" not in facts
@@ -309,12 +324,12 @@ def test_a_merchant_who_saved_before_the_setting_is_unchanged_by_a_later_save(
     assert facts["reply_language"] == LANGUAGE_MAP["arabic"]
 
 
-@pytest.mark.parametrize("value", ["gulf", "Khaleeji", 7, ["egyptian"]])
+@pytest.mark.parametrize("value", ["gulf", "Khaleeji", "Egyptian", " saudi", 7, ["egyptian"]])
 def test_a_dialect_the_platform_does_not_define_is_reported_and_treated_as_not_chosen(
         sessions, run_input, caplog, value):  # noqa: F811
     with sessions() as db:
-        db.add(TenantSettings(tenant_id=701, ai_settings={"default_language": "arabic",
-                                                           "arabic_dialect": value}))
+        db.add(TenantSettings(tenant_id=701, ai_settings={"default_language": "arabic"},
+                              extra_metadata={"reply_style": {"arabic_dialect": value}}))
         db.commit()
         with caplog.at_level(logging.WARNING, logger=PILOT_LOGGER):
             facts = run_input(db, 701)
@@ -354,3 +369,13 @@ def test_unreadable_settings_carry_no_dialect(sessions, run_input, monkeypatch):
         monkeypatch.setattr(db, "query", unreadable)
         facts = run_input(db, 701)
     assert "reply_dialect" not in facts and "reply_language" not in facts
+
+
+def test_the_older_arabic_label_value_with_a_dialect_does_not_contradict_it(caplog):
+    """«عربي», the older Arabic-label value, also names Saudi dialect; a chosen
+    dialect replaces it exactly as it replaces "arabic"."""
+    from core.reply_dialect import ARABIC_WITHOUT_DIALECT  # noqa: PLC0415
+
+    style = seam._reply_style_in({"default_language": "عربي", "arabic_dialect": "egyptian"}, 701)
+    assert style["reply_language"] == ARABIC_WITHOUT_DIALECT
+    assert style["reply_dialect"] == ARABIC_DIALECT_MEANING["egyptian"]
