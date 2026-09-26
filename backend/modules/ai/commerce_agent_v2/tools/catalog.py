@@ -585,6 +585,51 @@ def search_product_candidates_impl(
     return candidates
 
 
+def search_products_window_impl(
+    context: CommerceAgentContext,
+    product_ids: list[int],
+) -> CatalogSearchResult:
+    """A search result for products the platform already chose, in that order.
+
+    For a search that leaves out what this conversation already showed: the
+    platform's own ordered candidates (``search_product_candidates_impl``)
+    minus those products decide *which* products the model sees next; this
+    reads them exactly as ``search_products_impl`` reads its rows — tenant
+    scope, the catalogue as it is now, the tenant-ownership assertion, the same
+    ``_product_evidence`` projection, authorized and registered as evidence —
+    so the model may cite and look them up like any search result. A product
+    the catalogue no longer holds is simply not returned.
+    """
+    context.assert_scope()
+    wanted: list[int] = []
+    for value in product_ids or ():
+        try:
+            pid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and pid not in wanted:
+            wanted.append(pid)
+    formatted = CatalogContextBuilder(context.db, context.tenant_id).get_by_ids(wanted) if wanted else {}
+    rows = [formatted[pid] for pid in wanted if pid in formatted]
+    _assert_catalog_rows_belong_to_tenant(context, rows)
+    snapshots: list[ProductSnapshot] = []
+    evidence: list[EvidenceRecord] = []
+    for row in rows:
+        snapshot, record = _product_evidence(row)
+        snapshots.append(snapshot)
+        evidence.append(record)
+    context.authorize_products(
+        [item.product_id for item in snapshots],
+        titles={int(item.product_id): str(getattr(item, "title", "") or "") for item in snapshots},
+        aliases={int(item.product_id): str(getattr(item, "external_id", "") or "") for item in snapshots},
+    )
+    context.register_evidence(evidence)
+    context.record_catalog_search_outcome(found=bool(snapshots))
+    if not snapshots:
+        return CatalogSearchResult(status="not_found", failure_reason="no_catalog_product_matched")
+    return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
+
+
 def get_products_for_listing_impl(
     context: CommerceAgentContext,
     product_ids: list[int],

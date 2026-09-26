@@ -244,6 +244,29 @@ def test_1b_the_policy_reaches_a_list_on_its_own_when_the_model_offers_nothing()
     assert (decided.kind, decided.reason) == (pp.SHAPE_LIST, pp.MULTIPLE_CANDIDATES)
 
 
+def test_1c_a_list_the_policy_decides_on_its_own_is_recorded_but_not_composed() -> None:
+    """What the seam alone does with step 4's decision.
+
+    Five products browsed, no focus, no selector requested: the seam records
+    ``list`` / ``multiple_candidates_no_focus`` and, by itself, sends the text
+    alone — rows are composed only from a model-requested selector, a verified
+    "More" tap or a stood-down selector, because a list's words and text that
+    does not repeat every row are the model's. Production turn 66 of
+    2026-09-25 ended here (``choices_outcome=not_requested``, ``choice_rows=0``).
+
+    The loop now asks the model for the selector before the seam runs
+    (``list_offer_needed``); that path is proven end to end in
+    ``test_commerce_runtime_pagination_pg``. This pins the seam's half.
+    """
+    final, session = run_seam(draft(cite=[11, 12, 13, 14, 15]), [browsed(11, 12, 13, 14, 15)])
+    recorded = shape_of(session)
+    assert (recorded["shape"], recorded["shape_reason"]) == (pp.SHAPE_LIST, pp.MULTIPLE_CANDIDATES)
+    rows, _button = rc.payload_rows(final.payload)
+    assert rows == [] and recorded["choices"] != rc.OFFERED
+    assert final.kind != lc.DeliveryKind.RICH.value and card_of(final) is None
+    assert final.text == "تفضل"
+
+
 # ══ 2. One search candidate is not a selection ═══════════════════════════════
 
 def test_2_a_single_search_candidate_never_becomes_a_card() -> None:
