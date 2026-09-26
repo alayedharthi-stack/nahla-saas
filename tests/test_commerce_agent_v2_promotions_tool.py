@@ -194,10 +194,17 @@ def test_a_shareable_coupon_and_an_offer_become_citable_evidence(monkeypatch) ->
     # The resolver was asked for this tenant, on this session, for this customer,
     # scoped to the rung this customer is served and the merchant's minimum
     # life, and the evidence was registered on the trusted context.
-    assert calls == [(context.db, 7, {"limit": tool.MAX_PROMOTIONS, "customer_id": 41,
-                                      "read_first": pt.CouponReadScope(
-                                          valid_until_at_least=now + timedelta(hours=3),
-                                          levels=("silver",))})]
+    (db, tenant, kwargs), = calls
+    accept = kwargs.pop("accept")
+    assert (db, tenant, kwargs) == (context.db, 7, {
+        "limit": tool.MAX_PROMOTIONS, "customer_id": 41,
+        "read_first": pt.CouponReadScope(valid_until_at_least=now + timedelta(hours=3),
+                                         levels=("silver",))})
+    # ``accept`` is this call's own judgement, so the resolver reads on past
+    # every code the projection would refuse: the kept coupon is accepted, a
+    # rung the store keeps from the assistant is not.
+    assert accept(coupon_fact()) is True
+    assert accept(coupon_fact(6, "GOLD6", coupon_level="gold")) is False
     assert [e.ref for e in context.registered] == ["promotion:coupon:5", "promotion:offer:9"]
 
 

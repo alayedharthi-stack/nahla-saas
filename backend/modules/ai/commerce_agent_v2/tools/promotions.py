@@ -104,6 +104,9 @@ WITHHELD_LEVEL_NOT_SERVED = "level_not_served_for_customer"
 WITHHELD_LEVEL_POLICY_UNREADABLE = "level_policy_unreadable"
 WITHHELD_NOT_PUBLISHED = "not_published_for_general_use"
 WITHHELD_EXPIRING_TOO_SOON = "expiring_before_store_minimum"
+# The read reached its cap before it held a full list or had read every code in
+# scope: what it returns may be short, and an empty answer is not "none".
+PROMOTION_READ_INCOMPLETE = "promotion_read_incomplete"
 # The conditions a projection carries but has not evaluated. Named rather than
 # summarised, so a reader can see exactly what is still open.
 _UNEVALUATED = "conditions_not_fully_evaluated"
@@ -522,20 +525,34 @@ async def list_shareable_promotions_impl(
     min_hours = _min_remaining_hours(policy)
     now = _now()
     cutoff = now + timedelta(hours=min_hours) if min_hours > 0 else None
-    # What this call could keep is read before anything else. Without it the
-    # resolver judges only the store's newest rows, and a store whose newest
-    # codes sit on rungs this customer is not served, or expire before the
-    # merchant's minimum, hides every code it would accept — a "nothing for
-    # you" nobody established. The other rows still follow when there is room,
-    # so ``withheld`` still names the gate that took them. The rung is part of
-    # it only when the ladder was read whole; otherwise every rung is read as
-    # before, and what we could not judge is reported as ours.
+    # What this call could keep is read before anything else, and the read
+    # goes on past every code this call refuses. Without it the resolver judges
+    # only the store's newest rows, and a store whose newest codes sit on rungs
+    # this customer is not served, expire before the merchant's minimum, belong
+    # to other customers or were never published to the assistant hides every
+    # code it would accept — a "nothing for you" nobody established. The rung
+    # is part of the scope only when the ladder was read whole; otherwise every
+    # rung is read as before, and what we could not judge is reported as ours.
     ladder_whole = not level_policy_unreadable and not broken_rungs
+
+    def keeps(fact: Dict[str, Any]) -> bool:
+        """This call's own judgement of one fact, with nothing counted: the
+        loop below judges the same facts again and counts them."""
+        if cutoff is not None and fact.get("record_kind") == "coupon" and _expires_before(fact, cutoff):
+            return False
+        return _project(fact, customer_id=customer_id, allowed_levels=allowed_levels,
+                        entitlement=entitlement, served_level=served_level,
+                        level_policy_readable=not level_policy_unreadable) is not None
+
     truth = resolve_shareable_promotions(
         context.db, int(context.tenant_id), limit=bounded, customer_id=customer_id,
         read_first=CouponReadScope(
             valid_until_at_least=cutoff or now,
-            levels=((served_level,) if served_level else ()) if ladder_whole else None))
+            levels=((served_level,) if served_level else ()) if ladder_whole else None),
+        accept=keeps)
+    # False only when the scan cap ended the read with codes still unread that
+    # this customer might have been given.
+    read_incomplete = getattr(truth, "coupon_read_complete", None) is False
     snapshots: List[PromotionSnapshot] = []
     evidence: List[EvidenceRecord] = []
     withheld: Dict[str, int] = {}
@@ -571,7 +588,7 @@ async def list_shareable_promotions_impl(
     # rung, neither failure cost anything and neither is claimed.
     unreadable = (_unreadable_reason(level_policy_unreadable, broken_rungs)
                   if reached.get(LEVEL_CONDITIONED, 0) > 0 else None)
-    partial = outcome == PROMOTION_PARTIAL_FAILURE or unreadable is not None
+    partial = outcome == PROMOTION_PARTIAL_FAILURE or unreadable is not None or read_incomplete
     # The standing and the rung served are reported side by side: they differ
     # exactly when the store's policy capped this customer, and never silently.
     entitlement_view = {**entitlement.as_dict(), "served_level": served_level or ""}
@@ -582,7 +599,7 @@ async def list_shareable_promotions_impl(
     logger.info(
         "[PROMOTION_PROJECTION] tenant=%s customer=%s considered=%d kept=%d "
         "withheld=%s standing=%s level=%s served=%s determined=%s ladder_unreadable=%s "
-        "unreadable_rungs=%s read_first=%s",
+        "unreadable_rungs=%s read_first=%s read_complete=%s",
         int(context.tenant_id), "yes" if customer_id is not None else "none",
         considered, len(snapshots),
         ",".join(f"{reason}:{count}" for reason, count in sorted(withheld.items())) or "none",
@@ -593,6 +610,7 @@ async def list_shareable_promotions_impl(
         # reads as "none of these" rather than "none of the newest rows".
         (f"rung:{served_level or 'none'}" if ladder_whole else "all_rungs")
         + (f",min_hours:{min_hours}" if cutoff is not None else ""),
+        "no" if read_incomplete else "yes",
     )
     if not snapshots:
         if bool(getattr(truth, "query_failed", False)) or outcome == PROMOTION_QUERY_FAILED:
@@ -607,6 +625,13 @@ async def list_shareable_promotions_impl(
             return PromotionListResult(
                 status="error", query_outcome=outcome or NO_VALID_PROMOTIONS, partial=True,
                 failure_reason=unreadable, entitlement=entitlement_view, withheld=dict(withheld))
+        if read_incomplete:
+            # The read stopped at its cap with codes still unread. That is not
+            # an answer about the store, so it is not reported as one.
+            return PromotionListResult(
+                status="error", query_outcome=outcome or NO_VALID_PROMOTIONS, partial=True,
+                failure_reason=PROMOTION_READ_INCOMPLETE, entitlement=entitlement_view,
+                withheld=dict(withheld))
         return PromotionListResult(status="not_found", query_outcome=outcome or NO_VALID_PROMOTIONS,
                                    partial=partial, failure_reason="no_valid_shareable_promotions",
                                    entitlement=entitlement_view, withheld=dict(withheld))
@@ -617,12 +642,13 @@ async def list_shareable_promotions_impl(
                                # An offer the merchant published is still theirs to
                                # share; the rung-conditioned codes beside it are the
                                # ones we could not judge, and the list says so.
-                               failure_reason=unreadable)
+                               failure_reason=unreadable or (PROMOTION_READ_INCOMPLETE
+                                                             if read_incomplete else None))
 
 
 __all__ = ["GENERAL_AUTHORIZED", "LEVEL_CONDITIONED", "LEVEL_ENTITLED", "MAX_CONDITION_IDS",
            "MAX_PROMOTIONS",
-           "MERCHANT_AUTHORED_SOURCE_TYPES", "WITHHELD_EXPIRING_TOO_SOON",
+           "MERCHANT_AUTHORED_SOURCE_TYPES", "PROMOTION_READ_INCOMPLETE", "WITHHELD_EXPIRING_TOO_SOON",
            "WITHHELD_LEVEL_NOT_ALLOWED", "WITHHELD_LEVEL_NOT_EARNED",
            "WITHHELD_LEVEL_NOT_SERVED", "WITHHELD_LEVEL_POLICY_UNREADABLE",
            "WITHHELD_NOT_PUBLISHED",

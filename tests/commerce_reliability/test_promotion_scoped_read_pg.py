@@ -240,3 +240,58 @@ def test_an_unreadable_ladder_still_meets_the_codes_it_could_not_judge(store, mo
     assert result.status == "error"
     assert result.failure_reason == "coupon_level_policy_unreadable:not_a_ladder"
     assert result.withheld == {tool.WITHHELD_LEVEL_POLICY_UNREADABLE: 2}
+
+
+def test_other_customers_codes_filling_the_read_do_not_hide_this_customers_code(store, monkeypatch) -> None:
+    """More of another customer's silver codes than one page holds, all newer
+    than the code this customer may be given. They are refused one by one and
+    the read goes on past them; the answer is the qualifying code, not
+    ``not_found``."""
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
+            + [{"code": f"SILVER-THEIRS-{i}", "level": "silver", "expires": later,
+                "meta": {"customer_id": OTHER_CUSTOMER}} for i in range(pt._READ_FIRST_PAGE * 2 + 50)])
+    result = _run_tool(monkeypatch, session)
+    assert result.status == "ok"
+    assert [p.code for p in result.promotions] == ["SILVER-KEEP"]
+
+
+def test_codes_the_projection_refuses_do_not_end_the_read_at_eight(store, monkeypatch) -> None:
+    """Newer codes that pass the resolver and are then refused by the tool —
+    here codes on no rung that the merchant never published to the assistant —
+    must not use up the answer: the read continues until it has codes the tool
+    keeps, and the refusals are still counted by their reason."""
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
+            + [{"code": f"IMPORTED-OPEN-{i}", "source": "imported", "channel": None, "expires": later}
+               for i in range(12)])
+    result = _run_tool(monkeypatch, session)
+    assert result.status == "ok"
+    assert [p.code for p in result.promotions] == ["SILVER-KEEP"]
+    assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 12}
+
+
+def test_a_read_cut_short_by_its_cap_says_so_instead_of_answering_none(store, monkeypatch) -> None:
+    """The scan is bounded per call. When the bound ends it before a full list
+    or the end of the scope, the answer is an incomplete read — never
+    ``not_found``, which would claim the store has nothing."""
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    monkeypatch.setattr(pt, "_READ_FIRST_PAGE", 10)
+    monkeypatch.setattr(pt, "_READ_FIRST_SCAN_CAP", 30)
+    _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
+            + [{"code": f"IMPORTED-OPEN-{i}", "source": "imported", "channel": None, "expires": later}
+               for i in range(40)])
+    result = _run_tool(monkeypatch, session)
+    assert result.status == "error" and result.partial is True
+    assert result.failure_reason == tool.PROMOTION_READ_INCOMPLETE
+    assert result.promotions == []
+    assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 30}
+    # The same store, read to its end, answers with the code.
+    monkeypatch.setattr(pt, "_READ_FIRST_SCAN_CAP", 1000)
+    assert [p.code for p in _run_tool(monkeypatch, session).promotions] == ["SILVER-KEEP"]

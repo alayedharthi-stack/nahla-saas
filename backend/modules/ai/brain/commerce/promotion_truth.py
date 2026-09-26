@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from services.coupon_sync_visibility import is_dashboard_authored_coupon
 
@@ -21,11 +21,12 @@ logger = logging.getLogger("nahla.brain.promotion_truth")
 
 
 _MAX_SHAREABLE = 8
-# Rows a read with ``read_first`` looks at. Expired and campaign-only rows are
-# already out of it, and the rows the caller would accept come first, so the
-# bound only caps a store whose acceptable-looking rows are mostly refused on
-# their metadata (another customer's code, a disabled one).
-_READ_FIRST_WINDOW = 200
+# A read with ``read_first`` pages through the rows the caller would accept,
+# newest first, until it holds ``limit`` codes the caller keeps or has read them
+# all. The cap bounds one call's work; a read it cuts short says so
+# (``coupon_read_complete=False``) instead of passing for a store with nothing.
+_READ_FIRST_PAGE = 100
+_READ_FIRST_SCAN_CAP = 1000
 _CAMPAIGN_ONLY_CHANNELS = frozenset({"campaign", "email", "sms", "autopilot"})
 
 QUERY_OK = "ok"
@@ -60,6 +61,9 @@ class PromotionTruthResult:
     coupon_source: str = SOURCE_NOT_QUERIED
     offer_source: str = SOURCE_NOT_QUERIED
     generation_rule_source: str = SOURCE_NOT_QUERIED
+    # ``read_first`` only: False when the scan cap ended the read before it held
+    # ``limit`` accepted codes or had read every row in scope. None otherwise.
+    coupon_read_complete: Optional[bool] = None
 
 
 def _as_utc(dt: Any) -> Optional[datetime]:
@@ -469,6 +473,81 @@ def _read_first_clauses(coupon: Any, now: datetime, scope: CouponReadScope) -> T
     return filters, and_(lasts, on_rung)
 
 
+def _coupon_facts(rows: Iterable[Any], now: datetime, audience: Optional[int],
+                  tid: int) -> Iterator[Dict[str, Any]]:
+    """The shareable fact of each row, in order: valid now, not another
+    customer's personal code, carrying a code. A malformed row is skipped."""
+    for row in rows:
+        try:
+            if not _row_is_currently_valid(row, now=now):
+                continue
+            binding = _row_customer_binding(row)
+            if binding is not None and (audience is None or binding != audience):
+                continue          # someone else's personal code: never shareable here
+            fact = _row_to_coupon_fact(row)
+            if not fact["code"]:
+                continue
+        except Exception:  # noqa: silent-ok — skip malformed coupon row; other sources still queried
+            logger.info(
+                "[PROMOTION_TRUTH] tenant=%s source=coupon skipped_malformed_row",
+                tid,
+            )
+            continue
+        yield fact
+
+
+def _read_first_coupons(db: Any, coupon: Any, tid: int, now: datetime, audience: Optional[int],
+                        scope: CouponReadScope, accept: Optional[Callable[[Dict[str, Any]], bool]],
+                        limit: int) -> Tuple[List[Any], List[Dict[str, Any]], bool]:
+    """``(rows_read, facts, complete)`` for a read that puts ``scope`` first.
+
+    In-scope rows are read a page at a time, newest first (keyset on ``id``),
+    until ``limit`` facts were accepted, the scope ran out, or the scan cap was
+    reached; only the last is incomplete. Every fact read is kept, accepted or
+    not. When the scope ran out with room left, the newest out-of-scope facts
+    fill it, so a caller counting refusals still meets them.
+    """
+    from sqlalchemy import not_  # noqa: PLC0415
+
+    keeps = accept if accept is not None else (lambda _fact: True)
+    filters, wanted = _read_first_clauses(coupon, now, scope)
+    base = db.query(coupon).filter(coupon.tenant_id == tid, *filters)
+    rows: List[Any] = []
+    facts: List[Dict[str, Any]] = []
+    accepted = 0
+    exhausted = False
+    last_id: Optional[int] = None
+    while accepted < limit and len(rows) < _READ_FIRST_SCAN_CAP:
+        page = base.filter(wanted)
+        if last_id is not None:
+            page = page.filter(coupon.id < last_id)
+        size = min(_READ_FIRST_PAGE, _READ_FIRST_SCAN_CAP - len(rows))
+        batch = page.order_by(coupon.id.desc()).limit(size).all()
+        rows.extend(batch)
+        for fact in _coupon_facts(batch, now, audience, tid):
+            facts.append(fact)
+            if keeps(fact):
+                accepted += 1
+                if accepted >= limit:
+                    break
+        if len(batch) < size:
+            exhausted = True
+            break
+        last_id = int(batch[-1].id)
+    complete = accepted >= limit or exhausted
+    room = limit - len(facts)
+    if exhausted and room > 0:
+        rest = (base.filter(not_(wanted)).order_by(coupon.id.desc())
+                .limit(max(limit * 3, limit)).all())
+        rows.extend(rest)
+        for fact in _coupon_facts(rest, now, audience, tid):
+            facts.append(fact)
+            room -= 1
+            if room <= 0:
+                break
+    return rows, facts, complete
+
+
 def resolve_shareable_promotions(
     db: Any,
     tenant_id: int,
@@ -477,6 +556,7 @@ def resolve_shareable_promotions(
     limit: int = _MAX_SHAREABLE,
     customer_id: Optional[int] = None,
     read_first: Optional[CouponReadScope] = None,
+    accept: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> PromotionTruthResult:
     """Load currently valid shareable coupons/offers for one tenant at query time.
 
@@ -484,13 +564,17 @@ def resolve_shareable_promotions(
     ``customer_id`` names that customer; without a customer, or for any other
     customer, it is left out. Store-wide codes are unaffected.
 
-    The coupon read looks at a window of rows and judges them after the cut.
-    Unscoped, the window is the tenant's newest rows, whatever they are: a
-    store whose newest rows are expired, or sit on a rung the caller refuses,
-    can hide every code the caller would accept. ``read_first`` names what the
-    caller accepts; expired and campaign-only rows are then left out before the
-    cut, and the acceptable rows are read first, newest first, followed by the
-    rest. Every row is still judged row by row exactly as without it.
+    Unscoped, the coupon read looks at the tenant's newest rows and judges them
+    after the cut: a store whose newest rows are expired, sit on a rung the
+    caller refuses, or belong to other customers can hide every code the caller
+    would accept. ``read_first`` names what the caller accepts, and ``accept``
+    is the caller's own judgement of one fact. The read then leaves out expired
+    and campaign-only rows, pages through the in-scope rows newest first, and
+    stops only when ``limit`` facts were accepted, every in-scope row was read,
+    or the scan cap was reached — the last reported as an incomplete read.
+    Every fact read is returned, accepted or not, so the caller can say why it
+    refused one; when room is left, out-of-scope facts follow for the same
+    reason. Each row is still judged exactly as without a scope.
     """
     tid = int(tenant_id or 0)
     audience = int(customer_id) if customer_id not in (None, "", 0) else None
@@ -518,20 +602,26 @@ def resolve_shareable_promotions(
     generation_rules_present: Optional[bool] = None
 
     rows: List[Any] = []
+    shareable: List[Dict[str, Any]] = []
+    coupon_read_complete: Optional[bool] = None
     try:
         from models import Coupon  # noqa: PLC0415
 
-        from sqlalchemy import case  # noqa: PLC0415
-
-        query = db.query(Coupon).filter(Coupon.tenant_id == tid)
-        window = max(int(limit) * 3, int(limit))
         if read_first is None:
-            query = query.order_by(Coupon.id.desc())
+            rows = (
+                db.query(Coupon)
+                .filter(Coupon.tenant_id == tid)
+                .order_by(Coupon.id.desc())
+                .limit(max(int(limit) * 3, int(limit)))
+                .all()
+            )
+            for fact in _coupon_facts(rows, now_, audience, tid):
+                shareable.append(fact)
+                if len(shareable) >= int(limit):
+                    break
         else:
-            filters, wanted = _read_first_clauses(Coupon, now_, read_first)
-            query = query.filter(*filters).order_by(case((wanted, 0), else_=1), Coupon.id.desc())
-            window = max(window, _READ_FIRST_WINDOW)
-        rows = query.limit(window).all()
+            rows, shareable, coupon_read_complete = _read_first_coupons(
+                db, Coupon, tid, now_, audience, read_first, accept, int(limit))
         coupon_source = SOURCE_OK
     except Exception as exc:  # noqa: silent-ok — coupon source fail-open; other sources still queried unless session is poisoned
         coupon_source = SOURCE_FAILED
@@ -542,26 +632,6 @@ def resolve_shareable_promotions(
             PROMOTION_QUERY_FAILED,
             int(session_poisoned),
         )
-
-    shareable: List[Dict[str, Any]] = []
-    for row in rows:
-        try:
-            if not _row_is_currently_valid(row, now=now_):
-                continue
-            binding = _row_customer_binding(row)
-            if binding is not None and (audience is None or binding != audience):
-                continue          # someone else's personal code: never shareable here
-            fact = _row_to_coupon_fact(row)
-            if not fact["code"]:
-                continue
-            shareable.append(fact)
-            if len(shareable) >= int(limit):
-                break
-        except Exception:  # noqa: silent-ok — skip malformed coupon row; other sources still queried
-            logger.info(
-                "[PROMOTION_TRUTH] tenant=%s source=coupon skipped_malformed_row",
-                tid,
-            )
 
     offers: List[Dict[str, Any]] = []
     if session_poisoned:
@@ -673,6 +743,7 @@ def resolve_shareable_promotions(
         coupon_source=coupon_source,
         offer_source=offer_source,
         generation_rule_source=generation_rule_source,
+        coupon_read_complete=coupon_read_complete,
     )
 
 
