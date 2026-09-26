@@ -105,17 +105,31 @@ def test_arabic_without_dialect_is_arabics_own_meaning_minus_the_dialect() -> No
     assert "السعودية" not in ARABIC_WITHOUT_DIALECT
 
 
+RUNNING = {"COMMERCE_RUNTIME_PILOT_ENABLED": "true", "COMMERCE_RUNTIME_PILOT_MODEL": "a-model"}
+ADMITTED = {**RUNNING, "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST": "701"}
+RECIPIENTS = {"COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST": "966500000001"}
+PILOT_ENV = ("COMMERCE_RUNTIME_PILOT_ENABLED", "COMMERCE_RUNTIME_PILOT_MODEL",
+             "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST", "COMMERCE_RUNTIME_PILOT_RECIPIENT_ALLOWLIST",
+             "COMMERCE_RUNTIME_MODE", "COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST")
+
+
 @pytest.mark.parametrize("env, expected", [
     ({}, REACH_NONE),
-    ({"COMMERCE_RUNTIME_PILOT_ENABLED": "true", "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST": "5"},
-     REACH_NONE),
-    ({"COMMERCE_RUNTIME_PILOT_ENABLED": "true", "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST": "701"},
-     REACH_SOME),
-    ({"COMMERCE_RUNTIME_PILOT_ENABLED": "true", "COMMERCE_RUNTIME_MODE": "global"}, REACH_ALL),
+    ({**ADMITTED, **RECIPIENTS, "COMMERCE_RUNTIME_PILOT_MODEL": ""}, REACH_NONE),
+    ({**RUNNING, "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST": "5", **RECIPIENTS}, REACH_NONE),
+    ({**ADMITTED, **RECIPIENTS}, REACH_SOME),
+    (ADMITTED, REACH_NONE),
+    ({**ADMITTED, "COMMERCE_RUNTIME_MODE": "store_gated"}, REACH_ALL),
+    ({**RUNNING, "COMMERCE_RUNTIME_MODE": "store_gated"}, REACH_NONE),
+    ({**RUNNING, "COMMERCE_RUNTIME_MODE": "global"}, REACH_ALL),
+    ({**RUNNING, "COMMERCE_RUNTIME_MODE": "global",
+      "COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST": "701"}, REACH_NONE),
 ])
 def test_the_reach_follows_the_runtimes_own_admission(monkeypatch, env, expected) -> None:
-    for name in ("COMMERCE_RUNTIME_PILOT_ENABLED", "COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST",
-                 "COMMERCE_RUNTIME_MODE", "COMMERCE_RUNTIME_GLOBAL_TENANT_DENYLIST"):
+    """Every tenant-level check admission applies: enabled, a model, the tenant
+    admitted by the mode, and who decides the recipient — the store's own AI
+    setting (all its conversations) or the operator's list (some, or none)."""
+    for name in PILOT_ENV:
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -230,9 +244,57 @@ def test_a_stored_value_the_api_would_refuse_reads_back_as_not_chosen(client, se
 
 def test_the_settings_say_which_conversations_the_dialect_reaches(client, monkeypatch):
     http, _ = client
-    monkeypatch.setenv("COMMERCE_RUNTIME_PILOT_ENABLED", "true")
-    monkeypatch.setenv("COMMERCE_RUNTIME_PILOT_TENANT_ALLOWLIST", "701")
-    monkeypatch.delenv("COMMERCE_RUNTIME_MODE", raising=False)
+    for name in PILOT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in {**ADMITTED, **RECIPIENTS}.items():
+        monkeypatch.setenv(name, value)
     assert http.get("/settings").json()["arabic_dialect_reach"] == REACH_SOME
     monkeypatch.setenv("COMMERCE_RUNTIME_PILOT_ENABLED", "false")
     assert http.get("/settings").json()["arabic_dialect_reach"] == REACH_NONE
+
+
+def test_switching_the_store_ai_mode_returns_the_dialect_still_in_force(client):
+    """The page replaces its AI settings with this response; without the
+    dialect it would show the default while the choice still applies."""
+    http, _ = client
+    http.put("/settings", json={"ai": {"arabic_dialect": "egyptian"}})
+    response = http.patch("/settings/ai", json={"store_ai_mode": "on"})
+    assert response.status_code == 200, response.text
+    assert response.json()["ai"]["arabic_dialect"] == "egyptian"
+
+
+def test_a_save_that_does_not_change_the_dialect_leaves_the_metadata_column_alone(
+        client, sessions):  # noqa: F811
+    """Other features write ``extra_metadata`` too; an unchanged choice must not
+    rewrite it. A stored value the API would refuse is cleared by saving ""."""
+    from sqlalchemy import event  # noqa: PLC0415
+
+    http, _ = client
+    http.put("/settings", json={"ai": {"arabic_dialect": "iraqi"}})
+    written = []
+
+    def record(_conn, _cursor, statement, *_rest):
+        if statement.lstrip().upper().startswith("UPDATE TENANT_SETTINGS"):
+            written.append(statement)
+
+    engine = sessions.kw["bind"]
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = http.put("/settings", json={"ai": {"assistant_name": "وردة",
+                                                      "arabic_dialect": "iraqi"}})
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert response.status_code == 200
+    column = TenantSettings.extra_metadata.property.columns[0].name
+    assert written and not any(f" {column}=" in s for s in written), written
+    assert stored_dialect(sessions, 701) == "iraqi"
+
+    with sessions() as db:
+        row = db.query(TenantSettings).filter(TenantSettings.tenant_id == 701).one()
+        row.extra_metadata = {"reply_style": {"arabic_dialect": "Egyptian"}, "other": 1}
+        db.commit()
+    assert http.put("/settings", json={"ai": {"arabic_dialect": ""}}).status_code == 200
+    with sessions() as db:
+        meta = db.query(TenantSettings.extra_metadata).filter(
+            TenantSettings.tenant_id == 701).scalar()
+    assert meta == {"reply_style": {}, "other": 1}

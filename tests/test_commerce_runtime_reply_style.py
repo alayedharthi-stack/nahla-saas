@@ -379,3 +379,25 @@ def test_the_older_arabic_label_value_with_a_dialect_does_not_contradict_it(capl
     style = seam._reply_style_in({"default_language": "عربي", "arabic_dialect": "egyptian"}, 701)
     assert style["reply_language"] == ARABIC_WITHOUT_DIALECT
     assert style["reply_dialect"] == ARABIC_DIALECT_MEANING["egyptian"]
+
+
+def test_a_failed_dialect_read_costs_the_turn_the_dialect_only(
+        sessions, run_input, monkeypatch):  # noqa: F811
+    """The dialect is read on its own savepoint: when that read fails the turn
+    still carries the name, language and tone the merchant saved."""
+    save_ai(sessions, 701, assistant_name="وردة", default_language="bilingual",
+            reply_tone="friendly", arabic_dialect="egyptian")
+    with sessions() as db:
+        real_query = db.query
+
+        def failing(*entities, **kwargs):
+            if entities and entities[0] is TenantSettings.extra_metadata:
+                raise RuntimeError("metadata read failed")
+            return real_query(*entities, **kwargs)
+
+        monkeypatch.setattr(db, "query", failing)
+        facts = run_input(db, 701)
+    assert "reply_dialect" not in facts
+    assert facts["assistant_name"] == "وردة"
+    assert facts["reply_language"] == LANGUAGE_MAP["bilingual"]
+    assert facts["reply_tone"] == TONE_MAP["friendly"]

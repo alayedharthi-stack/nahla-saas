@@ -168,10 +168,6 @@ def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
         with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
             settings = db.query(TenantSettings.ai_settings).filter(
                 TenantSettings.tenant_id == int(tenant_id)).scalar()
-            # The Arabic dialect is stored beside the AI settings (see
-            # ``core.reply_dialect``).
-            metadata = db.query(TenantSettings.extra_metadata).filter(
-                TenantSettings.tenant_id == int(tenant_id)).scalar()
     except Exception as exc:  # noqa: BLE001 - the turn is answered without them
         logger.error("[COMMERCE_RUNTIME_PILOT] assistant name unreadable (AI settings read "
                      "failed; reply style omitted too) tenant=%s error=%s",
@@ -184,10 +180,32 @@ def _saved_ai_settings(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
                      "name tenant=%s", tenant_id)
         return None
     # The dialect joins the AI settings here, for this runtime only.
-    block =metadata.get("reply_style") if isinstance(metadata, Mapping) else None
+    block = _saved_reply_style(db, tenant_id)
     if isinstance(block, Mapping) and "arabic_dialect" in block:
         settings = {**settings, "arabic_dialect": block.get("arabic_dialect")}
     return settings
+
+
+def _saved_reply_style(db: Any, tenant_id: int) -> Optional[Mapping[str, Any]]:
+    """The stored reply-style block (the Arabic dialect, see
+    ``core.reply_dialect``), or ``None``.
+
+    Read on its own savepoint: a failure here costs the turn the dialect only,
+    never the name, language and tone read above.
+    """
+    from models import TenantSettings  # noqa: PLC0415
+
+    connection = getattr(db, "connection", None)
+    try:
+        with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
+            metadata = db.query(TenantSettings.extra_metadata).filter(
+                TenantSettings.tenant_id == int(tenant_id)).scalar()
+    except Exception as exc:  # noqa: BLE001 - the turn is answered without a dialect
+        logger.error("[COMMERCE_RUNTIME_PILOT] arabic dialect unreadable tenant=%s error=%s",
+                     tenant_id, type(exc).__name__)
+        return None
+    block = metadata.get("reply_style") if isinstance(metadata, Mapping) else None
+    return block if isinstance(block, Mapping) else None
 
 
 def _assistant_name_in(settings: Optional[Mapping[str, Any]], tenant_id: int) -> Optional[str]:

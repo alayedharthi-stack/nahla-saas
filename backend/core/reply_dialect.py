@@ -103,18 +103,27 @@ REACH_NONE = "none"
 
 def arabic_dialect_reach(tenant_id: Any) -> str:
     """Whether the commerce runtime answers this tenant's conversations at all,
-    and for all of them or some, by the pilot's own admission settings."""
+    and for all of them or some, by the checks its admission
+    (``pilot_guard.evaluate_pilot_route``) applies to a tenant: enabled, a
+    model configured, the tenant admitted by the mode, and who decides the
+    recipient. In ``store_gated`` and ``global`` the store's own AI setting
+    decides, so every conversation the store's AI answers is the runtime's; in
+    ``pilot`` only the operator's recipients are, and none without any."""
     from core.commerce_runtime import pilot_guard as pg  # noqa: PLC0415
 
     try:
         tenant = int(tenant_id)
     except (TypeError, ValueError):
         return REACH_NONE
-    if not pg.pilot_enabled():
+    if not pg.pilot_enabled() or not pg.pilot_model():
         return REACH_NONE
     if pg.runtime_mode() == pg.MODE_GLOBAL:
         return REACH_NONE if tenant in pg.global_tenant_denylist() else REACH_ALL
-    return REACH_SOME if tenant in pg.tenant_allowlist() else REACH_NONE
+    if tenant not in pg.tenant_allowlist():
+        return REACH_NONE
+    if pg.store_gate_decides_recipient():
+        return REACH_ALL
+    return REACH_SOME if pg.recipient_allowlist() else REACH_NONE
 
 
 __all__ = [

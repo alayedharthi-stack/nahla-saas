@@ -240,10 +240,13 @@ async def update_settings(
         current.update(incoming)
         current.pop("arabic_dialect", None)
         settings.ai_settings = current
-        if dialect is not None:
+        # Written only when it changes: other features write this column too.
+        updated = (with_arabic_dialect(settings.extra_metadata, dialect)
+                   if dialect is not None else None)
+        if updated is not None and updated != settings.extra_metadata:
             from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
 
-            settings.extra_metadata = with_arabic_dialect(settings.extra_metadata, dialect)
+            settings.extra_metadata = updated
             flag_modified(settings, "extra_metadata")
 
     if body.store is not None:
@@ -357,7 +360,8 @@ async def patch_store_ai_settings(
         "store_ai_enabled": bool(ai.get("store_ai_enabled", True)),
         "store_ai_mode": mode,
         "ai_test_allowed_numbers": list(ai.get("ai_test_allowed_numbers") or []),
-        "ai": ai,
+        # With the dialect: the page replaces its AI settings with this object.
+        "ai": _ai_with_dialect(settings),
     }
 
 
