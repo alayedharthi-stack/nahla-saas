@@ -253,17 +253,22 @@ def test_clause_3_names_no_other_dialect_and_carries_no_dialect_meaning():
 
 def test_clause_5_covers_both_cases_and_names_no_phrase():
     """Clause 5 (owner-approved, 26 September 2026, after tenant 33 turn 68).
-    One general rule for a message that is not clearly a product request: a
-    clear product request is searched and answered without asking; a message
-    that may mean something else is clarified rather than treated as a product
-    request; and an empty search for such a phrase says only that the text
-    matched no product. It quotes no customer phrase — no word list — and
-    supplies no reply."""
+    One general rule for a message that is not clearly a product request. When
+    a product request is the likelier reading the model searches and answers
+    and never asks whether a product is meant; a message clearly not about
+    products is answered as it is, without a search; only when neither reading
+    prevails does it ask; and an empty search for such a phrase says only that
+    the text matched no product. It quotes no customer phrase — no word list,
+    not even the observed one — and supplies no reply."""
     clause = _clause(5)
     assert "في سياق المحادثة قبل أن تبحث" in clause
-    assert "فابحث وأجب مباشرة دون أن تستوضح" in clause
-    assert "فاستوضح قصده" in clause and "ولا تعاملها كطلب منتج" in clause
+    assert "إذا كان الأرجح أن العميل يسأل عن منتج" in clause
+    assert "ولا تسأله هل يقصد منتجًا" in clause
+    assert "فردّ عليها بما يناسبها دون بحث" in clause
+    assert "وإذا لم يترجّح لك أحد المعنيين فاستوضح قصده" in clause
     assert "لا أن العميل سأل عن منتج غير موجود" in clause
     assert "بدل أن تجزم بعدم وجوده" in clause
     for quote in ("«", "»", '"'):
         assert quote not in clause, quote
+    for observed in ("عيال", "محمد", "عندك", "عندكم"):
+        assert observed not in pi.PILOT_REPLY_ADDENDUM, observed
