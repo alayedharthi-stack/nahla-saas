@@ -22,6 +22,24 @@
   },
   "exceptions": [
     {
+      "exception_id": "AGENT-SCOPE-1162-LIFECYCLE-TENANT-RECIPIENTS",
+      "exact_file_scope": ["backend/core/commerce_lifecycle/canary_guard.py"],
+      "base_content_sha256": "82be1686c42e65baff7e033ba057202602ba230dcae1df9de6a19436d94b641b",
+      "authorized_content_sha256": ["e5004a5bcf64b861ff26b9bd398a2113f45aed33690e1a2e9aed0a4299827b7a"],
+      "task_scope": "Permit a specifically opted-in test tenant's normalizable customer numbers across its lifecycle sends, while retaining the master dispatch gate, tenant allowlist, other tenants' recipient lists, and suppression of duplicate legacy owners. PR #1162.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1162",
+      "expires_at": "2026-10-31"
+    },
+    {
+      "exception_id": "AGENT-SCOPE-1162-LIFECYCLE-READINESS",
+      "exact_file_scope": ["backend/core/commerce_lifecycle/operations.py"],
+      "base_content_sha256": "4c4e21d1268e77a870ffa6102b747045ea26e0368587b85889db19a8aa06f677",
+      "authorized_content_sha256": ["096973d94d7286965fe1d2b537ae522618b86815336f9f6500a45466a5be95e2"],
+      "task_scope": "Report the same tenant-wide recipient eligibility in lifecycle recovery readiness as the approved dispatch guard. PR #1162.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1162",
+      "expires_at": "2026-10-31"
+    },
+    {
       "exception_id": "AGENT-SCOPE-1145-CATALOG-SEARCH-ORDER",
       "exact_file_scope": [
         "backend/core/store_knowledge.py"
