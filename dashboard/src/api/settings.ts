@@ -26,6 +26,13 @@ export interface AISettings {
   reply_tone: 'friendly' | 'professional' | 'sales'
   reply_length: 'short' | 'medium' | 'detailed'
   default_language: 'arabic' | 'english' | 'bilingual'
+  /**
+   * Arabic dialect for Arabic replies, independent of `default_language`.
+   * '' (or absent) = not chosen: the language option's own meaning applies
+   * (Saudi colloquial for 'arabic', no dialect for 'english' / 'bilingual').
+   * Values: backend `core/reply_dialect.py` ARABIC_DIALECTS.
+   */
+  arabic_dialect?: '' | 'saudi' | 'iraqi' | 'egyptian' | 'levantine' | 'fusha'
   owner_instructions: string
   coupon_rules: string
   escalation_rules: string
@@ -113,9 +120,17 @@ export interface SalesChannelAvailability {
 
 import { apiCall } from './client'
 
+/**
+ * Which of the store's conversations the Arabic-dialect setting reaches, as the
+ * server computes it from the runtime's own admission settings: only the new
+ * commerce agent reads it; the previous path keeps Saudi Arabic.
+ */
+export type ArabicDialectReach = 'all_conversations' | 'runtime_conversations' | 'none'
+
 export interface AllSettings {
   whatsapp: WhatsAppSettings
   ai: AISettings
+  arabic_dialect_reach?: ArabicDialectReach
   store: StoreSettings
   notifications: NotificationSettings
   sales_channel_availability?: SalesChannelAvailability
