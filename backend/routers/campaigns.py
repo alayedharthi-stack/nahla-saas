@@ -370,7 +370,7 @@ def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict
 PAUSE_REASON_LABELS_AR: Dict[str, str] = {
     "messaging_limit_reached": "بلغت الحملة حد المراسلة لدى Meta — تنتظر توفر السعة",
     "provider_rate_limited": "طلبت Meta إبطاء الإرسال مؤقتًا — يُستأنف تلقائيًا بعد مهلة",
-    "provider_throttling": "Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال",
+    "provider_throttling": "أوقفت نحلة الحملة مؤقتًا بعد تكرر قيود من Meta — راجع التفاصيل",
     "provider_repeated_error": "تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة",
     "marketing_blocked": (
         "Meta أوقفت تسليم الرسائل التسويقية لعدد كبير من المستلمين (131049) — "
@@ -2183,9 +2183,9 @@ async def debug_campaign(
             "materialized_rows":      int(
                 funnel.get("materialized_rows") or total_logs
             ),
-            "queued_for_send":        int(
-                funnel.get("queued_for_send") or counts.get("queued", 0)
-            ),
+            # Queue size changes during a run; the persisted funnel is
+            # a launch snapshot, not the current queue (including zero).
+            "queued_for_send":        int(counts.get("queued", 0)),
             "skipped_at_snapshot":    int(funnel.get("skipped_at_snapshot") or (
                 counts.get("skipped_unreachable", 0)
                 + counts.get("skipped_unsubscribed", 0)
