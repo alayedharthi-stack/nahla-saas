@@ -110,6 +110,7 @@ _CONFIRM_TEXTS: tuple[str, ...] = (
 )
 _CANCEL_TEXTS: tuple[str, ...] = (
     "إلغاء الطلب ❌",
+    "إلغاء الطلب",
     "الغاء الطلب",
     "إلغاء",
     "الغاء",
@@ -185,6 +186,41 @@ def resolve_owned_cod_button_payload_from_context(
         SmartAutomation,
     )
 
+    # Store-origin prompts are dispatched by the lifecycle ledger, not by a
+    # SmartAutomation execution. The accepted provider WAMID is stamped on the
+    # order after the send. Match that exact send as well as the tenant, phone,
+    # pending state and COD evidence before treating a template button as ours.
+    external_orders = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == int(tenant_id),
+            Order.status.in_(
+                tuple({STATUS_PENDING_CUSTOMER, *_STORE_PENDING_CONFIRMATION_STATUSES})
+            ),
+            Order.extra_metadata["nahla_cod_confirmation_wamid"].as_string()
+            == context_id,
+        )
+        .limit(2)
+        .all()
+    )
+    external_matches = []
+    for order in external_orders:
+        meta = dict(getattr(order, "extra_metadata", None) or {})
+        if (
+            int(getattr(order, "tenant_id", 0) or 0) == int(tenant_id)
+            and str(getattr(order, "status", "") or "").lower()
+            in {STATUS_PENDING_CUSTOMER, *_STORE_PENDING_CONFIRMATION_STATUSES}
+            and meta.get("nahla_cod_confirmation_origin") == "external_store"
+            and meta.get("nahla_cod_confirmation_sent") is True
+            and str(meta.get("nahla_cod_confirmation_wamid") or "").strip() == context_id
+            and str(meta.get("payment_method") or "").strip().lower() in _COD_METHODS
+            and str(getattr(order, "external_id", None) or "").strip()
+            and _order_phone_matches(order, customer_phone)
+        ):
+            external_matches.append(order)
+    if len(external_matches) == 1:
+        return f"nahla_cod_{action}:{external_matches[0].id}"
+
     candidates = (
         db.query(AutomationExecution, AutomationEvent, SmartAutomation)
         .join(AutomationEvent, AutomationExecution.event_id == AutomationEvent.id)
@@ -247,6 +283,74 @@ def resolve_owned_cod_button_payload_from_context(
         return f"nahla_cod_{action}:{order_id}"
 
     return None
+
+
+def resolve_verified_structured_cod_control(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    button_payload: str,
+    button_text: str,
+    context_wamid: Optional[str],
+) -> Optional[str]:
+    """Bind a provider button to one sent COD prompt before changing an order.
+
+    This is for a structured WhatsApp button only. Ordinary conversational
+    text must never acquire order-mutation authority from its wording.
+    """
+    action, order_id = parse_cod_button_payload(button_payload)
+    context_id = str(context_wamid or "").strip()
+    if action and order_id is not None:
+        order = _load_bound_pending_cod_order(
+            db, tenant_id=tenant_id, customer_phone=customer_phone,
+            order_id=order_id, context_wamid=context_id,
+        )
+        if order is None:
+            return None
+        meta = dict(getattr(order, "extra_metadata", None) or {})
+        stamped_wamid = str(meta.get("nahla_cod_confirmation_wamid") or "").strip()
+        if stamped_wamid and context_id and stamped_wamid != context_id:
+            return None
+        if not stamped_wamid and not context_id:
+            return None
+        return f"nahla_cod_{action}:{order_id}"
+    if not context_id:
+        return None
+    # Meta may return its own template payload. The title only chooses an
+    # action after context.id proves which COD prompt was accepted for this
+    # tenant and customer.
+    return resolve_owned_cod_button_payload_from_context(
+        db, tenant_id=tenant_id, customer_phone=customer_phone,
+        button_text=button_text, context_wamid=context_id,
+    )
+
+
+async def apply_claimed_structured_cod_control(
+    db,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    text: str,
+    button_payload: str,
+    context_wamid: Optional[str],
+) -> Tuple[Optional[str], Optional[Any]]:
+    """Apply the verified store mutation without sending a second reply.
+
+    The commerce runtime retains ownership of the natural customer response;
+    the provider result, not that response, is the confirmation evidence.
+    """
+    control = resolve_verified_structured_cod_control(
+        db, tenant_id=tenant_id, customer_phone=customer_phone,
+        button_payload=button_payload, button_text=text,
+        context_wamid=context_wamid,
+    )
+    if not control:
+        return None, None
+    return await handle_cod_reply(
+        db, tenant_id=tenant_id, customer_phone=customer_phone,
+        text=text, button_payload=control, context_wamid=context_wamid,
+    )
 
 
 async def intercept_cod_button_inbound(

@@ -21,6 +21,7 @@ from core.automation_engine import _lifecycle_quick_reply_id, _try_execute  # no
 from routers.whatsapp_webhook import _send_cod_followup_message  # noqa: E402
 from services.cod_confirmation import (  # noqa: E402
     COD_INBOUND_CONSUMED,
+    apply_claimed_structured_cod_control,
     consume_owned_cod_button_inbound,
     resolve_owned_cod_button_payload_from_context,
     stamp_initial_cod_automation_send_success,
@@ -179,6 +180,76 @@ def test_context_wamid_resolves_only_correlated_cod_prompt():
     assert _resolve(db, title="إلغاء الطلب") == "nahla_cod_cancel:155"
     assert _resolve(db, wamid="wamid.unrelated") is None
     assert _resolve(db, title="عرض المنتجات") is None
+
+
+def test_claimed_salla_cod_button_updates_store_before_natural_reply(monkeypatch):
+    """A real lifecycle prompt is a store instruction even with the pilot on."""
+    order = _order()
+    order.extra_metadata.update({
+        "nahla_cod_confirmation_origin": "external_store",
+        "nahla_cod_confirmation_wamid": "wamid.cod.prompt",
+    })
+    db = _DB(order)
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr("store_integration.order_service.update_order_status", update)
+    monkeypatch.setattr("observability.event_logger.log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("services.cod_confirmation.flag_modified", lambda *args, **kwargs: None)
+
+    result = _run(apply_claimed_structured_cod_control(
+        db, tenant_id=1, customer_phone="966555906901", text="تأكيد الطلب",
+        button_payload="nahla_cod_confirm:155", context_wamid="wamid.cod.prompt",
+    ))
+
+    assert result == ("confirm", order)
+    update.assert_awaited_once_with(1, "472240005", "under_review")
+    assert order.status == "under_review"
+    assert order.extra_metadata["cod_confirmed_at"]
+
+
+def test_claimed_cod_button_rejects_foreign_context_and_plain_text(monkeypatch):
+    order = _order()
+    order.extra_metadata["nahla_cod_confirmation_wamid"] = "wamid.cod.prompt"
+    db = _DB(order)
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr("store_integration.order_service.update_order_status", update)
+
+    for payload, context in (("nahla_cod_confirm:155", "wamid.foreign"), ("", "")):
+        assert _run(apply_claimed_structured_cod_control(
+            db, tenant_id=1, customer_phone="966555906901", text="تأكيد الطلب",
+            button_payload=payload, context_wamid=context,
+        )) == (None, None)
+    update.assert_not_awaited()
+    assert order.status == "in_progress"
+
+
+def test_claimed_store_cod_button_uses_send_context_when_meta_payload_is_opaque(monkeypatch):
+    from models import Order
+
+    order = _order()
+    order.extra_metadata.update({
+        "nahla_cod_confirmation_origin": "external_store",
+        "nahla_cod_confirmation_wamid": "wamid.cod.prompt",
+    })
+    db = _DB(order)
+    original_query = db.query
+
+    def query(*entities):
+        result = original_query(*entities)
+        if entities == (Order,):
+            result.all = lambda: [order]
+        return result
+
+    db.query = query
+    update = AsyncMock(return_value=True)
+    monkeypatch.setattr("store_integration.order_service.update_order_status", update)
+    monkeypatch.setattr("observability.event_logger.log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr("services.cod_confirmation.flag_modified", lambda *args, **kwargs: None)
+
+    assert _run(apply_claimed_structured_cod_control(
+        db, tenant_id=1, customer_phone="966555906901", text="تأكيد الطلب",
+        button_payload="opaque-meta-template-payload", context_wamid="wamid.cod.prompt",
+    )) == ("confirm", order)
+    update.assert_awaited_once_with(1, "472240005", "under_review")
 
 
 def test_manual_text_cannot_impersonate_button_callback():

@@ -397,6 +397,50 @@ def _race_db():
     return db, engine, tenant, customer
 
 
+def test_store_cod_template_context_binds_only_pending_order_and_customer():
+    from services.cod_confirmation import resolve_verified_structured_cod_control
+
+    db, engine, tenant, _customer = _race_db()
+    try:
+        order = Order(
+            tenant_id=tenant.id,
+            external_id="salla-shirt-101",
+            external_order_number="ORDER-SHIRT-101",
+            status="in_progress",
+            total="174",
+            customer_info={"phone": "+966500000001"},
+            extra_metadata={
+                "payment_method": "cod",
+                "nahla_cod_confirmation_sent": True,
+                "nahla_cod_confirmation_origin": "external_store",
+                "nahla_cod_confirmation_wamid": "wamid.cod.shirt",
+            },
+        )
+        db.add(order)
+        db.commit()
+        bound = resolve_verified_structured_cod_control(
+            db, tenant_id=tenant.id, customer_phone="966500000001",
+            button_payload="provider-default", button_text="تأكيد الطلب",
+            context_wamid="wamid.cod.shirt",
+        )
+        assert bound == f"nahla_cod_confirm:{order.id}"
+        assert resolve_verified_structured_cod_control(
+            db, tenant_id=tenant.id, customer_phone="966500000999",
+            button_payload="provider-default", button_text="تأكيد الطلب",
+            context_wamid="wamid.cod.shirt",
+        ) is None
+        order.status = "under_review"
+        db.commit()
+        assert resolve_verified_structured_cod_control(
+            db, tenant_id=tenant.id, customer_phone="966500000001",
+            button_payload="provider-default", button_text="تأكيد الطلب",
+            context_wamid="wamid.cod.shirt",
+        ) is None
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def _cod_created_payload(external_id: str, reference_id: str) -> dict:
     return {
         "id": external_id,
