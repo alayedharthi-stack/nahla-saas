@@ -152,6 +152,11 @@ class TurnReport:
     # asked for them came to: ``answered``, or why the verified reply before it
     # went out instead. None when nothing was asked.
     paging_words: Optional[str] = None
+    # When the platform decided a list the model's reply did not offer, what
+    # the one step that asked for it came to: ``answered`` (the model's reply
+    # from that step went out, with or without a selector), or why the reply
+    # before it went out instead. None when nothing was asked.
+    list_offer: Optional[str] = None
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
@@ -336,6 +341,10 @@ def _with_products_shown_earlier(
         if shown.products:
             binding.context.authorize_products(shown.product_ids, titles=shown.titles)
             preamble["products_shown_earlier"] = shown.as_facts()
+        # What a search asked for "other" products leaves out: every product an
+        # earlier reply cited or offered as a row, by the platform's own record.
+        binding.shown_product_ids = tuple(dict.fromkeys(
+            [int(p) for p in shown.product_ids] + [int(p) for p in shown.offered_as_rows]))
         # Only where paging exists can a row have been sent that no reply
         # cited; elsewhere the tap is verified exactly as it always was.
         tapped = _tapped_product(
@@ -810,6 +819,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
                      if event.kind == "reply_accepted"), None)
     accepted_detail = dict(getattr(accepted, "detail", None) or {})
     words = next((event for event in outcome.events if event.kind == "paging_words_answer"), None)
+    offer = next((event for event in outcome.events if event.kind == "list_offer_answer"), None)
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
     stop_detail = _stop_detail(outcome)
@@ -827,6 +837,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         card_outcome=str(accepted_detail.get("card") or "") or None,
         browse_outcome=str(accepted_detail.get("browse") or "") or None,
         paging_words=(str(words.detail.get("outcome") or "") or None) if words is not None else None,
+        list_offer=(str(offer.detail.get("outcome") or "") or None) if offer is not None else None,
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,

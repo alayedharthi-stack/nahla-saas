@@ -89,6 +89,10 @@ class LiveToolBinding:
     # Off, the search reads nothing beyond the model's window and says nothing
     # about more results: the turn is exactly what it was before paging.
     paging_available: bool = False
+    # Products this conversation already showed the customer (cited by an
+    # earlier reply or sent as a row), from the platform's own record of its
+    # replies. ``search_products`` leaves them out when asked for other ones.
+    shown_product_ids: Tuple[int, ...] = ()
     _gate: threading.Condition = dataclasses.field(
         default_factory=threading.Condition, repr=False)
     _poisoned: Optional[str] = None
@@ -351,18 +355,23 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
     def body(scope: at.ToolScope, arguments: Mapping[str, Any]) -> at.ToolResult:
         query = str(arguments.get("query") or "")
         limit = int(arguments.get("limit") or MAX_SEARCH_LIMIT)
+        # A search the model narrowed below the full window asked for a few
+        # products, not for the merchant's range: it has no continuation, so no
+        # selector over it is ever extended. Whether the store matched more is
+        # still said — "these are all of them" must never rest on a window.
+        narrowed = limit < MAX_SEARCH_LIMIT
+        shown = tuple(binding.shown_product_ids) if arguments.get("exclude_shown") is True else ()
+        if shown and binding.paging_available:
+            return _search_excluding_shown(binding, scope, query, min(limit, MAX_SEARCH_LIMIT),
+                                           shown, narrowed=narrowed)
         result = _run(search_products_impl(
             binding.context, query=query, limit=min(limit, MAX_SEARCH_LIMIT)))
         if getattr(result, "status", "") != "ok":
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
         products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
         payload: Dict[str, Any] = {"status": "ok", "found": bool(products), "products": products}
-        # A search the model narrowed below the full window asked for a few
-        # products, not for the merchant's range: it has no continuation, so no
-        # selector over it is ever extended, and it carries no more_results.
-        narrowed = limit < MAX_SEARCH_LIMIT
         candidates = (_search_candidates(binding, scope, query, products)
-                      if binding.paging_available and not narrowed else None)
+                      if binding.paging_available else None)
         if candidates is not None:
             # One boolean, and only when it is known: the model learns that the
             # search matched more than it was shown, never what or how many.
@@ -371,9 +380,65 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
         if sections:
             payload["product_knowledge"] = sections
         return at.ToolResult(result=payload, evidence_refs=_refs(getattr(result, "evidence", None) or ()),
-                             platform=candidates)
+                             platform=candidates if not narrowed else None)
 
     return run
+
+
+def _search_excluding_shown(binding: LiveToolBinding, scope: at.ToolScope, query: str, size: int,
+                            shown: Sequence[int], *, narrowed: bool) -> at.ToolResult:
+    """The same search, minus what this conversation already showed.
+
+    The platform's ordered candidates for the query decide what comes next:
+    the products shown earlier are taken out and the next ``size`` in the same
+    order are read as a normal search result. That remainder, in that order, is
+    also the continuation a "More" row pages through, so a typed request for
+    other products and a tap on "More" walk the same order and neither repeats
+    a product. Only the platform's record of what it showed is used; nothing
+    the customer or the model wrote decides it.
+    """
+    from core.commerce_runtime import search_candidates as sc
+    from modules.ai.commerce_agent_v2.tools.catalog import (
+        search_product_candidates_impl,
+        search_products_window_impl,
+    )
+
+    try:
+        with _savepoint(binding):
+            read = search_product_candidates_impl(binding.context, query=query, limit=sc.CANDIDATE_CAP)
+    except Exception as exc:  # noqa: BLE001 - reported as the failure it is, never as "nothing else"
+        logger.warning("[COMMERCE_RUNTIME] search candidates unavailable tenant=%s error=%s",
+                       scope.tenant_id, type(exc).__name__)
+        return _unresolved("error", "search_candidates_unavailable")
+    left_out = set(int(pid) for pid in shown)
+    remaining = [int(pid) for pid in read.product_ids if int(pid) not in left_out]
+    window = remaining[:max(1, int(size))]
+    result = search_products_window_impl(binding.context, window)
+    products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
+    more = len(remaining) > len(window) or not bool(read.exhausted)
+    payload: Dict[str, Any] = {
+        "status": "ok", "found": bool(products), "products": products,
+        # How many products the search matched that this conversation already
+        # showed and this result leaves out, so "nothing else" is never read
+        # as "nothing at all".
+        "shown_earlier_left_out": len(left_out & set(int(pid) for pid in read.product_ids)),
+        "more_results": more,
+    }
+    candidates: Optional[Any] = None
+    if not narrowed:
+        candidates = sc.SearchCandidates(
+            tenant_id=int(scope.tenant_id), namespace=str(scope.namespace),
+            conversation_id=int(scope.conversation_id), turn_id=int(scope.turn_id),
+            query_digest=sc.query_digest(query), method=str(read.method or ""),
+            product_ids=tuple(remaining), complete=bool(read.exhausted),
+            window_ids=sc.window_ids({"products": products}))
+        if not candidates.window_is_prefix():
+            candidates = None
+    logger.info("[COMMERCE_RUNTIME] search excluding shown tenant=%s left_out=%d remaining=%d "
+                "returned=%d more=%s", scope.tenant_id, payload["shown_earlier_left_out"],
+                len(remaining), len(products), more)
+    return at.ToolResult(result=payload, evidence_refs=_refs(getattr(result, "evidence", None) or ()),
+                         platform=candidates)
 
 
 def _search_candidates(binding: LiveToolBinding, scope: at.ToolScope, query: str,
@@ -835,6 +900,8 @@ def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
 
 _QUERY = {"type": "string", "maxLength": MAX_QUERY_LENGTH}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT}
+_EXCLUDE_SHOWN = {"type": "boolean",
+                  "description": "Leave out the products this conversation already showed the customer."}
 _ID = {"type": "integer", "minimum": 1, "maximum": 2_147_483_647}
 
 # The names below are the ones the merchant instructions already use. They are
@@ -926,8 +993,18 @@ LIVE_TOOL_NAMES: Tuple[str, ...] = tuple(name for name, *_ in _DECLARATIONS)
 SEARCH_TOOL_NAME = "search_products"
 SEARCH_PAGING_NOTE = (
     " When the search matched more products than it returned, the result has more_results "
-    "set to true; the other products are not listed."
+    "set to true; the other products are not listed, so the result is never all of the "
+    "merchant's products. When the customer asks for other or more products, pass "
+    "exclude_shown true: the products this conversation already showed are left out and "
+    "the next ones in the same order are returned."
 )
+
+
+def _search_schema(schema: Mapping[str, Any]) -> Dict[str, Any]:
+    """The search declaration where a continuation exists: with ``exclude_shown``."""
+    extended = ac.public_copy(schema)
+    extended["properties"]["exclude_shown"] = ac.public_copy(_EXCLUDE_SHOWN)
+    return extended
 
 
 def build_live_tools(binding: LiveToolBinding) -> Tuple[at.RegisteredTool, ...]:
@@ -939,7 +1016,10 @@ def build_live_tools(binding: LiveToolBinding) -> Tuple[at.RegisteredTool, ...]:
                 description=(description + SEARCH_PAGING_NOTE
                              if name == SEARCH_TOOL_NAME and binding.paging_available
                              else description),
-                input_schema=schema, result_kind=kind, read_only=True),
+                input_schema=(_search_schema(schema)
+                              if name == SEARCH_TOOL_NAME and binding.paging_available
+                              else schema),
+                result_kind=kind, read_only=True),
             function=factory(binding),
             # The binding owns the session these tools read on, so it is the one
             # told the instant the loop stops waiting for a call.

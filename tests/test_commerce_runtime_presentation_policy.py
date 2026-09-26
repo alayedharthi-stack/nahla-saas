@@ -245,20 +245,18 @@ def test_1b_the_policy_reaches_a_list_on_its_own_when_the_model_offers_nothing()
 
 
 def test_1c_a_list_the_policy_decides_on_its_own_is_recorded_but_not_composed() -> None:
-    """The gap between step 4's decision and what the customer receives, pinned.
+    """What the seam alone does with step 4's decision.
 
     Five products browsed, no focus, no selector requested: the seam records
-    ``list`` / ``multiple_candidates`` for the reply and sends the text alone.
-    Only a model-requested selector, a verified "More" tap or a stood-down
-    selector is ever composed into rows; a card (step 3) is composed from the
-    decision alone, a list is not. Production turn 66 of 2026-09-25 logged the
-    same outcome (``search_products`` returned five products,
-    ``choices_outcome=not_requested``, ``choice_rows=0``).
+    ``list`` / ``multiple_candidates_no_focus`` and, by itself, sends the text
+    alone — rows are composed only from a model-requested selector, a verified
+    "More" tap or a stood-down selector, because a list's words and text that
+    does not repeat every row are the model's. Production turn 66 of
+    2026-09-25 ended here (``choices_outcome=not_requested``, ``choice_rows=0``).
 
-    This test describes today's behaviour, not the goal. Composing the list
-    without letting the model's text repeat every row needs a model-facing
-    change (see the PR that adds this test); when that lands, this test is the
-    one that must change.
+    The loop now asks the model for the selector before the seam runs
+    (``list_offer_needed``); that path is proven end to end in
+    ``test_commerce_runtime_pagination_pg``. This pins the seam's half.
     """
     final, session = run_seam(draft(cite=[11, 12, 13, 14, 15]), [browsed(11, 12, 13, 14, 15)])
     recorded = shape_of(session)

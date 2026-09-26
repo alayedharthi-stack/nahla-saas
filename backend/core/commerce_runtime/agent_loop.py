@@ -58,6 +58,7 @@ from core.commerce_runtime import navigation as nav
 from core.commerce_runtime import presentation_policy as pp
 from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
+from core.commerce_runtime import search_candidates as sc
 from core.commerce_runtime.ledgers import LedgerRepository
 
 Clock = Callable[[], float]
@@ -186,6 +187,10 @@ class AgentLoop:
                 problems = ac.verify_reply_draft(draft, session.observations,
                                                  inbound=context.inbound)
                 if not problems:
+                    offer, more = self._list_left_out(draft, scope, session, presentation)
+                    if offer:
+                        draft = self._ask_for_list(provider, context, scope, session, cancelled,
+                                                   draft, offer, more)
                     missing = self._paging_words_missing(draft, scope, session, presentation)
                     if missing:
                         draft = self._ask_for_words(provider, context, scope, session, cancelled,
@@ -246,17 +251,7 @@ class AgentLoop:
         the step, the page-one read and the reservation after them: the reply
         then goes as the model asked.
         """
-        if self._browse is None or session.progress is None:
-            return ()
-        # Two steps: the one asked for, and one more a resumed invocation can
-        # still answer with if this one is lost after its step was debited.
-        if session.limits.max_steps - session.progress.steps_used < 2:
-            return ()
-        if any(p.code == br.WORDS_NEEDED for f in session.feedback for p in f.problems):
-            return ()
-        needed = (session.limits.provider_timeout_seconds + session.limits.tool_timeout_seconds
-                  + WORDS_RESERVE_SECONDS)
-        if session.remaining_seconds() < needed:
+        if self._browse is None or not self._can_ask(session, br.WORDS_NEEDED):
             return ()
         try:
             shape = pp.decide(draft=draft, observations=session.observations,
@@ -269,6 +264,65 @@ class AgentLoop:
             session.record("browse_failed", {"error": type(exc).__name__})
             return ()
         return eligible.words_missing(draft) if eligible is not None else ()
+
+    def _can_ask(self, session: "_Session", code: str) -> bool:
+        """Whether this turn may still ask the model one question under ``code``.
+
+        Once per turn — also across a resumed invocation, whose restored
+        feedback still names the question — and only with two steps left (the
+        one asked for, and one more a resumed invocation can still answer with)
+        and time for the step, a page-one read and the reservation after them.
+        """
+        if session.progress is None:
+            return False
+        if session.limits.max_steps - session.progress.steps_used < 2:
+            return False
+        if any(p.code == code for f in session.feedback for p in f.problems):
+            return False
+        needed = (session.limits.provider_timeout_seconds + session.limits.tool_timeout_seconds
+                  + WORDS_RESERVE_SECONDS)
+        return session.remaining_seconds() >= needed
+
+    def _list_left_out(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
+                       presentation: Optional[pp.PresentationContext]) -> Tuple[Tuple[int, ...], bool]:
+        """The products the platform decided to list and the model's reply did not offer.
+
+        Only when the presentation policy itself decided a list — several
+        products this turn's search returned, no single focus, no shape the
+        model asked for — and ``_can_ask`` allows it. The products are the ones
+        the most recent search showed the model that the customer can buy now,
+        in that search's order, and the flag says whether the search matched
+        more than it showed. ``()`` when there is nothing to ask.
+        """
+        if not self._can_ask(session, rc.LIST_OFFER_NEEDED):
+            return (), False
+        try:
+            shape = pp.decide(draft=draft, observations=session.observations,
+                              definitions=self._registry.definitions, presentation=presentation)
+            if shape.kind != pp.SHAPE_LIST or shape.reason != pp.MULTIPLE_CANDIDATES:
+                return (), False
+            return _latest_search_offer(session.observations, self._registry.definitions)
+        except Exception as exc:  # noqa: BLE001 - asking is an affordance; the answer still goes
+            session.record("list_offer_failed", {"error": type(exc).__name__})
+            return (), False
+
+    def _ask_for_list(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope,
+                      session: "_Session", cancelled: Optional[Callable[[], bool]],
+                      draft: ac.ReplyDraft, offer: Sequence[int], more: bool) -> ac.ReplyDraft:
+        """One more step for the selector the platform decided and the model left out.
+
+        The same question-and-answer ``_ask_for_words`` runs, with its one
+        problem: the products, the words a list needs, and that the decision
+        whether the answer is such an offer stays the model's. Whatever comes
+        back that verification accepts is the answer — with a selector or
+        without one — and anything else leaves the reply as it was.
+        """
+        session.record("list_offer_requested", {"products": [int(p) for p in offer],
+                                                "more_results": bool(more)})
+        problem = ac.VerificationProblem(rc.LIST_OFFER_NEEDED,
+                                         rc.list_offer_detail(offer, more_results=more))
+        return self._ask_once(provider, context, session, cancelled, draft, problem,
+                              answered_event="list_offer_answer")
 
     def _ask_for_words(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope,
                        session: "_Session", cancelled: Optional[Callable[[], bool]],
@@ -286,9 +340,25 @@ class AgentLoop:
         ownership, a concurrent invocation, the deadline — still ends it.
         """
         session.record("paging_words_requested", {"missing": list(missing)})
+        problem = ac.VerificationProblem(br.WORDS_NEEDED, br.words_needed_detail(missing))
+        return self._ask_once(provider, context, session, cancelled, draft, problem,
+                              answered_event="paging_words_answer")
+
+    def _ask_once(self, provider: Any, context: ac.AuthorizedContext, session: "_Session",
+                  cancelled: Optional[Callable[[], bool]], draft: ac.ReplyDraft,
+                  problem: ac.VerificationProblem, *, answered_event: str) -> ac.ReplyDraft:
+        """Show the model its verified reply as not yet accepted, with one problem.
+
+        Exactly one step is given. A verified reply from it is the answer;
+        anything else — no reply, a lookup instead of a reply, a reply
+        verification refuses, a provider that fails or times out — leaves
+        ``draft`` as the answer, so asking never leaves the customer worse off
+        than not asking. Only a stop that would have ended the turn anyway —
+        cancellation, lost ownership, a concurrent invocation, the deadline —
+        still ends it.
+        """
         session.feedback.append(ac.VerificationFeedback(
-            step_no=session.progress.steps_used,
-            problems=(ac.VerificationProblem(br.WORDS_NEEDED, br.words_needed_detail(missing)),)))
+            step_no=session.progress.steps_used, problems=(problem,)))
         answer: Optional[ac.ReplyDraft] = None
         outcome = "not_run"
         try:
@@ -320,7 +390,7 @@ class AgentLoop:
                 raise
         finally:
             # Recorded however the step ended, a stop that ends the turn included.
-            session.record("paging_words_answer", {"outcome": outcome})
+            session.record(answered_event, {"outcome": outcome})
         return answer if answer is not None else draft
 
     def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
@@ -1045,3 +1115,29 @@ class _Session:
 
 
 __all__ = ["AgentLoop"]
+
+
+def _latest_search_offer(observations: Sequence[Any], definitions: Sequence[Any]) -> Tuple[Tuple[int, ...], bool]:
+    """The products the most recent search showed the model that can be bought
+    now, in its order, and whether that search matched more than it showed.
+
+    Read from the observation body the model was given and nothing else; a
+    product the model was shown as not orderable is never added by the platform.
+    Fewer than two leaves nothing to offer.
+    """
+    kinds = {str(getattr(d, "name", "") or ""): str(getattr(d, "result_kind", "") or "")
+             for d in definitions or ()}
+    for obs in reversed(list(observations or ())):
+        if not getattr(obs, "ok", False) or getattr(obs, "body_truncated", False):
+            continue
+        if kinds.get(str(getattr(obs, "tool_name", "") or "")) != pp.CANDIDATE_KIND:
+            continue
+        result = getattr(obs, "result", None)
+        observed = rc.observed_products([obs])
+        offer = tuple(pid for pid in sc.window_ids(result)
+                      if pid in observed and bool(observed[pid].get("orderable")))[:rc.MAX_CHOICES]
+        if len(offer) < rc.MIN_CHOICES:
+            return (), False
+        more = bool(result.get("more_results")) if isinstance(result, dict) else False
+        return offer, more
+    return (), False

@@ -105,15 +105,15 @@ def test_every_field_the_model_must_supply_is_named_in_the_addendum():
         assert field in pi.PILOT_REPLY_ADDENDUM, field
 
 
-def test_the_selector_is_optional_and_described_on_the_tool_itself():
-    """``choices`` is deliberately absent from the addendum.
-
-    Naming it there would be a prompt change, which GOV-001 forbids by
-    default; a capability the model may decline is described where every tool
-    interface is described — on the declaration the model receives. What this
-    asserts is that the description is actually there and actually says the
-    two things that make the capability safe to offer: the products must have
-    been looked up in this turn, and the selector is never required.
+def test_the_selector_is_described_on_the_tool_itself_with_its_one_stated_use():
+    """``choices`` is deliberately absent from the addendum; it is described
+    where every tool interface is described — on the declaration the model
+    receives. It stays optional in the schema (a reply about one product, a
+    recommendation or a question offers none), and by the owner's approval of
+    26 September 2026 the declaration states the one use: an answer that
+    offers two or more products this turn's search returned to choose from.
+    The products must still have been looked up in this turn, and the customer
+    can always answer by typing.
     """
     reply = next(t for t in declared_tools() if t["name"] == ap.REPLY_TOOL_NAME)
     schema = reply["input_schema"]
@@ -121,7 +121,8 @@ def test_the_selector_is_optional_and_described_on_the_tool_itself():
     assert "choices" not in pi.PILOT_REPLY_ADDENDUM
     description = schema["properties"]["choices"]["description"]
     assert "this turn" in description and "evidence_refs" in description
-    assert "never required" in description and "typing" in description
+    assert "two or more products" in description and "optional" in description
+    assert "typing" in description
 
 
 def test_the_system_prompt_the_model_receives_is_the_assembled_one():
@@ -175,7 +176,8 @@ def test_no_declaration_refers_to_a_tool_that_is_not_exposed():
             token = word.strip("`'\"()")
             if "_" in token and token.islower() and token.replace("_", "").isalpha():
                 if token in {"order_number", "product_id", "order_id", "evidence_ref",
-                             "evidence_refs", "claims_commerce_facts", "input_schema"}:
+                             "evidence_refs", "claims_commerce_facts", "input_schema",
+                             "more_results", "exclude_shown"}:
                     continue
                 assert token in declared, (tool["name"], token)
 

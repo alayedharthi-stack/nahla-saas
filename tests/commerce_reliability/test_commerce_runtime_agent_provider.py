@@ -818,7 +818,12 @@ def test_each_shape_declares_itself_an_addition_over_the_text_not_a_replacement(
     for where in ("choices", "card"):
         assert "addition over the text" in declarations[where], where
         assert "never a replacement" in declarations[where], where
-        assert "never required" in declarations[where] or "is never required" in declarations[where]
+    assert "never required" in declarations["card"]
+    # The selector's one stated use (owner-approved, 26 September 2026): an
+    # answer offering two or more of this turn's search results; otherwise
+    # it stays optional.
+    assert "two or more products" in declarations["choices"]
+    assert "optional" in declarations["choices"]
     assert "addition over the text" in declarations["tool"]
     assert "never a replacement" in declarations["tool"]
 
