@@ -367,7 +367,11 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
         result = _run(search_products_impl(
             binding.context, query=query, limit=min(limit, MAX_SEARCH_LIMIT)))
         if getattr(result, "status", "") != "ok":
-            return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
+            reason = getattr(result, "failure_reason", None)
+            miss = (_query_word_presence(binding, scope, query)
+                    if query.strip() and str(reason or "").startswith("no_catalog_product_matched")
+                    else {})
+            return _unresolved(getattr(result, "status", None), reason, **miss)
         products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
         payload: Dict[str, Any] = {"status": "ok", "found": bool(products), "products": products}
         candidates = (_search_candidates(binding, scope, query, products)
@@ -383,6 +387,30 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
                              platform=candidates if not narrowed else None)
 
     return run
+
+
+def _query_word_presence(binding: LiveToolBinding, scope: at.ToolScope,
+                         query: str) -> Dict[str, Any]:
+    """For a named search that matched nothing: which of its words appear in
+    this store's products, and which appear nowhere in them.
+
+    A fact about the catalogue, read on its own savepoint. It says what the
+    miss was — a phrase the store's products share words with, or one they
+    share none with — and nothing about what the customer meant. A read that
+    fails adds nothing: the miss is reported exactly as before.
+    """
+    from modules.ai.commerce_agent_v2.tools.catalog import query_word_presence_impl
+
+    try:
+        with _savepoint(binding):
+            appear, nowhere = query_word_presence_impl(binding.context, query)
+    except Exception as exc:  # noqa: BLE001 - the miss stands without the fact
+        logger.warning("[COMMERCE_RUNTIME] search miss words unavailable tenant=%s error=%s",
+                       scope.tenant_id, type(exc).__name__)
+        return {}
+    logger.info("[COMMERCE_RUNTIME] search miss words tenant=%s appear=%d nowhere=%d",
+                scope.tenant_id, len(appear), len(nowhere))
+    return {QUERY_WORDS_IN_STORE: list(appear), QUERY_WORDS_NOT_IN_STORE: list(nowhere)}
 
 
 def _search_excluding_shown(binding: LiveToolBinding, scope: at.ToolScope, query: str, size: int,
@@ -901,6 +929,19 @@ def _shareable_promotions(binding: LiveToolBinding) -> at.ToolFunction:
 
 # ── Declarations ─────────────────────────────────────────────────────────────
 
+# A named search that matched nothing also says which of its words appear in
+# this store's products (``_query_word_presence``). The fact, and the one
+# sentence the declaration gains to say what it means — a declaration change,
+# owner-reviewed before merge.
+QUERY_WORDS_IN_STORE = "query_words_in_store_products"
+QUERY_WORDS_NOT_IN_STORE = "query_words_not_in_store_products"
+SEARCH_MISS_NOTE = (
+    " When a search matches nothing, the result also lists which words of the query appear "
+    "in this store's products (query_words_in_store_products) and which appear nowhere in "
+    "them (query_words_not_in_store_products). Search again with the words that do appear "
+    "before saying a product is not available. A query none of whose words appear in the "
+    "store's products is no sign that the customer was asking for a product."
+)
 _QUERY = {"type": "string", "maxLength": MAX_QUERY_LENGTH}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT}
 _EXCLUDE_SHOWN = {"type": "boolean",
@@ -914,7 +955,8 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
     (
         "search_products",
         "Search this merchant's synced catalog. An empty query browses the merchant's "
-        "top available products. Returns products with their evidence references.",
+        "top available products. Returns products with their evidence references."
+        + SEARCH_MISS_NOTE,
         {"type": "object", "properties": {"query": _QUERY, "limit": _LIMIT}, "required": []},
         "product_list",
         _catalog_search,

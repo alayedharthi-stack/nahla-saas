@@ -1193,6 +1193,73 @@ def test_a_candidate_read_that_fails_leaves_the_turns_session_usable(shop: Shop,
     assert report.tools_called == ("search_products", "get_product_details")
 
 
+# ── A named search that matched nothing ──────────────────────────────────────
+#
+# Tenant 33, 2026-09-26, turn 68: a personal message was searched as a product
+# name, matched nothing, and was answered "no product by that name". The miss
+# now also says which of the query's words appear in this store's products —
+# a fact about the catalogue, never a reading of the customer.
+
+
+def _searched_then(query: str) -> LiteralModel:
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=query)])
+        return _step([_reply("ok")])
+    return LiteralModel(script)
+
+
+def test_a_miss_says_which_of_its_words_the_store_holds(shop: Shop):
+    """A product word with an attribute the catalogue spells otherwise: the
+    phrase misses, the product word is in the store, the attribute is not."""
+    model = _searched_then(f"{SHIRTS} بيضا")
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["status"] == "not_found" and result["found"] is False
+    assert result["query_words_in_store_products"] == [SHIRTS]
+    assert result["query_words_not_in_store_products"] == ["بيضا"]
+
+
+def test_a_miss_none_of_whose_words_the_store_holds_says_so(shop: Shop):
+    model = _searched_then("عيال محمد")
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["status"] == "not_found"
+    assert result["query_words_in_store_products"] == []
+    assert result["query_words_not_in_store_products"] == ["عيال", "محمد"]
+
+
+def test_the_word_check_uses_the_searchs_own_arabic_fold(shop: Shop):
+    """ه for ة, and a definite article, as the search itself folds them."""
+    model = _searched_then("ساعه الفضيه ذهبيه")
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["query_words_in_store_products"] == ["ساعه", "الفضيه"]
+    assert result["query_words_not_in_store_products"] == ["ذهبيه"]
+
+
+def test_another_stores_products_never_count_as_this_stores(shop: Shop):
+    with shop.engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO products (tenant_id, external_id, title, description, price, in_stock, "
+            "stock_quantity, metadata) VALUES (:t, 'SKU-OTHER-SAFFRON', 'زعفران ممتاز', "
+            "'زعفران', 50, true, 3, CAST('{}' AS JSONB))"), {"t": shop.tenant_b})
+    model = _searched_then("زعفران")
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["query_words_in_store_products"] == []
+    assert result["query_words_not_in_store_products"] == ["زعفران"]
+
+
+def test_a_search_that_finds_products_carries_no_word_fact(shop: Shop):
+    model = _searched_then(SHIRTS)
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["found"] is True
+    assert "query_words_in_store_products" not in result
+    assert "query_words_not_in_store_products" not in result
+
+
 # ── A list the platform decided, and "other products" asked for in words ─────
 #
 # Tenant 1, 2026-09-25, turn 66: «وش منتجاتكم الثانية ؟». The search returned

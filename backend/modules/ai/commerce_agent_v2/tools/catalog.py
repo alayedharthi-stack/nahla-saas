@@ -630,6 +630,63 @@ def search_products_window_impl(
     return CatalogSearchResult(status="ok", products=snapshots, evidence=evidence)
 
 
+_MAX_PRESENCE_WORDS = 6
+_PRESENCE_TRIM = "؟?!.،,:;\"'()[]«»"
+
+
+def query_word_presence_impl(
+    context: CommerceAgentContext,
+    query: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Which words of a search that matched nothing appear in this store's products.
+
+    Never a model tool: the platform's fact about a miss. Each word of the
+    query, as the customer's own spelling, is looked for in this tenant's
+    product titles and descriptions with the search's Arabic fold
+    (``_normalize_catalog_search_arabic``), a leading definite article also
+    tried without it. Returns ``(appear, appear_nowhere)``; a word shorter
+    than two letters is not judged, and at most ``_MAX_PRESENCE_WORDS``.
+    """
+    from sqlalchemy import func, or_  # noqa: PLC0415
+
+    from core.store_knowledge import (  # noqa: PLC0415
+        _catalog_title_arabic_norm_expr,
+        _normalize_catalog_search_arabic,
+    )
+    from models import Product  # noqa: PLC0415
+
+    context.assert_scope()
+    words: list[tuple[str, str]] = []
+    for raw in str(query or "").split():
+        word = raw.strip(_PRESENCE_TRIM)
+        folded = _normalize_catalog_search_arabic(word)
+        if len(folded) >= 2 and folded not in {f for _w, f in words}:
+            words.append((word, folded))
+        if len(words) >= _MAX_PRESENCE_WORDS:
+            break
+    title = _catalog_title_arabic_norm_expr(Product.title)
+    description = _catalog_title_arabic_norm_expr(func.coalesce(Product.description, ""))
+
+    def _like(text: str) -> str:
+        return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+    appear: list[str] = []
+    nowhere: list[str] = []
+    for word, folded in words:
+        forms = [folded]
+        if folded.startswith("ال") and len(folded) > 4:
+            forms.append(folded[2:])
+        matches = [or_(title.like(_like(form), escape="\\"),
+                       description.like(_like(form), escape="\\")) for form in forms]
+        hit = (
+            context.db.query(Product.id)
+            .filter(Product.tenant_id == context.tenant_id, or_(*matches))
+            .first()
+        )
+        (appear if hit is not None else nowhere).append(word)
+    return tuple(appear), tuple(nowhere)
+
+
 def get_products_for_listing_impl(
     context: CommerceAgentContext,
     product_ids: list[int],
