@@ -729,6 +729,7 @@ async def provider_send_message(
     prefer_platform: bool = False,
     timeout: float = 20,
     allow_manual: bool = False,
+    unsubscribe_notice: bool = False,
     blocked_path: str = "provider_send_message",
     automation_guard: bool = True,
 ) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
@@ -759,6 +760,8 @@ async def provider_send_message(
     send_payload = dict(payload or {})
     send_payload.pop("_nahla_inbound_id", None)
     raw_to = str(send_payload.get("to") or "").strip()
+    if unsubscribe_notice and (not raw_to or db is None or not tenant_id):
+        raise ValueError("unsubscribe notice requires tenant, database and recipient")
     if raw_to:
         from utils.phone_utils import (  # noqa: PLC0415
             format_wa_send_recipient,
@@ -796,15 +799,21 @@ async def provider_send_message(
             )
         send_payload["to"] = formatted_to
 
-        if automation_guard and db is not None and tenant_id:
+        if unsubscribe_notice or (automation_guard and db is not None and tenant_id):
             try:
                 from core.automation_send_guard import (  # noqa: PLC0415
                     evaluate_automation_send,
                     evaluate_campaign_send,
+                    evaluate_unsubscribe_notice_send,
                 )
 
                 _msg_type = str(send_payload.get("type") or "text").strip().lower()
-                if operation == "campaign_send" and _msg_type == "template" and not allow_manual:
+                if unsubscribe_notice:
+                    _block = evaluate_unsubscribe_notice_send(
+                        db, tenant_id=tenant_id, customer_phone=formatted_to,
+                        payload=send_payload, blocked_path="unsubscribe_notice",
+                    )
+                elif operation == "campaign_send" and _msg_type == "template" and not allow_manual:
                     _block = evaluate_campaign_send(
                         db, tenant_id=int(tenant_id), customer_phone=formatted_to,
                         blocked_path=blocked_path or operation,
@@ -842,6 +851,8 @@ async def provider_send_message(
                         ),
                     )
             except Exception as _guard_exc:  # noqa: BLE001
+                if unsubscribe_notice:
+                    raise
                 logger.warning(
                     "[AUTOMATION_BLOCKED] guard check failed (non-fatal) "
                     "tenant_id=%s err=%s",

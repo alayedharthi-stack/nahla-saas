@@ -266,6 +266,32 @@ def evaluate_campaign_send(
     return decision
 
 
+def evaluate_unsubscribe_notice_send(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    payload: Any,
+    blocked_path: str,
+) -> AutomationBlockDecision:
+    """Consent notices are operational, not AI replies.
+
+    Retain the campaign path's fail-closed recipient blocklist and ALL sibling
+    pause checks. Only a closed, unchanged consent payload is eligible; quotas,
+    transport isolation, throttling and dedup remain owned by the wire layer.
+    """
+    from services.unsubscribe import is_unsubscribe_notice_payload  # noqa: PLC0415
+
+    if (db is None or not tenant_id or not customer_phone
+            or not is_unsubscribe_notice_payload(payload)
+            or payload.get("to") != customer_phone):
+        return AutomationBlockDecision(True, "invalid_unsubscribe_notice")
+    return evaluate_campaign_send(
+        db, tenant_id=tenant_id, customer_phone=customer_phone,
+        blocked_path=blocked_path,
+    )
+
+
 def evaluate_automation_send(
     db: Session,
     *,
