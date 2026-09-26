@@ -54,6 +54,24 @@
       "proposed_in": "https://github.com/alayedharthi-stack/nahla-saas/pull/1145",
       "base_blob": "origin/main:backend/core/store_knowledge.py at 5b71d5178f17f5b083eefbda67fa6d5807217533",
       "authorized_blob": "claude/eager-feynman-yoiaw7:backend/core/store_knowledge.py, unchanged since 2795a615989b013155c3defd8a42e908855a2c8b"
+    },
+    {
+      "exception_id": "AGENT-SCOPE-1164-ORDER-CONFIRMATION-TEMPLATE",
+      "exact_file_scope": ["backend/core/commerce_lifecycle/definitions.py"],
+      "base_content_sha256": "5572f060324075cd1f456e87be69c8b0897ed5bcb55cea46423d694ae039caee",
+      "authorized_content_sha256": ["edaab265f1174914cdd1e15ddd2e764da280251ac1174f7d339738286c0b7f09"],
+      "task_scope": "PR #1164: route an open-window order confirmation through its approved image-bearing Meta template so the header is not dropped.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1164",
+      "expires_at": "2026-10-31"
+    },
+    {
+      "exception_id": "AGENT-SCOPE-1164-ORDER-CONFIRMATION-INBOX",
+      "exact_file_scope": ["backend/core/commerce_lifecycle/dispatch.py"],
+      "base_content_sha256": "7e965df865b4c739097e89fd6a125054b17638ced4f5f5441cfb669df445726a",
+      "authorized_content_sha256": ["86202ff3c09f29a5b7cdc7cdfb96481cf481d86d739544e939883ef2c008ca9a"],
+      "task_scope": "PR #1164: pass the persisted order total and record accepted lifecycle wire evidence in the merchant inbox after send-ledger finalization; never resend for an inbox error.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1164",
+      "expires_at": "2026-10-31"
     }
   ]
 }
