@@ -249,3 +249,21 @@ def test_clause_3_names_no_other_dialect_and_carries_no_dialect_meaning():
         assert meaning not in addendum
     for other in ("العراقية", "المصرية", "الشامية", "الفصحى"):
         assert other not in addendum, other
+
+
+def test_clause_5_covers_both_cases_and_names_no_phrase():
+    """Clause 5 (owner-approved, 26 September 2026, after tenant 33 turn 68).
+    One general rule for a message that is not clearly a product request: a
+    clear product request is searched and answered without asking; a message
+    that may mean something else is clarified rather than treated as a product
+    request; and an empty search for such a phrase says only that the text
+    matched no product. It quotes no customer phrase — no word list — and
+    supplies no reply."""
+    clause = _clause(5)
+    assert "في سياق المحادثة قبل أن تبحث" in clause
+    assert "فابحث وأجب مباشرة دون أن تستوضح" in clause
+    assert "فاستوضح قصده" in clause and "ولا تعاملها كطلب منتج" in clause
+    assert "لا أن العميل سأل عن منتج غير موجود" in clause
+    assert "بدل أن تجزم بعدم وجوده" in clause
+    for quote in ("«", "»", '"'):
+        assert quote not in clause, quote

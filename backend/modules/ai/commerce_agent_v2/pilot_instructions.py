@@ -26,7 +26,14 @@ extending clause 3 to follow the separate Arabic-dialect setting
 ``core.reply_dialect`` defines): the merchant's current settings are the
 reference for language and dialect, however earlier replies were written;
 ``reply_language`` alone decides Arabic or English; and the dialect governs
-Arabic replies only. Neither clause supplies a sentence to send, a greeting or
+Arabic replies only. Also on 26 September 2026, after tenant 33 turn 68 (a
+personal message searched as a product name, then answered "no such product"),
+the owner approved one general clause (5) for a message that is not clearly a
+product request: read it in the conversation's context before searching; a
+clear product request is searched and answered without asking; a message that
+may mean something else is clarified, not treated as a product request; and a
+search that matched nothing for such a phrase says only that the text matched
+no product. It names no phrase and supplies no reply. No clause supplies a sentence to send, a greeting or
 a persona: every truth rule, every tool rule and every grounding rule above it
 is unchanged and still binding. The tool names it refers to are the ones the
 instructions already use, and the registry declares those same names — the two
@@ -58,7 +65,8 @@ PILOT_ADDENDUM_HEADING = "— تشغيل Nahlah Commerce Runtime (هذا الت�
 PILOT_REPLY_ADDENDUM = """
 — تشغيل Nahlah Commerce Runtime (هذا التشغيل فقط) —
 
-البندان 1 و2 يصححان ما يخص هذا التشغيل فقط، و3 و4 يصفان ما يقدمه لك هذا التشغيل.
+البندان 1 و2 يصححان ما يخص هذا التشغيل فقط، و3 و4 يصفان ما يقدمه لك هذا التشغيل،
+و5 يخص الرسالة التي لا يتضح أنها طلب منتج.
 كل ما سبق من قواعد الحقيقة والأدوات والاستناد إلى evidence يبقى ساريًا كما هو.
 
 1) صيغة الرد: لا يوجد كائن CommerceReply في هذا التشغيل. سلّم إجابتك النهائية عبر
@@ -90,6 +98,15 @@ PILOT_REPLY_ADDENDUM = """
    وإذا سأل العميل عن شيء لا يتسع له الصف فاذكره. وإذا أرفقت بطاقة فلا تضع في النص
    رابط الصورة أو رابط الصفحة إلا إذا طلب العميل الرابط. يبقى النص ردك أنت: تمهيد
    أو شرح أو مقارنة أو إجابة بالقدر الذي يحتاجه سؤال العميل.
+
+5) الرسالة التي لا يتضح أنها طلب منتج: ليست كل رسالة تصلك سؤالًا عن منتج؛ قد تكون
+   تحية أو كلامًا شخصيًا موجّهًا لصاحب الرقم أو عبارة تحتمل أكثر من معنى. افهم
+   الرسالة في سياق المحادثة قبل أن تبحث. إذا كان واضحًا أن العميل يسأل عن منتج أو
+   يتصفح المنتجات فابحث وأجب مباشرة دون أن تستوضح. وإذا احتملت الرسالة معنى غير طلب
+   منتج فاستوضح قصده بكلامك، ولا تعاملها كطلب منتج ولا تعرض عليه منتجات بدل
+   الاستيضاح. وإذا بحثت بعبارة لم يتضح أنها اسم منتج فلم تطابق شيئًا، فذلك يعني أن
+   النص لم يطابق منتجًا في المتجر، لا أن العميل سأل عن منتج غير موجود؛ فاستوضح بدل
+   أن تجزم بعدم وجوده.
 """.strip()
 
 
