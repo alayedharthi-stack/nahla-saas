@@ -143,6 +143,11 @@ class TurnReport:
     # unreadable without a transcript.
     choices_outcome: Optional[str] = None     # reply_choices: offered, or the reason withheld
     card_outcome: Optional[str] = None        # reply_card: offered, or the reason withheld
+    # The structured presentation decision, before either composer ran. These
+    # two bounded values distinguish a list the policy selected but the model
+    # never requested from a turn whose policy chose text in the first place.
+    presentation_shape: Optional[str] = None
+    presentation_reason: Optional[str] = None
     # A paged list's own account: whether a browse was opened, continued or
     # declined (and why), the page shown, and whether another follows. A "More"
     # tap's outcome in the store is ``navigation_tap`` — resolved, or the
@@ -840,6 +845,8 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         tools_called=tools_called,
         choices_outcome=str(accepted_detail.get("choices") or "") or None,
         card_outcome=str(accepted_detail.get("card") or "") or None,
+        presentation_shape=str(accepted_detail.get("shape") or "") or None,
+        presentation_reason=str(accepted_detail.get("shape_reason") or "") or None,
         browse_outcome=str(accepted_detail.get("browse") or "") or None,
         paging_words=(str(words.detail.get("outcome") or "") or None) if words is not None else None,
         list_offer=((str(offer.detail.get("outcome") or "") or None) if offer is not None
