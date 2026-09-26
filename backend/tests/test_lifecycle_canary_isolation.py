@@ -51,6 +51,32 @@ def _eval(*, tenant_id, phone, mode, sender_path="test", automation_type=None):
 
 
 class TestCentralGuardContract:
+    def test_explicit_tenant_wide_recipients_keep_other_tenants_closed(self, monkeypatch):
+        _enable_canary(monkeypatch, tenants="1,33", recipients=ALLOWED_PHONE)
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ALL_RECIPIENT_TENANTS", "1")
+        for mode, automation_type in (
+            (MODE_NEW_LIFECYCLE, None),
+            (MODE_LEGACY_LIFECYCLE, "cod_confirmation"),
+        ):
+            assert _eval(tenant_id=1, phone=OTHER_PHONE, mode=mode,
+                         automation_type=automation_type).allowed
+            blocked = _eval(tenant_id=33, phone=OTHER_PHONE, mode=mode,
+                            automation_type=automation_type)
+            assert not blocked.allowed
+            assert blocked.reason == "recipient_not_allowlisted"
+
+    def test_tenant_wide_setting_alone_never_enables_dispatch(self, monkeypatch):
+        _enable_canary(monkeypatch, tenants="33", recipients="")
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ALL_RECIPIENT_TENANTS", "1")
+        assert _eval(tenant_id=1, phone=OTHER_PHONE,
+                     mode=MODE_NEW_LIFECYCLE).reason == "tenant_not_allowlisted"
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST", "1")
+        assert _eval(tenant_id=1, phone="invalid",
+                     mode=MODE_NEW_LIFECYCLE).reason == "recipient_unnormalizable"
+        monkeypatch.setenv("COMMERCE_LIFECYCLE_DISPATCH_ENABLED", "false")
+        assert _eval(tenant_id=1, phone=OTHER_PHONE,
+                     mode=MODE_NEW_LIFECYCLE).reason == "dispatch_disabled"
+
     def test_allowed_tenant_and_recipient_permitted(self, monkeypatch):
         _enable_canary(monkeypatch)
         decision = _eval(

@@ -147,7 +147,9 @@ def build_order_recovery_preflight(db: Session, *, order_id: int) -> Dict[str, A
         "recipient_masked": _masked_phone(phone),
         "tenant_permitted": commerce_lifecycle_dispatch_tenant_permitted(tenant_id),
         "recipient_permitted": bool(
-            normalized and commerce_lifecycle_dispatch_recipient_permitted(normalized)
+            normalized and commerce_lifecycle_dispatch_recipient_permitted(
+                normalized, tenant_id=tenant_id,
+            )
         ),
         "approved_order_confirmation_template_available": bool(template is not None),
         "resolved_template_name": getattr(template, "name", None),
