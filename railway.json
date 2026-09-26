@@ -1,0 +1,1 @@
+{"build":{"builder":"DOCKERFILE","dockerfilePath":"Dockerfile"},"deploy":{"startCommand":"python scripts/operators/recover_unsubscribe_confirmation.py","restartPolicyType":"NEVER"}}
