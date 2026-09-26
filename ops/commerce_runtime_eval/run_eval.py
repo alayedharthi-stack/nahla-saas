@@ -135,6 +135,8 @@ SCENARIOS: Tuple[Scenario, ...] = (
     Scenario("clear_category_not_sold", "A", ("عندكم ساعات؟",)),
     Scenario("clear_person_named_product", "C", ("عطر سلطان عندك؟",)),
     Scenario("clear_incense", "C", ("عندكم بخور؟",)),
+    # A real product named like a person, asked for by the name alone.
+    Scenario("clear_person_bare_name", "C", ("سلطان عندك؟",)),
 )
 
 
@@ -288,6 +290,42 @@ class RecordingProvider:
         self.requests.append({"system": kwargs.get("system"), "messages": kwargs.get("messages")})
         return self.inner.call_single_step(**kwargs)
 
+    def tool_trace(self) -> List[Dict[str, Any]]:
+        """Each tool the model called this turn: its arguments and what came back.
+
+        Read from the last request, which carries the whole turn so far. Titles
+        only (at most five) — the full result is what the model saw."""
+        if not self.requests:
+            return []
+        calls: Dict[str, Dict[str, Any]] = {}
+        out: List[Dict[str, Any]] = []
+        for message in self.requests[-1].get("messages") or []:
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    calls[str(block.get("id"))] = {"name": block.get("name"),
+                                                   "input": block.get("input")}
+                elif block.get("type") == "tool_result":
+                    content = block.get("content")
+                    try:
+                        body = json.loads(content) if isinstance(content, str) else {}
+                    except ValueError:
+                        body = {}
+                    result = body.get("result") if isinstance(body.get("result"), dict) else {}
+                    call = calls.get(str(block.get("tool_use_id")), {})
+                    products = result.get("products") or []
+                    out.append({
+                        "name": call.get("name"), "input": call.get("input"),
+                        "status": result.get("status"), "found": result.get("found"),
+                        "products": len(products),
+                        "titles": [p.get("title") for p in products][:5],
+                        "reason": result.get("reason"),
+                        "words_in": result.get("query_words_in_store_products"),
+                        "words_not_in": result.get("query_words_not_in_store_products"),
+                    })
+        return out
+
     def context_seen(self) -> Dict[str, Any]:
         if not self.requests:
             return {}
@@ -403,6 +441,7 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
     seen = provider.context_seen()
     return {"report": fields, "sent": last, "sends": len(senders.sent), "wall_ms": wall_ms,
             "provider_message_id": report.provider_message_id,
+            "tool_trace": provider.tool_trace(),
             "context_keys": sorted(seen.keys()),
             "context_reply_language": seen.get("reply_language"),
             "context_reply_tone": seen.get("reply_tone"),
@@ -501,6 +540,7 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int) -> List[Dict[str, A
             "list_button": (result.get("sent") or {}).get("button"),
             "row_titles": [r.get("title") for r in (result.get("sent") or {}).get("rows") or []],
             "card_button": (result.get("sent") or {}).get("button_label"),
+            "tool_trace": result.get("tool_trace"),
             "context_keys": result["context_keys"],
             "context_reply_language": result["context_reply_language"],
             "context_reply_tone": result["context_reply_tone"],
