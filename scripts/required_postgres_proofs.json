@@ -762,11 +762,16 @@
       "nodeids": [
         "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_qualifying_code_behind_newer_rows_it_would_refuse_is_found",
         "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_when_nothing_qualifies_the_empty_answer_is_one_the_store_really_gave",
-        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_the_scoped_read_is_the_head_of_what_the_projection_would_accept",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_the_scoped_read_order_is_the_head_of_a_full_read_under_the_same_rules",
         "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_an_unreadable_ladder_still_meets_the_codes_it_could_not_judge",
         "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_other_customers_codes_filling_the_read_do_not_hide_this_customers_code",
         "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_codes_the_projection_refuses_do_not_end_the_read_at_eight",
-        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_read_cut_short_by_its_cap_says_so_instead_of_answering_none"
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_read_cut_short_by_its_cap_says_so_instead_of_answering_none",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_store_full_of_synced_imports_still_finds_the_code_in_a_few_queries",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_store_full_of_imports_with_nothing_for_this_customer_answers_none",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_scope_exactly_the_size_of_the_cap_read_to_its_end_is_complete",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_a_rung_padded_with_whitespace_is_still_read",
+        "tests/commerce_reliability/test_promotion_scoped_read_pg.py::test_another_tenants_newer_codes_neither_hide_nor_leak"
       ]
     }
   ]

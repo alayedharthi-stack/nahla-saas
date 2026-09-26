@@ -435,22 +435,39 @@ class CouponReadScope:
     """The coupons a caller will accept, to be read before any other.
 
     ``valid_until_at_least``: a code expiring earlier is not acceptable.
-    ``levels``: acceptable rungs; a code on no rung is always in scope, an
-    empty tuple accepts codes on no rung only, and ``None`` accepts any rung.
+    ``refused_levels``: rungs the caller always refuses; a code on one of them
+    is read only after everything else. A rung not named here stays in scope.
+    ``untiered_source_types``: when given, a code on no rung is in scope only
+    if its ``source_type`` (``manual`` when blank, as ``_row_to_coupon_fact``
+    reads it) is one of these; ``None`` keeps every code on no rung in scope.
+
+    Every narrowing here must only move rows the caller would refuse anyway:
+    a row the caller could accept that falls outside the scope is read late or
+    not at all.
     """
 
     valid_until_at_least: datetime
-    levels: Optional[Tuple[str, ...]] = None
+    refused_levels: Tuple[str, ...] = ()
+    untiered_source_types: Optional[Tuple[str, ...]] = None
 
 
-def _read_first_clauses(coupon: Any, now: datetime, scope: CouponReadScope) -> Tuple[List[Any], Any]:
+# What Python's ``str.strip()`` removes from a rung in the caller's judgement,
+# as far as SQL ``btrim`` can be told: a rung that differs only by such
+# padding is compared as the rung it is.
+_PAD = " \t\n\r\x0b\x0c"
+
+
+def _read_first_clauses(coupon: Any, now: datetime, audience: Optional[int],
+                        scope: CouponReadScope) -> Tuple[List[Any], Any]:
     """``(filters, wanted)`` for a read that puts ``scope`` first.
 
     The filters drop only rows the row-by-row checks below refuse anyway — an
-    expired code, a campaign-only one — so nothing the unscoped read could
-    return is lost. ``wanted`` orders the rows the caller would accept ahead of
-    the rest; the rest still follow, so a caller that counts why rows were
-    refused still meets them when there is room.
+    expired code, a campaign-only one, a code bound (by ``customer_id``, the
+    first binding key read) to another customer as a plain positive integer —
+    so nothing the unscoped read could return is lost. ``wanted`` orders the
+    rows the caller would accept ahead of the rest; the rest still follow, so
+    a caller that counts why rows were refused still meets them when there is
+    room.
     """
     from sqlalchemy import and_, func, or_, true  # noqa: PLC0415
 
@@ -459,18 +476,32 @@ def _read_first_clauses(coupon: Any, now: datetime, scope: CouponReadScope) -> T
         return moment.astimezone(timezone.utc).replace(tzinfo=None)
 
     channel = func.lower(func.trim(func.coalesce(coupon.allocation_channel, "")))
+    bound = func.coalesce(coupon.extra_metadata[_CUSTOMER_BINDING_KEYS[0]].astext, "")
+    another_customers = bound.op("~")("^[1-9][0-9]*$")
+    if audience is not None:
+        another_customers = and_(another_customers, bound != str(int(audience)))
     filters = [
         or_(coupon.expires_at.is_(None), coupon.expires_at >= naive(now)),
         channel.notin_(sorted(_CAMPAIGN_ONLY_CHANNELS)),
+        ~another_customers,
     ]
     edge = max(_as_utc(scope.valid_until_at_least) or now, now)
     lasts = or_(coupon.expires_at.is_(None), coupon.expires_at >= naive(edge))
-    if scope.levels is None:
-        on_rung = true()
+    rung = func.lower(func.btrim(func.coalesce(coupon.coupon_level, ""), _PAD))
+    refused = sorted({str(level or "").strip().lower() for level in scope.refused_levels} - {""})
+    on_a_kept_rung = rung.notin_(refused) if refused else true()
+    if scope.untiered_source_types is None:
+        untiered_ok = true()
     else:
-        levels = sorted({str(level or "").strip().lower() for level in scope.levels} - {""})
-        on_rung = func.lower(func.trim(func.coalesce(coupon.coupon_level, ""))).in_(["", *levels])
-    return filters, and_(lasts, on_rung)
+        raw_source = func.coalesce(coupon.source_type, "")
+        source = func.lower(func.btrim(func.coalesce(func.nullif(raw_source, ""), "manual"), _PAD))
+        untiered_ok = or_(
+            rung != "",
+            source.in_(sorted({str(t or "").strip().lower() for t in scope.untiered_source_types})),
+            # Anything but printable ASCII may be padding Python strips and SQL
+            # cannot: such a row stays in scope rather than be judged here.
+            raw_source.op("~")("[^ -~]"))
+    return filters, and_(lasts, on_a_kept_rung, untiered_ok)
 
 
 def _coupon_facts(rows: Iterable[Any], now: datetime, audience: Optional[int],
@@ -508,10 +539,14 @@ def _read_first_coupons(db: Any, coupon: Any, tid: int, now: datetime, audience:
     fill it, so a caller counting refusals still meets them.
     """
     from sqlalchemy import not_  # noqa: PLC0415
+    from sqlalchemy.orm import selectinload  # noqa: PLC0415
 
     keeps = accept if accept is not None else (lambda _fact: True)
-    filters, wanted = _read_first_clauses(coupon, now, scope)
-    base = db.query(coupon).filter(coupon.tenant_id == tid, *filters)
+    filters, wanted = _read_first_clauses(coupon, now, audience, scope)
+    # Each fact reads the coupon's rules; loaded with the page, not per row.
+    in_scope_ids = db.query(coupon.id).filter(coupon.tenant_id == tid, *filters)
+    base = (db.query(coupon).options(selectinload(coupon.rules))
+            .filter(coupon.tenant_id == tid, *filters))
     rows: List[Any] = []
     facts: List[Dict[str, Any]] = []
     accepted = 0
@@ -534,6 +569,10 @@ def _read_first_coupons(db: Any, coupon: Any, tid: int, now: datetime, audience:
             exhausted = True
             break
         last_id = int(batch[-1].id)
+    if not exhausted and accepted < limit and last_id is not None:
+        # The cap was reached exactly at a page boundary: the scope is read to
+        # its end only if nothing in it is older than the last row read.
+        exhausted = in_scope_ids.filter(wanted, coupon.id < last_id).first() is None
     complete = accepted >= limit or exhausted
     room = limit - len(facts)
     if exhausted and room > 0:

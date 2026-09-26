@@ -199,7 +199,8 @@ def test_a_shareable_coupon_and_an_offer_become_citable_evidence(monkeypatch) ->
     assert (db, tenant, kwargs) == (context.db, 7, {
         "limit": tool.MAX_PROMOTIONS, "customer_id": 41,
         "read_first": pt.CouponReadScope(valid_until_at_least=now + timedelta(hours=3),
-                                         levels=("silver",))})
+                                         refused_levels=("bronze", "gold", "vip"),
+                                         untiered_source_types=("manual",))})
     # ``accept`` is this call's own judgement, so the resolver reads on past
     # every code the projection would refuse: the kept coupon is accepted, a
     # rung the store keeps from the assistant is not.
@@ -216,11 +217,13 @@ def test_what_this_call_could_keep_is_read_first(monkeypatch) -> None:
     now = _fixed_now(monkeypatch)
     _, calls = run(Context(), monkeypatch, truth(), entitlement=entitled("gold", orders=7))
     assert calls[0][2]["read_first"] == pt.CouponReadScope(
-        valid_until_at_least=now + timedelta(hours=3), levels=("silver",))
+        valid_until_at_least=now + timedelta(hours=3), refused_levels=("bronze", "gold", "vip"),
+        untiered_source_types=("manual",))
 
-    # A customer with no rung this store serves: codes on no rung come first.
+    # A customer with no rung this store serves: every canonical rung is
+    # refused, so codes on no rung the merchant created come first.
     _, calls = run(Context(), monkeypatch, truth(), entitlement=unknown())
-    assert calls[0][2]["read_first"].levels == ()
+    assert calls[0][2]["read_first"].refused_levels == ("bronze", "silver", "gold", "vip")
 
     # No minimum: the edge is now, which the resolver already enforces.
     _, calls = run(Context(), monkeypatch, truth(), policy={**DEFAULT_POLICY, "min_remaining_hours": 0})
@@ -231,11 +234,11 @@ def test_what_this_call_could_keep_is_read_first(monkeypatch) -> None:
     # still met and reported as ours.
     for ladder in (RuntimeError("ladder unavailable"), "not a ladder"):
         _, calls = run(Context(), monkeypatch, truth(), levels=ladder)
-        assert calls[0][2]["read_first"].levels is None
+        assert calls[0][2]["read_first"].refused_levels == ()
     broken = _normalised_levels()
     broken[0] = {**broken[0], "allowed_channels": "ai"}
     _, calls = run(Context(), monkeypatch, truth(), levels=broken)
-    assert calls[0][2]["read_first"].levels is None
+    assert calls[0][2]["read_first"].refused_levels == ()
 
 
 def test_the_scope_is_rechecked_before_anything_is_read(monkeypatch) -> None:

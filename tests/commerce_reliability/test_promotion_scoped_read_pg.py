@@ -93,7 +93,7 @@ def store(disposable_pg):
             conn.execute(text("DELETE FROM coupons WHERE tenant_id = :t"), {"t": TENANT})
 
 
-def _insert(engine: Any, rows: Iterable[Dict[str, Any]]) -> None:
+def _insert(engine: Any, rows: Iterable[Dict[str, Any]], *, tenant: int = TENANT) -> None:
     """Rows in the order given, so a later row has a higher id: newer."""
     with engine.begin() as conn:
         for row in rows:
@@ -102,7 +102,7 @@ def _insert(engine: Any, rows: Iterable[Dict[str, Any]]) -> None:
                      "source_type, coupon_level, allocation_channel, expires_at, metadata) "
                      "VALUES (:t, :code, 'خصم', 'percentage', '10', :source, :level, :channel, :expires, "
                      "CAST(:meta AS jsonb))"),
-                {"t": TENANT, "code": row["code"], "source": row.get("source", "system"),
+                {"t": tenant, "code": row["code"], "source": row.get("source", "system"),
                  "level": row.get("level"), "channel": row.get("channel", "shared"),
                  "expires": row.get("expires"), "meta": json.dumps(row.get("meta") or {})})
 
@@ -183,10 +183,11 @@ def test_when_nothing_qualifies_the_empty_answer_is_one_the_store_really_gave(st
     assert result.entitlement["served_level"] == "silver"
 
 
-def test_the_scoped_read_is_the_head_of_what_the_projection_would_accept(store) -> None:
-    """``read_first`` changes which rows are read, never how a row is judged:
-    its answer starts with exactly what a read of every row, filtered by the
-    rules the scope stands for, holds first."""
+def test_the_scoped_read_order_is_the_head_of_a_full_read_under_the_same_rules(store) -> None:
+    """``read_first`` changes the order rows are read in, never how a row is
+    judged: with no ``accept``, its answer starts with exactly what a read of
+    every row, filtered by the rules the scope stands for, holds first. (The
+    tool's own judgement, ``accept``, is proved by the cases above.)"""
     engine, session = store
     now = datetime.now(timezone.utc)
     _crowded_store(engine, now)
@@ -198,7 +199,8 @@ def test_the_scoped_read_is_the_head_of_what_the_projection_would_accept(store) 
 
     scoped = pt.resolve_shareable_promotions(
         session, TENANT, limit=tool.MAX_PROMOTIONS, customer_id=CUSTOMER,
-        read_first=pt.CouponReadScope(valid_until_at_least=edge, levels=("silver",)))
+        read_first=pt.CouponReadScope(valid_until_at_least=edge,
+                                      refused_levels=("bronze", "gold", "vip")))
     everything = pt.resolve_shareable_promotions(session, TENANT, limit=100_000, customer_id=CUSTOMER)
     assert everything.candidate_count < 100_000 * 3, "the reference read must see every row"
 
@@ -220,7 +222,8 @@ def test_the_scoped_read_is_the_head_of_what_the_projection_would_accept(store) 
     # of the window follows, newest first, judged exactly as before.
     few = pt.resolve_shareable_promotions(
         session, TENANT, limit=tool.MAX_PROMOTIONS, customer_id=CUSTOMER,
-        read_first=pt.CouponReadScope(valid_until_at_least=edge, levels=("bronze",)))
+        read_first=pt.CouponReadScope(valid_until_at_least=edge,
+                                      refused_levels=("silver", "gold", "vip")))
     wanted = [fact["code"] for fact in everything.shareable
               if acceptable(fact) and not fact["coupon_level"].strip()]
     assert [fact["code"] for fact in few.shareable][:len(wanted)] == wanted
@@ -252,22 +255,22 @@ def test_other_customers_codes_filling_the_read_do_not_hide_this_customers_code(
     later = _naive(now + timedelta(days=5))
     _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
             + [{"code": f"SILVER-THEIRS-{i}", "level": "silver", "expires": later,
-                "meta": {"customer_id": OTHER_CUSTOMER}} for i in range(pt._READ_FIRST_PAGE * 2 + 50)])
+                "meta": {"customer_id": OTHER_CUSTOMER}} for i in range(250)])
     result = _run_tool(monkeypatch, session)
     assert result.status == "ok"
     assert [p.code for p in result.promotions] == ["SILVER-KEEP"]
 
 
 def test_codes_the_projection_refuses_do_not_end_the_read_at_eight(store, monkeypatch) -> None:
-    """Newer codes that pass the resolver and are then refused by the tool —
-    here codes on no rung that the merchant never published to the assistant —
-    must not use up the answer: the read continues until it has codes the tool
+    """Newer codes inside the scope that the tool then refuses — here codes on
+    no rung the merchant created but never published to the assistant — must
+    not use up the answer: the read continues until it has codes the tool
     keeps, and the refusals are still counted by their reason."""
     engine, session = store
     now = datetime.now(timezone.utc)
     later = _naive(now + timedelta(days=5))
     _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
-            + [{"code": f"IMPORTED-OPEN-{i}", "source": "imported", "channel": None, "expires": later}
+            + [{"code": f"MANUAL-OPEN-{i}", "source": "manual", "channel": None, "expires": later}
                for i in range(12)])
     result = _run_tool(monkeypatch, session)
     assert result.status == "ok"
@@ -285,7 +288,7 @@ def test_a_read_cut_short_by_its_cap_says_so_instead_of_answering_none(store, mo
     monkeypatch.setattr(pt, "_READ_FIRST_PAGE", 10)
     monkeypatch.setattr(pt, "_READ_FIRST_SCAN_CAP", 30)
     _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
-            + [{"code": f"IMPORTED-OPEN-{i}", "source": "imported", "channel": None, "expires": later}
+            + [{"code": f"MANUAL-OPEN-{i}", "source": "manual", "channel": None, "expires": later}
                for i in range(40)])
     result = _run_tool(monkeypatch, session)
     assert result.status == "error" and result.partial is True
@@ -295,3 +298,102 @@ def test_a_read_cut_short_by_its_cap_says_so_instead_of_answering_none(store, mo
     # The same store, read to its end, answers with the code.
     monkeypatch.setattr(pt, "_READ_FIRST_SCAN_CAP", 1000)
     assert [p.code for p in _run_tool(monkeypatch, session).promotions] == ["SILVER-KEEP"]
+
+
+
+class _Counting:
+    """Every statement the engine runs while the block is open."""
+
+    def __init__(self, engine: Any) -> None:
+        self.engine = engine
+        self.statements: List[str] = []
+
+    def _listen(self, _conn, _cursor, statement, _params, _context, _executemany) -> None:
+        self.statements.append(statement)
+
+    def __enter__(self) -> "_Counting":
+        from sqlalchemy import event
+
+        event.listen(self.engine, "before_cursor_execute", self._listen)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        from sqlalchemy import event
+
+        event.remove(self.engine, "before_cursor_execute", self._listen)
+
+
+def test_a_store_full_of_synced_imports_still_finds_the_code_in_a_few_queries(store, monkeypatch) -> None:
+    """Realistic volume, cap untouched: 1,500 valid codes imported from the
+    store platform, none on a rung and none the merchant published to the
+    assistant, all newer than the one code this customer can be given. They
+    are outside the scope, so the read neither stops on them nor loads them
+    one query at a time."""
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}]
+            + [{"code": f"SALLA-{i}", "source": "imported", "channel": None, "expires": later}
+               for i in range(1500)])
+    with _Counting(engine) as counted:
+        result = _run_tool(monkeypatch, session)
+    assert result.status == "ok" and [p.code for p in result.promotions] == ["SILVER-KEEP"]
+    coupon_reads = [s for s in counted.statements if "FROM coupons" in s or "FROM coupon_rules" in s]
+    assert len(coupon_reads) < 12, len(coupon_reads)
+
+
+def test_a_store_full_of_imports_with_nothing_for_this_customer_answers_none(store, monkeypatch) -> None:
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    _insert(engine, [{"code": f"SALLA-{i}", "source": "imported", "channel": None, "expires": later}
+                     for i in range(1200)]
+            + [{"code": f"GOLD-{i}", "level": "gold", "expires": later} for i in range(3)])
+    result = _run_tool(monkeypatch, session)
+    assert result.status == "not_found" and result.failure_reason == "no_valid_shareable_promotions"
+
+
+def test_a_scope_exactly_the_size_of_the_cap_read_to_its_end_is_complete(store, monkeypatch) -> None:
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    monkeypatch.setattr(pt, "_READ_FIRST_PAGE", 10)
+    monkeypatch.setattr(pt, "_READ_FIRST_SCAN_CAP", 30)
+    # Created by the merchant, on no rung, never published to the assistant:
+    # in scope, and refused row by row.
+    _insert(engine, [{"code": f"MANUAL-{i}", "source": "manual", "channel": None, "expires": later}
+                     for i in range(30)])
+    result = _run_tool(monkeypatch, session)
+    assert result.status == "not_found"
+    assert result.withheld == {tool.WITHHELD_NOT_PUBLISHED: 30}
+
+
+def test_a_rung_padded_with_whitespace_is_still_read(store, monkeypatch) -> None:
+    """The tool strips a rung before judging it; the scope must not lose a
+    code the tool would accept because SQL and Python trim differently."""
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    _insert(engine, [{"code": "SILVER-TAB", "level": "silver\t", "expires": later}]
+            + [{"code": f"GOLD-{i}", "level": "gold", "expires": later} for i in range(30)])
+    result = _run_tool(monkeypatch, session)
+    assert [p.code for p in result.promotions] == ["SILVER-TAB"]
+
+
+def test_another_tenants_newer_codes_neither_hide_nor_leak(store, monkeypatch) -> None:
+    engine, session = store
+    now = datetime.now(timezone.utc)
+    later = _naive(now + timedelta(days=5))
+    other = TENANT + 1
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO tenants (id, name) VALUES (:t, :n) ON CONFLICT (id) DO NOTHING"),
+                     {"t": other, "n": "متجر تجريبي عام — آخر"})
+    try:
+        _insert(engine, [{"code": "SILVER-KEEP", "level": "silver", "expires": later}])
+        _insert(engine, [{"code": f"OTHER-SILVER-{i}", "level": "silver", "expires": later}
+                         for i in range(300)], tenant=other)
+        result = _run_tool(monkeypatch, session)
+        assert [p.code for p in result.promotions] == ["SILVER-KEEP"]
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM coupons WHERE tenant_id = :t"), {"t": other})

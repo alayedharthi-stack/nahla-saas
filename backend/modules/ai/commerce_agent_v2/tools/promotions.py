@@ -548,7 +548,13 @@ async def list_shareable_promotions_impl(
         context.db, int(context.tenant_id), limit=bounded, customer_id=customer_id,
         read_first=CouponReadScope(
             valid_until_at_least=cutoff or now,
-            levels=((served_level,) if served_level else ()) if ladder_whole else None),
+            # Every canonical rung but the one served is refused below; with no
+            # rung served, all of them. A rung outside the ladder stays in scope
+            # and is judged row by row.
+            refused_levels=(tuple(level for level in CANONICAL_COUPON_LEVEL_IDS
+                                  if level != served_level) if ladder_whole else ()),
+            # A code on no rung is kept only when the merchant created it.
+            untiered_source_types=tuple(sorted(MERCHANT_AUTHORED_SOURCE_TYPES))),
         accept=keeps)
     # False only when the scan cap ended the read with codes still unread that
     # this customer might have been given.
