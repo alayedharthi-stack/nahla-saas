@@ -361,11 +361,15 @@ function AISettingsPanel() {
               <option value="detailed">تفصيلي وشامل</option>
             </select>
           </Field>
-          <Field label="لغة الردود">
+          {/* Each label states what the assistant is actually told for that value
+              (backend tenant_overlay.LANGUAGE_MAP, read by both runtimes). Only
+              "arabic" carries a dialect, and it also switches to English for a
+              customer who starts in English — so it must not read "Arabic only". */}
+          <Field label="لغة الردود" hint="اللهجة السعودية تُحدَّد في الخيار الأول فقط.">
             <select className="input" value={ai.default_language} onChange={e => patch({ default_language: e.target.value as AISettings['default_language'] })}>
-              <option value="arabic">عربي فقط</option>
-              <option value="english">إنجليزي فقط</option>
-              <option value="bilingual">ثنائي اللغة</option>
+              <option value="arabic">العربية باللهجة السعودية — وبالإنجليزية لمن يبدأ بها</option>
+              <option value="english">الإنجليزية — وبالعربية لمن يكتب بها</option>
+              <option value="bilingual">لغة العميل (عربية أو إنجليزية) — دون لهجة محددة</option>
             </select>
           </Field>
           <div className="sm:col-span-2">
