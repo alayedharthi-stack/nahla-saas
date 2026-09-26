@@ -179,6 +179,7 @@ def run(context: Context, monkeypatch: pytest.MonkeyPatch, result: pt.PromotionT
 
 def test_a_shareable_coupon_and_an_offer_become_citable_evidence(monkeypatch) -> None:
     context = Context()
+    now = _fixed_now(monkeypatch)
     result, calls = run(context, monkeypatch, truth(shareable=[coupon_fact()], offers=[offer_fact()]))
     assert result.status == "ok" and result.partial is False
     assert [p.evidence_ref for p in result.promotions] == ["promotion:coupon:5", "promotion:offer:9"]
@@ -191,9 +192,53 @@ def test_a_shareable_coupon_and_an_offer_become_citable_evidence(monkeypatch) ->
     assert offer.code == "" and offer.discount_type == "free_shipping" and offer.name == "شحن مجاني"
     assert all(p.eligibility_determined is False for p in result.promotions)
     # The resolver was asked for this tenant, on this session, for this customer,
-    # and the evidence was registered on the trusted context.
-    assert calls == [(context.db, 7, {"limit": tool.MAX_PROMOTIONS, "customer_id": 41})]
+    # scoped to the rung this customer is served and the merchant's minimum
+    # life, and the evidence was registered on the trusted context.
+    (db, tenant, kwargs), = calls
+    accept = kwargs.pop("accept")
+    assert (db, tenant, kwargs) == (context.db, 7, {
+        "limit": tool.MAX_PROMOTIONS, "customer_id": 41,
+        "read_first": pt.CouponReadScope(valid_until_at_least=now + timedelta(hours=3),
+                                         refused_levels=("bronze", "gold", "vip"),
+                                         untiered_source_types=("manual",))})
+    # ``accept`` is this call's own judgement, so the resolver reads on past
+    # every code the projection would refuse: the kept coupon is accepted, a
+    # rung the store keeps from the assistant is not.
+    assert accept(coupon_fact()) is True
+    assert accept(coupon_fact(6, "GOLD6", coupon_level="gold")) is False
     assert [e.ref for e in context.registered] == ["promotion:coupon:5", "promotion:offer:9"]
+
+
+def test_what_this_call_could_keep_is_read_first(monkeypatch) -> None:
+    """The resolver is told what this call would accept, so those rows are
+    read before the store's newest ones rather than cut off behind them. The
+    rung is part of it only when the ladder was read whole; the remaining-life
+    edge is the merchant's minimum, or now when there is none."""
+    now = _fixed_now(monkeypatch)
+    _, calls = run(Context(), monkeypatch, truth(), entitlement=entitled("gold", orders=7))
+    assert calls[0][2]["read_first"] == pt.CouponReadScope(
+        valid_until_at_least=now + timedelta(hours=3), refused_levels=("bronze", "gold", "vip"),
+        untiered_source_types=("manual",))
+
+    # A customer with no rung this store serves: every canonical rung is
+    # refused, so codes on no rung the merchant created come first.
+    _, calls = run(Context(), monkeypatch, truth(), entitlement=unknown())
+    assert calls[0][2]["read_first"].refused_levels == ("bronze", "silver", "gold", "vip")
+
+    # No minimum: the edge is now, which the resolver already enforces.
+    _, calls = run(Context(), monkeypatch, truth(), policy={**DEFAULT_POLICY, "min_remaining_hours": 0})
+    assert calls[0][2]["read_first"].valid_until_at_least == now
+
+    # A ladder that could not be read, or one with an unreadable rung, puts no
+    # rung first: every rung is read as before, so what we could not judge is
+    # still met and reported as ours.
+    for ladder in (RuntimeError("ladder unavailable"), "not a ladder"):
+        _, calls = run(Context(), monkeypatch, truth(), levels=ladder)
+        assert calls[0][2]["read_first"].refused_levels == ()
+    broken = _normalised_levels()
+    broken[0] = {**broken[0], "allowed_channels": "ai"}
+    _, calls = run(Context(), monkeypatch, truth(), levels=broken)
+    assert calls[0][2]["read_first"].refused_levels == ()
 
 
 def test_the_scope_is_rechecked_before_anything_is_read(monkeypatch) -> None:
