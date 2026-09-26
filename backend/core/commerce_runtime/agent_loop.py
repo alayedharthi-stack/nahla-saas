@@ -266,7 +266,11 @@ class AgentLoop:
         return eligible.words_missing(draft) if eligible is not None else ()
 
     def _can_ask(self, session: "_Session", code: str) -> bool:
-        """Whether this turn may still ask the model one question under ``code``.
+        """Whether this turn may still ask the model one question under ``code``."""
+        return not self._ask_blocker(session, code)
+
+    def _ask_blocker(self, session: "_Session", code: str) -> str:
+        """Why this turn may not ask the model one question under ``code``, or "".
 
         Once per turn — also across a resumed invocation, whose restored
         feedback still names the question — and only with two steps left (the
@@ -274,37 +278,58 @@ class AgentLoop:
         and time for the step, a page-one read and the reservation after them.
         """
         if session.progress is None:
-            return False
-        if session.limits.max_steps - session.progress.steps_used < 2:
-            return False
+            return "no_progress"
         if any(p.code == code for f in session.feedback for p in f.problems):
-            return False
+            return "already_asked"
+        if session.limits.max_steps - session.progress.steps_used < 2:
+            return "no_steps"
         needed = (session.limits.provider_timeout_seconds + session.limits.tool_timeout_seconds
                   + WORDS_RESERVE_SECONDS)
-        return session.remaining_seconds() >= needed
+        if session.remaining_seconds() < needed:
+            return "no_time"
+        return ""
 
     def _list_left_out(self, draft: ac.ReplyDraft, scope: at.ToolScope, session: "_Session",
                        presentation: Optional[pp.PresentationContext]) -> Tuple[Tuple[int, ...], bool]:
         """The products the platform decided to list and the model's reply did not offer.
 
-        Only when the presentation policy itself decided a list — several
-        products this turn's search returned, no single focus, no shape the
-        model asked for — and ``_can_ask`` allows it. The products are the ones
-        the most recent search showed the model that the customer can buy now,
-        in that search's order, and the flag says whether the search matched
-        more than it showed. ``()`` when there is nothing to ask.
+        All of these, read from structure alone:
+
+        * the presentation policy itself decided a list — several products this
+          turn's search returned, no single focus, no shape the model asked for;
+        * no product was read deliberately this turn (two such reads are a
+          comparison, never widened into the search they came from);
+        * the reply itself cites at least two of the products the most recent
+          search showed the model that can be bought now — an answer about one
+          product, or about none, is not an offer to choose.
+
+        The products are that search's buyable ones, in its order; the flag
+        says whether its stored result holds more than it showed (a "More" row
+        can exist). A question that is due but cannot be asked — no step or no
+        time left — is recorded as skipped with its reason. ``()`` otherwise.
         """
-        if not self._can_ask(session, rc.LIST_OFFER_NEEDED):
-            return (), False
         try:
             shape = pp.decide(draft=draft, observations=session.observations,
                               definitions=self._registry.definitions, presentation=presentation)
             if shape.kind != pp.SHAPE_LIST or shape.reason != pp.MULTIPLE_CANDIDATES:
                 return (), False
-            return _latest_search_offer(session.observations, self._registry.definitions)
+            if pp.provenance(session.observations, self._registry.definitions).focused:
+                return (), False
+            offer, more = _latest_search_offer(
+                session.observations, self._registry.definitions, scope,
+                self._browse.search_tool_names if self._browse is not None else ())
+            cited = set(getattr(draft, "evidence_refs", ()) or ())
+            if len([pid for pid in offer if rc.product_ref(pid) in cited]) < rc.MIN_CHOICES:
+                return (), False
         except Exception as exc:  # noqa: BLE001 - asking is an affordance; the answer still goes
             session.record("list_offer_failed", {"error": type(exc).__name__})
             return (), False
+        blocker = self._ask_blocker(session, rc.LIST_OFFER_NEEDED)
+        if blocker:
+            if blocker != "already_asked":
+                session.record("list_offer_skipped", {"reason": blocker})
+            return (), False
+        return offer, more
 
     def _ask_for_list(self, provider: Any, context: ac.AuthorizedContext, scope: at.ToolScope,
                       session: "_Session", cancelled: Optional[Callable[[], bool]],
@@ -1114,16 +1139,15 @@ class _Session:
         )
 
 
-__all__ = ["AgentLoop"]
-
-
-def _latest_search_offer(observations: Sequence[Any], definitions: Sequence[Any]) -> Tuple[Tuple[int, ...], bool]:
+def _latest_search_offer(observations: Sequence[Any], definitions: Sequence[Any], scope: Any,
+                         search_tool_names: Sequence[str]) -> Tuple[Tuple[int, ...], bool]:
     """The products the most recent search showed the model that can be bought
-    now, in its order, and whether that search matched more than it showed.
+    now, in its order, and whether that search's stored result holds more than
+    it showed — so a "More" row, and the word for it, can exist.
 
-    Read from the observation body the model was given and nothing else; a
-    product the model was shown as not orderable is never added by the platform.
-    Fewer than two leaves nothing to offer.
+    Read from the observation body the model was given and the platform's own
+    typed result of the same call; a product the model was shown as not
+    orderable is never added by the platform. Fewer than two leaves nothing.
     """
     kinds = {str(getattr(d, "name", "") or ""): str(getattr(d, "result_kind", "") or "")
              for d in definitions or ()}
@@ -1138,6 +1162,15 @@ def _latest_search_offer(observations: Sequence[Any], definitions: Sequence[Any]
                       if pid in observed and bool(observed[pid].get("orderable")))[:rc.MAX_CHOICES]
         if len(offer) < rc.MIN_CHOICES:
             return (), False
-        more = bool(result.get("more_results")) if isinstance(result, dict) else False
+        more = False
+        if search_tool_names:
+            candidates, _why = sc.from_observation(
+                obs, tenant_id=scope.tenant_id, namespace=scope.namespace,
+                conversation_id=scope.conversation_id, turn_id=scope.turn_id,
+                search_tool_names=search_tool_names)
+            more = bool(candidates is not None and candidates.extends_beyond_window)
         return offer, more
     return (), False
+
+
+__all__ = ["AgentLoop"]

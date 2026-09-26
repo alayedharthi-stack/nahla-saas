@@ -1259,12 +1259,56 @@ def test_a_reply_that_already_offers_the_list_is_not_asked_again(shop: Shop):
     assert report.list_offer is None and report.browse_outcome == br.OPENED
 
 
-def test_the_list_is_not_asked_for_with_one_step_left(shop: Shop):
+def test_a_list_due_with_no_step_left_is_recorded_as_skipped(shop: Shop):
     conversation = shop.conversation()
     model = text_then(SHIRTS, second=_with_words)
     report, transport = shop.turn(conversation, model, max_steps=2)
-    assert report.list_offer is None and len(model.calls) == 2
+    assert report.list_offer == "skipped_no_steps" and len(model.calls) == 2
     assert rc.payload_rows(transport.sent[0]) == ([], "")
+
+
+def test_an_answer_about_one_product_is_not_asked_for_a_list(shop: Shop):
+    """Two products searched, the reply cites one: an answer, not an offer."""
+    conversation = shop.conversation()
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        first = _last_search_result(messages)["result"]["products"][0]["product_id"]
+        return _step([_reply("That one is in stock.", commerce=True, refs=[f"catalog:product:{first}"])])
+
+    model = LiteralModel(script)
+    report, transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
+    assert report.list_offer is None and len(model.calls) == 2 and _asked(model) == []
+
+
+def test_a_comparison_of_two_read_products_is_not_widened_into_the_search(shop: Shop):
+    conversation = shop.conversation()
+
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=SHIRTS)])
+        ids = [int(p["product_id"]) for p in _last_search_result(messages)["result"]["products"]]
+        if call == 2:
+            return _step([_tool_use("d1", "get_product_details", product_id=ids[0]),
+                          _tool_use("d2", "get_product_details", product_id=ids[1])])
+        return _step([_reply("The first is lighter than the second.", commerce=True,
+                             refs=[f"catalog:product:{ids[0]}", f"catalog:product:{ids[1]}"])])
+
+    model = LiteralModel(script)
+    report, _transport = shop.turn(conversation, model, max_steps=6)
+    assert report.list_offer is None and _asked(model) == []
+
+
+def test_a_narrowed_search_is_not_asked_for_a_more_word(shop: Shop):
+    """A search the model narrowed has no continuation, so no "More" row can
+    exist and its word is not asked for."""
+    conversation = shop.conversation()
+    model = text_then(SHIRTS, limit=3)
+    report, _transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
+    (told,) = _asked(model)
+    assert [p["code"] for p in told["problems"]] == [rc.LIST_OFFER_NEEDED]
+    assert "more_label" not in told["problems"][0]["detail"]
 
 
 def _other_products(query: str, *, reply_choices: bool = True) -> LiteralModel:
@@ -1346,3 +1390,50 @@ def test_the_observed_turn_a_general_browse_then_other_products_in_words(shop: S
     assert not {p["product_id"] for p in shown["products"]} & set(page_one)
     others, _more, _button = _rows(second.sent[0])
     assert others and not set(others) & set(page_one)
+
+
+
+def _other_products_in_text(query: str) -> LiteralModel:
+    """Other products asked for in words, answered in text that cites them.
+    Asked for the list, it resubmits the same text: a walk that never sends a
+    row, so only the replies' citations record what was shown."""
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("call_search_t", "search_products", query=query, exclude_shown=True)])
+        ids = [int(p["product_id"]) for p in _last_search_result(messages)["result"]["products"]]
+        return _step([_reply("Also: " + ", ".join(str(i) for i in ids) + ".", commerce=True,
+                             refs=[f"catalog:product:{pid}" for pid in ids], call_id=f"reply_{call}")])
+    return LiteralModel(script)
+
+
+def test_a_walk_in_text_past_ten_products_never_comes_back_to_its_start(shop: Shop):
+    """The model is handed at most ten earlier products; what a request for
+    other products leaves out is every product cited within the lapse."""
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    _report, _first = shop.turn(conversation, text_then(SHIRTS), max_steps=PILOT_STEPS)
+    seen = list(ids[:5])
+    for turn in range(3):
+        model = _other_products_in_text(SHIRTS)
+        shop.turn(conversation, model, question="غيرها؟", max_steps=PILOT_STEPS)
+        got = [p["product_id"] for p in model.search_result()["result"]["products"]]
+        assert got == ids[5 * (turn + 1):5 * (turn + 2)], (turn, got)
+        seen += got
+    assert len(seen) == len(set(seen)) == 20
+
+
+def test_other_products_past_a_capped_read_does_not_claim_more(shop: Shop, monkeypatch):
+    """A candidate read that stopped at its cap says nothing about buyable
+    products beyond it: with nothing left in what was read, the answer is
+    "nothing else to show", never "more exist"."""
+    from core.commerce_runtime import search_candidates as sc
+
+    monkeypatch.setattr(sc, "CANDIDATE_CAP", 6)
+    conversation = shop.conversation()
+    ids = shop.products[SHOES]
+    _report, first = shop.turn(conversation, browse(SHOES, more=None), max_steps=PILOT_STEPS)
+    assert _rows(first.sent[0])[0] == ids[:6]
+    model = _other_products(SHOES)
+    shop.turn(conversation, model, question="غيرها؟", max_steps=PILOT_STEPS)
+    shown = model.search_result()["result"]
+    assert shown["found"] is False and shown["more_results"] is False

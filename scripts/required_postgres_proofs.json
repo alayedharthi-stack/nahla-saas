@@ -684,10 +684,15 @@
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_list_the_policy_decides_is_asked_for_and_sent_with_the_models_new_text",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_model_that_declines_the_list_sends_its_reply_as_it_was",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_reply_that_already_offers_the_list_is_not_asked_again",
-        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_the_list_is_not_asked_for_with_one_step_left",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_list_due_with_no_step_left_is_recorded_as_skipped",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_an_answer_about_one_product_is_not_asked_for_a_list",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_comparison_of_two_read_products_is_not_widened_into_the_search",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_narrowed_search_is_not_asked_for_a_more_word",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_asked_in_words_then_more_then_a_tap_never_repeat_a_product",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_when_everything_was_shown_says_so_and_is_not_a_new_list",
-        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_the_observed_turn_a_general_browse_then_other_products_in_words"
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_the_observed_turn_a_general_browse_then_other_products_in_words",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_walk_in_text_past_ten_products_never_comes_back_to_its_start",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_past_a_capped_read_does_not_claim_more"
       ]
     },
     {

@@ -415,7 +415,10 @@ def _search_excluding_shown(binding: LiveToolBinding, scope: at.ToolScope, query
     window = remaining[:max(1, int(size))]
     result = search_products_window_impl(binding.context, window)
     products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
-    more = len(remaining) > len(window) or not bool(read.exhausted)
+    # As on the normal path: more only when more is stored and reachable. A
+    # read that stopped at its cap says nothing about buyable products beyond
+    # it, and "we have more" must not rest on it.
+    more = len(remaining) > len(window)
     payload: Dict[str, Any] = {
         "status": "ok", "found": bool(products), "products": products,
         # How many products the search matched that this conversation already
