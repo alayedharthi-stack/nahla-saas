@@ -46,3 +46,53 @@ def test_recipient_mismatch_is_rejected(field, value):
     setattr(row, field, value)
     with pytest.raises(ValueError, match="recipient_mismatch"):
         check(row)
+
+
+@pytest.mark.parametrize("apply,accepted", [(False, True), (True, True), (True, False)])
+def test_operator_claims_before_send_and_records_truth(apply, accepted):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from scripts.operators.recover_unsubscribe_confirmation import recover
+    from models import Customer, WhatsAppConnection, Conversation
+    row = customer()
+    connection = SimpleNamespace(phone_number_id="PH1", status="connected")
+    conversation = SimpleNamespace(id=44)
+    db = MagicMock()
+    rows = {Customer: row, WhatsAppConnection: connection, Conversation: conversation}
+    def query(model):
+        q = MagicMock()
+        q.filter_by.return_value = q
+        q.with_for_update.return_value = q
+        q.populate_existing.return_value = q
+        q.order_by.return_value = q
+        q.one_or_none.return_value = q.one.return_value = q.first.return_value = rows[model]
+        return q
+    db.query.side_effect = query
+    async def post(**kwargs):
+        assert db.commit.called
+        assert row.extra_metadata[CLAIM_KEY]["status"] == "request_started"
+        assert kwargs["_unsubscribe_notice"] is True
+        if accepted:
+            kwargs["_result_sink"].update(wamid="wamid.synthetic", classification="ok")
+        return accepted
+    with patch("core.automation_send_guard.evaluate_unsubscribe_notice_send",
+               return_value=SimpleNamespace(block=False)), patch(
+            "routers.whatsapp_webhook._post_wa", new=AsyncMock(side_effect=post)) as wire, patch(
+            "core.conversation_engine.StateManager.save_message") as save:
+        report = asyncio.run(recover(db, tenant_id=77, customer_id=8,
+            phone="966500000123", expected_pending_at=PENDING, apply=apply))
+        if not apply:
+            assert report["action"] == "would_send"
+            wire.assert_not_awaited()
+            assert CLAIM_KEY not in row.extra_metadata
+        elif accepted:
+            assert report["action"] == "accepted"
+            assert save.call_args.kwargs["extra_metadata"]["provider_send"]["status"] == "sent"
+            assert row.extra_metadata["pending_unsubscribe_prompt_sent_at"]
+        else:
+            assert report["action"] == "not_confirmed"
+            save.assert_not_called()
+            assert "pending_unsubscribe_prompt_sent_at" not in row.extra_metadata
+        if apply:
+            with pytest.raises(ValueError, match="already_sent|already_claimed"):
+                check(row)
