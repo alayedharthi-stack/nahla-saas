@@ -20,6 +20,7 @@ logger = logging.getLogger("nahla.commerce_lifecycle.canary_guard")
 _ENV_DISPATCH_ENABLED = "COMMERCE_LIFECYCLE_DISPATCH_ENABLED"
 _ENV_DISPATCH_TENANT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_TENANT_ALLOWLIST"
 _ENV_DISPATCH_RECIPIENT_ALLOWLIST = "COMMERCE_LIFECYCLE_DISPATCH_RECIPIENT_ALLOWLIST"
+_ENV_DISPATCH_ALL_RECIPIENT_TENANTS = "COMMERCE_LIFECYCLE_DISPATCH_ALL_RECIPIENT_TENANTS"
 
 MODE_NEW_LIFECYCLE = "new_lifecycle"
 MODE_LEGACY_LIFECYCLE = "legacy_lifecycle"
@@ -81,7 +82,11 @@ def commerce_lifecycle_dispatch_enabled() -> bool:
 
 
 def _parse_dispatch_tenant_allowlist() -> frozenset[int]:
-    raw = str(os.environ.get(_ENV_DISPATCH_TENANT_ALLOWLIST, "")).strip()
+    return _parse_tenant_ids(_ENV_DISPATCH_TENANT_ALLOWLIST)
+
+
+def _parse_tenant_ids(env_name: str) -> frozenset[int]:
+    raw = str(os.environ.get(env_name, "")).strip()
     if not raw:
         return frozenset()
     allowed: set[int] = set()
@@ -131,19 +136,29 @@ def commerce_lifecycle_dispatch_tenant_permitted(tenant_id: int) -> bool:
     return int(tenant_id) in allowlist
 
 
-def commerce_lifecycle_dispatch_recipient_permitted(phone: str) -> bool:
-    """True only when dispatch is on, allowlist is non-empty, and phone normalizes into it."""
+def commerce_lifecycle_dispatch_recipient_permitted(
+    phone: str, *, tenant_id: Optional[int] = None,
+) -> bool:
+    """Honor explicit recipient or tenant-wide opt-in after phone validation.
+
+    The tenant-wide option is inert unless dispatch is enabled and that tenant
+    is also in the dispatch tenant allowlist. Callers without a trusted tenant
+    retain the original recipient-only behavior.
+    """
     if not commerce_lifecycle_dispatch_enabled():
-        return False
-    allowlist = commerce_lifecycle_dispatch_recipient_allowlist()
-    if not allowlist:
         return False
     from services.customer_intelligence import normalize_phone  # noqa: PLC0415
 
     normalized = normalize_phone(str(phone or "").strip())
     if not normalized:
         return False
-    return normalized in allowlist
+    if normalized in commerce_lifecycle_dispatch_recipient_allowlist():
+        return True
+    return bool(
+        tenant_id is not None
+        and commerce_lifecycle_dispatch_tenant_permitted(int(tenant_id))
+        and int(tenant_id) in _parse_tenant_ids(_ENV_DISPATCH_ALL_RECIPIENT_TENANTS)
+    )
 
 
 def lifecycle_dispatch_owns_legacy_send(
@@ -246,7 +261,7 @@ def evaluate_lifecycle_canary_send(
                 automation_type=atype,
                 phone_normalized=None,
             )
-        if not commerce_lifecycle_dispatch_recipient_permitted(raw):
+        if not commerce_lifecycle_dispatch_recipient_permitted(raw, tenant_id=tid):
             return CanaryDecision(
                 allowed=False,
                 reason=REASON_RECIPIENT_NOT_ALLOWLISTED,
@@ -297,7 +312,7 @@ def evaluate_lifecycle_canary_send(
             automation_type=atype,
             phone_normalized=None,
         )
-    if not commerce_lifecycle_dispatch_recipient_permitted(raw):
+    if not commerce_lifecycle_dispatch_recipient_permitted(raw, tenant_id=tid):
         return CanaryDecision(
             allowed=False,
             reason=REASON_RECIPIENT_NOT_ALLOWLISTED,
