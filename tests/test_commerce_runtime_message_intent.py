@@ -114,20 +114,28 @@ def assessed(decision, status="ok"):
 
 
 @pytest.mark.parametrize("decision", [mi.NON_COMMERCIAL, mi.AMBIGUOUS])
-def test_a_reading_that_is_not_a_store_request_withholds_the_tools_and_says_so(decision):
-    facts = mi.context_facts(assessed(decision))
-    assert mi.withholds_store_tools(assessed(decision)) is True
-    assert facts == {mi.READING_KEY: mi.READINGS[decision], mi.TOOLS_OFFERED_KEY: False}
+def test_a_reading_that_is_not_a_store_request_withholds_only_the_catalogue_search(decision):
+    assert mi.withheld_tools(assessed(decision)) == ("search_products",)
+    assert mi.context_facts(assessed(decision)) == {
+        mi.READING_KEY: mi.READINGS[decision], mi.SEARCH_OFFERED_KEY: False}
 
 
 @pytest.mark.parametrize("assessment", [None, assessed(mi.STORE_REQUEST), assessed(None, "api_error"),
                                         assessed(None, "no_decision"), assessed(None, "error")])
 def test_a_store_request_or_no_reading_leaves_the_turn_exactly_as_it_was(assessment):
-    assert mi.withholds_store_tools(assessment) is False
+    assert mi.withheld_tools(assessment) == ()
     assert mi.context_facts(assessment) == {}
 
 
 def test_what_the_agent_is_told_is_data_not_wording():
     for value in mi.READINGS.values():
         assert re.fullmatch(r"[a-z_]+", value)
-    assert re.fullmatch(r"[a-z_]+", mi.READING_KEY) and re.fullmatch(r"[a-z_]+", mi.TOOLS_OFFERED_KEY)
+    assert re.fullmatch(r"[a-z_]+", mi.READING_KEY) and re.fullmatch(r"[a-z_]+", mi.SEARCH_OFFERED_KEY)
+
+
+def test_titles_that_could_not_be_read_are_a_partial_list_never_an_empty_store():
+    payload = json.loads(mi.build_input(message="m", history=[], store_name="s", product_titles=None))
+    assert payload["store"]["product_titles"] == []
+    assert payload["store"]["product_titles_complete"] is False
+    payload = json.loads(mi.build_input(message="m", history=[], store_name="s", product_titles=[]))
+    assert payload["store"]["product_titles_complete"] is True      # read, and truly empty

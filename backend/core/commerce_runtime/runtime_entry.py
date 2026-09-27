@@ -187,9 +187,13 @@ class TurnReport:
     reply_text: str = ""
     latency_ms: Optional[int] = None
     owner_id: Optional[str] = None
-    # Experiment: the store's read tools were not offered for this message
-    # because a separate check did not read it as a store request.
-    store_tools_withheld: bool = False
+    # Experiment: what the message-intent check read, and the tools it kept
+    # from this one message. Empty/None when the check did not run.
+    message_intent_decision: Optional[str] = None
+    message_intent_status: Optional[str] = None
+    message_intent_model: Optional[str] = None
+    message_intent_latency_ms: Optional[int] = None
+    withheld_tools: Tuple[str, ...] = ()
 
     @property
     def replied(self) -> bool:
@@ -202,6 +206,7 @@ class TurnReport:
         fields["evidence_refs"] = ",".join(self.evidence_refs)
         fields["choice_row_ids"] = ",".join(self.choice_row_ids)
         fields["text_additions"] = ",".join(self.text_additions)
+        fields["withheld_tools"] = ",".join(self.withheld_tools)
         fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
@@ -633,8 +638,9 @@ def run_commerce_runtime_turn(
 
     ``message_intent`` (experiment) is a separate check's reading of the
     inbound message. Only a reading that is not a store request changes the
-    turn — see ``message_intent.withholds_store_tools``; ``None`` is the turn
-    exactly as it runs without the check.
+    turn, and only by not offering the catalogue search for this message — see
+    ``message_intent.withheld_tools``; ``None`` is the turn exactly as it runs
+    without the check.
 
     ``model`` is the caller's explicit choice and has no default: this entry
     refuses rather than let an unconfigured pilot inherit whatever the legacy
@@ -688,10 +694,15 @@ def run_commerce_runtime_turn(
         return TurnReport(reason=ADMISSION_CONFLICT, **base)
 
     turn_id = admitted.turn_id
-    withhold_store_tools = mi.withholds_store_tools(message_intent)
+    withheld = mi.withheld_tools(message_intent)
     report_base = dict(base, turn_id=turn_id, duplicate_inbound=bool(admitted.duplicate),
                        owner_id=owner_id, requested_model=requested_model,
-                       store_tools_withheld=withhold_store_tools)
+                       withheld_tools=tuple(withheld))
+    if message_intent is not None:
+        report_base.update(message_intent_decision=message_intent.decision,
+                           message_intent_status=message_intent.status,
+                           message_intent_model=message_intent.model,
+                           message_intent_latency_ms=message_intent.latency_ms)
 
     # The two conversation identifiers come from independent sequences. Establish
     # the association by reading the runtime row back, before anything is scoped
@@ -774,12 +785,15 @@ def run_commerce_runtime_turn(
             preamble[br.FACTS_KEY] = navigation_facts
         if browse_page is not None:
             presentation = dataclasses.replace(presentation, browse_page=browse_page)
-        if withhold_store_tools:
-            # The reading and the absence of the tools travel together, as
-            # data: the agent is not left to guess why it has nothing to search.
+        if withheld:
+            # The reading and the missing search travel together, as data: the
+            # agent is not left to guess why a tool it knows is not offered.
             preamble.update(mi.context_facts(message_intent))
-        registry = (at.ToolRegistry(()) if withhold_store_tools
-                    else alt.build_live_registry(binding))
+            registry = at.ToolRegistry(tuple(
+                tool for tool in alt.build_live_tools(binding)
+                if tool.definition.name not in withheld))
+        else:
+            registry = alt.build_live_registry(binding)
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
             tools_provider=anthropic_provider or AnthropicProvider(),

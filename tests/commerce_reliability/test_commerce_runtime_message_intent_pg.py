@@ -1,9 +1,11 @@
 """The message-intent experiment through the real runtime entry, on PostgreSQL.
 
 What is proved: a reading that is not a store request reaches the model as data
-beside the turn, with the store's read tools not offered; a store request, a
-failed check or no check leaves the turn exactly as it was; a tool the turn did
-not offer reads nothing even if the model asks for it. The reply is the
+beside the turn, with the catalogue search — and only the catalogue search — not
+offered; order, shipment, knowledge, product-detail and promotion tools stay
+offered and still run; a store request, a failed check or no check leaves the
+turn exactly as it was; a tool the turn did not offer reads nothing even if the
+model asks for it. The reply is the
 model's own in every case. No model and no network: the Anthropic HTTP call is
 the same scripted double the pilot tests use.
 
@@ -74,17 +76,33 @@ def context_block(call: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @pytest.mark.parametrize("decision", [mi.NON_COMMERCIAL, mi.AMBIGUOUS])
-def test_not_a_store_request_is_answered_by_the_model_without_store_tools(pilot, decision):
+def test_not_a_store_request_withholds_the_catalogue_search_and_nothing_else(pilot, decision):
     report, calls = run(pilot, [step([reply("رد النموذج نفسه", call_id="r1")])],
                         intent=assessed(decision))
-    assert offered(calls[0]) == [ap.REPLY_TOOL_NAME]
+    tools = offered(calls[0])
+    assert "search_products" not in tools
+    for kept in ("resolve_customer_order", "get_order_shipment", "search_merchant_knowledge",
+                 "get_product_details", ap.REPLY_TOOL_NAME):
+        assert kept in tools, kept
     facts = context_block(calls[0])
     assert facts[mi.READING_KEY] == mi.READINGS[decision]
-    assert facts[mi.TOOLS_OFFERED_KEY] is False
+    assert facts[mi.SEARCH_OFFERED_KEY] is False
     assert calls[0]["system"] == "EXISTING-INSTRUCTIONS"          # the instructions are untouched
-    assert report.store_tools_withheld is True
+    assert report.withheld_tools == ("search_products",)
+    assert report.message_intent_decision == decision
+    assert report.message_intent_status == "ok" and report.message_intent_model == "check-model"
     assert report.dispatch_status == dd.SENT_ACCEPTED
     assert report.reply_text == "رد النموذج نفسه"                  # the model's words, as written
+
+
+@pytest.mark.parametrize("decision", [mi.NON_COMMERCIAL, mi.AMBIGUOUS])
+def test_order_and_knowledge_tools_still_run_under_any_reading(pilot, decision):
+    report, _ = run(pilot, [step([tool_use("t1", "resolve_customer_order", purpose="status"),
+                                  tool_use("t2", "search_merchant_knowledge", query="توصيل")]),
+                            step([reply("رد", call_id="r1")])],
+                    intent=assessed(decision), question="طلبي متى يوصل؟")
+    assert set(report.tools_called) == {"resolve_customer_order", "search_merchant_knowledge"}
+    assert report.dispatch_status == dd.SENT_ACCEPTED
 
 
 @pytest.mark.parametrize("intent", [None, assessed(mi.STORE_REQUEST), assessed(None, "api_error")])
@@ -92,8 +110,8 @@ def test_a_store_request_or_no_reading_is_the_turn_exactly_as_before(pilot, inte
     report, calls = run(pilot, [step([reply("رد", call_id="r1")])], intent=intent)
     assert "search_products" in offered(calls[0]) and ap.REPLY_TOOL_NAME in offered(calls[0])
     facts = context_block(calls[0])
-    assert mi.READING_KEY not in facts and mi.TOOLS_OFFERED_KEY not in facts
-    assert report.store_tools_withheld is False
+    assert mi.READING_KEY not in facts and mi.SEARCH_OFFERED_KEY not in facts
+    assert report.withheld_tools == ()
     assert report.dispatch_status == dd.SENT_ACCEPTED
 
 
@@ -103,6 +121,6 @@ def test_a_tool_the_turn_did_not_offer_reads_nothing_even_when_asked_for(pilot):
                                 step([reply("رد", call_id="r1")])],
                         intent=assessed(mi.NON_COMMERCIAL))
     assert ref not in report.evidence_refs
-    assert report.store_tools_withheld is True
+    assert report.withheld_tools == ("search_products",)
     assert report.dispatch_status == dd.SENT_ACCEPTED
-    assert offered(calls[1]) == [ap.REPLY_TOOL_NAME]
+    assert "search_products" not in offered(calls[1])

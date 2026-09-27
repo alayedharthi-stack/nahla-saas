@@ -1,7 +1,8 @@
 """An independent reading of what an incoming message means, before the store agent runs.
 
 Experiment — off-send evaluation only. The pilot seam calls it only when
-``COMMERCE_RUNTIME_INTENT_CHECK=1``, which no environment sets.
+``COMMERCE_RUNTIME_INTENT_CHECK=1`` and ``COMMERCE_RUNTIME_INTENT_MODEL`` names
+the model, which no environment sets.
 
 The store agent is a sales assistant whose first move is a catalogue search.
 When a message sent to the store's number is not a store request at all — a
@@ -13,8 +14,16 @@ the sender most likely mean? The answer is one of three internal decisions.
 * ``store_request`` — the sender is asking the store, as a store, about
   something a store answers (a product or kind of product, prices, stock,
   orders, delivery, payment, services).
-* ``non_commercial`` — clearly not addressed to the store as a shop.
+* ``non_commercial`` — the message asks the store for nothing a store answers
+  (personal or social chat, a message meant for a particular person, a greeting,
+  compliment or thanks with no request in it).
 * ``ambiguous`` — both readings are reasonable and nothing settles it.
+
+What a decision changes (see ``withheld_tools``): only the catalogue search, and
+only for a message the check did not read as a store request. Every other tool —
+orders, shipment, the merchant's knowledge, product details, promotions — stays
+offered, because none of them turns an unrelated phrase into a claim about the
+catalogue.
 
 What this is not. It composes no customer-facing text, carries no keyword,
 phrase or sentence-shape rule, and edits nothing the agent writes. The decision
@@ -57,7 +66,7 @@ Choose one decision:
 - non_commercial: the sender is clearly not addressing the store as a shop: personal or family matters, social chat, a message meant for a particular person, or a greeting, compliment or thanks with no request in it.
 - ambiguous: both readings are reasonable and neither the message nor the conversation settles it.
 
-Judge the meaning, not the grammatical form: the same form of question can be about a product or about a person. The product titles are evidence of what this store sells; a name or phrase that is neither one of them nor a kind of product is not, by itself, a product request. Use the conversation: earlier messages can make a short message clearly a store request or clearly personal. If the message leaves both readings open, choose ambiguous rather than guessing.
+Judge the meaning, not the grammatical form: the same form of question can be about a product or about a person. The product titles are evidence of what this store sells; a name or phrase that is neither one of them nor a kind of product is not, by itself, a product request. When product_titles_complete is false, the store sells more than the titles shown, so a name that is not among them may still be one of its products. Use the conversation: earlier messages can make a short message clearly a store request or clearly personal. If the message leaves both readings open, choose ambiguous rather than guessing.
 """.strip()
 
 TOOL: Dict[str, Any] = {
@@ -95,29 +104,39 @@ class IntentAssessment:
                 "intent_output_tokens": self.output_tokens}
 
 
-# What the turn does with a decision (stage 2 of the experiment). Only a check
-# that ran and did *not* read a store request changes anything: the store's
-# read tools are not offered for that one message, and the agent is told so,
-# as data, beside the reading itself. A store request, a failed check or no
+# What the turn does with a decision. Only a check that ran and did *not* read
+# a store request changes anything, and only this much: the catalogue search is
+# not offered for that one message, and the agent is told both things as data —
+# what the check read and that the search is not offered — so it is never left
+# to guess why a tool it knows is missing. A store request, a failed check or no
 # check leaves the turn exactly as it was. The reply is the agent's own either
 # way; nothing here is wording.
+#
+# The readings say what the check decided and nothing more: a compliment to the
+# store asks it for nothing, which is true, where "not addressed to the store"
+# would not be.
+CATALOGUE_SEARCH_TOOL = "search_products"
+WITHHELD_TOOL_NAMES = (CATALOGUE_SEARCH_TOOL,)
 READING_KEY = "new_message_reading"
-TOOLS_OFFERED_KEY = "store_tools_offered_for_this_message"
+SEARCH_OFFERED_KEY = "catalogue_search_offered_for_this_message"
 READINGS = {
-    NON_COMMERCIAL: "not_addressed_to_the_store_as_a_shop",
-    AMBIGUOUS: "unclear_whether_addressed_to_the_store_as_a_shop",
+    NON_COMMERCIAL: "no_request_to_the_store_in_this_message",
+    AMBIGUOUS: "unclear_whether_this_message_asks_the_store_for_something",
 }
 
 
-def withholds_store_tools(assessment: Optional["IntentAssessment"]) -> bool:
-    return (assessment is not None and assessment.status == "ok"
-            and assessment.decision in READINGS)
+def withheld_tools(assessment: Optional["IntentAssessment"]) -> tuple:
+    """The tool names not offered for this message; empty unless the check read
+    something other than a store request."""
+    if assessment is not None and assessment.status == "ok" and assessment.decision in READINGS:
+        return WITHHELD_TOOL_NAMES
+    return ()
 
 
 def context_facts(assessment: Optional["IntentAssessment"]) -> Dict[str, Any]:
-    if not withholds_store_tools(assessment):
+    if not withheld_tools(assessment):
         return {}
-    return {READING_KEY: READINGS[assessment.decision], TOOLS_OFFERED_KEY: False}
+    return {READING_KEY: READINGS[assessment.decision], SEARCH_OFFERED_KEY: False}
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -126,12 +145,14 @@ def _clip(text: Any, limit: int) -> str:
 
 
 def build_input(*, message: str, history: Sequence[Mapping[str, Any]], store_name: str,
-                product_titles: Sequence[str]) -> str:
+                product_titles: Optional[Sequence[str]]) -> str:
     """The check's whole view of the turn, as one data block.
 
     ``history`` uses the runtime's own turn shape (``role`` user/assistant,
     ``text``); only the last few turns are kept. Product titles are distinct and
-    bounded, and the block says when the list is partial.
+    bounded, and the block says when the list is partial. ``None`` means the
+    titles could not be read: the check is told the list is partial, never that
+    the store sells nothing.
     """
     turns: List[Dict[str, str]] = []
     for turn in list(history or [])[-MAX_HISTORY_TURNS:]:
@@ -143,7 +164,8 @@ def build_input(*, message: str, history: Sequence[Mapping[str, Any]], store_nam
     payload = {
         "store": {"name": _clip(store_name, 120),
                   "product_titles": titles[:MAX_PRODUCT_TITLES],
-                  "product_titles_complete": len(titles) <= MAX_PRODUCT_TITLES},
+                  "product_titles_complete": (product_titles is not None
+                                              and len(titles) <= MAX_PRODUCT_TITLES)},
         "conversation": turns,
         "new_message": _clip(message, MAX_TEXT_CHARS),
     }
@@ -151,7 +173,7 @@ def build_input(*, message: str, history: Sequence[Mapping[str, Any]], store_nam
 
 
 def assess(*, message: str, history: Sequence[Mapping[str, Any]], store_name: str,
-           product_titles: Sequence[str], provider: Any, model: str,
+           product_titles: Optional[Sequence[str]], provider: Any, model: str,
            audit_context: Optional[Mapping[str, Any]] = None,
            timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> IntentAssessment:
     """Ask the model the one question and read back one decision. Never raises."""
