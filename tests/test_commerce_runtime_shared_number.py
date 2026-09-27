@@ -51,9 +51,9 @@ def test_a_coexistence_number_is_handed_to_the_model_as_data(
     connections(701, metadata=COEXISTENCE)
     with sessions() as db:
         facts = run_input(db, 701)
-    assert facts[seam.SHARED_NUMBER_KEY] == seam.SHARED_NUMBER_MEANING
+    assert facts[seam.SHARED_NUMBER_KEY] is True
     # Beside the turn, never written into the instructions.
-    assert seam.SHARED_NUMBER_MEANING not in seam._instructions()
+    assert seam.SHARED_NUMBER_KEY not in seam._instructions()
 
 
 @pytest.mark.parametrize("connection_type,metadata", [
@@ -61,6 +61,10 @@ def test_a_coexistence_number_is_handed_to_the_model_as_data(
     ("embedded", {}),
     ("direct", {"connection_mode": "cloud_api"}),
     ("embedded", {"connection_mode": "coexistence_pending"}),
+    # The provider says the number left the Business app: a stale mode is not the fact.
+    ("embedded", {"connection_mode": "coexistence", "is_on_biz_app": False}),
+    # The retired column value alone is not how the platform records coexistence.
+    ("coexistence", None),
 ])
 def test_a_number_the_platform_does_not_record_as_shared_carries_no_such_fact(
         sessions, run_input, connections, connection_type, metadata):  # noqa: F811
@@ -84,7 +88,7 @@ def test_another_tenants_shared_number_never_reaches_this_store(
     with sessions() as db:
         own, other = run_input(db, 701), run_input(db, 702)
     assert seam.SHARED_NUMBER_KEY not in own
-    assert other[seam.SHARED_NUMBER_KEY] == seam.SHARED_NUMBER_MEANING
+    assert other[seam.SHARED_NUMBER_KEY] is True
 
 
 def test_an_unreadable_connection_leaves_the_fact_out_and_the_turn_still_goes(

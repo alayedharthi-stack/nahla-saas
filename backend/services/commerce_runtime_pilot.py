@@ -398,40 +398,39 @@ def _context_preamble(db: Any, tenant_id: int, convo: Any, recipient: str) -> Di
         preamble["assistant_name"] = assistant_name
     preamble.update(_reply_style_in(settings, tenant_id))
     if _number_shared_with_merchant(db, tenant_id):
-        preamble[SHARED_NUMBER_KEY] = SHARED_NUMBER_MEANING
+        preamble[SHARED_NUMBER_KEY] = True
     return preamble
 
 
-# The store's WhatsApp number is also the merchant's own number in the WhatsApp
-# Business app (Meta coexistence, as ``services.meta_coexistence`` defines it):
-# people who know the merchant may write to it about things that are not the
-# store. A fact about the channel, from the connection's own state, handed to
-# the model as data — never a reading of any message, and never a reply.
-SHARED_NUMBER_KEY = "whatsapp_number"
-SHARED_NUMBER_MEANING = (
-    "رقم المتجر هذا هو أيضًا رقم التاجر نفسه في تطبيق واتساب للأعمال، "
-    "فقد يراسله أشخاص يعرفونه شخصيًا في أمور لا تخص المتجر."
-)
+# The store's WhatsApp number is also in use in the merchant's WhatsApp Business
+# app (Meta coexistence, while the provider still reports the number there, as
+# ``services.meta_coexistence.should_project_as_coexistence`` defines it). A
+# fact about the channel, from the connection's own state, handed to the model
+# as data — no reading of any message, no meaning attached, never a reply.
+SHARED_NUMBER_KEY = "store_number_also_in_merchant_whatsapp_business_app"
 
 
 def _number_shared_with_merchant(db: Any, tenant_id: int) -> bool:
     """Whether this tenant's WhatsApp connection shares its number with the
-    merchant's own WhatsApp Business app. Read on its own savepoint; a read
-    that fails answers "no", so the turn goes exactly as before."""
+    merchant's WhatsApp Business app. Read on its own savepoint; a read that
+    fails answers "no", so the turn goes exactly as before."""
     from models import WhatsAppConnection  # noqa: PLC0415
-    from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+    from services.meta_coexistence import should_project_as_coexistence  # noqa: PLC0415
 
     connection = getattr(db, "connection", None)
     try:
         with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
             metadata = db.query(WhatsAppConnection.extra_metadata).filter(
                 WhatsAppConnection.tenant_id == int(tenant_id)).scalar()
-        return is_coexistence_mode(SimpleNamespace(
+        shared = should_project_as_coexistence(SimpleNamespace(
             extra_metadata=metadata if isinstance(metadata, dict) else None))
     except Exception as exc:  # noqa: BLE001 - the turn goes without the fact
-        logger.warning("[COMMERCE_RUNTIME_PILOT] connection mode unreadable tenant=%s error=%s",
-                       tenant_id, type(exc).__name__)
+        logger.error("[COMMERCE_RUNTIME_PILOT] connection mode unreadable tenant=%s error=%s",
+                     tenant_id, type(exc).__name__)
         return False
+    if shared:
+        logger.info("[COMMERCE_RUNTIME_PILOT] shared number tenant=%s", tenant_id)
+    return shared
 
 
 def _wire_unobserved(metadata: Any) -> bool:
