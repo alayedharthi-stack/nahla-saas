@@ -44,6 +44,12 @@ REPEATS = max(1, min(int(os.environ.get("EVAL_REPEATS", "3") or 3), 10))
 # First repeat number to run, so a staged run can continue where it stopped.
 REP_START = max(1, min(int(os.environ.get("EVAL_REP_START", "1") or 1), REPEATS))
 SCRIPTED = os.environ.get("EVAL_PROVIDER", "") == "scripted"
+# Arms run side by side, interleaved per scenario: ``baseline`` is the turn as
+# it runs today; ``intent`` runs the message-intent check first (the pilot
+# seam's own ``_message_intent``) on EVAL_INTENT_MODEL and hands its reading to
+# the runtime entry.
+ARMS = tuple(a.strip() for a in os.environ.get("EVAL_ARMS", "baseline").split(",") if a.strip())
+INTENT_MODEL = os.environ.get("EVAL_INTENT_MODEL", "")
 
 # ── Measurement vocabulary (report only) ─────────────────────────────────────
 NON_SAUDI_MARKERS = ("هسع", "شنو", "شو ", "هلأ", "هلق", "بدك", "كتير", "إزاي", "ازاي", "عايز",
@@ -85,6 +91,22 @@ CATALOGUE_C: Tuple[Tuple[str, int, int, Tuple[str, ...], str, bool], ...] = (
     ("بخور معطر", 90, 10, (), "", True),
     ("دهن عود", 350, 2, (), "", True),
 )
+# A store with more products than the intent check is shown (151 titles,
+# «عطر سلطان» past the first 80), for the one case stage 1b found the check
+# cannot see: a bare product name beyond its window.
+_SCENTS = ("ورد", "ياسمين", "عنبر", "مسك", "عود", "فانيلا", "لافندر", "صندل", "زعفران", "ليمون",
+           "برتقال", "نعناع", "قرفة", "هيل", "جوري", "فل", "كادي", "ريحان", "توت", "خزامى")
+_KINDS = ("عطر", "بخور", "دهن", "معطر مفارش", "صابون", "شموع", "بودي لوشن")
+
+
+def _large_catalogue() -> Tuple[Tuple[str, int, int, Tuple[str, ...], str, bool], ...]:
+    titles = [f"{kind} {scent}" for kind in _KINDS for scent in _SCENTS][:130]
+    titles += [f"عطر {scent} 100ml" for scent in _SCENTS]
+    titles.insert(120, "عطر سلطان")
+    return tuple((title, 60 + 5 * (i % 40), 3, (), "", True) for i, title in enumerate(titles))
+
+
+CATALOGUE_G = _large_catalogue()
 STORE_HOST = "shop.eval-store.example"
 IMAGE_HOST = "cdn.eval-store.example"
 
@@ -169,6 +191,9 @@ SCENARIOS: Tuple[Scenario, ...] = (
     # Clear questions that are not about a product, answered by the store's knowledge.
     Scenario("sh_delivery_question", "F", ("توصلون للرياض؟",)),
     Scenario("sh_gift_wrap_question", "F", ("عندكم تغليف هدايا؟",)),
+    # A real product named like a person, in a store larger than the check's view.
+    Scenario("sh_bare_name_large_store", "G", ("سلطان عندك؟",)),
+    Scenario("sh_perfume_named_large_store", "G", ("عطر سلطان عندك؟",)),
 )
 
 
@@ -431,8 +456,38 @@ class _Trace:
         return None
 
 
+class _ScriptedCheck:
+    """EVAL_PROVIDER=scripted only: the check answers ambiguous, so a smoke run
+    walks the withheld-tools path without an API call."""
+
+    def call_single_step(self, **_kw: Any) -> Dict[str, Any]:
+        from core.commerce_runtime import message_intent as mi
+        return {"status": "ok", "usage": {"input_tokens": 0, "output_tokens": 0},
+                "blocks": [{"type": "tool_use", "name": mi.TOOL_NAME,
+                            "input": {"decision": mi.AMBIGUOUS, "reason": "scripted"}}]}
+
+
+def _intent_for(db: Any, seam: Any, store: Store, text_in: str, history: Any,
+                metadata: Mapping[str, Any]) -> Any:
+    """The intent arm's reading, through the seam's own function, switched on
+    for this call only."""
+    previous = os.environ.get(seam.INTENT_CHECK_ENV)
+    os.environ[seam.INTENT_CHECK_ENV] = "1"
+    try:
+        return seam._message_intent(db, tenant_id=store.tenant_id, text=text_in, history=history,
+                                    inbound_metadata=dict(metadata),
+                                    model="scripted" if SCRIPTED else INTENT_MODEL,
+                                    provider=_ScriptedCheck() if SCRIPTED else None)
+    finally:
+        if previous is None:
+            os.environ.pop(seam.INTENT_CHECK_ENV, None)
+        else:
+            os.environ[seam.INTENT_CHECK_ENV] = previous
+
+
 def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: int, phone: str,
-             customer_name: str, text_in: str, metadata: Mapping[str, Any]) -> Dict[str, Any]:
+             customer_name: str, text_in: str, metadata: Mapping[str, Any],
+             arm: str = "baseline") -> Dict[str, Any]:
     from core.commerce_runtime import pilot_guard
     from core.commerce_runtime import runtime_entry as entry
     from core.conversation_engine import StateManager
@@ -449,6 +504,7 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
         preamble = seam._context_preamble(db, store.tenant_id, convo, customer_name)
         history = seam._prior_turns(db, tenant_id=store.tenant_id, conversation_id=conversation_id,
                                     phone=phone, current_text=text_in)
+        intent = _intent_for(db, seam, store, text_in, history, metadata) if arm == "intent" else None
         db.commit()
     finally:
         db.close()
@@ -468,7 +524,8 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
         inbound_metadata=dict(metadata), transport=entry.whatsapp_reply_transport(
             senders.text, senders.list, recipient=phone, send_card=senders.card),
         instructions=seam._instructions(), model=ctx.model, budget=pilot_guard.pilot_budget(),
-        context_preamble=preamble, history=history, anthropic_provider=provider)
+        context_preamble=preamble, history=history, anthropic_provider=provider,
+        message_intent=intent)
     wall_ms = int((time.monotonic() - started) * 1000)
     last = senders.sent[-1] if senders.sent else {}
     wire = seam.WireObservation()
@@ -487,6 +544,8 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
     fields = report.as_log_fields()
     seen = provider.context_seen()
     return {"report": fields, "sent": last, "sends": len(senders.sent), "wall_ms": wall_ms,
+            "intent": intent.as_log_fields() if intent is not None else None,
+            "intent_reason": intent.reason if intent is not None else None,
             "provider_message_id": report.provider_message_id,
             "tool_trace": provider.tool_trace(),
             "context_keys": sorted(seen.keys()),
@@ -536,12 +595,13 @@ class Context:
     stores: Dict[str, Store]
 
 
-def run_scenario(ctx: Context, scenario: Scenario, rep: int) -> List[Dict[str, Any]]:
+def run_scenario(ctx: Context, scenario: Scenario, rep: int,
+                 arm: str = "baseline") -> List[Dict[str, Any]]:
     from core.conversation_engine import StateManager
 
     store = ctx.stores[scenario.tenant]
     name = {"A": "نورة عبدالله", "B": "أحمد سالم", "C": "سارة محمد", "D": "نورة عبدالله",
-            "E": "سارة محمد", "F": "أحمد سالم"}[scenario.tenant]
+            "E": "سارة محمد", "F": "أحمد سالم", "G": "نورة عبدالله"}[scenario.tenant]
     customer_id, conversation_id, phone = new_conversation(ctx.engine, store, name)
     if scenario.history:
         db = ctx.session_factory()
@@ -568,21 +628,27 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int) -> List[Dict[str, A
                                if str(r.get("title", "")).startswith(scenario.tap_title)),
                               products[-1] if products else None)
             if chosen is None:
-                out.append({"label": LABEL, "scenario": scenario.name, "rep": rep, "step": step_no,
-                            "input": step, "skipped": "no_row_to_tap"})
+                out.append({"label": LABEL, "arm": arm, "scenario": scenario.name, "rep": rep,
+                            "step": step_no, "input": step, "skipped": "no_row_to_tap"})
                 break
             text_in = str(chosen.get("title") or "")
             metadata = {"list_reply_id": str(chosen.get("id")), "list_reply_title": text_in,
                         "list_reply_context_id": str((previous or {}).get("provider_message_id") or "")}
         try:
-            result = run_turn(ctx, store, conversation_id, customer_id, phone, name, text_in, metadata)
+            result = run_turn(ctx, store, conversation_id, customer_id, phone, name, text_in, metadata,
+                              arm=arm)
         except Exception as exc:  # noqa: BLE001 - one failed turn is a result, not the end
-            out.append({"label": LABEL, "scenario": scenario.name, "rep": rep, "step": step_no,
-                        "input": step, "error": type(exc).__name__, "detail": str(exc)[:200]})
+            out.append({"label": LABEL, "arm": arm, "scenario": scenario.name, "rep": rep,
+                        "step": step_no, "input": step, "error": type(exc).__name__,
+                        "detail": str(exc)[:200]})
             break
         report = result["report"]
         record = {
-            "label": LABEL, "scenario": scenario.name, "rep": rep, "step": step_no, "input": step,
+            "label": LABEL, "arm": arm, "scenario": scenario.name, "rep": rep, "step": step_no,
+            "input": step, **{k: (result.get("intent") or {}).get(k) for k in (
+                "intent_decision", "intent_status", "intent_model", "intent_latency_ms",
+                "intent_input_tokens", "intent_output_tokens")},
+            "intent_reason": result.get("intent_reason"),
             "inbound_text": text_in, "reply_text": (result.get("sent") or {}).get("text"),
             "delivery": (result.get("sent") or {}).get("kind"), "sends": result["sends"],
             "list_button": (result.get("sent") or {}).get("button"),
@@ -598,7 +664,7 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int) -> List[Dict[str, A
                 "reason", "choices_outcome", "card_outcome", "browse_outcome", "paging_words",
                 "navigation_tap", "navigation_page", "navigation_has_next", "steps_used",
                 "tool_calls_used", "tools_called", "evidence_refs", "input_tokens",
-                "output_tokens", "latency_ms", "model", "stop_reason")},
+                "output_tokens", "latency_ms", "model", "stop_reason", "store_tools_withheld")},
             "metrics": measure(result, store),
         }
         record["outcome"] = outcome_class(record)
@@ -629,7 +695,8 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     by: Dict[str, List[Mapping[str, Any]]] = {}
     for record in records:
         if "metrics" in record:
-            by.setdefault(f"{record['scenario']}#{record['step']}", []).append(record)
+            by.setdefault(f"{record.get('arm', 'baseline')}:{record['scenario']}#{record['step']}",
+                          []).append(record)
 
     def med(values: List[Any]) -> Any:
         values = [v for v in values if isinstance(v, (int, float))]
@@ -706,26 +773,34 @@ def main() -> int:
                 ("التوصيل", "نوصّل لجميع مدن المملكة خلال 2 إلى 5 أيام عمل، والتوصيل مجاني "
                             "للطلبات فوق 300 ريال."),
                 ("تغليف الهدايا", "نوفّر تغليف هدايا مجانيًا لأي طلب، اطلبه عند إتمام الطلب."))),
+            "G": seed_store(engine, "G", {"assistant_name": "ريم", "default_language": "arabic",
+                                          "reply_tone": "friendly"}, CATALOGUE_G, shared_number=True),
         }
         ctx = Context(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
                       model=model, stores=stores)
         wanted = [s.strip() for s in os.environ.get("EVAL_SCENARIOS", "").split(",") if s.strip()]
         scenarios = [s for s in SCENARIOS if not wanted or s.name in wanted]
+        if "intent" in ARMS and not SCRIPTED:
+            budget.add(INTENT_MODEL, 0, 0)   # refuses an intent model it cannot price, before any call
         stopped = False
         for rep in range(REP_START, REPEATS + 1):
             for scenario in scenarios:
-                if budget.exhausted:
-                    stopped = True
-                    break
-                new = run_scenario(ctx, scenario, rep)
-                for r in new:
-                    if "metrics" in r:
-                        budget.add(r.get("model") or model, r.get("input_tokens"),
-                                   r.get("output_tokens"))
-                records.extend(new)
+                for arm in ARMS:
+                    if budget.exhausted:
+                        stopped = True
+                        break
+                    new = run_scenario(ctx, scenario, rep, arm)
+                    for r in new:
+                        if "metrics" in r:
+                            budget.add(r.get("model") or model, r.get("input_tokens"),
+                                       r.get("output_tokens"))
+                        if r.get("intent_status") is not None and not SCRIPTED:
+                            budget.add(INTENT_MODEL, r.get("intent_input_tokens"),
+                                       r.get("intent_output_tokens"))
+                    records.extend(new)
         emit("EVAL_SUMMARY=", {"label": LABEL, "status": "budget_stop" if stopped else "done",
                                "spent_usd": round(budget.spent_usd, 4), "budget_usd": budget.limit_usd,
-                               "model": model,
+                               "model": model, "arms": list(ARMS), "intent_model": INTENT_MODEL,
                                "repeats": REPEATS, "turns": sum(1 for r in records if "metrics" in r),
                                "errors": [r for r in records if "error" in r or "skipped" in r],
                                "by_step": summarise(records)})
