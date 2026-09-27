@@ -91,6 +91,42 @@ CASES: Tuple[Case, ...] = (
     Case("ha_this", "holdout_ambiguous", "D", "هذا عندكم؟", (SR, AMB), False),
 )
 
+DRESS_ASKED = (("inbound", "عندكم فستان وردي؟"), ("outbound", "إيه عندنا فستان وردي بـ 179 ريال 🌸"))
+
+# Set b: where the check could cost a real shopper. Written after set a's
+# results, to probe the known limits: a store with more products than the check
+# is shown (G: 150 titles, «عطر سلطان» past the first 80), brand and
+# perfume-house names, English, model codes, sizes, follow-ups. A product
+# request judged non_commercial is the harm; ambiguous is accepted only where
+# the name alone cannot show it is a product.
+CASES_B: Tuple[Case, ...] = (
+    Case("b_sultan_beyond_window", "harm", "G", "سلطان عندك؟", (SR, AMB), True),
+    Case("b_perfume_sultan_beyond", "harm", "G", "عطر سلطان عندك؟", (SR,), True),
+    Case("b_brand", "harm", "E", "عندكم شانيل؟", (SR,), True),
+    Case("b_perfume_house", "harm", "E", "عبدالصمد القرشي عندكم؟", (SR, AMB), True),
+    Case("b_english", "harm", "D", "Do you have a white blouse?", (SR,), True),
+    Case("b_model_code", "harm", "D", "عندكم موديل 2291؟", (SR,), True),
+    Case("b_followup_colour", "harm", "D", "والأسود؟", (SR,), True, DRESS_ASKED),
+    Case("b_greeting_request", "harm", "D", "السلام عليكم عندكم مقاسات كبيرة؟", (SR,), True),
+    Case("b_size_only", "harm", "D", "XL متوفر؟", (SR,), True),
+    Case("b_order_complaint", "harm", "D", "الطلب وصل ناقص", (SR,), True),
+    Case("b_gift_for_named", "harm", "E", "ابي عطر لأخوي محمد", (SR,), True),
+    Case("b_original_after_product", "original", "D", "عيال محمد عندك", NOT_SR, True, DRESS_ASKED),
+    Case("b_original_large_store", "original", "G", "عيال محمد عندك", NOT_SR, True),
+    Case("b_compliment_large_store", "social", "G", "ابداع روعه", NOT_SR, False),
+)
+
+SCENTS = ("ورد", "ياسمين", "عنبر", "مسك", "عود", "فانيلا", "لافندر", "صندل", "زعفران", "ليمون",
+          "برتقال", "نعناع", "قرفة", "هيل", "جوري", "فل", "كادي", "ريحان", "توت", "خزامى")
+KINDS = ("عطر", "بخور", "دهن", "معطر مفارش", "صابون", "شموع", "بودي لوشن")
+
+
+def large_catalogue() -> List[str]:
+    titles = [f"{kind} {scent}" for kind in KINDS for scent in SCENTS][:130]
+    titles += [f"عطر {scent} 100ml" for scent in SCENTS]
+    titles.insert(120, "عطر سلطان")
+    return titles
+
 
 def _load(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -137,11 +173,14 @@ def main() -> int:
         from modules.ai.orchestrator.providers.anthropic_provider import AnthropicProvider
 
         stores = {"D": ("متجر تجريبي عام D", [c[0] for c in run_eval.CATALOGUE_A]),
-                  "E": ("متجر تجريبي عام E", [c[0] for c in run_eval.CATALOGUE_C])}
+                  "E": ("متجر تجريبي عام E", [c[0] for c in run_eval.CATALOGUE_C]),
+                  "G": ("متجر تجريبي عام G", large_catalogue())}
+        wanted = os.environ.get("EVAL_INTENT_SET", "a")
+        cases = (CASES if "a" in wanted else ()) + (CASES_B if "b" in wanted else ())
         provider = AnthropicProvider()
         for model, reps in _models():
             for rep in range(1, reps + 1):
-                for case in CASES:
+                for case in cases:
                     if budget.exhausted:
                         status = "budget_stop"
                         break
