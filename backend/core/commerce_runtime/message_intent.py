@@ -1,6 +1,7 @@
 """An independent reading of what an incoming message means, before the store agent runs.
 
-Experiment — off-send evaluation only; not wired into any live path.
+Experiment — off-send evaluation only. The pilot seam calls it only when
+``COMMERCE_RUNTIME_INTENT_CHECK=1``, which no environment sets.
 
 The store agent is a sales assistant whose first move is a catalogue search.
 When a message sent to the store's number is not a store request at all — a
@@ -92,6 +93,31 @@ class IntentAssessment:
                 "intent_model": self.model, "intent_latency_ms": self.latency_ms,
                 "intent_input_tokens": self.input_tokens,
                 "intent_output_tokens": self.output_tokens}
+
+
+# What the turn does with a decision (stage 2 of the experiment). Only a check
+# that ran and did *not* read a store request changes anything: the store's
+# read tools are not offered for that one message, and the agent is told so,
+# as data, beside the reading itself. A store request, a failed check or no
+# check leaves the turn exactly as it was. The reply is the agent's own either
+# way; nothing here is wording.
+READING_KEY = "new_message_reading"
+TOOLS_OFFERED_KEY = "store_tools_offered_for_this_message"
+READINGS = {
+    NON_COMMERCIAL: "not_addressed_to_the_store_as_a_shop",
+    AMBIGUOUS: "unclear_whether_addressed_to_the_store_as_a_shop",
+}
+
+
+def withholds_store_tools(assessment: Optional["IntentAssessment"]) -> bool:
+    return (assessment is not None and assessment.status == "ok"
+            and assessment.decision in READINGS)
+
+
+def context_facts(assessment: Optional["IntentAssessment"]) -> Dict[str, Any]:
+    if not withholds_store_tools(assessment):
+        return {}
+    return {READING_KEY: READINGS[assessment.decision], TOOLS_OFFERED_KEY: False}
 
 
 def _clip(text: Any, limit: int) -> str:

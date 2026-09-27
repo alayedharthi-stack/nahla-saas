@@ -39,6 +39,7 @@ from core.commerce_runtime import contracts as c
 from core.commerce_runtime import conversation_link as cl
 from core.commerce_runtime import delivery_dispatch as dd
 from core.commerce_runtime import ledger_contracts as lc
+from core.commerce_runtime import message_intent as mi
 from core.commerce_runtime import navigation as nav
 from core.commerce_runtime import recent_products as rp
 from core.commerce_runtime import presentation_policy as pp
@@ -186,6 +187,9 @@ class TurnReport:
     reply_text: str = ""
     latency_ms: Optional[int] = None
     owner_id: Optional[str] = None
+    # Experiment: the store's read tools were not offered for this message
+    # because a separate check did not read it as a store request.
+    store_tools_withheld: bool = False
 
     @property
     def replied(self) -> bool:
@@ -618,6 +622,7 @@ def run_commerce_runtime_turn(
     history: Optional[Any] = None,
     channel: str = CHANNEL,
     anthropic_provider: Optional[Any] = None,
+    message_intent: Optional[mi.IntentAssessment] = None,
 ) -> TurnReport:
     """Run one admitted inbound turn to a recorded transport outcome.
 
@@ -625,6 +630,11 @@ def run_commerce_runtime_turn(
     conversation is admitted under a reference derived from it here, so a caller
     cannot supply a reference that names a different conversation, and the
     association is verified by reading the row back before anything is bound.
+
+    ``message_intent`` (experiment) is a separate check's reading of the
+    inbound message. Only a reading that is not a store request changes the
+    turn — see ``message_intent.withholds_store_tools``; ``None`` is the turn
+    exactly as it runs without the check.
 
     ``model`` is the caller's explicit choice and has no default: this entry
     refuses rather than let an unconfigured pilot inherit whatever the legacy
@@ -678,8 +688,10 @@ def run_commerce_runtime_turn(
         return TurnReport(reason=ADMISSION_CONFLICT, **base)
 
     turn_id = admitted.turn_id
+    withhold_store_tools = mi.withholds_store_tools(message_intent)
     report_base = dict(base, turn_id=turn_id, duplicate_inbound=bool(admitted.duplicate),
-                       owner_id=owner_id, requested_model=requested_model)
+                       owner_id=owner_id, requested_model=requested_model,
+                       store_tools_withheld=withhold_store_tools)
 
     # The two conversation identifiers come from independent sequences. Establish
     # the association by reading the runtime row back, before anything is scoped
@@ -762,7 +774,12 @@ def run_commerce_runtime_turn(
             preamble[br.FACTS_KEY] = navigation_facts
         if browse_page is not None:
             presentation = dataclasses.replace(presentation, browse_page=browse_page)
-        registry = alt.build_live_registry(binding)
+        if withhold_store_tools:
+            # The reading and the absence of the tools travel together, as
+            # data: the agent is not left to guess why it has nothing to search.
+            preamble.update(mi.context_facts(message_intent))
+        registry = (at.ToolRegistry(()) if withhold_store_tools
+                    else alt.build_live_registry(binding))
         reasoner = ap.AnthropicReasoningProvider(
             instructions=instructions,
             tools_provider=anthropic_provider or AnthropicProvider(),
