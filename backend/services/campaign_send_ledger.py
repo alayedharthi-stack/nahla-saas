@@ -1883,8 +1883,13 @@ def clear_stall_recovery(campaign: Any) -> None:
 
 
 def offer_expired(campaign: Any, *, now: Optional[datetime] = None) -> bool:
-    """True when the campaign advertises an offer whose end has passed."""
-    exp = _naive(getattr(campaign, "offer_expires_at", None))
+    """True when the campaign advertises an offer whose end has passed.
+    Anything that is not a real datetime (unset column, a test double)
+    means "no expiry" — never a guess."""
+    raw = getattr(campaign, "offer_expires_at", None)
+    if not isinstance(raw, datetime):
+        return False
+    exp = _naive(raw)
     return exp is not None and (now or utcnow()) >= exp
 
 

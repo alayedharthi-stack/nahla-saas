@@ -1677,7 +1677,7 @@ def _consent_skip_for_row(
         if {phone, _normalize_blocked_phone(phone)} & blocked_phones:
             return LOG_SKIPPED_BLOCKED_CUSTOMER, REASON_BLOCKED_CUSTOMER
     cust: Optional[Customer] = None
-    if row.customer_id:
+    if isinstance(row.customer_id, int):
         cust = db.get(Customer, row.customer_id)
     if cust is None:
         cust = customers_by_phone.get(phone)
@@ -1687,13 +1687,17 @@ def _consent_skip_for_row(
         db.refresh(cust)
     except Exception:  # noqa: silent-ok — BLE001; a detached/stale object still carries the snapshot flags
         pass
-    meta = getattr(cust, "extra_metadata", None) or {}
+    # Only a real metadata dict carries consent flags; anything else
+    # (legacy NULL, an unexpected shape) is "no flag", never "skip".
+    meta = getattr(cust, "extra_metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
     if meta.get("is_unsubscribed"):
         return LOG_SKIPPED_UNSUBSCRIBED, REASON_UNSUBSCRIBED
     if meta.get("pending_unsubscribe"):
         return LOG_SKIPPED_UNSUBSCRIBED, REASON_PENDING_OPT_OUT
-    from services.manual_segments import is_marketing_opted_out  # noqa: PLC0415
-    if is_marketing_opted_out(cust):
+    from services.manual_segments import is_marketing_opted_out_from_meta  # noqa: PLC0415
+    if is_marketing_opted_out_from_meta(meta):
         return LOG_SKIPPED_MANUAL_EXCLUSION, REASON_MARKETING_OPT_OUT
     return None
 
