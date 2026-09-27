@@ -755,10 +755,11 @@ def test_scenario_21_riyadh_date_normalization_remains_available():
     assert expiry >= start
 
 
-def test_scenario_22_small_catalog_poller_interval_remains_sixty_seconds():
-    from services.salla_coupons_poller import POLL_INTERVAL_SECONDS, get_poller_state
+def test_scenario_22_reconciler_keeps_sixty_seconds_while_recent_poll_runs_faster():
+    from services.salla_coupons_poller import POLL_INTERVAL_SECONDS, RECENT_POLL_SECONDS, get_poller_state
 
-    assert POLL_INTERVAL_SECONDS == 60
+    assert POLL_INTERVAL_SECONDS <= RECENT_POLL_SECONDS
+    assert RECENT_POLL_SECONDS == 10
     state = get_poller_state()
     assert state["config"]["adaptive_sla"]["small_catalog_seconds"] == 60
 

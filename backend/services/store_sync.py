@@ -2969,6 +2969,7 @@ class StoreSyncService:
         raw_list=None,
         fetch_result=None,
         duration_ms=None,
+        record_sync_meta: bool = True,
     ) -> int:
         adapter = self._get_adapter()
         if raw_list is None:
@@ -3003,30 +3004,32 @@ class StoreSyncService:
                     }
                     raw_list = []
             else:
-                self._record_coupon_sync_meta(
-                    triggered_by=triggered_by,
-                    items_seen=0,
-                    created=0,
-                    updated=0,
-                    failure_class="no_adapter",
-                    fetch_ok=False,
-                )
+                if record_sync_meta:
+                    self._record_coupon_sync_meta(
+                        triggered_by=triggered_by,
+                        items_seen=0,
+                        created=0,
+                        updated=0,
+                        failure_class="no_adapter",
+                        fetch_ok=False,
+                    )
                 return 0
 
         if fetch_result and not fetch_result.get("ok") and not fetch_result.get("partial"):
-            self._record_coupon_sync_meta(
-                triggered_by=triggered_by,
-                items_seen=int(fetch_result.get("items_seen") or 0),
-                created=0,
-                updated=0,
-                failure_class=fetch_result.get("failure_class"),
-                pages_fetched=fetch_result.get("pages_fetched"),
-                duration_ms=duration_ms,
-                partial=False,
-                http_status=fetch_result.get("http_status"),
-                retry_after=fetch_result.get("retry_after"),
-                fetch_ok=False,
-            )
+            if record_sync_meta:
+                self._record_coupon_sync_meta(
+                    triggered_by=triggered_by,
+                    items_seen=int(fetch_result.get("items_seen") or 0),
+                    created=0,
+                    updated=0,
+                    failure_class=fetch_result.get("failure_class"),
+                    pages_fetched=fetch_result.get("pages_fetched"),
+                    duration_ms=duration_ms,
+                    partial=False,
+                    http_status=fetch_result.get("http_status"),
+                    retry_after=fetch_result.get("retry_after"),
+                    fetch_ok=False,
+                )
             return 0
 
         raw_list = list(raw_list or [])
@@ -3117,19 +3120,20 @@ class StoreSyncService:
             fetch_ok = bool(fetch_result.get("ok"))
             if partial:
                 failure_class = "partial_pagination"
-        self._record_coupon_sync_meta(
-            triggered_by=triggered_by,
-            items_seen=len(raw_list),
-            created=created,
-            updated=updated,
-            failure_class=failure_class,
-            pages_fetched=(fetch_result or {}).get("pages_fetched"),
-            duration_ms=duration_ms,
-            partial=partial,
-            http_status=(fetch_result or {}).get("http_status"),
-            retry_after=(fetch_result or {}).get("retry_after"),
-            fetch_ok=fetch_ok,
-        )
+        if record_sync_meta:
+            self._record_coupon_sync_meta(
+                triggered_by=triggered_by,
+                items_seen=len(raw_list),
+                created=created,
+                updated=updated,
+                failure_class=failure_class,
+                pages_fetched=(fetch_result or {}).get("pages_fetched"),
+                duration_ms=duration_ms,
+                partial=partial,
+                http_status=(fetch_result or {}).get("http_status"),
+                retry_after=(fetch_result or {}).get("retry_after"),
+                fetch_ok=fetch_ok,
+            )
         return created + updated
 
     def _record_coupon_sync_meta(

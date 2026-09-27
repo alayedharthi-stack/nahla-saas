@@ -244,7 +244,10 @@ def test_h6_3_per_tenant_poll_failure_isolates_and_redacts_logs(caplog):
                 return_value=mock_lock,
             ):
                 with patch("services.salla_coupon_fetch.tenant_poll_due", return_value=True):
-                    with patch(
+                    with patch("services.salla_coupons_poller._poll_recent_integration", new_callable=AsyncMock, return_value={
+                        "items_seen": 0, "upserted": 0, "fetch_ok": True,
+                        "failure_class": None, "duration_ms": 1,
+                    }), patch(
                         "services.salla_coupons_poller._poll_integration",
                         poll_side,
                     ):
@@ -334,7 +337,10 @@ def test_h6_5_poller_state_never_exposes_raw_store_id(caplog):
                 return_value=mock_lock,
             ):
                 with patch("services.salla_coupon_fetch.tenant_poll_due", return_value=True):
-                    with patch(
+                    with patch("services.salla_coupons_poller._poll_recent_integration", new_callable=AsyncMock, return_value={
+                        "items_seen": 0, "upserted": 0, "fetch_ok": True,
+                        "failure_class": None, "duration_ms": 1,
+                    }), patch(
                         "services.salla_coupons_poller._poll_integration",
                         poll_ok,
                     ):

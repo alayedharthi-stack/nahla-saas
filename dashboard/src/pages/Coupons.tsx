@@ -330,7 +330,7 @@ export default function Coupons() {
   const globalDefaults = data.global_defaults || DEFAULT_GLOBAL_DEFAULTS
   const aiPolicy = data.ai_policy || DEFAULT_AI_POLICY
 
-  const load = () => {
+  const load = (keepExistingOnError = false) => {
     featureRealityApi.coupons()
       .then(d => setData({
         ...d,
@@ -338,10 +338,24 @@ export default function Coupons() {
         global_defaults: d.global_defaults || DEFAULT_GLOBAL_DEFAULTS,
         ai_policy:       d.ai_policy       || DEFAULT_AI_POLICY,
       }))
-      .catch(() => setData(emptyData))
+      .catch(() => { if (!keepExistingOnError) setData(emptyData) })
   }
 
   useEffect(() => { load() }, [])
+
+  // Salla has no coupon-created store event. Keep the open dashboard in sync
+  // with the fast, bounded server-side coupon poll, including tab returns.
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') load(true)
+    }
+    const timer = window.setInterval(refreshIfVisible, 5_000)
+    window.addEventListener('focus', refreshIfVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshIfVisible)
+    }
+  }, [])
 
   useEffect(() => {
     featureRealityApi.sallaIntegrationStatus()
@@ -401,7 +415,7 @@ export default function Coupons() {
     coupon_level?: CouponLevelId
     allocation_channel?: CouponChannel
   }) => {
-    await featureRealityApi.createCoupon({
+    const created = await featureRealityApi.createCoupon({
       code: payload.code,
       type: payload.type,
       value: payload.value,
@@ -415,6 +429,9 @@ export default function Coupons() {
     })
     setCreateOpen(false)
     setFilter('manual')
+    setSyncMessage(created.sync_status === 'synced'
+      ? 'حُفظ الكوبون في نحلة وسلة.'
+      : `حُفظ الكوبون في نحلة، ولم يتأكد إرساله إلى سلة: ${created.sync_error || 'تحقق من حالة الربط وأعد الإرسال من صف الكوبون.'}`)
     load()
   }
 
@@ -1137,7 +1154,7 @@ function CreateStoreCouponModal({ open, onClose, onCreate }: CreateStoreCouponMo
         <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
           <div className="min-w-0">
             <h2 className="text-base font-bold text-slate-900">إضافة كوبون</h2>
-            <p className="text-xs text-slate-500 mt-0.5">كوبون متجر يدوي — يُدار من هذه الصفحة ولا يُرسل إلى سلة تلقائياً</p>
+            <p className="text-xs text-slate-500 mt-0.5">كوبون متجر يدوي — يُرسل إلى سلة تلقائياً عند اكتمال الربط</p>
           </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700">
             <X className="w-5 h-5" />

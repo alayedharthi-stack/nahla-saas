@@ -867,7 +867,7 @@ export const featureRealityApi = {
     ai_allocatable?: boolean
     coupon_level?: CouponLevelId | null
     allocation_channel?: CouponChannel | null
-  }): Promise<{ id: number }> {
+  }): Promise<{ id: number; sync_status?: string | null; sync_error?: string | null }> {
     return apiCall('/coupons', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -887,6 +887,10 @@ export const featureRealityApi = {
   syncSallaCoupons(): Promise<{ status: string; synced: number }> {
     return apiCall('/coupons/sync-salla', {
       method: 'POST',
+      // Large Salla stores require a complete paginated import before the
+      // response is ready. The shared 25s timeout aborts this request while
+      // the server is still committing the imported coupons.
+      timeoutMs: 120_000,
     })
   },
   pushSallaCoupon(couponId: string): Promise<{

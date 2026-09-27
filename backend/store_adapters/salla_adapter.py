@@ -1320,6 +1320,7 @@ class SallaAdapter(BaseStoreAdapter):
         per_page: int = 60,
         extra_params: Optional[Dict[str, Any]] = None,
         label: str = "",
+        max_pages: Optional[int] = None,
     ) -> Dict[str, Any]:
         from services.salla_coupon_fetch import classify_fetch_exception, empty_fetch_result  # noqa: PLC0415
 
@@ -1380,6 +1381,20 @@ class SallaAdapter(BaseStoreAdapter):
                 break
             if len(items) < per_page:
                 break
+            if max_pages is not None and page >= max_pages:
+                # A bounded recent scan must never pass off a truncated
+                # catalogue as a complete one. The full reconciler will
+                # still import every page on its normal cadence.
+                return {
+                    "ok": False,
+                    "items": [],
+                    "pages_fetched": pages_fetched,
+                    "items_seen": len(all_items),
+                    "partial": False,
+                    "http_status": None,
+                    "failure_class": "recent_window_too_large",
+                    "retry_after": None,
+                }
             page += 1
 
         return {
@@ -1396,6 +1411,23 @@ class SallaAdapter(BaseStoreAdapter):
     async def fetch_coupons_paginated(self, *, per_page: int = 60) -> Dict[str, Any]:
         self._require_auth("fetch_coupons_paginated")
         return await self._fetch_all_pages_result("/coupons", per_page=per_page, label="coupons")
+
+    async def fetch_recent_coupons_paginated(
+        self, *, per_page: int = 60, max_pages: int = 5,
+    ) -> Dict[str, Any]:
+        """Fetch a bounded Riyadh two-day creation window for fast imports."""
+        self._require_auth("fetch_recent_coupons_paginated")
+        from core.salla_order_fidelity import _riyadh_tz  # noqa: PLC0415
+
+        today = datetime.now(_riyadh_tz()).date()
+        start = today - timedelta(days=1)
+        return await self._fetch_all_pages_result(
+            "/coupons",
+            per_page=per_page,
+            extra_params={"creation_date": f"{start.isoformat()},{today.isoformat()}"},
+            label="coupons_recent",
+            max_pages=max_pages,
+        )
 
 
     # ── Products ───────────────────────────────────────────────────────────────
