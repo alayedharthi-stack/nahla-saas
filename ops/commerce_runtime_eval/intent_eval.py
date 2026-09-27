@@ -116,6 +116,33 @@ CASES_B: Tuple[Case, ...] = (
     Case("b_compliment_large_store", "social", "G", "ابداع روعه", NOT_SR, False),
 )
 
+# Set c, after the owner's corrected criterion (2026-09-27): a bare name alone
+# («سلطان عندك؟») is ambiguous and may be clarified even where the store sells
+# «عطر سلطان», so those cases no longer gate. What gates is harm to a clear
+# request: a named product with its kind past the check's first 80 titles, an
+# order or delivery question, and a store whose catalogue could not be read.
+BARE_NAME_SOLD = {"n_sultan_sold", "b_sultan_beyond_window"}
+CASES_C: Tuple[Case, ...] = (
+    Case("c_dress_named_beyond", "harm", "H", "فستان لولوة عندك؟", (SR,), True),
+    Case("c_honey_type_beyond", "harm", "I", "عسل مانوكا عندك؟", (SR,), True),
+    Case("c_honey_type_beyond_2", "harm", "I", "عندكم عسل مانوكا؟", (SR,), True),
+    Case("c_perfume_named_beyond", "harm", "G", "عطر سلطان عندك؟", (SR,), True),
+    Case("c_order_where", "harm", "D", "وين طلبي؟", (SR,), True),
+    Case("c_order_number", "harm", "D", "رقم طلبي 4471 وش صار عليه؟", (SR,), True),
+    Case("c_shipment", "harm", "E", "ابي اتابع شحنتي", (SR,), True),
+    Case("c_delivery_fee", "harm", "D", "كم رسوم التوصيل؟", (SR,), True),
+    Case("c_delivery_city", "harm", "E", "متى يوصل الطلب لجدة؟", (SR,), True),
+    Case("c_unknown_catalogue_product", "harm", "U", "عطر سلطان عندك؟", (SR,), True),
+    Case("c_unknown_catalogue_original", "original", "U", "عيال محمد عندك", NOT_SR, True),
+)
+
+
+def corrected(case: Case) -> Case:
+    if case.name in BARE_NAME_SOLD:
+        return dataclasses.replace(case, hard=False, accepted=(SR, AMB, NC))
+    return case
+
+
 SCENTS = ("ورد", "ياسمين", "عنبر", "مسك", "عود", "فانيلا", "لافندر", "صندل", "زعفران", "ليمون",
           "برتقال", "نعناع", "قرفة", "هيل", "جوري", "فل", "كادي", "ريحان", "توت", "خزامى")
 KINDS = ("عطر", "بخور", "دهن", "معطر مفارش", "صابون", "شموع", "بودي لوشن")
@@ -125,6 +152,26 @@ def large_catalogue() -> List[str]:
     titles = [f"{kind} {scent}" for kind in KINDS for scent in SCENTS][:130]
     titles += [f"عطر {scent} 100ml" for scent in SCENTS]
     titles.insert(120, "عطر سلطان")
+    return titles
+
+
+CLOTHING = ("فستان", "بلوزة", "تنورة", "جاكيت", "عباية", "بنطلون", "قميص")
+COLOURS = ("أسود", "أبيض", "أحمر", "أزرق", "أخضر", "وردي", "بيج", "كحلي", "رمادي", "بني",
+           "فوشي", "عنابي", "زيتي", "سماوي", "ذهبي", "فضي", "بنفسجي", "خمري", "موف", "تركواز")
+FOOD = ("عسل", "تمر", "قهوة", "شاي", "زيت", "بهارات", "مكسرات")
+FOOD_TYPES = ("سمر", "طلح", "زهور", "جبلي", "سكري", "خلاص", "عربي", "تركي", "أخضر", "أسود",
+              "زيتون", "سمسم", "مشكل", "كبسة", "لوز", "كاجو", "فستق", "بلدي", "ملكي", "فاخر")
+
+
+def large_clothing() -> List[str]:
+    titles = [f"{kind} {colour}" for kind in CLOTHING for colour in COLOURS]
+    titles.insert(125, "فستان لولوة")
+    return titles
+
+
+def large_food() -> List[str]:
+    titles = [f"{kind} {kind_type}" for kind in FOOD for kind_type in FOOD_TYPES]
+    titles.insert(125, "عسل مانوكا")
     return titles
 
 
@@ -174,9 +221,14 @@ def main() -> int:
 
         stores = {"D": ("متجر تجريبي عام D", [c[0] for c in run_eval.CATALOGUE_A]),
                   "E": ("متجر تجريبي عام E", [c[0] for c in run_eval.CATALOGUE_C]),
-                  "G": ("متجر تجريبي عام G", large_catalogue())}
+                  "G": ("متجر تجريبي عام G", large_catalogue()),
+                  "H": ("متجر تجريبي عام H", large_clothing()),
+                  "I": ("متجر تجريبي عام I", large_food()),
+                  # A store whose catalogue could not be read: titles unknown.
+                  "U": ("متجر تجريبي عام U", None)}
         wanted = os.environ.get("EVAL_INTENT_SET", "a")
-        cases = (CASES if "a" in wanted else ()) + (CASES_B if "b" in wanted else ())
+        cases = tuple(corrected(c) for c in (CASES if "a" in wanted else ())
+                      + (CASES_B if "b" in wanted else ()) + (CASES_C if "c" in wanted else ()))
         provider = AnthropicProvider()
         for model, reps in _models():
             for rep in range(1, reps + 1):

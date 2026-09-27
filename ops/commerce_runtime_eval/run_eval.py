@@ -20,6 +20,7 @@ Output: one ``EVAL_TURN=`` JSON line per turn, one ``EVAL_SUMMARY=`` line.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import importlib.util
 import json
@@ -50,6 +51,13 @@ SCRIPTED = os.environ.get("EVAL_PROVIDER", "") == "scripted"
 # the runtime entry.
 ARMS = tuple(a.strip() for a in os.environ.get("EVAL_ARMS", "baseline").split(",") if a.strip())
 INTENT_MODEL = os.environ.get("EVAL_INTENT_MODEL", "")
+# ``intent_no_reading`` is an ablation for one question — does the unrequested
+# greeting come from the reading the agent is shown? — and exists only here: it
+# runs the same check and withholds the same tool, and shows the agent the
+# capability fact without the reading. EVAL_ARM_SCOPE ({"arm": [scenario, ...]})
+# limits an arm to some scenarios; an arm it does not name runs all of them.
+INTENT_ARMS = ("intent", "intent_no_reading")
+ARM_SCOPE = json.loads(os.environ.get("EVAL_ARM_SCOPE", "") or "{}")
 
 # ── Measurement vocabulary (report only) ─────────────────────────────────────
 NON_SAUDI_MARKERS = ("هسع", "شنو", "شو ", "هلأ", "هلق", "بدك", "كتير", "إزاي", "ازاي", "عايز",
@@ -107,6 +115,29 @@ def _large_catalogue() -> Tuple[Tuple[str, int, int, Tuple[str, ...], str, bool]
 
 
 CATALOGUE_G = _large_catalogue()
+
+# Two more stores larger than the check's view, for the owner's hard cases: a
+# named product with its kind past the first 80 titles must reach the search.
+_CLOTHING = ("فستان", "بلوزة", "تنورة", "جاكيت", "عباية", "بنطلون", "قميص")
+_COLOURS = ("أسود", "أبيض", "أحمر", "أزرق", "أخضر", "وردي", "بيج", "كحلي", "رمادي", "بني",
+            "فوشي", "عنابي", "زيتي", "سماوي", "ذهبي", "فضي", "بنفسجي", "خمري", "موف", "تركواز")
+_FOOD = ("عسل", "تمر", "قهوة", "شاي", "زيت", "بهارات", "مكسرات")
+_FOOD_TYPES = ("سمر", "طلح", "زهور", "جبلي", "سكري", "خلاص", "عربي", "تركي", "أخضر", "أسود",
+               "زيتون", "سمسم", "مشكل", "كبسة", "لوز", "كاجو", "فستق", "بلدي", "ملكي", "فاخر")
+
+
+def _catalogue_of(titles: List[str]) -> Tuple[Tuple[str, int, int, Tuple[str, ...], str, bool], ...]:
+    return tuple((title, 45 + 5 * (i % 40), 3, (), "", True) for i, title in enumerate(titles))
+
+
+def _titles_with(kinds: Tuple[str, ...], kinds_of: Tuple[str, ...], named: str) -> List[str]:
+    titles = [f"{kind} {k}" for kind in kinds for k in kinds_of]
+    titles.insert(125, named)
+    return titles
+
+
+CATALOGUE_H = _catalogue_of(_titles_with(_CLOTHING, _COLOURS, "فستان لولوة"))
+CATALOGUE_I = _catalogue_of(_titles_with(_FOOD, _FOOD_TYPES, "عسل مانوكا"))
 STORE_HOST = "shop.eval-store.example"
 IMAGE_HOST = "cdn.eval-store.example"
 
@@ -194,6 +225,12 @@ SCENARIOS: Tuple[Scenario, ...] = (
     # A real product named like a person, in a store larger than the check's view.
     Scenario("sh_bare_name_large_store", "G", ("سلطان عندك؟",)),
     Scenario("sh_perfume_named_large_store", "G", ("عطر سلطان عندك؟",)),
+    Scenario("sh_dress_named_large_store", "H", ("فستان لولوة عندك؟",)),
+    Scenario("sh_honey_type_large_store", "I", ("عسل مانوكا عندك؟",)),
+    # Order and delivery questions: their tools must never be withheld.
+    Scenario("sh_order_status", "D", ("طلبي متى يوصل؟",)),
+    Scenario("sh_order_where", "E", ("وين طلبي؟",)),
+    Scenario("sh_delivery_fee", "F", ("كم رسوم التوصيل؟",)),
 )
 
 
@@ -467,22 +504,42 @@ class _ScriptedCheck:
                             "input": {"decision": mi.AMBIGUOUS, "reason": "scripted"}}]}
 
 
-def _intent_for(db: Any, seam: Any, store: Store, text_in: str, history: Any,
-                metadata: Mapping[str, Any]) -> Any:
-    """The intent arm's reading, through the seam's own function, switched on
-    for this call only."""
-    previous = os.environ.get(seam.INTENT_CHECK_ENV)
+def _intent_for(db: Any, seam: Any, store: Store, conversation_id: int, text_in: str,
+                history: Any, metadata: Mapping[str, Any]) -> Any:
+    """The intent arm's reading, through the seam's own function and the seam's
+    own model setting (the one production would read), switched on for this
+    call only."""
+    saved = {k: os.environ.get(k) for k in (seam.INTENT_CHECK_ENV, seam.INTENT_MODEL_ENV)}
     os.environ[seam.INTENT_CHECK_ENV] = "1"
+    os.environ[seam.INTENT_MODEL_ENV] = "scripted" if SCRIPTED else INTENT_MODEL
     try:
-        return seam._message_intent(db, tenant_id=store.tenant_id, text=text_in, history=history,
-                                    inbound_metadata=dict(metadata),
-                                    model="scripted" if SCRIPTED else INTENT_MODEL,
+        return seam._message_intent(db, tenant_id=store.tenant_id, conversation_id=conversation_id,
+                                    text=text_in, history=history, inbound_metadata=dict(metadata),
                                     provider=_ScriptedCheck() if SCRIPTED else None)
     finally:
-        if previous is None:
-            os.environ.pop(seam.INTENT_CHECK_ENV, None)
-        else:
-            os.environ[seam.INTENT_CHECK_ENV] = previous
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@contextlib.contextmanager
+def _arm_facts(arm: str) -> Any:
+    """The ablation arm shows the capability fact without the reading."""
+    from core.commerce_runtime import message_intent as mi
+    if arm != "intent_no_reading":
+        yield
+        return
+    original = mi.context_facts
+
+    def without_reading(assessment: Any) -> Dict[str, Any]:
+        return {k: v for k, v in original(assessment).items() if k != mi.READING_KEY}
+    mi.context_facts = without_reading
+    try:
+        yield
+    finally:
+        mi.context_facts = original
 
 
 def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: int, phone: str,
@@ -504,7 +561,8 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
         preamble = seam._context_preamble(db, store.tenant_id, convo, customer_name)
         history = seam._prior_turns(db, tenant_id=store.tenant_id, conversation_id=conversation_id,
                                     phone=phone, current_text=text_in)
-        intent = _intent_for(db, seam, store, text_in, history, metadata) if arm == "intent" else None
+        intent = (_intent_for(db, seam, store, conversation_id, text_in, history, metadata)
+                  if arm in INTENT_ARMS else None)
         db.commit()
     finally:
         db.close()
@@ -515,17 +573,18 @@ def run_turn(ctx: "Context", store: Store, conversation_id: int, customer_id: in
         from modules.ai.orchestrator.providers.anthropic_provider import AnthropicProvider
         provider = RecordingProvider(AnthropicProvider())
     started = time.monotonic()
-    report = entry.run_commerce_runtime_turn(
-        engine=ctx.engine, session_factory=ctx.session_factory, tenant_id=store.tenant_id,
-        conversation_id=conversation_id, connection_ref=f"wa:{store.connection_id}",
-        connection_id=str(store.connection_id), customer_id=customer_id,
-        normalized_customer_phone=phone,
-        provider_message_id="wamid.eval.in." + uuid.uuid4().hex, inbound_text=text_in,
-        inbound_metadata=dict(metadata), transport=entry.whatsapp_reply_transport(
-            senders.text, senders.list, recipient=phone, send_card=senders.card),
-        instructions=seam._instructions(), model=ctx.model, budget=pilot_guard.pilot_budget(),
-        context_preamble=preamble, history=history, anthropic_provider=provider,
-        message_intent=intent)
+    with _arm_facts(arm):
+        report = entry.run_commerce_runtime_turn(
+            engine=ctx.engine, session_factory=ctx.session_factory, tenant_id=store.tenant_id,
+            conversation_id=conversation_id, connection_ref=f"wa:{store.connection_id}",
+            connection_id=str(store.connection_id), customer_id=customer_id,
+            normalized_customer_phone=phone,
+            provider_message_id="wamid.eval.in." + uuid.uuid4().hex, inbound_text=text_in,
+            inbound_metadata=dict(metadata), transport=entry.whatsapp_reply_transport(
+                senders.text, senders.list, recipient=phone, send_card=senders.card),
+            instructions=seam._instructions(), model=ctx.model, budget=pilot_guard.pilot_budget(),
+            context_preamble=preamble, history=history, anthropic_provider=provider,
+            message_intent=intent)
     wall_ms = int((time.monotonic() - started) * 1000)
     last = senders.sent[-1] if senders.sent else {}
     wire = seam.WireObservation()
@@ -601,7 +660,8 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int,
 
     store = ctx.stores[scenario.tenant]
     name = {"A": "نورة عبدالله", "B": "أحمد سالم", "C": "سارة محمد", "D": "نورة عبدالله",
-            "E": "سارة محمد", "F": "أحمد سالم", "G": "نورة عبدالله"}[scenario.tenant]
+            "E": "سارة محمد", "F": "أحمد سالم", "G": "نورة عبدالله", "H": "نورة عبدالله",
+            "I": "أحمد سالم"}[scenario.tenant]
     customer_id, conversation_id, phone = new_conversation(ctx.engine, store, name)
     if scenario.history:
         db = ctx.session_factory()
@@ -664,7 +724,8 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int,
                 "reason", "choices_outcome", "card_outcome", "browse_outcome", "paging_words",
                 "navigation_tap", "navigation_page", "navigation_has_next", "steps_used",
                 "tool_calls_used", "tools_called", "evidence_refs", "input_tokens",
-                "output_tokens", "latency_ms", "model", "stop_reason", "store_tools_withheld")},
+                "output_tokens", "latency_ms", "model", "stop_reason", "withheld_tools",
+                "message_intent_decision")},
             "metrics": measure(result, store),
         }
         record["outcome"] = outcome_class(record)
@@ -775,12 +836,16 @@ def main() -> int:
                 ("تغليف الهدايا", "نوفّر تغليف هدايا مجانيًا لأي طلب، اطلبه عند إتمام الطلب."))),
             "G": seed_store(engine, "G", {"assistant_name": "ريم", "default_language": "arabic",
                                           "reply_tone": "friendly"}, CATALOGUE_G, shared_number=True),
+            "H": seed_store(engine, "H", {"assistant_name": "وردة", "default_language": "arabic",
+                                          "reply_tone": "friendly"}, CATALOGUE_H, shared_number=True),
+            "I": seed_store(engine, "I", {"assistant_name": "ريم", "default_language": "arabic",
+                                          "reply_tone": "friendly"}, CATALOGUE_I, shared_number=True),
         }
         ctx = Context(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
                       model=model, stores=stores)
         wanted = [s.strip() for s in os.environ.get("EVAL_SCENARIOS", "").split(",") if s.strip()]
         scenarios = [s for s in SCENARIOS if not wanted or s.name in wanted]
-        if "intent" in ARMS and not SCRIPTED:
+        if set(INTENT_ARMS) & set(ARMS) and not SCRIPTED:
             budget.add(INTENT_MODEL, 0, 0)   # refuses an intent model it cannot price, before any call
         stopped = False
         for rep in range(REP_START, REPEATS + 1):
@@ -789,6 +854,8 @@ def main() -> int:
                     if budget.exhausted:
                         stopped = True
                         break
+                    if arm in ARM_SCOPE and scenario.name not in ARM_SCOPE[arm]:
+                        continue
                     new = run_scenario(ctx, scenario, rep, arm)
                     for r in new:
                         if "metrics" in r:
