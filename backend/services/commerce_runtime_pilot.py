@@ -541,22 +541,44 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
 
 
 # Experiment: a separate reading of the inbound message before the agent runs
-# (``core.commerce_runtime.message_intent``). Off unless this is exactly "1",
-# which no environment sets; off, the turn is exactly what it was.
+# (``core.commerce_runtime.message_intent``). Off unless INTENT_CHECK_ENV is
+# exactly "1" *and* INTENT_MODEL_ENV names the model, which no environment sets;
+# off, the turn is exactly what it was. The check's model is its own explicit
+# setting and never falls back to the agent's: a check measured on one model
+# must not run on another because a variable was left unset.
 INTENT_CHECK_ENV = "COMMERCE_RUNTIME_INTENT_CHECK"
+INTENT_MODEL_ENV = "COMMERCE_RUNTIME_INTENT_MODEL"
+
+# An inbound that is a tap on a control this platform sent (a list row, a
+# reply button, the cash-on-delivery confirmation) is verified state, not words
+# to interpret, so the check never runs on it.
+_STRUCTURED_REPLY_KEYS = ("list_reply_id", "button_id", "cod_button_payload")
 
 
-def _intent_check_enabled() -> bool:
-    return os.environ.get(INTENT_CHECK_ENV, "").strip() == "1"
+def _intent_check_model() -> str:
+    """The configured check model, or "" when the check is off."""
+    if os.environ.get(INTENT_CHECK_ENV, "").strip() != "1":
+        return ""
+    model = os.environ.get(INTENT_MODEL_ENV, "").strip()
+    if not model:
+        logger.warning("[COMMERCE_RUNTIME_PILOT] intent check enabled without %s; not run",
+                       INTENT_MODEL_ENV)
+    return model
 
 
-def _catalogue_view(db: Any, tenant_id: int) -> Tuple[str, List[str]]:
+def _is_structured_reply(inbound_metadata: Optional[Mapping[str, Any]]) -> bool:
+    metadata = inbound_metadata or {}
+    return (metadata.get("cod_structured_button") is True
+            or any(str(metadata.get(key) or "").strip() for key in _STRUCTURED_REPLY_KEYS))
+
+
+def _catalogue_view(db: Any, tenant_id: int) -> Tuple[str, Optional[List[str]]]:
     """``(store_name, product_titles)`` the check reads: the store's own words.
 
     Distinct titles, in-stock first and then oldest first (the catalogue's
     canonical order), one past the check's bound so it can say the list is
-    partial. A read that fails yields no titles, never a guess; the check is
-    then told nothing about the catalogue.
+    partial. A read that fails yields ``None`` — unknown, which the check is
+    shown as a partial list — never an empty catalogue.
     """
     from core.commerce_runtime import message_intent as mi  # noqa: PLC0415
     from sqlalchemy import text as sql  # noqa: PLC0415
@@ -576,24 +598,24 @@ def _catalogue_view(db: Any, tenant_id: int) -> Tuple[str, List[str]]:
     except Exception as exc:  # noqa: BLE001 - the check runs without the catalogue
         logger.warning("[COMMERCE_RUNTIME_PILOT] intent check catalogue unreadable tenant=%s "
                        "error=%s", tenant_id, type(exc).__name__)
-        return "", []
+        return "", None
     settings = row[1] if row is not None and isinstance(row[1], Mapping) else {}
     name = str(settings.get("store_name") or (row[0] if row is not None else "") or "")
     return name, titles
 
 
-def _message_intent(db: Any, *, tenant_id: int, text: str, history: Sequence[Mapping[str, Any]],
-                    inbound_metadata: Optional[Mapping[str, Any]], model: str,
+def _message_intent(db: Any, *, tenant_id: int, conversation_id: int, text: str,
+                    history: Sequence[Mapping[str, Any]],
+                    inbound_metadata: Optional[Mapping[str, Any]],
                     provider: Any = None) -> Any:
     """The check's assessment for this inbound message, or ``None``.
 
     ``None`` — the turn runs exactly as without the check — when the experiment
-    is off, or when the inbound is a tap on a row this platform sent: that is
-    verified state, not words to interpret.
+    is off or has no model configured, or when the inbound is a tap on a control
+    this platform sent.
     """
-    if not _intent_check_enabled():
-        return None
-    if (inbound_metadata or {}).get("list_reply_id"):
+    model = _intent_check_model()
+    if not model or _is_structured_reply(inbound_metadata):
         return None
     from core.commerce_runtime import message_intent as mi  # noqa: PLC0415
 
@@ -605,7 +627,9 @@ def _message_intent(db: Any, *, tenant_id: int, text: str, history: Sequence[Map
     store_name, titles = _catalogue_view(db, int(tenant_id))
     assessment = mi.assess(message=text, history=history, store_name=store_name,
                            product_titles=titles, provider=provider, model=model,
-                           audit_context={"tenant_id": int(tenant_id), "channel": "whatsapp"})
+                           audit_context={"tenant_id": int(tenant_id),
+                                          "conversation_id": int(conversation_id),
+                                          "channel": "whatsapp"})
     logger.info("[COMMERCE_RUNTIME_PILOT] intent check tenant=%s %s", tenant_id,
                 " ".join(f"{k}={v}" for k, v in assessment.as_log_fields().items()))
     return assessment
@@ -1343,9 +1367,8 @@ async def _own_turn(
     def run() -> Any:
         history = _prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
                                phone=to, current_text=text)
-        intent = _message_intent(db, tenant_id=int(tenant_id), text=text, history=history,
-                                 inbound_metadata=inbound_metadata,
-                                 model=str(decision.model or ""))
+        intent = _message_intent(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
+                                 text=text, history=history, inbound_metadata=inbound_metadata)
         return entry.run_commerce_runtime_turn(
             engine=engine,
             session_factory=SessionLocal,
@@ -1491,6 +1514,14 @@ def _record(*, db: Any, trace: Any, convo: Any, tenant_id: int, to: str, report:
                 "commerce_runtime_wire_duplicate_suppressed": wire.duplicate_suppressed,
                 "provider_message_id": report.provider_message_id,
                 "evidence_refs": list(report.evidence_refs),
+                # Experiment: what the intent check read and kept from this
+                # message, so a reply shaped by it is auditable. Absent when the
+                # check did not run.
+                **({"message_intent_decision": report.message_intent_decision,
+                    "message_intent_status": report.message_intent_status,
+                    "message_intent_model": report.message_intent_model,
+                    "withheld_tools": list(report.withheld_tools)}
+                   if getattr(report, "message_intent_status", None) else {}),
                 # The rows this message actually carried, read back from the
                 # wire rather than from the reserved intent. A later tap is
                 # checked against these, so a reply that offered no list — or
