@@ -566,9 +566,11 @@ def get_capacity_resume_state() -> Dict[str, Any]:
 
 async def run_campaign_capacity_resume_scheduler() -> None:
     """Continue campaigns that Meta's shared messaging limit paused, once
-    capacity returns. The state lives in the database, so a restart or
-    deploy never loses a waiting campaign — the next tick picks it up.
-    See ``campaign_dispatcher.resume_capacity_waiting``."""
+    capacity returns, and campaigns whose worker died mid-run. The state
+    lives in the database, so a restart or deploy never loses a waiting
+    campaign — the next tick picks it up. See
+    ``campaign_dispatcher.resume_capacity_waiting`` and
+    ``campaign_dispatcher.resume_stalled_campaigns``."""
     await asyncio.sleep(20)
     _capacity_resume_state["started_at"] = datetime.now(timezone.utc)
     logger.info("[Campaign Capacity Resume] Started — polling every %ss", _CAPACITY_POLL_SECONDS)
@@ -595,7 +597,9 @@ async def _resume_capacity_waiting_campaigns() -> None:
         if _p not in _sys.path:
             _sys.path.insert(0, _p)
     from core.database import SessionLocal  # noqa: PLC0415
-    from services.campaign_dispatcher import resume_capacity_waiting  # noqa: PLC0415
+    from services.campaign_dispatcher import (  # noqa: PLC0415
+        resume_capacity_waiting, resume_stalled_campaigns,
+    )
 
     db = SessionLocal()
     try:
@@ -604,6 +608,19 @@ async def _resume_capacity_waiting_campaigns() -> None:
             if a.get("action", "").startswith("resumed"):
                 _capacity_resume_state["resumed"] += 1
                 logger.info("[Campaign Capacity Resume] %s", a)
+    finally:
+        db.close()
+    # Runs whose worker died (deploy / crash) continue from the durable
+    # queue without the merchant. Separate session: a failure here must
+    # not undo the capacity pass above.
+    db = SessionLocal()
+    try:
+        for a in await resume_stalled_campaigns(db):
+            if str(a.get("action", "")).startswith(("recovered", "gave_up", "offer_expired")):
+                _capacity_resume_state["stall_recoveries"] = (
+                    _capacity_resume_state.get("stall_recoveries", 0) + 1
+                )
+                logger.info("[Campaign Stall Recovery] %s", a)
     finally:
         db.close()
 
