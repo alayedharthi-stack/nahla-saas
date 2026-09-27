@@ -161,6 +161,14 @@ SCENARIOS: Tuple[Scenario, ...] = (
     Scenario("sh_colour_not_stocked", "D", ("عندكم فستان أخضر؟",)),
     Scenario("sh_perfume_not_carried", "E", ("عندكم عطر عنبر؟",)),
     Scenario("sh_category_not_sold_2", "D", ("عندكم عبايات؟",)),
+    # Unavailable, and a product request only because of the conversation so far.
+    Scenario("sh_context_not_carried", "E", ("وعنبر؟",),
+             history=(("inbound", "عندكم عطر سلطان؟"), ("outbound", "إيه عندنا عطر سلطان بـ 220 ريال 🌹"))),
+    # A bare name where the store has no product by it (pairs with sh_person_bare_name).
+    Scenario("sh_bare_name_no_product", "D", ("سلطان عندك؟",)),
+    # Clear questions that are not about a product, answered by the store's knowledge.
+    Scenario("sh_delivery_question", "F", ("توصلون للرياض؟",)),
+    Scenario("sh_gift_wrap_question", "F", ("عندكم تغليف هدايا؟",)),
 )
 
 
@@ -209,7 +217,8 @@ class Store:
 
 def seed_store(engine: Any, label: str, settings: Mapping[str, Any],
                catalogue: Sequence[Tuple[str, int, int, Tuple[str, ...], str, bool]],
-               shared_number: bool = False) -> Store:
+               shared_number: bool = False,
+               knowledge: Sequence[Tuple[str, str]] = ()) -> Store:
     from sqlalchemy import text
 
     with engine.begin() as conn:
@@ -230,6 +239,12 @@ def seed_store(engine: Any, label: str, settings: Mapping[str, Any],
              "ct": "embedded" if shared_number else "direct",
              "m": json.dumps({"connection_mode": "coexistence", "smb_sync": "completed"}
                              if shared_number else {})}).scalar_one())
+        for title, body in knowledge:
+            conn.execute(text(
+                "INSERT INTO merchant_knowledge_sections (tenant_id, kind, title, body, is_active, "
+                "source, ai_status, priority, created_at, updated_at) VALUES (:t, 'custom', :ti, :b, "
+                "true, 'manual', 'approved', 100, now(), now())"),
+                {"t": tenant_id, "ti": title, "b": body})
         product_ids, prices, images, links = [], set(), [], []
         for index, (title, price, stock, sizes, colour, has_image) in enumerate(catalogue, start=1):
             ref = f"{label}{index:02d}{uuid.uuid4().hex[:6]}"
@@ -526,7 +541,7 @@ def run_scenario(ctx: Context, scenario: Scenario, rep: int) -> List[Dict[str, A
 
     store = ctx.stores[scenario.tenant]
     name = {"A": "نورة عبدالله", "B": "أحمد سالم", "C": "سارة محمد", "D": "نورة عبدالله",
-            "E": "سارة محمد"}[scenario.tenant]
+            "E": "سارة محمد", "F": "أحمد سالم"}[scenario.tenant]
     customer_id, conversation_id, phone = new_conversation(ctx.engine, store, name)
     if scenario.history:
         db = ctx.session_factory()
@@ -678,6 +693,12 @@ def main() -> int:
                                           "reply_tone": "friendly"}, CATALOGUE_A, shared_number=True),
             "E": seed_store(engine, "E", {"assistant_name": "ريم", "default_language": "arabic",
                                           "reply_tone": "friendly"}, CATALOGUE_C, shared_number=True),
+            # Its own store, so D and E stay exactly as the earlier baseline saw them.
+            "F": seed_store(engine, "F", {"assistant_name": "وردة", "default_language": "arabic",
+                                          "reply_tone": "friendly"}, CATALOGUE_A, knowledge=(
+                ("التوصيل", "نوصّل لجميع مدن المملكة خلال 2 إلى 5 أيام عمل، والتوصيل مجاني "
+                            "للطلبات فوق 300 ريال."),
+                ("تغليف الهدايا", "نوفّر تغليف هدايا مجانيًا لأي طلب، اطلبه عند إتمام الطلب."))),
         }
         ctx = Context(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
                       model=model, stores=stores)
