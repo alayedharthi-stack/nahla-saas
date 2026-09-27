@@ -36,10 +36,10 @@ import {
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
 import { useDashboardPoll } from '../lib/dashboardPolling'
-import ActiveCampaignHero from '../components/campaigns/ActiveCampaignHero'
-import CampaignStatsFilters from '../components/campaigns/CampaignStatsFilters'
-import EditCampaignContentModal from '../components/campaigns/EditCampaignContentModal'
-import { isLiveCampaign } from '../components/campaigns/campaignFormat'
+import ActiveCampaignHero from '../components/campaignBoard/ActiveCampaignHero'
+import CampaignStatsFilters from '../components/campaignBoard/CampaignStatsFilters'
+import EditCampaignContentModal from '../components/campaignBoard/EditCampaignContentModal'
+import { isLiveCampaign } from '../components/campaignBoard/campaignFormat'
 import { campaignHeroLabels, fill as fillLabel } from '../i18n/campaignHeroLabels'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
