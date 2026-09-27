@@ -6,10 +6,16 @@ if [ "${EVAL_CONFIRM:-}" = "RUN_KEY_PROBE" ]; then
   sleep 10
   exit 0
 fi
-if [ "${EVAL_CONFIRM:-}" != "RUN_OFFSEND_EVAL" ]; then
-  echo '{"status": "idle", "reason": "EVAL_CONFIRM is not RUN_OFFSEND_EVAL"}'
-  exit 0
-fi
+case "${EVAL_CONFIRM:-}" in
+  RUN_OFFSEND_EVAL) SCRIPT=run_eval.py ;;
+  RUN_INTENT_EVAL) SCRIPT=intent_eval.py ;;
+  *) echo '{"status": "idle", "reason": "EVAL_CONFIRM names no run"}'; exit 0 ;;
+esac
+# The evaluation key shares its organization's spend limit with production:
+# no run without its own hard cap (enforced again inside each script).
+case "${EVAL_BUDGET_USD:-}" in
+  ''|*[!0-9.]*) echo '{"status": "refused", "reason": "EVAL_BUDGET_USD must be a positive number"}'; exit 0 ;;
+esac
 unset DATABASE_URL
 export PGDATA=/tmp/evalpg
 mkdir -p "$PGDATA" && chown postgres:postgres "$PGDATA"
@@ -18,7 +24,7 @@ su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D $PGDATA -o '-c listen_addre
 export NAHLA_EVAL_ADMIN_DSN="postgresql://postgres@127.0.0.1:5432/postgres"
 cd /app
 status=0
-/opt/venv/bin/python -u ops/commerce_runtime_eval/run_eval.py 2>/tmp/eval.err || status=$?
+/opt/venv/bin/python -u "ops/commerce_runtime_eval/$SCRIPT" 2>/tmp/eval.err || status=$?
 echo "{\"status\": \"eval_exit\", \"code\": $status}"
 grep -E "Traceback|Error" /tmp/eval.err | tail -5 || true
 sleep 10

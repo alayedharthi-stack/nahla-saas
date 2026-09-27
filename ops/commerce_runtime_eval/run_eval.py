@@ -660,6 +660,13 @@ def summarise(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def main() -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from budget import Budget
+    try:
+        budget = Budget.from_env()
+    except Exception as exc:  # noqa: BLE001 - no cap, no run
+        emit("EVAL_SUMMARY=", {"label": LABEL, "status": "refused", "reason": str(exc)[:200]})
+        return 2
     admin = os.environ.get(ADMIN_ENV, "")
     model = os.environ.get(MODEL_ENV, "") if not SCRIPTED else "scripted-model"
     if not admin or not model or (not SCRIPTED and not (os.environ.get("ANTHROPIC_API_KEY")
@@ -704,10 +711,21 @@ def main() -> int:
                       model=model, stores=stores)
         wanted = [s.strip() for s in os.environ.get("EVAL_SCENARIOS", "").split(",") if s.strip()]
         scenarios = [s for s in SCENARIOS if not wanted or s.name in wanted]
+        stopped = False
         for rep in range(REP_START, REPEATS + 1):
             for scenario in scenarios:
-                records.extend(run_scenario(ctx, scenario, rep))
-        emit("EVAL_SUMMARY=", {"label": LABEL, "status": "done", "model": model,
+                if budget.exhausted:
+                    stopped = True
+                    break
+                new = run_scenario(ctx, scenario, rep)
+                for r in new:
+                    if "metrics" in r:
+                        budget.add(r.get("model") or model, r.get("input_tokens"),
+                                   r.get("output_tokens"))
+                records.extend(new)
+        emit("EVAL_SUMMARY=", {"label": LABEL, "status": "budget_stop" if stopped else "done",
+                               "spent_usd": round(budget.spent_usd, 4), "budget_usd": budget.limit_usd,
+                               "model": model,
                                "repeats": REPEATS, "turns": sum(1 for r in records if "metrics" in r),
                                "errors": [r for r in records if "error" in r or "skipped" in r],
                                "by_step": summarise(records)})
