@@ -1685,7 +1685,7 @@ def _consent_skip_for_row(
         return None
     try:
         db.refresh(cust)
-    except Exception:  # noqa: BLE001, silent-ok — a detached/stale object still carries the snapshot flags
+    except Exception:  # noqa: silent-ok — BLE001; a detached/stale object still carries the snapshot flags
         pass
     meta = getattr(cust, "extra_metadata", None) or {}
     if meta.get("is_unsubscribed"):

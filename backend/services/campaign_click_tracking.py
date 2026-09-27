@@ -93,7 +93,7 @@ def record_button_tap_from_inbound(msg: Dict[str, Any]) -> Optional[Dict[str, An
     except Exception as exc:  # noqa: BLE001
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001, silent-ok — best-effort measurement must not affect routing
+        except Exception:  # noqa: silent-ok — BLE001; best-effort measurement must not affect routing
             pass
         logger.warning("[campaign_click] failed to record tap: %s", exc)
         return None
