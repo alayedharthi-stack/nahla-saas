@@ -41,6 +41,8 @@ ADMIN_ENV = "NAHLA_EVAL_ADMIN_DSN"
 MODEL_ENV = "EVAL_MODEL"
 LABEL = os.environ.get("EVAL_LABEL", "unlabelled")
 REPEATS = max(1, min(int(os.environ.get("EVAL_REPEATS", "3") or 3), 10))
+# First repeat number to run, so a staged run can continue where it stopped.
+REP_START = max(1, min(int(os.environ.get("EVAL_REP_START", "1") or 1), REPEATS))
 SCRIPTED = os.environ.get("EVAL_PROVIDER", "") == "scripted"
 
 # ── Measurement vocabulary (report only) ─────────────────────────────────────
@@ -152,6 +154,13 @@ SCENARIOS: Tuple[Scenario, ...] = (
     Scenario("sh_incense", "E", ("عندكم بخور؟",)),
     Scenario("sh_person_named_product", "E", ("عطر سلطان عندك؟",)),
     Scenario("sh_person_bare_name", "E", ("سلطان عندك؟",)),
+    # The message that opened the observed exchange, on its own.
+    Scenario("sh_compliment", "D", ("ابداع روعه",)),
+    # Products the store really does not have: a colour it does not stock, a
+    # perfume it does not carry, a category a clothing store does not sell.
+    Scenario("sh_colour_not_stocked", "D", ("عندكم فستان أخضر؟",)),
+    Scenario("sh_perfume_not_carried", "E", ("عندكم عطر عنبر؟",)),
+    Scenario("sh_category_not_sold_2", "D", ("عندكم عبايات؟",)),
 )
 
 
@@ -674,7 +683,7 @@ def main() -> int:
                       model=model, stores=stores)
         wanted = [s.strip() for s in os.environ.get("EVAL_SCENARIOS", "").split(",") if s.strip()]
         scenarios = [s for s in SCENARIOS if not wanted or s.name in wanted]
-        for rep in range(1, REPEATS + 1):
+        for rep in range(REP_START, REPEATS + 1):
             for scenario in scenarios:
                 records.extend(run_scenario(ctx, scenario, rep))
         emit("EVAL_SUMMARY=", {"label": LABEL, "status": "done", "model": model,
