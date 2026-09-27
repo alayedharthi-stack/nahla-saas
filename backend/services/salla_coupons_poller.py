@@ -18,7 +18,8 @@ from core.pg_advisory_lock import DedicatedAdvisoryLock
 
 logger = logging.getLogger("nahla.salla_coupons_poller")
 
-POLL_INTERVAL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLL_SECONDS", "5"))
+POLL_INTERVAL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLL_SECONDS", "60"))
+TICK_INTERVAL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_TICK_SECONDS", "5"))
 RECENT_POLL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_RECENT_POLL_SECONDS", "10"))
 ADVISORY_LOCK_KEY = int(os.getenv("NAHLA_SALLA_COUPONS_POLLER_LOCK_KEY", "748103219046"))
 STARTUP_DELAY_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLLER_STARTUP_DELAY", "5"))
@@ -38,6 +39,7 @@ _state: Dict[str, Any] = {
     "tenants": {},
     "config": {
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "tick_interval_seconds": TICK_INTERVAL_SECONDS,
         "recent_poll_seconds": RECENT_POLL_SECONDS,
         "advisory_lock_key": ADVISORY_LOCK_KEY,
         "startup_delay_seconds": STARTUP_DELAY_SECONDS,
@@ -84,7 +86,7 @@ async def run_salla_coupons_poller_scheduler() -> None:
     await asyncio.sleep(STARTUP_DELAY_SECONDS)
     logger.info(
         "[Salla Coupons Poller] starting interval=%ss recent_interval=%ss advisory_lock_key=%s",
-        POLL_INTERVAL_SECONDS, RECENT_POLL_SECONDS, ADVISORY_LOCK_KEY,
+        TICK_INTERVAL_SECONDS, RECENT_POLL_SECONDS, ADVISORY_LOCK_KEY,
     )
     while True:
         try:
@@ -97,7 +99,7 @@ async def run_salla_coupons_poller_scheduler() -> None:
                 '[Salla Coupons Poller] tick_failed event=coupon_poller_tick_failed error_class=%s',
                 safe_exception_class(exc),
             )
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        await asyncio.sleep(TICK_INTERVAL_SECONDS)
 
 
 async def _run_one_tick() -> Dict[str, Any]:
