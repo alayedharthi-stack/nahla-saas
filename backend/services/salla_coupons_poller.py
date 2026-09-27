@@ -8,7 +8,7 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -19,8 +19,10 @@ from core.pg_advisory_lock import DedicatedAdvisoryLock
 logger = logging.getLogger("nahla.salla_coupons_poller")
 
 POLL_INTERVAL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLL_SECONDS", "60"))
+TICK_INTERVAL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_TICK_SECONDS", "5"))
+RECENT_POLL_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_RECENT_POLL_SECONDS", "10"))
 ADVISORY_LOCK_KEY = int(os.getenv("NAHLA_SALLA_COUPONS_POLLER_LOCK_KEY", "748103219046"))
-STARTUP_DELAY_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLLER_STARTUP_DELAY", "50"))
+STARTUP_DELAY_SECONDS = int(os.getenv("NAHLA_SALLA_COUPONS_POLLER_STARTUP_DELAY", "5"))
 DISABLED = os.getenv("NAHLA_SALLA_COUPONS_POLLER_DISABLED", "").lower() in ("1", "true", "yes")
 
 _state: Dict[str, Any] = {
@@ -37,6 +39,8 @@ _state: Dict[str, Any] = {
     "tenants": {},
     "config": {
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "tick_interval_seconds": TICK_INTERVAL_SECONDS,
+        "recent_poll_seconds": RECENT_POLL_SECONDS,
         "advisory_lock_key": ADVISORY_LOCK_KEY,
         "startup_delay_seconds": STARTUP_DELAY_SECONDS,
         "disabled": DISABLED,
@@ -81,9 +85,8 @@ async def run_salla_coupons_poller_scheduler() -> None:
     _state["started_at"] = datetime.now(timezone.utc).isoformat()
     await asyncio.sleep(STARTUP_DELAY_SECONDS)
     logger.info(
-        "[Salla Coupons Poller] starting interval=%ss advisory_lock_key=%s",
-        POLL_INTERVAL_SECONDS,
-        ADVISORY_LOCK_KEY,
+        "[Salla Coupons Poller] starting interval=%ss recent_interval=%ss advisory_lock_key=%s",
+        TICK_INTERVAL_SECONDS, RECENT_POLL_SECONDS, ADVISORY_LOCK_KEY,
     )
     while True:
         try:
@@ -96,7 +99,7 @@ async def run_salla_coupons_poller_scheduler() -> None:
                 '[Salla Coupons Poller] tick_failed event=coupon_poller_tick_failed error_class=%s',
                 safe_exception_class(exc),
             )
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        await asyncio.sleep(TICK_INTERVAL_SECONDS)
 
 
 async def _run_one_tick() -> Dict[str, Any]:
@@ -180,33 +183,60 @@ async def _run_one_tick() -> Dict[str, Any]:
                 continue
 
             coupon_sync_meta = cfg.get("coupon_sync_meta") or {}
-            if _retry_after_active(coupon_sync_meta):
-                tenant_state["result"] = "skipped_retry_after"
+            recent_sync_meta = cfg.get("coupon_recent_sync_meta") or {}
+            full_backoff = _retry_after_active(coupon_sync_meta)
+            full_due = not full_backoff and tenant_poll_due(coupon_sync_meta)
+            recent_backoff = _retry_after_active(recent_sync_meta)
+            provider_failures = ("rate_limited", "auth_error", "needs_reauth")
+            provider_backoff = (
+                (recent_backoff and recent_sync_meta.get("failure_class") in provider_failures)
+                or (full_backoff and coupon_sync_meta.get("failure_class") in provider_failures)
+            )
+            if provider_backoff:
+                tenant_state["result"] = "skipped_provider_backoff"
                 _state["tenants"][tenant_id] = tenant_state
                 continue
-            if not tenant_poll_due(coupon_sync_meta):
+            recent_due = (
+                not recent_backoff
+                and tenant_poll_due(recent_sync_meta, interval_seconds=RECENT_POLL_SECONDS)
+            )
+            if not full_due and not recent_due:
                 tenant_state["result"] = "skipped_not_due"
                 _state["tenants"][tenant_id] = tenant_state
                 continue
 
             try:
-                stats = await _poll_integration(db, intg)
-                scanned += 1
-                items_seen_total += stats["items_seen"]
-                created_total += stats["created"]
-                updated_total += stats["updated"]
-                tenant_state.update({"result": "ok", "stats": stats})
-                logger.info(
-                    "[Salla Coupons Poller] tenant_poll_ok event=coupon_poller_tenant_ok tenant_hash=%s store_hash=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
-                    hash_identifier(tenant_id),
-                    hash_identifier(store_id),
-                    stats["items_seen"],
-                    stats["created"],
-                    stats["updated"],
-                    stats["duration_ms"],
-                    stats.get("fetch_ok"),
-                    stats.get("partial"),
-                )
+                recent_stats = None
+                if recent_due:
+                    recent_stats = await _poll_recent_integration(db, intg)
+                    tenant_state["recent_stats"] = recent_stats
+                    logger.info(
+                        "[Salla Coupons Poller] tenant_recent_poll event=coupon_recent_poll tenant_hash=%s store_hash=%s items_seen=%d upserted=%d fetch_ok=%s failure_class=%s duration_ms=%d",
+                        hash_identifier(tenant_id), hash_identifier(store_id),
+                        recent_stats["items_seen"], recent_stats["upserted"],
+                        recent_stats["fetch_ok"], recent_stats["failure_class"],
+                        recent_stats["duration_ms"],
+                    )
+                if recent_stats is not None and not recent_stats["fetch_ok"] and (
+                    not full_due or recent_stats["failure_class"] in provider_failures
+                ):
+                    tenant_state["result"] = "recent_fetch_failed"
+                    errors += 1
+                elif full_due:
+                    stats = await _poll_integration(db, intg)
+                    scanned += 1
+                    items_seen_total += stats["items_seen"]
+                    created_total += stats["created"]
+                    updated_total += stats["updated"]
+                    tenant_state.update({"result": "ok", "stats": stats})
+                    logger.info(
+                        "[Salla Coupons Poller] tenant_poll_ok event=coupon_poller_tenant_ok tenant_hash=%s store_hash=%s items_seen=%d created=%d updated=%d duration_ms=%d fetch_ok=%s partial=%s",
+                        hash_identifier(tenant_id), hash_identifier(store_id),
+                        stats["items_seen"], stats["created"], stats["updated"],
+                        stats["duration_ms"], stats.get("fetch_ok"), stats.get("partial"),
+                    )
+                else:
+                    tenant_state["result"] = "ok_recent"
             except Exception as exc:
                 errors += 1
                 tenant_state["result"] = "error"
@@ -313,4 +343,72 @@ async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:
         "failure_class": fetch_result.get("failure_class"),
         "pages_fetched": fetch_result.get("pages_fetched"),
         "poll_interval_seconds": meta.get("poll_interval_seconds"),
+    }
+
+
+async def _poll_recent_integration(db: Session, intg: Any) -> Dict[str, Any]:
+    """Quickly import new Salla coupons without resetting full-scan cadence."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    from store_integration.registry import adapter_for_integration  # noqa: PLC0415
+    from services.store_sync import StoreSyncService  # noqa: PLC0415
+
+    started = time.monotonic()
+    adapter = adapter_for_integration(intg)
+    if adapter is None or not hasattr(adapter, "fetch_recent_coupons_paginated"):
+        raise RuntimeError("missing_fetch_recent_coupons_paginated")
+
+    fetch_result = await adapter.fetch_recent_coupons_paginated(per_page=60)
+    upserted = 0
+    if fetch_result.get("ok"):
+        svc = StoreSyncService(
+            db, int(intg.tenant_id),
+            integration_connection_id=int(intg.id), adapter=adapter,
+        )
+        upserted = await svc.sync_coupons(
+            triggered_by="salla_coupons_recent_poller",
+            raw_list=list(fetch_result.get("items") or []),
+            fetch_result=fetch_result,
+            record_sync_meta=False,
+        )
+
+    now = datetime.now(timezone.utc)
+    cfg = dict(intg.config or {})
+    old_meta = dict(cfg.get("coupon_recent_sync_meta") or {})
+    recent_meta = {
+        "last_attempt_at": now.isoformat(),
+        "last_poll_at": now.isoformat(),
+        "last_success_at": now.isoformat() if fetch_result.get("ok") else old_meta.get("last_success_at"),
+        "items_seen": int(fetch_result.get("items_seen") or 0),
+        "upserted": upserted,
+        "pages_fetched": int(fetch_result.get("pages_fetched") or 0),
+        "failure_class": fetch_result.get("failure_class"),
+    }
+    retry_after = fetch_result.get("retry_after")
+    if not fetch_result.get("ok"):
+        # Failed recent scans must not hammer Salla every ten seconds.
+        # Keep the normal full reconciliation available after the backoff.
+        failure = str(fetch_result.get("failure_class") or "")
+        if failure == "recent_window_too_large":
+            retry_after = 900
+        elif failure in ("auth_error", "needs_reauth"):
+            retry_after = 300
+        elif retry_after is None:
+            retry_after = 60
+    if retry_after:
+        try:
+            recent_meta["retry_after_until"] = (now + timedelta(seconds=int(retry_after))).isoformat()
+        except (TypeError, ValueError):
+            pass
+    cfg["coupon_recent_sync_meta"] = recent_meta
+    intg.config = cfg
+    flag_modified(intg, "config")
+    db.commit()
+    db.refresh(intg)
+
+    return {
+        "items_seen": recent_meta["items_seen"],
+        "upserted": upserted,
+        "fetch_ok": bool(fetch_result.get("ok")),
+        "failure_class": fetch_result.get("failure_class"),
+        "duration_ms": int((time.monotonic() - started) * 1000),
     }

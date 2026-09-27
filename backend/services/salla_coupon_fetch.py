@@ -67,6 +67,7 @@ def tenant_poll_due(
     coupon_sync_meta: Optional[Dict[str, Any]],
     *,
     now: Optional[datetime] = None,
+    interval_seconds: Optional[int] = None,
 ) -> bool:
     now = now or datetime.now(timezone.utc)
     meta = coupon_sync_meta or {}
@@ -80,6 +81,6 @@ def tenant_poll_due(
     except ValueError:
         return True
 
-    interval = int(meta.get("poll_interval_seconds") or poll_interval_seconds_for_catalog(meta.get("items_seen") or 0))
+    interval = int(interval_seconds or meta.get("poll_interval_seconds") or poll_interval_seconds_for_catalog(meta.get("items_seen") or 0))
     elapsed = (now - last_poll.astimezone(timezone.utc)).total_seconds()
     return elapsed >= interval

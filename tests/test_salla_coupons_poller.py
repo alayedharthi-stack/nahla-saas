@@ -22,8 +22,12 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
 from database.models import Base, Coupon, Integration, Tenant
 from services.coupon_salla_push import normalize_salla_coupon_push_dates, salla_coupon_today
 from services.salla_coupon_fetch import tenant_poll_due
-from services.salla_coupons_poller import _poll_integration, _retry_after_active, get_poller_state
+from services.salla_coupons_poller import (
+    _poll_integration, _poll_recent_integration, _retry_after_active,
+    _run_one_tick, get_poller_state,
+)
 from services.store_sync import StoreSyncService
+from store_adapters.salla_adapter import SallaAdapter
 
 
 @event.listens_for(Base.metadata, "before_create")
@@ -189,6 +193,119 @@ def test_tenant_poll_due_respects_adaptive_interval():
     assert tenant_poll_due(meta, now=now + timedelta(minutes=6)) is True
 
 
+def test_recent_poll_due_does_not_wait_for_large_catalog_reconciliation():
+    now = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+    meta = {"last_poll_at": now.isoformat(), "poll_interval_seconds": 900}
+    assert tenant_poll_due(meta, now=now + timedelta(seconds=11)) is False
+    assert tenant_poll_due(meta, now=now + timedelta(seconds=9), interval_seconds=10) is False
+    assert tenant_poll_due(meta, now=now + timedelta(seconds=11), interval_seconds=10) is True
+
+
+def test_recent_coupon_fetch_filters_creation_date_and_binds_page_count():
+    adapter = SallaAdapter(api_key="test", store_id="generic-store", tenant_id=8)
+    raw = {"id": 99, "code": "SHOES10", "type": "percentage", "amount": 10}
+    async def fake_get(_path, params):
+        return {"data": [raw] * 60, "pagination": {"last_page": 9}}
+    adapter._get = AsyncMock(side_effect=fake_get)
+
+    result = asyncio.run(adapter.fetch_recent_coupons_paginated(max_pages=2))
+
+    assert result["ok"] is False
+    assert result["failure_class"] == "recent_window_too_large"
+    assert result["items"] == []  # Never import an incomplete window.
+    assert adapter._get.await_count == 2
+    params = adapter._get.await_args_list[0].args[1]
+    start, end = params["creation_date"].split(",")
+    assert (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days == 1
+
+
+def test_recent_coupon_poller_imports_without_delaying_full_reconciliation(monkeypatch):
+    db, tenant_id = _make_db()
+    full_meta = {
+        "last_poll_at": datetime.now(timezone.utc).isoformat(),
+        "poll_interval_seconds": 900,
+        "items_seen": 3278,
+    }
+    intg = Integration(
+        tenant_id=tenant_id, provider="salla", enabled=True,
+        external_store_id="generic-store",
+        config={"api_key": "token", "store_id": "generic-store", "coupon_sync_meta": full_meta},
+    )
+    db.add(intg)
+    db.commit()
+    raw = {"id": 99, "code": "SHOES10", "type": "percentage", "amount": 10, "name": "Shoe offer"}
+    adapter = MagicMock()
+    adapter.fetch_recent_coupons_paginated = AsyncMock(return_value={
+        "ok": True, "items": [raw], "items_seen": 1, "pages_fetched": 1,
+        "partial": False, "failure_class": None, "retry_after": None,
+    })
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+
+    stats = asyncio.run(_poll_recent_integration(db, intg))
+    db.refresh(intg)
+    assert stats["fetch_ok"] is True
+    assert stats["upserted"] == 1
+    assert db.query(Coupon).filter_by(tenant_id=tenant_id, code="SHOES10", source_type="imported").count() == 1
+    assert intg.config["coupon_sync_meta"] == full_meta
+    assert intg.config["coupon_recent_sync_meta"]["last_success_at"]
+
+    lock = MagicMock(held=True)
+    lock.try_acquire.return_value = True
+    with patch("core.database.SessionLocal", return_value=db), patch(
+        "services.salla_coupons_poller.DedicatedAdvisoryLock", return_value=lock,
+    ), patch("services.salla_coupons_poller._poll_integration", new_callable=AsyncMock) as full_poll:
+        tick = asyncio.run(_run_one_tick())
+    assert tick["scanned"] == 0
+    full_poll.assert_not_awaited()
+    assert adapter.fetch_recent_coupons_paginated.await_count == 1
+
+
+def test_recent_coupon_fetch_failure_preserves_full_reconciliation_metadata(monkeypatch):
+    db, tenant_id = _make_db()
+    intg = Integration(
+        tenant_id=tenant_id, provider="salla", enabled=True,
+        config={"api_key": "token", "coupon_sync_meta": {"last_poll_at": "2026-01-01T00:00:00+00:00"}},
+    )
+    db.add(intg)
+    db.commit()
+    adapter = MagicMock()
+    adapter.fetch_recent_coupons_paginated = AsyncMock(return_value={
+        "ok": False, "items": [], "items_seen": 120, "pages_fetched": 2,
+        "failure_class": "recent_window_too_large", "retry_after": None,
+    })
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+    stats = asyncio.run(_poll_recent_integration(db, intg))
+    assert stats["fetch_ok"] is False
+    assert db.query(Coupon).filter_by(tenant_id=tenant_id).count() == 0
+    assert intg.config["coupon_sync_meta"]["last_poll_at"] == "2026-01-01T00:00:00+00:00"
+    assert _retry_after_active(intg.config["coupon_recent_sync_meta"])
+
+
+def test_recent_window_failure_does_not_block_due_full_reconciliation():
+    db, tenant_id = _make_db()
+    db.add(Integration(
+        tenant_id=tenant_id, provider="salla", enabled=True,
+        external_store_id="generic-store",
+        config={"api_key": "token", "store_id": "generic-store"},
+    ))
+    db.commit()
+    lock = MagicMock(held=True)
+    lock.try_acquire.return_value = True
+    recent = {"items_seen": 300, "upserted": 0, "fetch_ok": False,
+              "failure_class": "recent_window_too_large", "duration_ms": 1}
+    full = {"items_seen": 3200, "created": 1, "updated": 3199,
+            "fetch_ok": True, "partial": False, "duration_ms": 100}
+    with patch("core.database.SessionLocal", return_value=db), patch(
+        "services.salla_coupons_poller.DedicatedAdvisoryLock", return_value=lock,
+    ), patch("services.salla_coupons_poller._poll_recent_integration", new_callable=AsyncMock, return_value=recent), patch(
+        "services.salla_coupons_poller._poll_integration", new_callable=AsyncMock, return_value=full,
+    ) as full_poll:
+        tick = asyncio.run(_run_one_tick())
+    assert tick["scanned"] == 1
+    assert tick["created"] == 1
+    full_poll.assert_awaited_once()
+
+
 def test_coupons_poller_uses_fetch_coupons_paginated_once(monkeypatch):
     db, tenant_id = _make_db()
     intg = Integration(
@@ -241,4 +358,3 @@ def test_get_poller_state_exposes_adaptive_config():
     state = get_poller_state()
     assert "adaptive_sla" in state["config"]
     assert state["config"]["adaptive_sla"]["small_catalog_seconds"] == 60
-
