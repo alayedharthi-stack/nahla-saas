@@ -26,6 +26,7 @@ import dataclasses
 import datetime as _dt
 import hashlib
 import logging
+import os
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from services.turn_trace import SOURCE_COMMERCE_RUNTIME as TRACE_SOURCE
@@ -537,6 +538,77 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
     while turns and turns[-1]["role"] == "user" and turns[-1]["text"] == current:
         turns.pop()
     return turns
+
+
+# Experiment: a separate reading of the inbound message before the agent runs
+# (``core.commerce_runtime.message_intent``). Off unless this is exactly "1",
+# which no environment sets; off, the turn is exactly what it was.
+INTENT_CHECK_ENV = "COMMERCE_RUNTIME_INTENT_CHECK"
+
+
+def _intent_check_enabled() -> bool:
+    return os.environ.get(INTENT_CHECK_ENV, "").strip() == "1"
+
+
+def _catalogue_view(db: Any, tenant_id: int) -> Tuple[str, List[str]]:
+    """``(store_name, product_titles)`` the check reads: the store's own words.
+
+    Distinct titles, in-stock first and then oldest first (the catalogue's
+    canonical order), one past the check's bound so it can say the list is
+    partial. A read that fails yields no titles, never a guess; the check is
+    then told nothing about the catalogue.
+    """
+    from core.commerce_runtime import message_intent as mi  # noqa: PLC0415
+    from sqlalchemy import text as sql  # noqa: PLC0415
+
+    connection = getattr(db, "connection", None)
+    try:
+        with (connection().begin_nested() if callable(connection) else contextlib.nullcontext()):
+            titles = [str(row[0]) for row in db.execute(sql(
+                "SELECT title FROM products WHERE tenant_id = :t AND title IS NOT NULL "
+                "GROUP BY title "
+                "ORDER BY MAX(CASE WHEN in_stock THEN 1 ELSE 0 END) DESC, MIN(id) LIMIT :n"),
+                {"t": int(tenant_id), "n": mi.MAX_PRODUCT_TITLES + 1})]
+            row = db.execute(sql(
+                "SELECT t.name, s.store_settings FROM tenants t "
+                "LEFT JOIN tenant_settings s ON s.tenant_id = t.id WHERE t.id = :t"),
+                {"t": int(tenant_id)}).first()
+    except Exception as exc:  # noqa: BLE001 - the check runs without the catalogue
+        logger.warning("[COMMERCE_RUNTIME_PILOT] intent check catalogue unreadable tenant=%s "
+                       "error=%s", tenant_id, type(exc).__name__)
+        return "", []
+    settings = row[1] if row is not None and isinstance(row[1], Mapping) else {}
+    name = str(settings.get("store_name") or (row[0] if row is not None else "") or "")
+    return name, titles
+
+
+def _message_intent(db: Any, *, tenant_id: int, text: str, history: Sequence[Mapping[str, Any]],
+                    inbound_metadata: Optional[Mapping[str, Any]], model: str,
+                    provider: Any = None) -> Any:
+    """The check's assessment for this inbound message, or ``None``.
+
+    ``None`` — the turn runs exactly as without the check — when the experiment
+    is off, or when the inbound is a tap on a row this platform sent: that is
+    verified state, not words to interpret.
+    """
+    if not _intent_check_enabled():
+        return None
+    if (inbound_metadata or {}).get("list_reply_id"):
+        return None
+    from core.commerce_runtime import message_intent as mi  # noqa: PLC0415
+
+    if provider is None:
+        from modules.ai.orchestrator.providers.anthropic_provider import (  # noqa: PLC0415
+            AnthropicProvider,
+        )
+        provider = AnthropicProvider()
+    store_name, titles = _catalogue_view(db, int(tenant_id))
+    assessment = mi.assess(message=text, history=history, store_name=store_name,
+                           product_titles=titles, provider=provider, model=model,
+                           audit_context={"tenant_id": int(tenant_id), "channel": "whatsapp"})
+    logger.info("[COMMERCE_RUNTIME_PILOT] intent check tenant=%s %s", tenant_id,
+                " ".join(f"{k}={v}" for k, v in assessment.as_log_fields().items()))
+    return assessment
 
 
 def _send_factory(phone_id: str, tenant_id: int, db: Any, loop: Any,
@@ -1269,6 +1341,11 @@ async def _own_turn(
                                          str(decision.recipient))
 
     def run() -> Any:
+        history = _prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
+                               phone=to, current_text=text)
+        intent = _message_intent(db, tenant_id=int(tenant_id), text=text, history=history,
+                                 inbound_metadata=inbound_metadata,
+                                 model=str(decision.model or ""))
         return entry.run_commerce_runtime_turn(
             engine=engine,
             session_factory=SessionLocal,
@@ -1289,8 +1366,8 @@ async def _own_turn(
             admission_barrier=admission_barrier,
             budget=pilot_guard.pilot_budget(),
             context_preamble=context_preamble,
-            history=_prior_turns(db, tenant_id=int(tenant_id), conversation_id=conversation_id,
-                                 phone=to, current_text=text),
+            history=history,
+            message_intent=intent,
         )
 
     report = await asyncio.to_thread(run)

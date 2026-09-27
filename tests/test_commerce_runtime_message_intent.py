@@ -103,3 +103,31 @@ def test_the_instructions_carry_no_customer_phrase():
     Its instructions contain no Arabic text at all, so none can hide there."""
     assert not re.search(r"[؀-ۿ]", mi.INSTRUCTIONS)
     assert not re.search(r"[؀-ۿ]", json.dumps(mi.TOOL))
+
+
+# ── What a decision does to the turn (stage 2) ───────────────────────────────
+
+
+def assessed(decision, status="ok"):
+    return mi.IntentAssessment(decision=decision if status == "ok" else None, status=status,
+                               model="m", latency_ms=1)
+
+
+@pytest.mark.parametrize("decision", [mi.NON_COMMERCIAL, mi.AMBIGUOUS])
+def test_a_reading_that_is_not_a_store_request_withholds_the_tools_and_says_so(decision):
+    facts = mi.context_facts(assessed(decision))
+    assert mi.withholds_store_tools(assessed(decision)) is True
+    assert facts == {mi.READING_KEY: mi.READINGS[decision], mi.TOOLS_OFFERED_KEY: False}
+
+
+@pytest.mark.parametrize("assessment", [None, assessed(mi.STORE_REQUEST), assessed(None, "api_error"),
+                                        assessed(None, "no_decision"), assessed(None, "error")])
+def test_a_store_request_or_no_reading_leaves_the_turn_exactly_as_it_was(assessment):
+    assert mi.withholds_store_tools(assessment) is False
+    assert mi.context_facts(assessment) == {}
+
+
+def test_what_the_agent_is_told_is_data_not_wording():
+    for value in mi.READINGS.values():
+        assert re.fullmatch(r"[a-z_]+", value)
+    assert re.fullmatch(r"[a-z_]+", mi.READING_KEY) and re.fullmatch(r"[a-z_]+", mi.TOOLS_OFFERED_KEY)
