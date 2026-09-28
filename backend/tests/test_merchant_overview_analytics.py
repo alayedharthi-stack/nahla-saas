@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import JSON, create_engine
+from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
@@ -208,6 +208,32 @@ def test_undated_order_is_excluded_not_dated_as_now(db):
     assert order_created_at(row) is None
     kpis = compute_overview_kpis(db, tenant.id, "today", now=NOW)
     assert kpis["orders"] == 0
+
+
+def test_unreadable_campaign_and_trace_ledgers_are_unknown_not_zero(db):
+    tenant = _tenant(db, "unreadable-ledgers")
+    db.commit()
+    engine = db.get_bind()
+
+    def deny_ledger_reads(conn, cursor, statement, parameters, context, executemany):
+        if "campaign_send_logs" in statement or "conversation_traces" in statement:
+            raise RuntimeError("ledger temporarily unreadable")
+
+    event.listen(engine, "before_cursor_execute", deny_ledger_reads)
+    try:
+        result = compute_overview_kpis(db, tenant.id, "today", now=NOW)
+    finally:
+        event.remove(engine, "before_cursor_execute", deny_ledger_reads)
+    assert result["messages_sent"] is None
+    assert result["recent_conversations"] is None
+
+
+def test_empty_ledgers_report_real_zero_and_empty_list(db):
+    tenant = _tenant(db, "empty-ledgers")
+    db.commit()
+    result = compute_overview_kpis(db, tenant.id, "today", now=NOW)
+    assert result["messages_sent"] == 0
+    assert result["recent_conversations"] == []
 
 
 def test_period_bounds_riyadh_today_is_calendar_not_rolling_24h(db):
