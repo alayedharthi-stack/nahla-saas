@@ -334,7 +334,7 @@ def compute_overview_kpis(
         db, tenant_id, start_naive, end_naive + timedelta(microseconds=1),
     )
 
-    messages_sent_period = 0
+    messages_sent_period: Optional[int] = None
     try:
         messages_sent_period = (
             db.query(func.count(CampaignSendLog.id))
@@ -348,7 +348,8 @@ def compute_overview_kpis(
             .scalar()
         ) or 0
     except Exception:
-        messages_sent_period = 0
+        # An unreadable ledger is unknown, never a measured zero.
+        messages_sent_period = None
 
     new_customers = 0
     customers = (
@@ -387,7 +388,7 @@ def compute_overview_kpis(
     else:
         ai_rate = round((ai_outbound / inbound_eligible) * 100.0, 1)
 
-    recent_conversations_out: List[Dict[str, Any]] = []
+    recent_conversations_out: Optional[List[Dict[str, Any]]] = []
     try:
         traces = (
             db.query(ConversationTrace)
@@ -417,7 +418,8 @@ def compute_overview_kpis(
             if len(recent_conversations_out) >= 5:
                 break
     except Exception:
-        recent_conversations_out = []
+        # Distinguish a failed trace query from a genuinely empty period.
+        recent_conversations_out = None
 
     return {
         "period": period,
@@ -440,7 +442,7 @@ def compute_overview_kpis(
         "metric_kind_orders": "created_at_in_window",
         "metric_kind_new_customers": "first_seen_at_in_window",
         "metric_kind_ai_rate": "ai_outbound_over_eligible_inbound",
-        "messages_sent": int(messages_sent_period),
+        "messages_sent": messages_sent_period,
         "ai_rate": ai_rate,
         "ai_rate_numerator": ai_outbound,
         "ai_rate_denominator": inbound_eligible,
