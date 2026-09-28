@@ -175,7 +175,12 @@ def test_the_trusted_context_and_only_it_reaches_the_implementation(binding, mon
     run(binding, "search_products", {"query": "حذاء"})
     context, kwargs = seen[0]
     assert context is binding.context
-    assert set(kwargs) == {"query", "limit"}
+    assert set(kwargs) == {"query", "limit", "partial_words"}
+    # The platform's choice, never an argument the model can pass or withhold:
+    # a call that names it is refused before the implementation runs.
+    assert kwargs["partial_words"] is True
+    refused = run(binding, "search_products", {"query": "حذاء", "partial_words": False})
+    assert refused.ok is False and len(seen) == 1
 
 
 # ── Projection and provenance ────────────────────────────────────────────────
