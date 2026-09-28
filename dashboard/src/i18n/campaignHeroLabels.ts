@@ -78,6 +78,7 @@ export interface CampaignHeroLabels {
   filters: {
     title: string
     scope: string
+    scopeLatest: string
     scopeAll: string
     scopeRunning: string
     scopeCampaign: string
@@ -193,7 +194,7 @@ const EN: CampaignHeroLabels = {
       needsReview: 'Stopped — please review before resuming.',
       offerExpired: 'The offer end date has passed. Nothing more is sent until you update the offer or its date.',
       offerExpiredAction: 'Edit the offer to continue with the remaining customers.',
-      providerThrottled: 'WhatsApp is restricting sends from your number. Wait for the window to clear, then resume.',
+      providerThrottled: 'Sending paused after repeated provider errors. Review the details before resuming.',
       providerThrottledUntil: 'A resume can send again from {time}.',
       reviewGeneric: 'Stopped for a reason that needs your review.',
       completed: 'Completed.',
@@ -219,6 +220,7 @@ const EN: CampaignHeroLabels = {
   filters: {
     title: 'Statistics',
     scope: 'Campaign',
+    scopeLatest: 'Latest campaign',
     scopeAll: 'All campaigns',
     scopeRunning: 'Live campaigns',
     scopeCampaign: 'Specific campaign',
@@ -334,7 +336,7 @@ const AR: CampaignHeroLabels = {
       needsReview: 'متوقفة — تحتاج مراجعتك قبل الاستئناف.',
       offerExpired: 'انتهى تاريخ العرض. لن يُرسل شيء حتى تحدّث العرض أو تاريخه.',
       offerExpiredAction: 'عدّل العرض لتكمل للعملاء المتبقين.',
-      providerThrottled: 'واتساب يقيّد الإرسال من رقمك. انتظر انقضاء النافذة ثم استأنف.',
+      providerThrottled: 'توقف الإرسال بعد تكرر أخطاء المزوّد. راجع التفاصيل قبل الاستئناف.',
       providerThrottledUntil: 'يمكن للاستئناف الإرسال من {time}.',
       reviewGeneric: 'متوقفة لسبب يستلزم مراجعتك.',
       completed: 'اكتملت.',
@@ -360,6 +362,7 @@ const AR: CampaignHeroLabels = {
   filters: {
     title: 'الإحصاءات',
     scope: 'الحملة',
+    scopeLatest: 'آخر حملة',
     scopeAll: 'جميع الحملات',
     scopeRunning: 'الحملات الجارية',
     scopeCampaign: 'حملة محددة',

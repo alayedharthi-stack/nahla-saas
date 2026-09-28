@@ -379,7 +379,7 @@ def _campaign_executions(db: Session, campaign_ids: List[int]) -> Dict[int, Dict
 PAUSE_REASON_LABELS_AR: Dict[str, str] = {
     "messaging_limit_reached": "بلغت الحملة حد المراسلة لدى Meta — تنتظر توفر السعة",
     "provider_rate_limited": "طلبت Meta إبطاء الإرسال مؤقتًا — يُستأنف تلقائيًا بعد مهلة",
-    "provider_throttling": "Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال",
+    "provider_throttling": "توقفت جولة الإرسال بعد تكرر أخطاء المزوّد — راجع التفاصيل",
     "provider_repeated_error": "تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة",
     "marketing_blocked": (
         "أوقفها قاطع قديم بعد رفض Meta تسليم رسائل تسويقية لعدد من المستلمين (131049) — "
