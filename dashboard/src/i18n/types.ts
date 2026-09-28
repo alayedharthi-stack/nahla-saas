@@ -575,6 +575,19 @@ export interface Translations {
     chartSubtitle:      string
     chartRevenueLabel:  string
     messagesSent:       string
+    allCampaignsScope: string
+    currentCampaignTitle: string
+    campaignVsOverviewHint: string
+    viewCampaigns: string
+    campaignUnavailable: string
+    overviewUnavailable: string
+    campaignAccepted: string
+    campaignDelivered: string
+    campaignRead: string
+    campaignQueued: string
+    campaignLifetimeScope: string
+    lastUpdated: string
+    noCampaigns: string
     currency:           string
     viewPlans:          string
     noConversationsYet: string

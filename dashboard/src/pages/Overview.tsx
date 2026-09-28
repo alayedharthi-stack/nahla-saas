@@ -16,6 +16,9 @@ import { useLanguage } from '../i18n/context'
 import { UI_ONLY_GUARD } from '../i18n/uiOnly'
 import { apiCall } from '../api/client'
 import { trackPlatformEvent } from '../lib/platformTelemetry'
+import { campaignsApi, type CampaignRecord } from '../api/campaigns'
+import { isLiveCampaign } from '../components/campaignBoard/campaignFormat'
+import { useDashboardPoll } from '../lib/dashboardPolling'
 
 // UI_ONLY_GUARD: only static labels use t(); merchant/customer data stays as API values.
 
@@ -46,7 +49,7 @@ interface OverviewStats {
   /** Total marketing-campaign template sends in the selected window —
    *  surfaced as its own KPI so a big blast is visible even when the
    *  conversation counter barely moves (recipients with open windows). */
-  messages_sent?: number
+  messages_sent?: number | null
   new_customers?: number
   ai_rate_numerator?: number
   ai_rate_denominator?: number
@@ -64,7 +67,7 @@ interface OverviewStats {
   ai_rate: number | null
   ai_revenue: number
   ai_orders: number
-  recent_conversations: any[]
+  recent_conversations: any[] | null
   recent_orders: any[]
   revenue_chart: { day: string; day_en?: string; revenue: number }[]
 }
@@ -146,6 +149,10 @@ export default function Overview() {
   }))
   const [stats, setStats]     = useState<OverviewStats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [overviewError, setOverviewError] = useState(false)
+  const [campaign, setCampaign] = useState<CampaignRecord | null>(null)
+  const [campaignUnavailable, setCampaignUnavailable] = useState(false)
+  const [campaignAsOf, setCampaignAsOf] = useState<string | null>(null)
   const [waUsage, setWaUsage] = useState<WaUsage | null>(null)
   const [tierRefreshing, setTierRefreshing] = useState(false)
   // Single timeframe controller — every KPI card + the recent lists
@@ -206,79 +213,87 @@ export default function Overview() {
     apiCall<WaUsage>('/whatsapp/usage').then(setWaUsage).catch(() => null)
   }, [])
 
-  useEffect(() => {
-    // Re-fetch KPIs whenever the merchant changes the timeframe. We
-    // keep the loading state truthy only when we have NO prior data so
-    // switching periods doesn't blank the cards mid-fetch — the numbers
-    // update in place instead, which is less jarring.
-    if (stats === null) setLoading(true)
-    Promise.all([
-      apiCall<any>(`/store-sync/status?period=${encodeURIComponent(period)}`).catch(() => null),
-      apiCall<any>('/store-sync/knowledge').catch(() => null),
-    ]).then(([syncStatus]) => {
-      let hasData = false
-      if (syncStatus) {
-        hasData =
-          (syncStatus.orders_today ?? syncStatus.orders ?? 0) > 0
-          || (syncStatus.recent_orders?.length ?? 0) > 0
-        setStats({
-          period:               (syncStatus.period as Period) ?? period,
-          period_label_ar:      syncStatus.period_label_ar ?? periodLabel(period),
-          conversations:        syncStatus.conversations  ?? syncStatus.conversations_today ?? 0,
-          orders:               syncStatus.orders         ?? syncStatus.orders_today        ?? 0,
-          revenue:              syncStatus.revenue        ?? syncStatus.revenue_today       ?? 0,
-          messages_sent:        syncStatus.messages_sent  ?? 0,
-          new_customers:        syncStatus.new_customers,
-          conversations_today:  syncStatus.conversations_today ?? 0,
-          orders_today:         syncStatus.orders_today        ?? 0,
-          revenue_today:        syncStatus.revenue_today       ?? 0,
-          ai_rate:              syncStatus.ai_rate             ?? null,
-          ai_rate_numerator:    syncStatus.ai_rate_numerator,
-          ai_rate_denominator:  syncStatus.ai_rate_denominator,
-          period_label_en:      syncStatus.period_label_en,
-          ai_revenue:           syncStatus.ai_revenue          ?? 0,
-          ai_orders:            syncStatus.ai_orders           ?? 0,
-          recent_conversations: syncStatus.recent_conversations ?? [],
-          recent_orders:        syncStatus.recent_orders        ?? [],
-          revenue_chart:        syncStatus.revenue_chart        ?? chartPlaceholder,
+  useDashboardPoll({
+    pollKey: `GET:/store-sync/status?period=${period}`,
+    intervalMs: 15_000,
+    leading: true,
+    run: async (signal) => {
+      try {
+        const result = await apiCall<OverviewStats>(
+          `/store-sync/status?period=${encodeURIComponent(period)}`, { signal },
+        )
+        if (signal.aborted) return
+        setStats({ ...result, period })
+        setOverviewError(false)
+        trackPlatformEvent('overview_loaded', {
+          has_data: (result.orders ?? result.orders_today ?? 0) > 0
+            || (result.messages_sent ?? 0) > 0,
+          period,
         })
+      } catch (error) {
+        if (signal.aborted) return
+        setStats(null)
+        setOverviewError(true)
+        throw error
+      } finally {
+        if (!signal.aborted) setLoading(false)
       }
-      trackPlatformEvent('overview_loaded', { has_data: hasData, period })
-    }).finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period])
+    },
+  })
 
-  const revenueData = (stats?.revenue_chart?.length
-    ? stats.revenue_chart.map(row => ({
+  useDashboardPoll({
+    pollKey: 'GET:/campaigns:overview',
+    intervalMs: 15_000,
+    leading: true,
+    run: async (signal) => {
+      try {
+        const result = await campaignsApi.list({ signal })
+        if (signal.aborted) return
+        const newest = (items: CampaignRecord[]) => [...items].sort((a, b) =>
+          (Date.parse(b.created_at || '') || 0) - (Date.parse(a.created_at || '') || 0)
+          || b.id - a.id)[0] ?? null
+        setCampaign(newest(result.campaigns.filter(isLiveCampaign)) ?? newest(result.campaigns))
+        setCampaignAsOf(result.as_of ?? new Date().toISOString())
+        setCampaignUnavailable(false)
+      } catch (error) {
+        if (signal.aborted) return
+        setCampaignUnavailable(true)
+        throw error
+      }
+    },
+  })
+
+  const currentStats = stats?.period === period && !overviewError ? stats : null
+  const revenueData = (currentStats?.revenue_chart?.length
+    ? currentStats.revenue_chart.map(row => ({
         ...row,
         day: lang === 'en' ? (row.day_en ?? row.day) : row.day,
       }))
     : chartPlaceholder)
-  const recentConversations = stats?.recent_conversations ?? []
-  const recentOrders        = stats?.recent_orders        ?? []
-  const hasRealData         = (stats?.orders_today ?? 0) > 0 || recentOrders.length > 0
+  const recentConversations = currentStats?.recent_conversations ?? []
+  const recentOrders        = currentStats?.recent_orders        ?? []
 
   // Pull from the period-agnostic field with a fallback to the legacy
   // ``_today`` aliases so the page still renders correctly against an
   // older backend during a partial deploy.
-  const kpiRevenue       = stats?.revenue       ?? stats?.revenue_today       ?? 0
-  const kpiConversations = stats?.conversations ?? stats?.conversations_today ?? 0
-  const kpiMessagesToday = stats?.today_messages_count ?? 0
+  const kpiRevenue       = currentStats?.revenue       ?? currentStats?.revenue_today       ?? 0
+  const kpiConversations = currentStats?.conversations ?? currentStats?.conversations_today ?? 0
+  const kpiMessagesToday = currentStats?.today_messages_count ?? 0
   const kpiConversationLabel = period === 'today'
-    ? (stats?.metric_kind_conversations === 'billable_conversation_windows'
+    ? (currentStats?.metric_kind_conversations === 'billable_conversation_windows'
         ? ov.kpiConversationsToday
         : ov.kpiMessagesToday)
     : ov.kpiConversations
-  const kpiConversationValue = period === 'today' && stats?.metric_kind_conversations !== 'billable_conversation_windows'
+  const kpiConversationValue = period === 'today' && currentStats?.metric_kind_conversations !== 'billable_conversation_windows'
     ? kpiMessagesToday
     : kpiConversations
-  const kpiOrders        = stats?.orders        ?? stats?.orders_today        ?? 0
-  const kpiMessagesSent  = stats?.messages_sent ?? 0
+  const kpiOrders        = currentStats?.orders        ?? currentStats?.orders_today        ?? 0
+  const kpiMessagesSent  = currentStats?.messages_sent
   const periodLabelDisplay = lang === 'en'
-    ? (stats?.period_label_en ?? periodLabel(period))
-    : (stats?.period_label_ar ?? periodLabel(period))
-  const kpiNewCustomers = stats?.new_customers
-  const kpiAiRate = stats?.ai_rate
+    ? (currentStats?.period_label_en ?? periodLabel(period))
+    : (currentStats?.period_label_ar ?? periodLabel(period))
+  const kpiNewCustomers = currentStats?.new_customers
+  const kpiAiRate = currentStats?.ai_rate
   const kpiAiRateLabel = kpiAiRate === null || kpiAiRate === undefined
     ? (loading ? '—' : t(tr => tr.common.noData))
     : `${kpiAiRate.toFixed(1)}%`
@@ -318,14 +333,14 @@ export default function Overview() {
             <div>
               <p className="text-xs text-white/80 font-medium">{ov.aiSalesLabel}</p>
               <p className="text-2xl font-black text-white leading-none mt-0.5">
-                {(stats?.ai_revenue ?? 0).toLocaleString(locale)} <span className="text-sm font-bold text-white/90">{ov.currency}</span>
+                {currentStats ? currentStats.ai_revenue.toLocaleString(locale) : '—'} <span className="text-sm font-bold text-white/90">{ov.currency}</span>
               </p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="text-center hidden sm:block">
               <p className="text-xs text-white/80 font-medium">{ov.aiOrdersLabel}</p>
-              <p className="text-lg font-bold text-white">{stats?.ai_orders ?? 0}</p>
+              <p className="text-lg font-bold text-white">{currentStats?.ai_orders ?? '—'}</p>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block" />
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-white rounded-xl px-3 py-2 border border-slate-200">
@@ -662,6 +677,9 @@ export default function Overview() {
               onClick={() => {
                 if (p !== period) {
                   trackPlatformEvent('overview_period_changed', { period: p })
+                  setStats(null)
+                  setLoading(true)
+                  setOverviewError(false)
                   setPeriod(p)
                 }
               }}
@@ -677,21 +695,14 @@ export default function Overview() {
         </div>
       </div>
 
-      {/* KPI Cards.
-          Layout note: we promote ``رسائل مُرسلة`` (campaign throughput)
-          to a top-level card only when the merchant actually ran a
-          campaign in the window. Showing a permanent zero-stat to a
-          merchant who never sent a campaign would just add visual
-          noise; gating it on ``kpiMessagesSent > 0`` keeps the grid
-          tidy and turns the 5th column into a "live signal" that a
-          blast is going out. */}
-      <div className={`grid grid-cols-2 gap-4 ${
-        kpiMessagesSent > 0 ? 'lg:grid-cols-5' : 'lg:grid-cols-4'
-      }`}>
+      {overviewError && <p role="alert" className="text-sm text-amber-700">{ov.overviewUnavailable}</p>}
+      {/* The period total covers all campaigns; the separate campaign card
+          below uses the canonical lifetime ledger for one campaign. */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <StatCard
           label={ov.kpiRevenue}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : `${kpiRevenue.toLocaleString(locale)} ${ov.currency}`}
+          value={loading || overviewError ? '—' : `${kpiRevenue.toLocaleString(locale)} ${ov.currency}`}
           icon={DollarSign}
           iconColor="text-emerald-600"
           iconBg="bg-emerald-50"
@@ -699,25 +710,23 @@ export default function Overview() {
         <StatCard
           label={kpiConversationLabel}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : kpiConversationValue.toLocaleString(locale)}
+          value={loading || overviewError || !currentStats ? '—' : kpiConversationValue.toLocaleString(locale)}
           icon={MessageSquare}
           iconColor="text-blue-600"
           iconBg="bg-blue-50"
         />
-        {kpiMessagesSent > 0 && (
-          <StatCard
-            label={ov.messagesSent}
-            subLabel={`${periodLabelDisplay} • Meta`}
-            value={loading ? '—' : kpiMessagesSent.toLocaleString(locale)}
-            icon={MessageSquare}
-            iconColor="text-amber-600"
-            iconBg="bg-amber-50"
-          />
-        )}
+        <StatCard
+          label={ov.messagesSent}
+          subLabel={`${periodLabelDisplay} · ${ov.allCampaignsScope}`}
+          value={loading || overviewError || kpiMessagesSent == null ? '—' : kpiMessagesSent.toLocaleString(locale)}
+          icon={MessageSquare}
+          iconColor="text-amber-600"
+          iconBg="bg-amber-50"
+        />
         <StatCard
           label={ov.kpiOrders}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : String(kpiOrders)}
+          value={loading || overviewError ? '—' : String(kpiOrders)}
           icon={ShoppingCart}
           iconColor="text-brand-600"
           iconBg="bg-brand-50"
@@ -725,7 +734,7 @@ export default function Overview() {
         <StatCard
           label={ov.kpiNewCustomers}
           subLabel={periodLabelDisplay}
-          value={loading || kpiNewCustomers === undefined ? '—' : kpiNewCustomers.toLocaleString(locale)}
+          value={loading || overviewError || kpiNewCustomers === undefined ? '—' : kpiNewCustomers.toLocaleString(locale)}
           icon={Users}
           iconColor="text-teal-600"
           iconBg="bg-teal-50"
@@ -733,11 +742,44 @@ export default function Overview() {
         <StatCard
           label={ov.kpiAiRate}
           subLabel={periodLabelDisplay}
-          value={loading ? '—' : kpiAiRateLabel}
+          value={loading || overviewError ? '—' : kpiAiRateLabel}
           icon={TrendingUp}
           iconColor="text-purple-600"
           iconBg="bg-purple-50"
         />
+      </div>
+
+      <div className="card p-5" aria-live="polite">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h3 className="font-semibold text-slate-900">{ov.currentCampaignTitle}</h3>
+            <p className="text-xs text-slate-500 mt-1">{ov.campaignVsOverviewHint}</p>
+          </div>
+          <Link to="/campaigns" className="text-xs text-brand-600 hover:underline">{ov.viewCampaigns}</Link>
+        </div>
+        {campaignUnavailable ? (
+          <p className="text-sm text-amber-700 mt-4">{ov.campaignUnavailable}</p>
+        ) : campaign ? (
+          <>
+            <p className="text-sm font-medium text-slate-700 mt-4">{campaign.name}</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+              {([
+                [ov.campaignAccepted, campaign.stats?.meta_accepted],
+                [ov.campaignDelivered, campaign.stats?.delivered],
+                [ov.campaignRead, campaign.stats?.read],
+                [ov.campaignQueued, campaign.stats?.queued],
+              ] as const).map(([label, count]) => (
+                <div key={label} className="rounded-xl bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">{label}</p>
+                  <p className="font-bold text-lg text-slate-900">{count == null ? '—' : count.toLocaleString(locale)}</p>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-slate-500 mt-3">
+              {ov.campaignLifetimeScope} · {ov.lastUpdated}: {campaignAsOf ? new Date(campaignAsOf).toLocaleString(locale) : '—'}
+            </p>
+          </>
+        ) : <p className="text-sm text-slate-500 mt-4">{campaignAsOf ? ov.noCampaigns : t(tr => tr.common.loading)}</p>}
       </div>
 
       {/* Revenue chart — same selectedRange as the KPI cards. */}
@@ -783,7 +825,7 @@ export default function Overview() {
           </div>
           {recentConversations.length === 0 ? (
             <div className="py-10 text-center text-xs text-slate-400">
-              {loading ? t(tr => tr.common.loading) : ov.noConversationsYet}
+              {loading ? t(tr => tr.common.loading) : overviewError || currentStats?.recent_conversations == null ? ov.overviewUnavailable : ov.noConversationsYet}
             </div>
           ) : (
             <ul className="divide-y divide-slate-100">
@@ -827,7 +869,7 @@ export default function Overview() {
           </div>
           {recentOrders.length === 0 ? (
             <div className="py-10 text-center text-xs text-slate-400">
-              {loading ? t(tr => tr.common.loading) : ov.noOrdersYet}
+              {loading ? t(tr => tr.common.loading) : overviewError ? ov.overviewUnavailable : ov.noOrdersYet}
             </div>
           ) : (
           <ul className="divide-y divide-slate-100">
