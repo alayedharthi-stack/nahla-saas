@@ -129,8 +129,8 @@ def test_the_tool_gate_and_product_anchored_retrieval_are_unchanged(seeded: Seed
 
 
 @pytest.mark.parametrize("title,question,names", [
-    ("التوصيل", "رسوم للتوصيل", True),
-    ("الشحن والتوصيل", "بالتوصيل", True),
+    ("التوصيل", "رسوم التوصيل للرياض", True),
+    ("الشحن والتوصيل", "مدة الشحن", True),
     ("تغليف الهدايا", "تغليف هدايا gift wrapping", True),
     ("الدفع عند الاستلام", "عندكم", False),
     ("تعليمات الغسيل", "على", False),

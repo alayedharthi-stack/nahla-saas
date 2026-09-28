@@ -584,24 +584,18 @@ def _score_kb_section(*, title: str, body: str, subject: str) -> float:
     return min(1.0, hits / max(1, len(subj_tokens)) + (0.2 if hits >= 2 else 0.0))
 
 
-# The definite article as it is written attached to a word: alone, after the
-# conjunction «و», after the preposition «ب», and as «لل» after «ل». Folding
-# it lets «التوصيل», «والتوصيل», «بالتوصيل» and «للتوصيل» name one topic.
-_ATTACHED_ARTICLE = ("وال", "بال", "لل", "ال")
-_TOPIC_WORD_RE = re.compile(r"[^\w]+")
-
-
 def _topic_words(text: str) -> set:
-    """The whole words of ``text``, folded as the score folds them, article off."""
-    words = set()
-    for word in _TOPIC_WORD_RE.split(_norm(text)):
-        for article in _ATTACHED_ARTICLE:
-            if word.startswith(article) and len(word) - len(article) >= 3:
-                word = word[len(article):]
-                break
-        if len(word) >= 3:
-            words.add(word)
-    return words
+    """The whole words of ``text``, cut by the lookup query's own tokenizer.
+
+    ``knowledge_retrieval.normalize_lookup_query`` is what the question was
+    cut by before it reached here, so a title cut by it too is compared word
+    for word with the same folding and the same definite-article rule.
+    """
+    from modules.ai.commerce_agent_v2.knowledge_retrieval import (  # noqa: PLC0415 — it imports this module
+        normalize_lookup_query,
+    )
+
+    return set(normalize_lookup_query(text).split())
 
 
 def _names_section_topic(*, title: str, question: str) -> bool:
