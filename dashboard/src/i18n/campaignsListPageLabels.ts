@@ -60,9 +60,9 @@ export interface CampaignsListLabels {
     paused: string
     waiting_for_capacity: string
     rate_limit_backoff: string
-    marketing_delivery_backoff: string
-    marketing_delivery_blocked: string
     provider_throttled: string
+    needs_review: string
+    offer_expired: string
     unknown: string
   }
   sendHealth: {
@@ -79,7 +79,6 @@ export interface CampaignsListLabels {
     capacityResumeAt: string
     capacityResumeSoon: string
     rateLimitResumeAt: string
-    marketingResumeAt: string
     throttleClearsAt: string
     throttleCleared: string
   }
@@ -113,6 +112,7 @@ export interface CampaignsListLabels {
     errorCopied: string
     copyFailed: string
     failureDetailsTitle: string
+    editContent: string
   }
   waves: {
     loadFailed: string
@@ -717,9 +717,9 @@ export const campaignsListEn: CampaignsListLabels = {
     paused: 'Paused',
     waiting_for_capacity: 'Waiting for Meta messaging capacity',
     rate_limit_backoff: 'Meta asked to slow down — continues automatically',
-    marketing_delivery_backoff: 'Waiting after marketing delivery refusals — automatic continuation',
-    marketing_delivery_blocked: 'Meta is not delivering marketing to many recipients — stopped',
     provider_throttled: 'Meta is throttling this number — stopped',
+    needs_review: 'Stopped — needs your review before resuming',
+    offer_expired: 'Offer expired — update the offer to continue',
     unknown: 'Unknown',
   },
   sendHealth: {
@@ -742,10 +742,14 @@ export const campaignsListEn: CampaignsListLabels = {
       run_ended_with_queue: 'The send run ended before every recipient — needs a resume',
       evidence_unresolved: 'Stopped: an earlier send record cannot be tied to a recipient — needs review',
       evidence_unreadable: 'Stopped: the earlier send records could not be read',
+      offer_expired: 'The offer expired — no new messages until you update the offer or its end date',
+      stalled_repeatedly: 'The sending worker kept dying mid-run — automatic recovery stopped for review',
+      consent_unreadable: 'Some customers\' consent state could not be read at send time — they were not messaged and stay queued; review, then resume',
+      content_revised: 'A new content version was saved — resume to send it to the remaining recipients',
+      marketing_blocked: 'Stopped by a retired breaker after Meta refused marketing delivery for some recipients (131049) — review the offer, then resume; it will not resume on its own',
     },
     capacityResumeAt: 'Meta daily limit reached — continues automatically around {time}',
     capacityResumeSoon: 'Meta daily limit reached — continues automatically when capacity returns',
-    marketingResumeAt: 'Automatically rechecks around {time}, then continues unsent recipients if eligible. Delivery is not guaranteed.',
     rateLimitResumeAt: 'Meta asked to slow down — continues automatically around {time}',
     throttleClearsAt: '{count} Meta delivery failures ({key}) in the last {minutes} min — a resume can send again from {time}; it will not resume on its own',
     throttleCleared: 'The Meta failure window has cleared — you can resume',
@@ -780,6 +784,7 @@ export const campaignsListEn: CampaignsListLabels = {
     errorCopied: '📋 Technical error copied to clipboard',
     copyFailed: 'Could not copy — copy manually.',
     failureDetailsTitle: 'Send failure details ({failed} of {total})',
+    editContent: 'Edit content',
   },
   waves: {
     loadFailed: 'Could not load waves',
@@ -974,9 +979,9 @@ export const campaignsListAr: CampaignsListLabels = {
     paused: 'متوقفة مؤقتاً',
     waiting_for_capacity: 'بانتظار سعة المراسلة من Meta',
     rate_limit_backoff: 'طلبت Meta إبطاء الإرسال — تُستأنف تلقائياً',
-    marketing_delivery_backoff: 'انتظار بعد منع التسليم التسويقي — استكمال تلقائي',
-    marketing_delivery_blocked: 'Meta لا تسلّم الرسائل التسويقية لعدد كبير من المستلمين — متوقفة',
     provider_throttled: 'Meta تقيّد الإرسال من هذا الرقم — متوقفة',
+    needs_review: 'متوقفة — تحتاج مراجعتك قبل الاستئناف',
+    offer_expired: 'انتهى العرض — حدّث العرض للمتابعة',
     unknown: 'غير معروفة',
   },
   sendHealth: {
@@ -999,10 +1004,14 @@ export const campaignsListAr: CampaignsListLabels = {
       run_ended_with_queue: 'انتهت جولة الإرسال قبل اكتمال المستلمين — تحتاج استئنافاً',
       evidence_unresolved: 'توقف الإرسال: سجل إرسال سابق لا يمكن ربطه بمستلم — يحتاج مراجعة',
       evidence_unreadable: 'توقف الإرسال: تعذرت قراءة سجل الإرسال السابق',
+      offer_expired: 'انتهى تاريخ العرض — لن تُرسل رسائل جديدة حتى تحدّث العرض أو تاريخ انتهائه',
+      stalled_repeatedly: 'تعطّل عامل الإرسال مراراً أثناء الإرسال — توقف التعافي التلقائي للمراجعة',
+      consent_unreadable: 'تعذّرت قراءة حالة موافقة بعض العملاء وقت الإرسال — لم تُرسل لهم الرسالة وبقوا في الطابور؛ راجع ثم استأنف',
+      content_revised: 'حُفظت نسخة جديدة من المحتوى — استأنف الحملة لإرسالها للمتبقين',
+      marketing_blocked: 'أوقفها قاطع قديم بعد رفض Meta تسليم رسائل تسويقية لعدد من المستلمين (131049) — راجع العرض ثم استأنف؛ لن تُستأنف تلقائياً',
     },
     capacityResumeAt: 'بلغت حد Meta اليومي — تُستأنف تلقائياً قرابة {time}',
     capacityResumeSoon: 'بلغت حد Meta اليومي — تُستأنف تلقائياً عند توفر السعة',
-    marketingResumeAt: 'إعادة فحص تلقائية قرابة {time}، ثم استكمال من لم تُقبل رسائلهم عند السماح. الوصول غير مضمون.',
     rateLimitResumeAt: 'طلبت Meta إبطاء الإرسال — تُستأنف تلقائياً قرابة {time}',
     throttleClearsAt: '{count} رسالة لم تسلّمها Meta ({key}) خلال آخر {minutes} دقيقة — يمكن الاستئناف من {time}، ولن تُستأنف تلقائياً',
     throttleCleared: 'انقضت نافذة إخفاقات Meta — يمكن استئناف الإرسال',
@@ -1037,6 +1046,7 @@ export const campaignsListAr: CampaignsListLabels = {
     errorCopied: '📋 تم نسخ الخطأ التقني إلى الحافظة',
     copyFailed: 'تعذر النسخ — انسخ يدوياً.',
     failureDetailsTitle: 'تفاصيل فشل الإرسال ({failed} من {total})',
+    editContent: 'تعديل المحتوى',
   },
   waves: {
     loadFailed: 'تعذر تحميل الدفعات',

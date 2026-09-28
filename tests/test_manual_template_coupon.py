@@ -83,6 +83,9 @@ def _make_customer(*, name: str = "أحمد", status: str = "active"):
     cust.name = name
     cust.customer_status = status
     cust.normalized_phone = "966500000000"
+    # Consent flags: a real (empty) dict — an auto-generated MagicMock here
+    # would read as an unreadable consent state and correctly block the send.
+    cust.extra_metadata = {}
     return cust
 
 

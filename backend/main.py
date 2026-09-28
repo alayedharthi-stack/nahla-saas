@@ -949,6 +949,19 @@ async def on_startup() -> None:
         def _run_migrations():
             Base.metadata.create_all(engine)
             safe_alters = [
+                # ── Campaigns: offer validity, content revisions, click measurement ──
+                # (models: Campaign.offer_expires_at / content_revision,
+                #  CampaignSendLog.clicked_at, CampaignSendAttempt.content_revision /
+                #  click_trackable / clicked_at / click_kind / click_inbound_message_id;
+                #  campaign_content_revisions is created by create_all above.)
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS offer_expires_at TIMESTAMP",
+                "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS content_revision INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE campaign_send_logs ADD COLUMN IF NOT EXISTS clicked_at TIMESTAMP",
+                "ALTER TABLE campaign_send_attempts ADD COLUMN IF NOT EXISTS content_revision INTEGER",
+                "ALTER TABLE campaign_send_attempts ADD COLUMN IF NOT EXISTS click_trackable BOOLEAN",
+                "ALTER TABLE campaign_send_attempts ADD COLUMN IF NOT EXISTS clicked_at TIMESTAMP",
+                "ALTER TABLE campaign_send_attempts ADD COLUMN IF NOT EXISTS click_kind VARCHAR(24)",
+                "ALTER TABLE campaign_send_attempts ADD COLUMN IF NOT EXISTS click_inbound_message_id VARCHAR",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'merchant'",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true",
