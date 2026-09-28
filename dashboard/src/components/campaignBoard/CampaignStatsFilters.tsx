@@ -50,7 +50,6 @@ export default function CampaignStatsFilters({ campaigns, lang, dir, refreshToke
       return
     }
     setLoading(true)
-    setData(null)
     try {
       const res = await campaignsApi.stats({
         scope,
