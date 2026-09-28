@@ -584,24 +584,39 @@ def _score_kb_section(*, title: str, body: str, subject: str) -> float:
     return min(1.0, hits / max(1, len(subj_tokens)) + (0.2 if hits >= 2 else 0.0))
 
 
+# The definite article as it is written attached to a word: alone, after the
+# conjunction «و», after the preposition «ب», and as «لل» after «ل». Folding
+# it lets «التوصيل», «والتوصيل», «بالتوصيل» and «للتوصيل» name one topic.
+_ATTACHED_ARTICLE = ("وال", "بال", "لل", "ال")
+_TOPIC_WORD_RE = re.compile(r"[^\w]+")
+
+
+def _topic_words(text: str) -> set:
+    """The whole words of ``text``, folded as the score folds them, article off."""
+    words = set()
+    for word in _TOPIC_WORD_RE.split(_norm(text)):
+        for article in _ATTACHED_ARTICLE:
+            if word.startswith(article) and len(word) - len(article) >= 3:
+                word = word[len(article):]
+                break
+        if len(word) >= 3:
+            words.add(word)
+    return words
+
+
 def _names_section_topic(*, title: str, question: str) -> bool:
-    """Whether the question names the topic a merchant section is titled by.
+    """Whether the question names, as a whole word, a word of a section's title.
 
     A section's title is the merchant's own name for what it covers («التوصيل»,
-    «تغليف الهدايا»). A question sharing a word with that title asks about that
-    topic however many other words it carries — the ratio in
-    ``_score_kb_section`` would let «رسوم التوصيل الشحن» or «توصيل الرياض
-    delivery» drop the delivery section only because the query grew longer.
-    Words match in either direction (a question word inside a title word, or a
-    title word inside the question), on the same normalized three-letter tokens
-    the score uses.
+    «تغليف الهدايا»). A question naming it asks about that topic however many
+    other words it carries — the ratio in ``_score_kb_section`` would let
+    «رسوم التوصيل الشحن» or «توصيل الرياض delivery» drop the delivery section
+    only because the query grew longer. Whole words only: a title word inside
+    a question word («عند» in «عندكم»), or the reverse («على» in «تعليمات»),
+    is not the question naming the topic.
     """
-    title_norm = _norm(title)
-    question_norm = _norm(question)
-    if not title_norm or not question_norm:
-        return False
-    return (any(token in title_norm for token in _subject_tokens(question))
-            or any(token in question_norm for token in _subject_tokens(title)))
+    title_words = _topic_words(title)
+    return bool(title_words) and not title_words.isdisjoint(_topic_words(question))
 
 
 def _combine_kb_relevance(
@@ -656,9 +671,12 @@ def _retrieve_product_kb_sections_status(
 ) -> tuple[bool, List[Dict[str, Any]]]:
     """Tenant-safe KB lookup. ``succeeded=False`` is operational failure, not empty facts.
 
-    ``title_names_topic`` (store-wide questions only): a section whose title the
-    question names qualifies whatever its word ratio, and ranks ahead of those
-    that qualify on the ratio alone. Product-anchored retrieval is unchanged.
+    ``title_names_topic`` (a store-wide lookup the model asked for): a section
+    whose title the question names qualifies whatever its word ratio. It
+    qualifies only: sections still rank by their score, so one that qualified
+    on its title alone ranks below every section that qualified on the ratio,
+    and never displaces one. Its payload says so (``qualified_by_title``).
+    Product-anchored retrieval is unchanged.
     """
     if db is None:
         return False, []
@@ -740,25 +758,22 @@ def _retrieve_product_kb_sections_status(
             subject_relevance=subject_relevance,
             question_relevance=question_relevance,
         )
-        names_topic = bool(title_names_topic) and _names_section_topic(
-            title=title, question=str(message or "").strip())
-        if combined < _KB_RELEVANCE_THRESHOLD and not names_topic:
+        by_title = (combined < _KB_RELEVANCE_THRESHOLD and bool(title_names_topic)
+                    and _names_section_topic(title=title, question=str(message or "").strip()))
+        if combined < _KB_RELEVANCE_THRESHOLD and not by_title:
             continue
-        scored.append(
-            (
-                (1.0 if names_topic else 0.0) + combined,
-                question_relevance,
-                {
-                    "section_id": getattr(row, "id", None),
-                    "title": title,
-                    "body": body[:_KB_SECTION_BODY_LIMIT],
-                    "kind": row_kind,
-                    "match_score": round(combined, 3),
-                    "subject_score": round(subject_relevance, 3),
-                    "question_score": round(question_relevance, 3),
-                },
-            )
-        )
+        payload = {
+            "section_id": getattr(row, "id", None),
+            "title": title,
+            "body": body[:_KB_SECTION_BODY_LIMIT],
+            "kind": row_kind,
+            "match_score": round(combined, 3),
+            "subject_score": round(subject_relevance, 3),
+            "question_score": round(question_relevance, 3),
+        }
+        if by_title:
+            payload["qualified_by_title"] = True
+        scored.append((combined, question_relevance, payload))
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     result_limit = int(limit or _KB_SECTION_RESULT_LIMIT)
     return True, [payload for _, _, payload in scored[:result_limit]]
@@ -813,6 +828,7 @@ def retrieve_catalog_candidate_kb_sections(
     product_id: Any = None,
     limit: int = _KB_SECTION_RESULT_LIMIT,
     include_merchant_facts: bool = False,
+    title_names_topic: bool = False,
 ) -> Dict[str, Any]:
     """One tenant-safe KB retrieval for catalog-owned compose.
 
@@ -821,6 +837,8 @@ def retrieve_catalog_candidate_kb_sections(
     Store-wide tool callers may include public documents and operational facts;
     catalog callers retain the product-only default. Visibility, relevance,
     product associations and result/body limits are shared by both modes.
+    ``title_names_topic`` applies to a store-wide lookup only (see
+    ``_retrieve_product_kb_sections_status``).
     """
     kinds_filter = None
     if include_merchant_facts:
@@ -835,7 +853,7 @@ def retrieve_catalog_candidate_kb_sections(
         product_ids=product_ids,
         limit=limit,
         kinds_filter=kinds_filter,
-        title_names_topic=include_merchant_facts,
+        title_names_topic=bool(title_names_topic) and bool(include_merchant_facts),
     )
     if not succeeded:
         return catalog_kb_retrieval_failure_payload()

@@ -94,6 +94,9 @@ async def search_merchant_knowledge_impl(
         scope=SCOPE_TURN,
         purpose="model_store_knowledge",
         query=text,
+        # The model named what it is looking for: a section titled by one of
+        # its words is on topic however many other words the query carries.
+        title_names_topic=True,
     )
     if str(record.get("status") or "") not in {STATUS_OK, STATUS_NO_RESULTS}:
         return KnowledgeSearchResult(

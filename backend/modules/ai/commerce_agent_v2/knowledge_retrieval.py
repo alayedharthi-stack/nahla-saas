@@ -169,6 +169,7 @@ def _retrieve(
     product_ids: list[int],
     limit: int,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> dict[str, Any]:
     # The retriever scores the product subject and the customer question as two
     # independent dimensions and keeps the better one, so they are passed
@@ -185,6 +186,7 @@ def _retrieve(
         # Store-wide questions need policies as well as product knowledge.
         # Product-anchored retrieval keeps its existing, narrower kind set.
         include_merchant_facts=not product_ids,
+        title_names_topic=title_names_topic,
     )
 
 
@@ -235,12 +237,15 @@ def run_knowledge_lookup(
     product_ids: list[int] | None = None,
     limit: int = KNOWLEDGE_RESULT_LIMIT,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> dict[str, Any]:
     """Run one bounded tenant-scoped lookup and record the attempt.
 
     Never raises: a retrieval failure is recorded as an outcome so the caller
     can answer from structured evidence, and so a later "not documented" reply
-    can prove a lookup actually ran.
+    can prove a lookup actually ran. ``title_names_topic`` is for a lookup the
+    model asked for: a store-wide section whose title the query names as a
+    whole word qualifies whatever its word ratio.
     """
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
     query = normalize_lookup_query(query)
@@ -269,7 +274,8 @@ def run_knowledge_lookup(
         )
     try:
         payload = _retrieve(
-            context, query=query, product_ids=ids, limit=limit, subject=subject
+            context, query=query, product_ids=ids, limit=limit, subject=subject,
+            title_names_topic=title_names_topic,
         )
     except Exception as exc:  # noqa: BLE001 — recorded as an outcome, never fatal
         logger.debug(
