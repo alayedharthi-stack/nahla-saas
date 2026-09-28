@@ -209,17 +209,21 @@ class AgentLoop:
                 continue
 
             if isinstance(result, ac.ProviderInvalid):
-                # Only a truncated step reaches here; everything else stopped
-                # the turn inside ``_provider_step``. Being cut off is a fact
-                # about that step, not a verdict on the turn: the model keeps
-                # its whole context and is told plainly what happened, so it
-                # can finish the answer instead of the customer getting none.
-                session.feedback.append(ac.VerificationFeedback(
-                    step_no=session.progress.steps_used,
-                    problems=(ac.VerificationProblem(
+                # Only a truncated step or a reply citing malformed evidence
+                # reaches here; everything else stopped the turn inside
+                # ``_provider_step``. Either is a fact about that step, not a
+                # verdict on the turn: the model keeps its whole context and is
+                # told plainly what happened, so it can finish or correct the
+                # answer instead of the customer getting none.
+                if result.reason == ac.MALFORMED_EVIDENCE:
+                    problem = ac.VerificationProblem(ac.MALFORMED_EVIDENCE, result.detail)
+                else:
+                    problem = ac.VerificationProblem(
                         "output_truncated",
                         "the previous step reached the output limit and was cut off before it "
-                        "finished; nothing from it was used"),)))
+                        "finished; nothing from it was used")
+                session.feedback.append(ac.VerificationFeedback(
+                    step_no=session.progress.steps_used, problems=(problem,)))
                 continue
 
             raise self._provider_stop(result)          # pragma: no cover - validation narrows the union
@@ -446,10 +450,24 @@ class AgentLoop:
         except ac.UnsupportedCapability as exc:
             raise _Stop(ac.StopReason.UNSUPPORTED_CAPABILITY.value, capability=exc.capability,
                         requested=exc.requested, allowed=exc.allowed) from exc
+        except ac.MalformedEvidenceReference as exc:
+            # A reply that cites something that is not a reference — a bare
+            # product id, a title — is the mistake verification already hands
+            # back for a reference this turn never observed. While a step
+            # remains, the model is told which values were refused and
+            # answers again; nothing from the refused reply is used or sent.
+            # With no step left it ends as before.
+            refs = getattr(getattr(raw, "draft", None), "evidence_refs", ())
+            if isinstance(raw, ac.ProviderReply) and session.steps_left():
+                session.record("malformed_evidence", {"step_no": request.step_no})
+                return ac.ProviderInvalid(ac.MALFORMED_EVIDENCE,
+                                          detail=ac.malformed_evidence_detail(refs))
+            raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
         except c.ValidationError as exc:
             raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
         session.record("provider_step", {"result": type(result).__name__})
-        if (isinstance(result, ac.ProviderInvalid) and result.reason == ac.TRUNCATED_OUTPUT
+        if (isinstance(result, ac.ProviderInvalid)
+                and result.reason in (ac.TRUNCATED_OUTPUT, ac.MALFORMED_EVIDENCE)
                 and session.steps_left()):
             # A step that ran out of room is recoverable while the budget still
             # allows another: the loop hands the fact back rather than ending a

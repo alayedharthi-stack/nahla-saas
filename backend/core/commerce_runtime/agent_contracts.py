@@ -181,7 +181,7 @@ class ToolObservation:
 
 @dataclasses.dataclass(frozen=True)
 class VerificationProblem:
-    code: str                                # closed: "unknown_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind" | "coupon_code_without_evidence" | "unobserved_code" | "choice_without_evidence"
+    code: str                                # closed: "unknown_evidence" | "malformed_evidence" | "empty_text" | "text_too_long" | "missing_evidence" | "invalid_kind" | "coupon_code_without_evidence" | "unobserved_code" | "choice_without_evidence"
     detail: str
 
 
@@ -265,18 +265,25 @@ class ProviderBlocked(ProviderResult):
 # than in one provider because the loop treats it as correctable while a step
 # remains: being cut off is a fact about that step, not a verdict on the turn.
 TRUNCATED_OUTPUT = "truncated_output"
+# A reply whose evidence_refs hold something that is not a reference at all
+# (a bare id, a title, prose). It is the same correctable mistake as citing a
+# well-formed reference this turn never observed, which verification hands back;
+# only the shape check used to run first and end the turn instead.
+MALFORMED_EVIDENCE = "malformed_evidence"
 
 
 @dataclasses.dataclass(frozen=True)
 class ProviderInvalid(ProviderResult):
     """Incomplete or malformed output (truncation, unparsable structure).
 
-    Not a usable reply. ``TRUNCATED_OUTPUT`` is the one reason the loop may
-    hand back to the provider instead of stopping the turn, because the model
-    can finish what it was cut off from; every other reason ends the turn.
+    Not a usable reply. ``TRUNCATED_OUTPUT`` and ``MALFORMED_EVIDENCE`` are the
+    reasons the loop may hand back to the provider instead of stopping the
+    turn, because the model can finish or correct what it produced; every other
+    reason ends the turn. ``detail`` says what to correct, for the model only.
     """
 
     reason: str
+    detail: str = ""
 
 
 # ── Loop configuration, persisted progress and outcome ───────────────────────
@@ -583,10 +590,33 @@ def validate_tool_name(value: Any) -> str:
     return value
 
 
+class MalformedEvidenceReference(c.ValidationError):
+    """An evidence reference that is not shaped like one ('<kind>:<id>')."""
+
+
+def is_evidence_ref(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) <= MAX_EVIDENCE_REF_LENGTH
+            and bool(_EVIDENCE_REF_RE.match(value)))
+
+
 def validate_evidence_ref(value: Any) -> str:
-    if not isinstance(value, str) or len(value) > MAX_EVIDENCE_REF_LENGTH or not _EVIDENCE_REF_RE.match(value):
-        raise c.ValidationError("evidence reference must look like '<kind>:<id>'")
+    if not is_evidence_ref(value):
+        raise MalformedEvidenceReference("evidence reference must look like '<kind>:<id>'")
     return value
+
+
+def malformed_evidence_detail(refs: Sequence[Any]) -> str:
+    """What the model is told about the values it cited that are not references.
+
+    For the model only, never the customer: which values were refused (bounded
+    and quoted, as the model wrote them) and what a reference is.
+    """
+    bad = [r for r in (refs or ()) if not is_evidence_ref(r)]
+    shown = ", ".join(json.dumps(str(r)[:60], ensure_ascii=False) for r in bad[:5])
+    more = f" and {len(bad) - 5} more" if len(bad) > 5 else ""
+    return (f"evidence_refs held {len(bad)} value(s) that are not evidence references: {shown}{more}. "
+            "A reference is the evidence_ref a tool result returned in this turn, copied exactly "
+            "('<kind>:<id>'); nothing from this reply was used.")
 
 
 def validate_tool_request(value: Any) -> ToolRequest:
@@ -876,6 +906,7 @@ __all__ = [
     "LoopBudget", "LoopEvent", "LoopOutcome", "LoopPhase", "LoopProgress", "LoopStatus", "MAX_ARGUMENTS_BYTES",
     "MAX_CHECKPOINT_BYTES", "MAX_CHECKPOINT_OBSERVATIONS", "MAX_OBSERVATION_BYTES", "MAX_REPLY_TEXT_LENGTH",
     "MAX_TOOL_ATTEMPTS_PER_SIGNATURE", "MAX_TOOL_REQUESTS_PER_STEP", "ObservationCheckpoint", "ProviderBlocked",
+    "MALFORMED_EVIDENCE", "MalformedEvidenceReference",
     "ProviderCapabilities", "ProviderFailure", "ProviderInvalid", "ProviderReply", "ProviderRequest",
     "ProviderResult", "ProviderToolRequests", "READABLE_STATE_VERSIONS", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft",
     "TRUNCATED_OUTPUT", "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",
