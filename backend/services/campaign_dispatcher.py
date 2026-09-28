@@ -552,6 +552,11 @@ async def _dispatch_campaign_with_lease(
         if ctx.pause_reason and not ctx.lease_lost:
             campaign.status = "paused"
         _note_capacity_wait(campaign, ctx)
+        if not ctx.lease_lost:
+            # The run reached its own end (paused or wave done): it did not
+            # stall, so automatic stall recovery starts fresh next time.
+            from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+            _ledger.clear_stall_recovery(campaign)
         db.commit()
         return {
             "campaign_id":   campaign_id,
@@ -774,6 +779,9 @@ async def _dispatch_campaign_with_lease(
     campaign.status = final_status
     campaign.updated_at = datetime.now(timezone.utc)
     _note_capacity_wait(campaign, ctx)
+    # The run reached its own end: it did not stall, so automatic stall
+    # recovery starts fresh if a later run's worker dies.
+    ledger.clear_stall_recovery(campaign)
 
     _persist_dispatch_result(
         campaign,
@@ -1653,6 +1661,88 @@ def _revive_zombie_sending(
     return sum(out.values())
 
 
+# Sentinel "status" returned by ``_consent_skip_for_row`` when the
+# recipient's consent could not be read: not a send-log status. The row
+# stays ``queued`` and is not sent in this run.
+CONSENT_UNREADABLE = "consent_unreadable"
+
+
+def _consent_skip_for_row(
+    db: Session,
+    row: CampaignSendLog,
+    *,
+    customers_by_phone: Dict[str, Customer],
+    blocked_phones: Optional[set] = None,
+) -> Optional[Tuple[str, str]]:
+    """Decide, from the database as it is NOW, whether this queued recipient
+    may still be sent to.
+
+    Returns ``None`` when sending is allowed; ``(skipped_* status, reason)``
+    when consent was withdrawn since the snapshot (merchant block list,
+    customer unsubscribe — confirmed or pending — or the merchant's
+    marketing opt-out); or ``(CONSENT_UNREADABLE, detail)`` when the
+    current state could not be established — the refresh failed, or the
+    stored consent flags have a shape this code does not understand.
+
+    Fail closed: an unreadable state is never permission to send. The
+    caller leaves such a recipient queued (not sent in this attempt) with
+    the reason recorded, and the run ends paused for the merchant.
+    Only a missing metadata column (legacy ``NULL``) counts as "no flags";
+    any other non-dict value is treated as unreadable.
+    """
+    phone = row.customer_phone_e164 or ""
+    if blocked_phones:
+        if {phone, _normalize_blocked_phone(phone)} & blocked_phones:
+            return LOG_SKIPPED_BLOCKED_CUSTOMER, REASON_BLOCKED_CUSTOMER
+    cust: Optional[Customer] = None
+    try:
+        if isinstance(row.customer_id, int):
+            cust = db.get(Customer, row.customer_id)
+        if cust is None:
+            cust = customers_by_phone.get(phone)
+        if cust is None:
+            return None
+        # Re-read the customer's current flags; the object in hand may be
+        # the launch-time snapshot.
+        db.refresh(cust)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: silent-ok — BLE001; the read already failed, we only restore the session
+            pass
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s consent state unreadable "
+            "(refresh failed: %s) — not sent in this attempt",
+            row.campaign_id, row.id, type(exc).__name__,
+        )
+        return CONSENT_UNREADABLE, f"refresh_failed:{type(exc).__name__}"
+    meta = getattr(cust, "extra_metadata", None)
+    if meta is None:
+        meta = {}                      # legacy row: no consent flags were ever set
+    elif not isinstance(meta, dict):
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s consent flags have an unexpected "
+            "shape (%s) — not sent in this attempt", row.campaign_id, row.id, type(meta).__name__,
+        )
+        return CONSENT_UNREADABLE, f"metadata_shape:{type(meta).__name__}"
+    if meta.get("is_unsubscribed"):
+        return LOG_SKIPPED_UNSUBSCRIBED, REASON_UNSUBSCRIBED
+    if meta.get("pending_unsubscribe"):
+        return LOG_SKIPPED_UNSUBSCRIBED, REASON_PENDING_OPT_OUT
+    try:
+        from services.manual_segments import is_marketing_opted_out_from_meta  # noqa: PLC0415
+        opted_out = is_marketing_opted_out_from_meta(meta)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s marketing opt-out flags unreadable "
+            "(%s) — not sent in this attempt", row.campaign_id, row.id, type(exc).__name__,
+        )
+        return CONSENT_UNREADABLE, f"opt_out_flags:{type(exc).__name__}"
+    if opted_out:
+        return LOG_SKIPPED_MANUAL_EXCLUSION, REASON_MARKETING_OPT_OUT
+    return None
+
+
 def _force_terminate_runaway(
     row: CampaignSendLog,
     *,
@@ -1820,19 +1910,10 @@ def _count_log_statuses(db: Session, campaign_id: int) -> Dict[str, int]:
 def _note_capacity_wait(campaign: Campaign, ctx: "DispatchRunContext") -> None:
     """A run stopped by Meta's shared messaging limit is waiting for
     capacity, not failed or merchant-paused: persist when it may continue
-    so the scheduler resumes it. A typed marketing breaker gets a separate
-    increasing cooldown; spam/unknown/uncertain outcomes clear the wait."""
+    so the scheduler resumes it. Spam/unknown/uncertain outcomes clear the
+    wait (they need the merchant)."""
     from services import campaign_send_ledger as ledger  # noqa: PLC0415
     if ctx.lease_lost:
-        return
-    if (ctx.pause_reason == ledger.PAUSE_PROVIDER_THROTTLING
-            and ctx.post_accept_error_key == "marketing_blocked"):
-        wait = ledger.record_marketing_wait(campaign)
-        logger.warning(
-            "[campaign_dispatcher] campaign=%d waiting after marketing delivery refusals "
-            "until %s (attempt %d); untouched recipients only", campaign.id,
-            wait["next_eligible_at"], wait["attempt"],
-        )
         return
     if ctx.pause_reason == ledger.PAUSE_PROVIDER_RATE_LIMITED:
         wait = ledger.record_rate_limit_wait(campaign, detail=ctx.pause_detail)
@@ -1952,6 +2033,8 @@ async def _dispatch_queued_rows(
     same_code_counts: Dict[str, int] = {}
     abort_reason: Optional[str] = None
     consecutive_uncertain = 0
+    # Recipients left queued because their consent state could not be read.
+    consent_unreadable = 0
 
     # Resolve whatever a dead worker left in flight before drawing work,
     # and apply status events that arrived before their attempts.
@@ -1961,6 +2044,8 @@ async def _dispatch_queued_rows(
 
     scope_key = ledger.messaging_scope_key(wa_conn)
     phone_number_id = getattr(wa_conn, "phone_number_id", None)
+    click_trackable = ledger.template_click_trackable(template)
+    blocked_phones = _load_blocked_phone_set(db, tenant_id)
 
     # Rows handled in THIS invocation are never drawn again by it.
     processed_ids: set = set()
@@ -1996,6 +2081,7 @@ async def _dispatch_queued_rows(
             batch = [(int(i), p) for i, p in batch_q.all()]
             if not batch:
                 break
+            blocked_phones = _load_blocked_phone_set(db, tenant_id)
 
             for log_id, phone in batch:
                 processed_ids.add(log_id)
@@ -2031,6 +2117,20 @@ async def _dispatch_queued_rows(
                     )
                     break
 
+                # ── The offer ended: stop claiming, keep the queue ────
+                db.refresh(campaign)
+                if ledger.offer_expired(campaign):
+                    ctx.pause(
+                        ledger.PAUSE_OFFER_EXPIRED,
+                        f"offer_expires_at={campaign.offer_expires_at.isoformat()}",
+                    )
+                    logger.warning(
+                        "[campaign_dispatcher] campaign=%d paused: offer expired at %s — "
+                        "%s recipients stay queued until the merchant updates the offer",
+                        campaign_id, campaign.offer_expires_at, "remaining",
+                    )
+                    break
+
                 # ── Legacy attempt ceilings (no Meta call) ───────────
                 row = db.get(CampaignSendLog, log_id)
                 if row is None:
@@ -2038,6 +2138,42 @@ async def _dispatch_queued_rows(
                 db.refresh(row)
                 if row.status != LOG_QUEUED:
                     continue
+                # ── Consent is re-read at send time, not only at snapshot ──
+                # A campaign can span days (capacity waits, recoveries); a
+                # customer who unsubscribed, was opted out or blocked since
+                # the snapshot leaves the queue here without a request.
+                skip_now = _consent_skip_for_row(
+                    db, row, customers_by_phone=customers_by_phone,
+                    blocked_phones=blocked_phones,
+                )
+                if skip_now is not None and skip_now[0] == CONSENT_UNREADABLE:
+                    # Fail closed: no request for this recipient in this run.
+                    # The row stays queued (nothing was sent, so a later run
+                    # may retry it safely) with the reason recorded; the run
+                    # ends paused for the merchant (see after the loop).
+                    row = db.get(CampaignSendLog, log_id)
+                    if row is not None:
+                        row.error_code = ledger.CONSENT_UNREADABLE_ERROR
+                        row.error_message = f"[{ledger.CONSENT_UNREADABLE_ERROR}] {skip_now[1]}"[:500]
+                        row.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+                    consent_unreadable += 1
+                    if len(errors) < 10:
+                        errors.append(f"{phone}: consent state unreadable [{ledger.CONSENT_UNREADABLE_ERROR}]")
+                    continue
+                if skip_now is not None:
+                    row.status, row.skip_reason = skip_now
+                    row.updated_at = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.info(
+                        "[campaign_dispatcher] campaign=%d row=%s left the queue at send time: %s",
+                        campaign_id, log_id, skip_now[1],
+                    )
+                    continue
+                if row.error_code == ledger.CONSENT_UNREADABLE_ERROR:
+                    # Readable again on this attempt: drop the stale note.
+                    row.error_code = None
+                    row.error_message = None
                 if _force_terminate_runaway(row, campaign_id=campaign_id):
                     failed += 1
                     db.commit()
@@ -2148,6 +2284,10 @@ async def _dispatch_queued_rows(
                     )
                     continue
 
+                # Which content version this request carries, and whether a
+                # button tap on it can be measured at all.
+                attempt.content_revision = int(getattr(campaign, "content_revision", None) or 1)
+                attempt.click_trackable = click_trackable
                 ledger.mark_request_started(db, attempt)
 
                 # ── 4. Send and record exactly what we learned ───────
@@ -2392,6 +2532,20 @@ async def _dispatch_queued_rows(
                 break
             if pause > 0:
                 await asyncio.sleep(pause)
+        if consent_unreadable and not ctx.stopped:
+            # Everyone readable has been handled; the recipients whose
+            # consent could not be read were not sent to and are still
+            # queued. That is a stop for the merchant, never a completion
+            # and never a silent send.
+            ctx.pause(
+                ledger.PAUSE_CONSENT_UNREADABLE,
+                f"{consent_unreadable} recipient(s) not sent: consent state unreadable; "
+                "still queued for review",
+            )
+            logger.warning(
+                "[campaign_dispatcher] campaign=%d paused: %d recipient(s) with unreadable "
+                "consent state were not sent", campaign_id, consent_unreadable,
+            )
     finally:
         if own_lease:
             try:
@@ -2813,7 +2967,7 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
     Wave campaigns are set back to ``active`` and their pending waves are
     dispatched by the wave scheduler.
     """
-    from models import CampaignDispatchLease, CampaignWave  # noqa: PLC0415
+    from models import CampaignDispatchLease, CampaignWave  # noqa: PLC0415, F811
     from services import campaign_send_ledger as ledger  # noqa: PLC0415
 
     now = now or ledger.utcnow()
@@ -2874,16 +3028,24 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
         # New/late receipts may have appeared during the durable cooldown.
         throttle = ledger.post_accept_throttle(db, ledger.messaging_scope_key(wa_conn), now=now)
         if throttle is not None:
+            # A sender-scoped breaker (spam / rate) is tripped: this needs
+            # the merchant, never a timer.
             lease.pause_reason = ledger.PAUSE_PROVIDER_THROTTLING
             lease.pause_detail = f"post_accept {throttle[0]} x{throttle[1]}"
             lease.paused_at = now
-            if throttle[0] == "marketing_blocked":
-                wait = ledger.record_marketing_wait(campaign, now=now)
-                entry.update(action="marketing_wait", next_eligible_at=wait["next_eligible_at"])
-            else:
-                ledger.clear_capacity_wait(campaign)
-                entry.update(action="provider_action_required", error_key=throttle[0])
+            ledger.clear_capacity_wait(campaign)
+            entry.update(action="provider_action_required", error_key=throttle[0])
             db.commit()
+            continue
+        if ledger.offer_expired(campaign, now=now):
+            # The offer ended while waiting: nothing more goes out until the
+            # merchant updates the expiry or the content.
+            lease.pause_reason = ledger.PAUSE_OFFER_EXPIRED
+            lease.pause_detail = f"offer_expires_at={campaign.offer_expires_at.isoformat()}"
+            lease.paused_at = now
+            ledger.clear_capacity_wait(campaign)
+            db.commit()
+            entry["action"] = "offer_expired"
             continue
         budget = ledger.messaging_budget(db, wa_conn, now=now)
         if budget.budget is not None and budget.used >= budget.budget:
@@ -2932,5 +3094,124 @@ async def resume_capacity_waiting(db: Session, *, now: Optional[datetime] = None
             continue
         result = await dispatch_campaign(db, cid)
         entry.update(action="resumed", status=result.get("status"),
+                     sent=result.get("sent"), errors=(result.get("errors") or [])[:3])
+    return out
+
+
+async def resume_stalled_campaigns(db: Session, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Continue ``active`` campaigns whose worker died mid-run.
+
+    A deploy, a crash or an OOM kills the sending thread; the campaign
+    stays ``status='active'`` with recipients ``queued`` and a lease that
+    nobody renews. Until now only the merchant's click continued it. The
+    scheduler now re-dispatches such a campaign through the normal leased
+    path — atomic claims, the send guard, the budget check and zombie
+    resolution are unchanged, so nobody is sent twice and a request whose
+    outcome is unknown stays ``uncertain``.
+
+    Guard rails: the lease must be expired by ``STALL_GRACE``; a merchant
+    stop, a live worker or a scheduled/paused status wins; recoveries back
+    off (1, 2, 4 … minutes, capped) and stop after
+    ``STALL_RECOVERY_MAX_ATTEMPTS`` with the campaign paused as
+    ``stalled_repeatedly`` for the merchant. Wave campaigns get their
+    ``dispatching`` wave (left by the dead worker) put back to ``pending``
+    for the wave scheduler instead of a direct dispatch.
+    """
+    from models import CampaignDispatchLease, CampaignWave  # noqa: PLC0415
+    from services import campaign_send_ledger as ledger  # noqa: PLC0415
+    from services import wave_scheduler as ws  # noqa: PLC0415
+
+    now = now or ledger.utcnow()
+    out: List[Dict[str, Any]] = []
+    queued_subq = (
+        db.query(CampaignSendLog.campaign_id)
+        .filter(CampaignSendLog.status == LOG_QUEUED)
+        .distinct()
+        .subquery()
+    )
+    rows = (
+        db.query(Campaign, CampaignDispatchLease)
+        .outerjoin(CampaignDispatchLease, CampaignDispatchLease.campaign_id == Campaign.id)
+        .filter(Campaign.status == "active", Campaign.id.in_(db.query(queued_subq.c.campaign_id)))
+        .all()
+    )
+    for campaign, lease in rows:
+        cid = int(campaign.id)
+        entry: Dict[str, Any] = {"campaign_id": cid}
+        out.append(entry)
+        if lease is not None and lease.stop_requested_at is not None:
+            entry["action"] = "stop_requested"
+            continue
+        if ledger.lease_is_live(lease, now=now):
+            entry["action"] = "worker_running"
+            continue
+        if lease is None or lease.expires_at is None:
+            # Never had a worker (or the lease row predates the ledger):
+            # the immediate-launch rescue owns campaigns without any run.
+            last_touch = ledger._naive(campaign.updated_at) or ledger._naive(campaign.launched_at)
+            if last_touch is None or now - last_touch < ledger.STALL_GRACE:
+                entry["action"] = "too_recent"
+                continue
+        elif now - ledger._naive(lease.expires_at) < ledger.STALL_GRACE:
+            entry["action"] = "too_recent"
+            continue
+        rec = ledger.stall_recovery(campaign) or {}
+        try:
+            next_at = ledger._naive(datetime.fromisoformat(str(rec.get("next_eligible_at"))))
+        except (TypeError, ValueError):
+            next_at = None
+        if next_at is not None and now < next_at:
+            entry.update(action="waiting", next_eligible_at=rec.get("next_eligible_at"))
+            continue
+        if int(rec.get("attempt", 0) or 0) >= ledger.STALL_RECOVERY_MAX_ATTEMPTS:
+            campaign.status = "paused"
+            campaign.updated_at = datetime.now(timezone.utc)
+            if lease is not None:
+                lease.pause_reason = ledger.PAUSE_STALLED_REPEATEDLY
+                lease.pause_detail = f"worker died {rec.get('attempt')} times; automatic recovery stopped"
+                lease.paused_at = now
+            db.commit()
+            logger.error(
+                "[campaign_dispatcher] campaign=%d paused: worker died repeatedly (%s recoveries)",
+                cid, rec.get("attempt"),
+            )
+            entry["action"] = "gave_up"
+            continue
+        if ledger.offer_expired(campaign, now=now):
+            campaign.status = "paused"
+            campaign.updated_at = datetime.now(timezone.utc)
+            if lease is not None:
+                lease.pause_reason = ledger.PAUSE_OFFER_EXPIRED
+                lease.pause_detail = f"offer_expires_at={campaign.offer_expires_at.isoformat()}"
+                lease.paused_at = now
+            db.commit()
+            entry["action"] = "offer_expired"
+            continue
+        rec = ledger.record_stall_recovery(campaign, now=now)
+        db.commit()
+        stuck_waves = (
+            db.query(CampaignWave)
+            .filter(CampaignWave.campaign_id == cid, CampaignWave.status == ws.WAVE_DISPATCHING)
+            .all()
+        )
+        has_waves = bool(stuck_waves) or db.query(CampaignWave.id).filter(
+            CampaignWave.campaign_id == cid).first() is not None
+        if has_waves:
+            for w in stuck_waves:
+                w.status = ws.WAVE_PENDING
+                w.started_at = None
+            db.commit()
+            logger.warning(
+                "[campaign_dispatcher] campaign=%d stalled wave run recovered (attempt %d): "
+                "%d wave(s) back to pending", cid, rec["attempt"], len(stuck_waves),
+            )
+            entry.update(action="recovered_waves", attempt=rec["attempt"], waves=len(stuck_waves))
+            continue
+        logger.warning(
+            "[campaign_dispatcher] campaign=%d stalled run recovered automatically (attempt %d)",
+            cid, rec["attempt"],
+        )
+        result = await dispatch_campaign(db, cid)
+        entry.update(action="recovered", attempt=rec["attempt"], status=result.get("status"),
                      sent=result.get("sent"), errors=(result.get("errors") or [])[:3])
     return out

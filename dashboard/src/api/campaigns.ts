@@ -68,14 +68,47 @@ export type CampaignLifecycle =
   /** Meta rejected sends with its per-minute limit: paused for a recorded
    *  backoff and continued automatically after it. See ``capacity_wait``. */
   | 'rate_limit_backoff'
-  | 'marketing_delivery_backoff'
-  /** Meta declined to deliver marketing to many recipients (131049): the
-   *  post-accept breaker stopped the run. Not resumed automatically;
-   *  ``throttle.clears_at`` says when a resume can send again. */
-  | 'marketing_delivery_blocked'
-  /** Another post-accept breaker (e.g. spam rate limit). See ``throttle``. */
+  /** A sender-scope post-accept breaker (spam rate limit). See ``throttle``. */
   | 'provider_throttled'
+  /** Paused in a way the platform will not continue on its own: the
+   *  retired 131049 breaker's pause, or a worker that kept dying. The
+   *  merchant reviews the offer / content and resumes explicitly. */
+  | 'needs_review'
+  /** ``offer_expires_at`` has passed: no new sends until the merchant
+   *  updates the offer / expiry (recorded as a content revision). */
+  | 'offer_expired'
   | 'unknown'
+
+/** How the platform explains the current state, as facts (the UI phrases them). */
+export interface CampaignStatusExplanation {
+  /** calm = normal waiting/progress · action = the merchant must act · neutral otherwise */
+  tone: 'calm' | 'action' | 'neutral'
+  /** The platform continues this campaign on its own. */
+  auto_resume: boolean
+  worker_running: boolean
+  /** Next automatic check, when known. Never an invented time. */
+  next_check_at: string | null
+  next_check_known: boolean
+  /** True when the time is the exact moment a slot frees, not a recheck. */
+  next_check_exact: boolean
+  pause_reason: string | null
+  remaining: number
+}
+
+/** Whether button taps can be measured for this campaign at all. */
+export interface CampaignClickTracking {
+  status: 'available' | 'pending' | 'unavailable'
+  reason: string
+  trackable_messages: number
+  /** Some messages predate tracking: the count covers only the trackable ones. */
+  partial: boolean
+}
+
+export interface CampaignStallRecovery {
+  attempt: number
+  last_recovered_at?: string | null
+  next_eligible_at?: string | null
+}
 
 /** Canonical per-campaign analytics derived from ``CampaignSendLog``.
  *
@@ -134,6 +167,17 @@ export interface CampaignStats {
   /** Recipients with more than one accepted copy. */
   recipients_delivered_multiple?: number
   recipients_accepted_multiple_unproven?: number
+  /** Unique recipients the message provably reached (delivered or read). */
+  reached?: number
+  /** Unique recipients who tapped a quick-reply button (tracked copies only). */
+  clicked?: number
+  /** Recipients Meta refused for the recipient's own marketing limit (131049). */
+  recipients_marketing_limit?: number
+  messages_click_trackable?: number
+  messages_clicked?: number
+  recipients_clicked?: number
+  /** Latest provider receipt (delivered / read / failed / tap) we hold. */
+  last_receipt_at?: string | null
   /** Failure reasons counted from the same rows as the counters. */
   error_breakdown?: CampaignErrorBreakdownEntry[]
 }
@@ -229,6 +273,14 @@ export interface CampaignRecord {
   throttle_checked?: boolean
   created_at: string | null
   launched_at: string | null
+  /** The offer's end; past it the campaign stops claiming recipients. */
+  offer_expires_at?: string | null
+  /** Bumped by every content edit (see revisions). */
+  content_revision?: number
+  click_tracking?: CampaignClickTracking
+  stall_recovery?: CampaignStallRecovery | null
+  last_provider_event_at?: string | null
+  status_explanation?: CampaignStatusExplanation
   /** Wave/Batch — `immediate` for legacy / small campaigns,
    *  `batched` or `adaptive` once the merchant opts in. The UI
    *  shows the "wave N of M" badge whenever this is not
@@ -835,12 +887,107 @@ export interface CampaignReport {
   stats?: CampaignStats
 }
 
+export type CampaignStatsScope = 'all' | 'running' | number
+export type CampaignStatsPeriod = 'today' | 'week' | 'month' | 'year' | 'all' | 'custom'
+
+/** Filtered counters from GET /campaigns/stats. Counted by EVENT time. */
+export interface CampaignFilteredStats {
+  scope: string
+  campaign_ids: number[]
+  period: CampaignStatsPeriod
+  range: { from: string | null; to: string | null }
+  period_basis: 'event_time'
+  as_of: string
+  recipients: {
+    accepted: number
+    reached: number
+    read: number
+    clicked: number
+    failed_final: number
+    recipient_limit: number
+    excluded: number
+  }
+  messages: {
+    accepted: number
+    delivered: number
+    read: number
+    clicked: number
+    failed_after_accept: number
+    click_trackable: number
+  }
+  remaining: number
+  click_tracking: { status: 'available' | 'unavailable'; reason: string; partial?: boolean }
+}
+
+export interface CampaignContentRevision {
+  revision_no: number
+  template_id: string | null
+  template_name: string | null
+  template_language: string | null
+  template_body: string | null
+  template_variables: Record<string, string>
+  coupon_code: string
+  offer_expires_at: string | null
+  note: string | null
+  created_at: string | null
+  sends?: {
+    attempted: number
+    accepted: number
+    delivered: number
+    read: number
+    clicked: number
+    first_at: string | null
+    last_at: string | null
+  }
+}
+
+export interface UpdateCampaignContentPayload {
+  template_id?: string
+  template_variables?: Record<string, string>
+  coupon_code?: string
+  offer_expires_at?: string | null
+  clear_offer_expiry?: boolean
+  note?: string
+}
+
 export const campaignsApi = {
   getTemplates: () =>
     apiCall<{ templates: WaTemplate[]; source: 'meta' | 'mock' }>('/campaigns/templates'),
 
-  list: () =>
-    apiCall<{ campaigns: CampaignRecord[] }>('/campaigns'),
+  list: (opts?: { signal?: AbortSignal }) =>
+    apiCall<{ campaigns: CampaignRecord[]; as_of?: string }>(
+      '/campaigns', opts?.signal ? { signal: opts.signal } : undefined),
+
+  /** Filtered summary counters (campaign scope × period), by event time. */
+  stats: (params: {
+    scope: CampaignStatsScope
+    period: CampaignStatsPeriod
+    from?: string
+    to?: string
+    tzOffsetMinutes?: number
+  }, opts?: { signal?: AbortSignal }) => {
+    const qs = new URLSearchParams()
+    qs.set('scope', String(params.scope))
+    qs.set('period', params.period)
+    if (params.from) qs.set('from', params.from)
+    if (params.to) qs.set('to', params.to)
+    qs.set('tz_offset_minutes', String(params.tzOffsetMinutes ?? -new Date().getTimezoneOffset()))
+    return apiCall<CampaignFilteredStats>(`/campaigns/stats?${qs.toString()}`,
+      opts?.signal ? { signal: opts.signal } : undefined)
+  },
+
+  /** Every content version with how many messages each one produced. */
+  revisions: (id: number) =>
+    apiCall<{ campaign_id: number; current_revision: number; revisions: CampaignContentRevision[] }>(
+      `/campaigns/${id}/revisions`),
+
+  /** Edit a stopped campaign's offer / expiry / content as a new revision.
+   *  Applies to future sends only; refused (409) while a run is live. */
+  updateContent: (id: number, payload: UpdateCampaignContentPayload) =>
+    apiCall<CampaignRecord & { revision: CampaignContentRevision }>(`/campaigns/${id}/content`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   /** Read-only metadata for the "🛡️ حماية ذكية من التكرار" trust card.
    *  Cheap (one fast SELECT) so it's safe to call once per wizard

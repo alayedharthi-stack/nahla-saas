@@ -1920,6 +1920,20 @@ async def _dispatch_message(
         phone_number_id, sender, msg_id, msg_type, _text_preview,
     )
 
+    # ── Campaign click measurement (quick-reply taps only) ─────────────
+    # A template quick-reply tap quotes the campaign message it answers
+    # (``context.id`` = our wamid). Record it against that attempt before
+    # any routing decision; purely observational — it never changes how
+    # the message is handled, and it never raises.
+    if msg_type in ("button", "interactive") and isinstance(msg.get("context"), dict):
+        try:
+            from services.campaign_click_tracking import (  # noqa: PLC0415
+                record_button_tap_from_inbound,
+            )
+            record_button_tap_from_inbound(msg)
+        except Exception as _click_exc:  # noqa: BLE001
+            logger.debug("[campaign_click] skipped: %s", _click_exc)
+
     # ── [INBOUND_MEDIA_RAW] — May 2026 #41 ────────────────────────────
     # Single grep-able line for EVERY inbound payload before any
     # routing / dedup / tenant-resolution gate fires. Surfaces the

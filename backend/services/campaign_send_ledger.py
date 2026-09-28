@@ -135,8 +135,18 @@ POST_ACCEPT_BREAKER_WINDOW = timedelta(
 POST_ACCEPT_BREAKER_THRESHOLDS: Dict[str, int] = {
     "spam_rate_limit": _env_int("NAHLA_CAMPAIGN_BREAKER_SPAM", 5),
     "rate_limit": _env_int("NAHLA_CAMPAIGN_BREAKER_RATE", 10),
-    "marketing_blocked": _env_int("NAHLA_CAMPAIGN_BREAKER_ECOSYSTEM", 25),
 }
+# Post-accept failures that describe the RECIPIENT, not the sender. Meta's
+# 131049 ("not delivered to maintain healthy ecosystem engagement") is the
+# per-user marketing-message limit: that person has received too many
+# marketing templates from all businesses. It says nothing about our
+# number, so it is a final outcome for that recipient in this campaign
+# (never retried) and never a reason to stop sending to anyone else.
+# Until 2026-09-27 it tripped a 25-in-15-minutes sender breaker with an
+# exponential cooldown up to 24h — which is why campaign 35 / tenant 33
+# advanced ~100–180 recipients per day (RCA in
+# docs/engineering/campaign-automatic-continuation.md).
+RECIPIENT_SCOPED_POST_ACCEPT_CODES = frozenset({"marketing_blocked"})
 # Consecutive uncertain outcomes before the dispatcher pauses.
 UNCERTAIN_BREAKER_THRESHOLD = _env_int("NAHLA_CAMPAIGN_BREAKER_UNCERTAIN", 3)
 # Unmatched inbox rows older than this are dropped (non-campaign sends).
@@ -158,9 +168,28 @@ RATE_LIMIT_BACKOFF_BASE = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOF
 RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF_MAX_MINUTES", 60))
 # Continue untouched recipients, never retry an accepted 131049 copy. These
 # delays are Nahla policy, not a prediction of when Meta will deliver again.
-MARKETING_BACKOFF_BASE = timedelta(hours=1)
-MARKETING_BACKOFF_MAX = timedelta(hours=24)
-MARKETING_BACKOFF_KEY = "_marketing_continuation_attempt"
+# The offer the campaign advertises has ended (``Campaign.offer_expires_at``):
+# no new recipient is claimed until the merchant edits the expiry / content.
+PAUSE_OFFER_EXPIRED = "offer_expired"
+# A worker died mid-run repeatedly; automatic recovery gave up.
+PAUSE_STALLED_REPEATEDLY = "stalled_repeatedly"
+# A recipient's current consent state could not be read at send time
+# (refresh failed, or the stored flags have an unexpected shape). The
+# recipient was NOT sent to and stays queued with ``error_code`` =
+# ``CONSENT_UNREADABLE_ERROR``; the run ends paused for the merchant.
+# Unreadable consent is never permission to send.
+PAUSE_CONSENT_UNREADABLE = "consent_unreadable"
+CONSENT_UNREADABLE_ERROR = "consent_unreadable"
+# Automatic recovery of a run whose worker died (deploy, crash, OOM). The
+# scheduler re-dispatches an ``active`` campaign with queued recipients and
+# no live lease, with a bounded backoff between attempts.
+STALL_RECOVERY_KEY = "_stall_recovery"
+STALL_RECOVERY_BASE = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_STALL_BACKOFF_MINUTES", 1))
+STALL_RECOVERY_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_STALL_BACKOFF_MAX_MINUTES", 30))
+STALL_RECOVERY_MAX_ATTEMPTS = _env_int("NAHLA_CAMPAIGN_STALL_MAX_ATTEMPTS", 8)
+# A lease must be expired by at least this long before the campaign counts
+# as stalled (a live worker renews it every recipient).
+STALL_GRACE = timedelta(seconds=_env_int("NAHLA_CAMPAIGN_STALL_GRACE_SECONDS", 90))
 # A run that ends for no recorded reason while recipients are still queued
 # (e.g. a same-code breaker) is paused, never "completed".
 PAUSE_RUN_ENDED_WITH_QUEUE = "run_ended_with_queue"
@@ -1371,14 +1400,38 @@ def ledger_stats(db: Session, campaign_ids: List[int]) -> Dict[int, Dict[str, in
             "messages_read": 0, "messages_failed_after_accept": 0,
             "messages_rejected": 0, "messages_uncertain": 0,
             "recipients_with_attempts": len(logs),
+            # Recipient-scoped post-accept refusals (Meta 131049): final
+            # for this campaign, never a reason to stop the run.
+            "recipients_marketing_limit": 0,
+            # Click measurement (quick-reply taps only; see record_button_click).
+            "messages_click_trackable": 0, "messages_clicked": 0,
+            "recipients_clicked": 0,
+            "last_receipt_at": None,
         }
         for key in (OUTCOME_DELIVERED_ONCE, OUTCOME_DELIVERED_MULTIPLE,
                     OUTCOME_ACCEPTED_MULTIPLE_UNPROVEN, OUTCOME_ACCEPTED_PENDING,
                     OUTCOME_FAILED_AFTER_ACCEPT, OUTCOME_FAILED_BEFORE_ACCEPT,
                     OUTCOME_UNCERTAIN, OUTCOME_IN_FLIGHT):
             s[f"recipients_{key}"] = 0
+        last_receipt: Optional[datetime] = None
         for lst in logs.values():
+            if any(a.clicked_at is not None for a in lst):
+                s["recipients_clicked"] += 1
+            if any(a.state == ATTEMPT_ACCEPTED and a.failed_at is not None
+                   and a.delivered_at is None and a.read_at is None
+                   and a.post_accept_error_code in RECIPIENT_SCOPED_POST_ACCEPT_CODES
+                   for a in lst) and not any(
+                       a.delivered_at is not None or a.read_at is not None for a in lst):
+                s["recipients_marketing_limit"] += 1
             for a in lst:
+                if a.click_trackable:
+                    s["messages_click_trackable"] += 1
+                if a.clicked_at is not None:
+                    s["messages_clicked"] += 1
+                for t in (a.delivered_at, a.read_at, a.failed_at, a.clicked_at):
+                    t = _naive(t)
+                    if t is not None and (last_receipt is None or t > last_receipt):
+                        last_receipt = t
                 if a.state in POSSIBLY_SENT_STATES:
                     s["messages_attempted"] += 1
                 if a.state == ATTEMPT_ACCEPTED:
@@ -1396,6 +1449,7 @@ def ledger_stats(db: Session, campaign_ids: List[int]) -> Dict[int, Dict[str, in
             outcome = classify_recipient(lst)
             if outcome != OUTCOME_NOT_STARTED:
                 s[f"recipients_{outcome}"] += 1
+        s["last_receipt_at"] = last_receipt.isoformat() if last_receipt else None
         out[cid] = s
     return out
 
@@ -1786,44 +1840,126 @@ def capacity_wait(campaign: Any) -> Optional[Dict[str, Any]]:
 
 
 # Pauses the scheduler may continue on its own, once their recorded wait
-# has passed. provider_throttling additionally requires an explicit, typed
-# marketing-only wait below. Spam/uncertain/legacy pauses remain manual.
-AUTO_RESUME_REASONS = frozenset({
-    PAUSE_MESSAGING_LIMIT, PAUSE_PROVIDER_RATE_LIMITED, PAUSE_PROVIDER_THROTTLING,
-})
+# has passed: the shared capacity limit and Meta's pre-accept per-minute
+# limit. Everything else (spam breaker, unknown outcomes, unreadable
+# evidence, an expired offer, repeated worker deaths, a legacy pause) stays
+# with the merchant. 131049 no longer pauses a run at all — it is a
+# per-recipient outcome (``RECIPIENT_SCOPED_POST_ACCEPT_CODES``).
+AUTO_RESUME_REASONS = frozenset({PAUSE_MESSAGING_LIMIT, PAUSE_PROVIDER_RATE_LIMITED})
 
 
-def record_marketing_wait(campaign: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]:
-    """Durable, increasing cooldown for untouched recipients after 131049.
+# ── Stalled-run recovery (worker died mid-run) ────────────────────────────
 
-    The counter survives intervening capacity/rate waits and restarts. Never
-    requeue accepted/uncertain copies; normal claim guards still own admission.
-    """
+
+def stall_recovery(campaign: Any) -> Optional[Dict[str, Any]]:
+    tv = campaign.template_variables or {}
+    w = tv.get(STALL_RECOVERY_KEY) if isinstance(tv, dict) else None
+    return w if isinstance(w, dict) else None
+
+
+def record_stall_recovery(campaign: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Note one automatic recovery of a stalled run and when the next one
+    may happen (1, 2, 4 … minutes, capped). Stage only; caller commits."""
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
     now = now or utcnow()
-    tv = dict(campaign.template_variables or {})
+    prev = stall_recovery(campaign) or {}
     try:
-        attempt = max(0, min(24, int(tv.get(MARKETING_BACKOFF_KEY, 0)))) + 1
-    except (ValueError, TypeError, OverflowError):
-        attempt = 25  # malformed state can lengthen a wait, never shorten it
-    delay = min(MARKETING_BACKOFF_BASE * (2 ** min(attempt - 1, 5)), MARKETING_BACKOFF_MAX)
-    wait = {
-        "reason": PAUSE_PROVIDER_THROTTLING,
-        "authority": CAPACITY_WAIT_AUTHORITY,
-        "error_key": "marketing_blocked",
-        "continuation": "untouched_recipients_only",
-        "since": now.isoformat(),
-        "next_eligible_at": (now + delay).isoformat(),
-        "next_eligible_exact": False,
+        attempt = max(0, int(prev.get("attempt", 0))) + 1
+    except (TypeError, ValueError):
+        attempt = STALL_RECOVERY_MAX_ATTEMPTS
+    delay = min(STALL_RECOVERY_BASE * (2 ** min(attempt - 1, 10)), STALL_RECOVERY_MAX)
+    rec = {
         "attempt": attempt,
+        "last_recovered_at": now.isoformat(),
+        "next_eligible_at": (now + delay).isoformat(),
     }
-    prev = capacity_wait(campaign) or {}
-    if (prev.get("reason") == PAUSE_PROVIDER_RATE_LIMITED
-            or prev.get("requeue_rate_limited")):
-        wait["requeue_rate_limited"] = True
-    tv[MARKETING_BACKOFF_KEY] = attempt
+    tv = dict(campaign.template_variables or {})
+    tv[STALL_RECOVERY_KEY] = rec
     campaign.template_variables = tv
-    store_capacity_wait(campaign, wait)
-    return wait
+    flag_modified(campaign, "template_variables")
+    return rec
+
+
+def clear_stall_recovery(campaign: Any) -> None:
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+    tv = dict(campaign.template_variables or {})
+    if STALL_RECOVERY_KEY in tv:
+        tv.pop(STALL_RECOVERY_KEY, None)
+        campaign.template_variables = tv
+        flag_modified(campaign, "template_variables")
+
+
+def offer_expired(campaign: Any, *, now: Optional[datetime] = None) -> bool:
+    """True when the campaign advertises an offer whose end has passed.
+    Anything that is not a real datetime (unset column, a test double)
+    means "no expiry" — never a guess."""
+    raw = getattr(campaign, "offer_expires_at", None)
+    if not isinstance(raw, datetime):
+        return False
+    exp = _naive(raw)
+    return exp is not None and (now or utcnow()) >= exp
+
+
+# ── Button clicks (quick replies only) ───────────────────────────────────
+
+CLICK_KIND_QUICK_REPLY = "quick_reply"
+
+
+def template_click_trackable(template: Any) -> bool:
+    """True when the template has at least one QUICK_REPLY button: a tap
+    arrives as an inbound message whose ``context.id`` is our wamid. URL,
+    COPY_CODE, PHONE_NUMBER and OTP buttons produce no event, so a
+    campaign built on them can never measure clicks."""
+    for comp in (getattr(template, "components", None) or []):
+        if not isinstance(comp, dict) or (comp.get("type") or "").upper() != "BUTTONS":
+            continue
+        for btn in comp.get("buttons") or []:
+            if isinstance(btn, dict) and (btn.get("type") or "").upper() == "QUICK_REPLY":
+                return True
+    return False
+
+
+@dataclass
+class ClickApplyResult:
+    matched: bool
+    counted: bool
+    reason: str
+    attempt_id: Optional[int] = None
+    campaign_id: Optional[int] = None
+    tenant_id: Optional[int] = None
+
+
+def record_button_click(db: Session, *, context_wamid: str, inbound_message_id: Optional[str],
+                        at: Optional[datetime] = None,
+                        kind: str = CLICK_KIND_QUICK_REPLY) -> ClickApplyResult:
+    """Attribute a quick-reply tap to the campaign attempt that owns the
+    quoted wamid. Counted once per attempt (the first tap), only for
+    attempts flagged ``click_trackable`` at send time — a tap on a copy
+    sent before tracking existed is matched but not counted. Commits."""
+    wamid = (context_wamid or "").strip()
+    if not wamid:
+        return ClickApplyResult(False, False, "no_context")
+    att = _find_attempt(db, wamid)
+    if att is None:
+        return ClickApplyResult(False, False, "not_a_campaign_message")
+    if not att.click_trackable:
+        return ClickApplyResult(True, False, "sent_before_tracking",
+                                attempt_id=att.id, campaign_id=att.campaign_id, tenant_id=att.tenant_id)
+    if att.clicked_at is not None:
+        return ClickApplyResult(True, False, "already_counted",
+                                attempt_id=att.id, campaign_id=att.campaign_id, tenant_id=att.tenant_id)
+    now = at or utcnow()
+    att.clicked_at = now
+    att.click_kind = kind[:24]
+    att.click_inbound_message_id = (inbound_message_id or None)
+    att.updated_at = utcnow()
+    row = db.get(CampaignSendLog, att.send_log_id)
+    if row is not None and row.clicked_at is None:
+        row.clicked_at = now
+        row.updated_at = utcnow()
+    db.commit()
+    return ClickApplyResult(True, True, "counted",
+                            attempt_id=att.id, campaign_id=att.campaign_id, tenant_id=att.tenant_id)
 
 
 def record_rate_limit_wait(campaign: Any, *, detail: str,
@@ -1868,11 +2004,6 @@ def authorized_capacity_wait(template_variables: Any,
     if reason not in AUTO_RESUME_REASONS:
         return None
     if w.get("authority") != CAPACITY_WAIT_AUTHORITY or w.get("reason") != reason:
-        return None
-    if reason == PAUSE_PROVIDER_THROTTLING and (
-        w.get("error_key") != "marketing_blocked"
-        or w.get("continuation") != "untouched_recipients_only"
-    ):
         return None
     try:
         datetime.fromisoformat(str(w.get("next_eligible_at")))

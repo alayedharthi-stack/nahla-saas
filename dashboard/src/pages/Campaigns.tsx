@@ -36,6 +36,11 @@ import {
   extractVariables, renderTemplate, getTemplateBody, getTemplateHeader, getTemplateFooter,
 } from '../api/campaigns'
 import { useDashboardPoll } from '../lib/dashboardPolling'
+import ActiveCampaignHero from '../components/campaignBoard/ActiveCampaignHero'
+import CampaignStatsFilters from '../components/campaignBoard/CampaignStatsFilters'
+import EditCampaignContentModal from '../components/campaignBoard/EditCampaignContentModal'
+import { isLiveCampaign } from '../components/campaignBoard/campaignFormat'
+import { campaignHeroLabels, fill as fillLabel } from '../i18n/campaignHeroLabels'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -132,9 +137,9 @@ const LIFECYCLE_VARIANT: Record<string, CampaignBadgeVariant> = {
   paused: 'amber',
   waiting_for_capacity: 'blue',
   rate_limit_backoff: 'blue',
-  marketing_delivery_backoff: 'amber',
-  marketing_delivery_blocked: 'amber',
   provider_throttled: 'amber',
+  needs_review: 'red',
+  offer_expired: 'red',
   unknown: 'slate',
 }
 
@@ -3030,12 +3035,13 @@ function SampleRowsPanel({
 
 // ── Campaign list row ─────────────────────────────────────────────────────────
 
-function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
+function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete, onEdit }: {
   campaign: CampaignRecord
   onStatusChange: (id: number, status: string) => void
   checked: boolean
   onCheck: (id: number, v: boolean) => void
   onDelete: (id: number) => void
+  onEdit: (c: CampaignRecord) => void
 }) {
   const { tStatic, lang, dir } = useLanguage()
   const list = tStatic(tr => tr.campaignsMgmt.list)
@@ -3392,15 +3398,22 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 : health.capacityResumeSoon}
             </p>
           )}
-          {(lifecycleKey === 'rate_limit_backoff' || lifecycleKey === 'marketing_delivery_backoff') && (
+          {lifecycleKey === 'rate_limit_backoff' && (
             <p className="text-[10px] text-blue-600 mt-1 max-w-[200px]" title={campaign.execution?.pause_detail || ''}>
               {campaign.capacity_wait?.next_eligible_at
-                ? (lifecycleKey === 'marketing_delivery_backoff' ? health.marketingResumeAt : health.rateLimitResumeAt)
-                    .replace('{time}', formatUtcTime(campaign.capacity_wait.next_eligible_at, lang))
+                ? health.rateLimitResumeAt.replace('{time}', formatUtcTime(campaign.capacity_wait.next_eligible_at, lang))
                 : health.pauseReasons.provider_rate_limited}
             </p>
           )}
-          {(lifecycleKey === 'marketing_delivery_blocked' || lifecycleKey === 'provider_throttled') && (
+          {(lifecycleKey === 'needs_review' || lifecycleKey === 'offer_expired') && (
+            <p className="text-[10px] text-red-600 mt-1 max-w-[220px]" title={campaign.execution?.pause_detail || ''}>
+              {lifecycleKey === 'offer_expired'
+                ? health.pauseReasons.offer_expired
+                : (health.pauseReasons[pauseReason === 'provider_throttling' ? 'marketing_blocked' : (pauseReason || '')]
+                  || campaign.pause_reason_ar || pauseReason)}
+            </p>
+          )}
+          {lifecycleKey === 'provider_throttled' && (
             <p className="text-[10px] text-amber-600 mt-1 max-w-[220px]" title={campaign.execution?.pause_detail || ''}>
               {campaign.throttle
                 ? health.throttleClearsAt
@@ -3483,12 +3496,20 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete }: {
                 <XCircle className="w-3.5 h-3.5" /> {rowLabels.pause}
               </button>
             )}
-            {campaign.status === 'paused' && (
+            {campaign.status === 'paused' && lifecycleKey !== 'offer_expired' && (
               <button
                 onClick={() => onStatusChange(campaign.id, 'active')}
                 className="text-xs text-brand-500 hover:text-brand-700 transition-colors flex items-center gap-1"
               >
                 <Send className="w-3.5 h-3.5" /> {rowLabels.resume}
+              </button>
+            )}
+            {campaign.status === 'paused' && (
+              <button
+                onClick={() => onEdit(campaign)}
+                className={`text-xs transition-colors flex items-center gap-1 ${lifecycleKey === 'offer_expired' ? 'text-red-600 hover:text-red-800' : 'text-slate-500 hover:text-slate-800'}`}
+              >
+                <Copy className="w-3.5 h-3.5" /> {rowLabels.editContent}
               </button>
             )}
             {campaign.status === 'draft' && (
@@ -3651,8 +3672,15 @@ export default function Campaigns() {
   const [campaigns, setCampaigns] = useState<CampaignRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  /** Client clock of the last successful list read — shown on the hero cards. */
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null)
+  const [refreshToken, setRefreshToken] = useState(0)
+  const [busyId, setBusyId] = useState<number | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [editing, setEditing] = useState<CampaignRecord | null>(null)
   const { tStatic, t, lang, dir } = useLanguage()
   const list = tStatic(tr => tr.campaignsMgmt.list)
+  const heroLabels = campaignHeroLabels(lang)
   void UI_ONLY_GUARD
 
   const tableHeaders = useMemo(
@@ -3669,26 +3697,69 @@ export default function Campaigns() {
     [list],
   )
 
+  const applyList = useCallback((rows: CampaignRecord[]) => {
+    setCampaigns(rows)
+    setLastUpdatedAt(new Date())
+    setRefreshToken(n => n + 1)
+  }, [])
+
   const loadCampaigns = useCallback(() => {
     setLoading(true)
     campaignsApi.list()
-      .then(r => setCampaigns(r.campaigns))
+      .then(r => applyList(r.campaigns))
       .catch(() => setCampaigns([]))
       .finally(() => setLoading(false))
-  }, [])
+  }, [applyList])
 
   useEffect(() => { loadCampaigns() }, [loadCampaigns])
 
+  // Live refresh from the durable log — no page reload. Faster while a
+  // campaign is sending or waiting, slower otherwise. WhatsApp receipts
+  // arrive on their own schedule, so the cards say when they were read.
+  const anyLive = useMemo(() => campaigns.some(isLiveCampaign), [campaigns])
+  useDashboardPoll({
+    pollKey: 'GET:/campaigns',
+    intervalMs: anyLive ? 10_000 : 60_000,
+    enabled: !loading,
+    leading: false,
+    run: async (signal) => {
+      const r = await campaignsApi.list({ signal })
+      applyList(r.campaigns)
+    },
+  })
+
+  const describeRefusal = (e: unknown): string => {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (/offer_expired/.test(msg)) return heroLabels.alerts.resumeRefusedOfferExpired
+    if (/provider_throttled/.test(msg)) return heroLabels.alerts.resumeRefusedThrottled
+    return fillLabel(heroLabels.alerts.actionFailed, { msg })
+  }
+
   const handleStatusChange = async (id: number, status: string) => {
+    setBusyId(id)
+    setActionError(null)
     try {
       const updated = await campaignsApi.updateStatus(id, status)
       setCampaigns(cs => cs.map(c => c.id === updated.id ? updated : c))
     } catch (e) {
-      // A refused resume (e.g. 409 provider_throttled) carries the reason
-      // and when it can proceed — show it instead of doing nothing.
-      if (e instanceof Error && e.message) window.alert(e.message)
+      // A refused resume (409 offer_expired / provider_throttled) carries
+      // the reason — show it inline instead of doing nothing.
+      setActionError(describeRefusal(e))
+    } finally {
+      setBusyId(null)
     }
   }
+
+  const handleContentSaved = (updated: CampaignRecord) => {
+    setCampaigns(cs => cs.map(c => c.id === updated.id ? updated : c))
+  }
+
+  const handleSaveAndResume = async (updated: CampaignRecord) => {
+    handleContentSaved(updated)
+    await handleStatusChange(updated.id, 'active')
+  }
+
+  const liveCampaigns = useMemo(() => campaigns.filter(isLiveCampaign), [campaigns])
 
   const handleDelete = async (id: number) => {
     try {
@@ -3836,15 +3907,31 @@ export default function Campaigns() {
         </>
       )}
 
-      <div
-        className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4"
-        // The "إجمالي المُرسَل" + "معدل القراءة" tiles below are
-        // derived from the canonical CampaignSendLog aggregator so
-        // they always agree with the per-campaign detail panel
-        // ("قبلتها Meta" / "وصلت للعميل" / "قرأها العميل"). Hover
-        // tooltips make the denominator explicit so the merchant
-        // never has to guess what 54% means.
-      >
+      {actionError && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 flex items-start gap-2" role="alert">
+          <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+          <p className="text-sm text-red-700 flex-1">{actionError}</p>
+          <button type="button" onClick={() => setActionError(null)} className="text-xs text-red-500 hover:text-red-700">✕</button>
+        </div>
+      )}
+
+      {/* Live campaigns first: full width, name + message + calm status +
+          unique-customer counters, refreshed from the send log. */}
+      <ActiveCampaignHero
+        campaigns={liveCampaigns}
+        lang={lang}
+        dir={dir}
+        list={list}
+        lastUpdatedAt={lastUpdatedAt}
+        busyId={busyId}
+        onPause={c => handleStatusChange(c.id, 'paused')}
+        onResume={c => handleStatusChange(c.id, 'active')}
+        onEdit={c => setEditing(c)}
+      />
+
+      {/* Statistics with campaign + period filters (counted by event time). */}
+      <CampaignStatsFilters campaigns={campaigns} lang={lang} dir={dir} refreshToken={refreshToken} />
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label={list.stats.completed} value={stats.completed.toString()} icon={CheckCircle} />
         <div
           title={
@@ -3961,6 +4048,7 @@ export default function Campaigns() {
                   checked={selectedIds.has(c.id)}
                   onCheck={handleCheck}
                   onDelete={handleDelete}
+                  onEdit={setEditing}
                 />
               ))}
             </tbody>
@@ -3974,6 +4062,16 @@ export default function Campaigns() {
           onCreated={(c) => {
             setCampaigns(cs => [c, ...cs])
           }}
+        />
+      )}
+      {editing && (
+        <EditCampaignContentModal
+          campaign={editing}
+          lang={lang}
+          dir={dir}
+          onClose={() => setEditing(null)}
+          onSaved={handleContentSaved}
+          onSaveAndResume={handleSaveAndResume}
         />
       )}
     </div>

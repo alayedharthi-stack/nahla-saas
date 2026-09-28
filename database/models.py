@@ -1867,10 +1867,55 @@ class Campaign(Base):
     # ``waves`` relationship populated when ``send_strategy != 'immediate'``.
     # See ``CampaignWave`` below.
 
+    # ── Offer validity + content revisions ───────────────────────────────
+    # ``offer_expires_at``: when set, the dispatcher stops claiming new
+    # recipients once this moment has passed (pause reason
+    # ``offer_expired``) — a campaign never keeps sending an offer that
+    # ended. ``content_revision`` is bumped by every merchant edit of the
+    # campaign's template / variables / coupon / expiry
+    # (``campaign_content_revisions``); each attempt records the revision
+    # it was built from, so the send history says which version reached
+    # whom. Edits apply to future sends only.
+    offer_expires_at = Column(DateTime, nullable=True)
+    content_revision = Column(Integer, nullable=False, default=1, server_default='1')
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     launched_at = Column(DateTime, nullable=True)
+
+
+class CampaignContentRevision(Base):
+    """One immutable snapshot of a campaign's sendable content.
+
+    Revision 1 is the content the campaign was launched with; every
+    merchant edit (template, variables, coupon, offer expiry) writes the
+    next revision and bumps ``Campaign.content_revision``. Attempts
+    carry ``content_revision`` so the report can say how many messages
+    went out under each version. Rows are never updated or deleted
+    while the campaign exists.
+    """
+    __tablename__ = 'campaign_content_revisions'
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'revision_no',
+                         name='uq_campaign_content_revision_no'),
+        Index('ix_campaign_content_revisions_campaign', 'campaign_id'),
+    )
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id = Column(Integer, ForeignKey('tenants.id'), nullable=False)
+    campaign_id = Column(Integer, ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False)
+    revision_no = Column(Integer, nullable=False)
+    template_id = Column(String, nullable=True)
+    template_name = Column(String, nullable=True)
+    template_language = Column(String, nullable=True)
+    template_body = Column(Text, nullable=True)
+    template_variables = Column(JSONB, nullable=True)   # merchant-visible variables only
+    coupon_code = Column(String, nullable=True)
+    offer_expires_at = Column(DateTime, nullable=True)
+    note = Column(Text, nullable=True)
+    created_by_user_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class CampaignWave(Base):
@@ -2133,6 +2178,10 @@ class CampaignSendLog(Base):
     delivered_at = Column(DateTime, nullable=True)
     read_at      = Column(DateTime, nullable=True)
     failed_at    = Column(DateTime, nullable=True)
+    # First quick-reply button tap on any of this recipient's accepted
+    # copies (see ``CampaignSendAttempt.clicked_at``). NULL = no tap was
+    # reported, or the copy was sent before click tracking existed.
+    clicked_at   = Column(DateTime, nullable=True)
     # Optional wave membership — populated when the parent campaign
     # uses ``send_strategy != 'immediate'``. NULL means the row
     # belongs to the legacy immediate path. The wave-aware dispatch
@@ -2280,6 +2329,21 @@ class CampaignSendAttempt(Base):
     post_accept_error_code = Column(String(64), nullable=True)
     post_accept_raw_error_code = Column(String(32), nullable=True)
     post_accept_error_message = Column(Text, nullable=True)
+    # Which content revision this request was built from (see
+    # ``CampaignContentRevision``). NULL = before revisions existed
+    # (treated as revision 1).
+    content_revision = Column(Integer, nullable=True)
+    # Button-click measurement. ``click_trackable`` is decided at send
+    # time from the template's buttons: True only when the template has
+    # QUICK_REPLY buttons (WhatsApp reports a tap as an inbound message
+    # whose ``context.id`` is this attempt's wamid). URL / copy-code /
+    # call buttons produce no event, so they are never counted. NULL =
+    # sent before tracking existed: a tap on such a copy is NOT
+    # attributed retroactively.
+    click_trackable = Column(Boolean, nullable=True)
+    clicked_at = Column(DateTime, nullable=True)
+    click_kind = Column(String(24), nullable=True)          # quick_reply
+    click_inbound_message_id = Column(String, nullable=True)
     claimed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     request_started_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)

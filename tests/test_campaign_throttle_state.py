@@ -1,8 +1,9 @@
 """Meta throttling: why a campaign stopped is reported truthfully, a
-temporary per-minute limit backs off and continues on its own, a delivery
-block (131049) cools down before continuing untouched recipients, and a run never ends "completed" with recipients
-still queued. Real leased dispatch path, scripted Meta, SQLite and
-PostgreSQL; generic merchant data, no real sends.
+temporary per-minute limit backs off and continues on its own, a sender
+block (131048 spam) stops the run for the merchant, a recipient's own
+marketing limit (131049) never stops anyone else, and a run never ends
+"completed" with recipients still queued. Real leased dispatch path,
+scripted Meta, SQLite and PostgreSQL; generic merchant data, no real sends.
 """
 from __future__ import annotations
 
@@ -84,18 +85,19 @@ def _age_failures(Session, minutes):
 
 
 def test_a_new_run_inside_the_window_stops_at_its_first_recipient(dbf, fake_meta, world):
-    """What production showed at 20:53–20:58: every run started while the
-    25 failures of the previous run were still inside the 15-minute window
-    paused with no send. Once they age out, the next run sends."""
+    """A sender-scope breaker (131048 spam) counts the scope's window, not
+    the run: every run started while the 5 failures of the previous run
+    are still inside the 15-minute window pauses with no send. Once they
+    age out, the next run sends."""
     ids = _seed(dbf, phones=PHONES[:3])
-    _post_accept_failures(dbf, ids, 25)
+    _post_accept_failures(dbf, ids, 5, key="spam_rate_limit")
     meta = fake_meta(FakeMeta())
     for _ in range(3):
         world.dispatch(dbf, ids.campaign_id)
     assert meta.calls == []
     lease = _lease(dbf, ids.campaign_id)
     assert lease.reason == ledger.PAUSE_PROVIDER_THROTTLING
-    assert "marketing_blocked x25" in lease.detail and "clears_at=" in lease.detail
+    assert "spam_rate_limit x5" in lease.detail and "clears_at=" in lease.detail
     _age_failures(dbf, 16)
     db = dbf()
     ledger.clear_stop(db, campaign_id=ids.campaign_id)
@@ -107,16 +109,27 @@ def test_a_new_run_inside_the_window_stops_at_its_first_recipient(dbf, fake_meta
 
 def test_the_breaker_says_exactly_when_it_clears(dbf):
     ids = _seed(dbf, phones=PHONES[:1])
-    _post_accept_failures(dbf, ids, 30, minutes_ago=10)
+    _post_accept_failures(dbf, ids, 8, key="spam_rate_limit", minutes_ago=10)
     db = dbf()
     st = ledger.post_accept_throttle_status(db, SCOPE)
     first = min(a.failed_at for a in db.query(CampaignSendAttempt))
     db.close()
-    # 30 counted, threshold 25: below it once the 6 oldest have left the window.
-    assert (st["key"], st["count"], st["threshold"]) == ("marketing_blocked", 30, 25)
+    # 8 counted, threshold 5: below it once the 4 oldest have left the window.
+    assert (st["key"], st["count"], st["threshold"]) == ("spam_rate_limit", 8, 5)
     # The window includes its lower bound: the count drops one tick later.
-    assert datetime.fromisoformat(st["clears_at"]) == first + timedelta(seconds=6) + \
+    assert datetime.fromisoformat(st["clears_at"]) == first + timedelta(seconds=4) + \
         ledger.POST_ACCEPT_BREAKER_WINDOW
+
+
+def test_131049_never_trips_a_sender_breaker(dbf):
+    """The recipient's own marketing limit is not our number's problem:
+    any count of 131049 receipts leaves the breaker clear."""
+    ids = _seed(dbf, phones=PHONES[:1])
+    _post_accept_failures(dbf, ids, 300, minutes_ago=1)
+    db = dbf()
+    assert ledger.post_accept_throttle(db, SCOPE) is None
+    assert ledger.post_accept_throttle_status(db, SCOPE) is None
+    db.close()
 
 
 # ── Resume refuses while tripped, with the time ─────────────────────────
@@ -140,11 +153,11 @@ def _dispatch_now(Session, ids, monkeypatch):
 
 def test_dispatch_now_refuses_while_tripped_and_changes_nothing(dbf, fake_meta, monkeypatch):
     ids = _seed(dbf, phones=PHONES[:2])
-    _post_accept_failures(dbf, ids, 25)
+    _post_accept_failures(dbf, ids, 5, key="spam_rate_limit")
     before = _status(dbf, ids.campaign_id)
     res, spawned = _dispatch_now(dbf, ids, monkeypatch)
     assert (res["ok"], res["reason"]) == (False, "provider_throttled")
-    assert res["throttle"]["key"] == "marketing_blocked" and res["throttle"]["clears_at"]
+    assert res["throttle"]["key"] == "spam_rate_limit" and res["throttle"]["clears_at"]
     assert spawned == [] and _status(dbf, ids.campaign_id) == before
 
 
@@ -153,7 +166,7 @@ def test_negative_control_without_the_check_dispatch_now_starts_a_run_that_canno
     import routers.campaigns as rc
     monkeypatch.setattr(rc, "_campaign_throttle", lambda db, c: None)
     ids = _seed(dbf, phones=PHONES[:2])
-    _post_accept_failures(dbf, ids, 25)
+    _post_accept_failures(dbf, ids, 5, key="spam_rate_limit")
     res, spawned = _dispatch_now(dbf, ids, monkeypatch)
     assert res["ok"] is True and spawned == [ids.campaign_id]
 
@@ -166,7 +179,7 @@ def test_resume_refuses_while_tripped(dbf, fake_meta, monkeypatch):
     db.get(Campaign, ids.campaign_id).status = "paused"
     db.commit()
     db.close()
-    _post_accept_failures(dbf, ids, 25)
+    _post_accept_failures(dbf, ids, 5, key="spam_rate_limit")
     monkeypatch.setattr(rc, "_spawn_dispatch_in_background", lambda cid: None)
     monkeypatch.setattr(rc, "resolve_tenant_id", lambda request, db=None: ids.tenant_id)
     monkeypatch.setattr(disp, "_get_wa_connection",
@@ -183,17 +196,21 @@ def test_resume_refuses_while_tripped(dbf, fake_meta, monkeypatch):
 # ── The page says what actually happened ─────────────────────────────────
 
 
-def test_a_delivery_block_is_shown_as_one_not_as_wait_a_minute(dbf, fake_meta, world):
+def test_a_recipient_limit_is_shown_per_recipient_not_as_a_campaign_block(dbf, fake_meta, world):
+    """25 people reached their own marketing limit (131049): the run sends
+    the rest, the page shows the campaign as sent and counts those 25 as
+    failed-after-accept for the recipient's limit — never "wait a minute"
+    and never a block on the campaign."""
     ids = _seed(dbf, phones=PHONES[:2])
     _post_accept_failures(dbf, ids, 25)
     fake_meta(FakeMeta())
     world.dispatch(dbf, ids.campaign_id)
     payload = _cap._lifecycle(dbf, ids.campaign_id)
-    assert payload["lifecycle"] == "marketing_delivery_backoff"
+    assert payload["lifecycle"] == "sent"
     assert payload["last_error_key"] != "rate_limit"
     assert "انتظر دقيقة" not in (payload["last_error_ar"] or "")
-    assert payload["capacity_wait"]["next_eligible_at"]
-    assert payload["capacity_wait"]["next_eligible_exact"] is False
+    assert payload["capacity_wait"] is None and payload["throttle"] is None
+    assert payload["stats"]["recipients_marketing_limit"] == 25
 
 
 def test_negative_control_the_meta_classifier_misreads_the_internal_token():
@@ -249,16 +266,20 @@ def test_consecutive_rate_limits_back_off_longer(dbf, fake_meta, world):
     assert timedelta(minutes=9) < due - _now() <= 2 * ledger.RATE_LIMIT_BACKOFF_BASE
 
 
-def test_marketing_cooldown_continues_only_untouched_recipients(dbf, fake_meta, world):
-    """Owner-authorized continuation; never retry a previously accepted copy."""
+def test_131049_history_never_blocks_a_run_and_its_copies_are_never_resent(dbf, fake_meta, world):
+    """The 25 accepted copies Meta refused for the recipient's limit stay
+    as they are; the untouched recipients are sent right away."""
     ids = _seed(dbf, phones=PHONES[:3])
     _post_accept_failures(dbf, ids, 25)
     meta = fake_meta(FakeMeta())
     world.dispatch(dbf, ids.campaign_id)
-    _age_failures(dbf, 16)
-    _cap._age_window(dbf, hours=1)
-    assert [a["action"] for a in world.resume(dbf) if a["campaign_id"] == ids.campaign_id] == ["resumed"]
     assert sorted(meta.calls) == sorted(PHONES[:3])
+    assert _status(dbf, ids.campaign_id) == "completed"
+    assert world.resume(dbf) == []
+    db = dbf()
+    assert db.query(CampaignSendAttempt).filter(
+        CampaignSendAttempt.post_accept_error_code == "marketing_blocked").count() == 25
+    db.close()
 
 
 def test_negative_control_the_old_breaker_ended_a_rate_limited_run_as_completed(
@@ -403,11 +424,11 @@ def test_a_per_run_spam_breaker_is_never_shown_as_cleared(dbf, fake_meta, world)
 
 def test_without_a_connection_the_block_is_never_shown_as_cleared(dbf, fake_meta, world, monkeypatch):
     ids = _seed(dbf, phones=PHONES[:2])
-    _post_accept_failures(dbf, ids, 25)
+    _post_accept_failures(dbf, ids, 5, key="spam_rate_limit")
     fake_meta(FakeMeta())
     world.dispatch(dbf, ids.campaign_id)
     _age_failures(dbf, 16)                               # the window has in fact cleared
     monkeypatch.setattr(disp, "_get_wa_connection", lambda db, tenant_id: None)
     payload = _cap._lifecycle(dbf, ids.campaign_id)
-    assert payload["lifecycle"] == "marketing_delivery_backoff"
+    assert payload["lifecycle"] == "provider_throttled"
     assert payload["throttle"] is None and payload["throttle_checked"] is False

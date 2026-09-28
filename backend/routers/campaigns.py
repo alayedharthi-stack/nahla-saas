@@ -168,6 +168,7 @@ def _campaign_canonical_stats(
             func.count(CampaignSendLog.delivered_at).label("delivered_cnt"),
             func.count(CampaignSendLog.read_at).label("read_cnt"),
             func.count(CampaignSendLog.failed_at).label("failed_after_accept_cnt"),
+            func.count(CampaignSendLog.clicked_at).label("clicked_cnt"),
         )
         .filter(CampaignSendLog.campaign_id.in_(campaign_ids))
         .group_by(CampaignSendLog.campaign_id, CampaignSendLog.status)
@@ -187,6 +188,9 @@ def _campaign_canonical_stats(
             "total_recipients":    0,
             "in_flight":           0,
             "uncertain":           0,
+            # Recipients who tapped a quick-reply button on the message
+            # (only counted where tracking was possible; see click_tracking).
+            "clicked":             0,
         })
         st = (r.st or "").lower()
         cnt = int(r.cnt or 0)
@@ -196,6 +200,7 @@ def _campaign_canonical_stats(
             s["delivered"]     += int(r.delivered_cnt or 0)
             s["read"]          += int(r.read_cnt or 0)
             s["failed_after_accept"] += int(r.failed_after_accept_cnt or 0)
+            s["clicked"]       += int(r.clicked_cnt or 0)
         elif st in ("queued", "sending"):
             s["queued"] += cnt
             if st == "sending":
@@ -225,6 +230,10 @@ def _campaign_canonical_stats(
         s["failed_before_accept"] = s["failed"]
         s["failed_total"] = s["failed"] + s["failed_after_accept"]
         s["pending_delivery"] = s["not_delivered_yet"]
+        # Unique recipients the message provably reached: a delivered or
+        # read receipt (read implies delivered; the webhook backfills it).
+        # Meta acceptance alone is NOT reach.
+        s["reached"] = s["delivered"]
 
     # Message-scope counts from the attempt ledger (one row per request
     # we sent) and per-recipient outcomes across all attempts. These are
@@ -373,8 +382,15 @@ PAUSE_REASON_LABELS_AR: Dict[str, str] = {
     "provider_throttling": "Meta تقيّد الإرسال من هذا الرقم — توقف الإرسال",
     "provider_repeated_error": "تكرر خطأ من Meta لعدة مستلمين — توقف الإرسال للمراجعة",
     "marketing_blocked": (
-        "Meta أوقفت تسليم الرسائل التسويقية لعدد كبير من المستلمين (131049) — "
-        "توقف الإرسال حمايةً لجودة الرقم"
+        "أوقفها قاطع قديم بعد رفض Meta تسليم رسائل تسويقية لعدد من المستلمين (131049) — "
+        "راجع العرض ثم استأنف؛ لن تُستأنف تلقائيًا"
+    ),
+    "offer_expired": "انتهى تاريخ العرض — لن تُرسل رسائل جديدة حتى تحدّث العرض أو تاريخ انتهائه",
+    "content_revised": "حُفظت نسخة جديدة من المحتوى — استأنف الحملة لإرسالها للمتبقين",
+    "stalled_repeatedly": "تعطّل عامل الإرسال مرارًا أثناء الإرسال — توقف التعافي التلقائي للمراجعة",
+    "consent_unreadable": (
+        "تعذّرت قراءة حالة موافقة بعض العملاء وقت الإرسال — لم تُرسل لهم الرسالة وبقوا في الطابور؛ "
+        "راجع ثم استأنف"
     ),
     "run_ended_with_queue": "انتهت جولة الإرسال قبل اكتمال المستلمين — تحتاج استئنافًا",
     "uncertain_sends": "نتيجة عدة رسائل غير محسومة — توقف للمراجعة",
@@ -410,12 +426,130 @@ def _throttled_refusal(throttle: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _click_tracking_summary(*, template_components: Any, stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether button clicks can be measured for this campaign, and how far.
+
+    ``status``:
+      * ``available``   — quick-reply template and at least one message was
+                          sent with tracking on; ``clicked`` is a real count
+                          over ``trackable_messages`` messages.
+      * ``pending``     — quick-reply template, nothing trackable sent yet
+                          (e.g. all earlier copies predate tracking) but
+                          recipients remain: upcoming sends will be measured.
+      * ``unavailable`` — no quick-reply buttons (URL / copy-code / call
+                          buttons are not reported by WhatsApp), or every
+                          copy was sent before tracking existed.
+    ``partial`` is True when some messages predate tracking: the count
+    covers only the trackable ones.
+    """
+    from services.campaign_send_ledger import template_click_trackable  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+    trackable_template = None
+    if template_components is not None:
+        trackable_template = template_click_trackable(SimpleNamespace(components=template_components))
+    trackable_msgs = int(stats.get("messages_click_trackable", 0) or 0)
+    accepted_msgs = int(stats.get("messages_accepted", 0) or 0)
+    queued = int(stats.get("queued", 0) or 0)
+    partial = trackable_msgs > 0 and accepted_msgs > trackable_msgs
+    if trackable_template is False:
+        return {"status": "unavailable", "reason": "no_quick_reply_buttons",
+                "trackable_messages": trackable_msgs, "partial": False}
+    if trackable_msgs > 0:
+        return {"status": "available", "reason": "quick_reply",
+                "trackable_messages": trackable_msgs, "partial": partial}
+    if trackable_template is None:
+        return {"status": "unavailable", "reason": "template_unknown",
+                "trackable_messages": 0, "partial": False}
+    if queued > 0:
+        return {"status": "pending", "reason": "measured_from_next_sends",
+                "trackable_messages": 0, "partial": accepted_msgs > 0}
+    return {"status": "unavailable", "reason": "sent_before_tracking",
+            "trackable_messages": 0, "partial": False}
+
+
+# Lifecycles that are normal waiting, not problems. The card shows them in
+# a calm tone with the next known check time.
+_CALM_LIFECYCLES = frozenset({
+    "sending", "pending_dispatch", "waiting_scheduler", "waiting_for_capacity",
+    "rate_limit_backoff", "stalled",
+})
+# Lifecycles that need the merchant (a clear reason + an action).
+_ACTION_LIFECYCLES = frozenset({
+    "needs_review", "offer_expired", "provider_throttled", "failed", "failed_all",
+    "orphaned_materialized_rows", "unknown_status",
+})
+
+
+def _status_explanation(*, lifecycle: str, execution: Dict[str, Any],
+                        capacity_wait: Optional[Dict[str, Any]],
+                        stall_recovery: Optional[Dict[str, Any]], queued: int) -> Dict[str, Any]:
+    """Structured facts the dashboard turns into one calm sentence:
+    tone, whether the platform continues on its own, and the next check
+    time when it is known (``next_check_known=False`` otherwise — never an
+    invented time)."""
+    tone = "calm" if lifecycle in _CALM_LIFECYCLES else (
+        "action" if lifecycle in _ACTION_LIFECYCLES else "neutral")
+    auto = lifecycle in ("waiting_for_capacity", "rate_limit_backoff", "stalled",
+                         "sending", "pending_dispatch", "waiting_scheduler")
+    next_check: Optional[str] = None
+    exact = False
+    if lifecycle in ("waiting_for_capacity", "rate_limit_backoff") and capacity_wait:
+        next_check = capacity_wait.get("next_eligible_at")
+        exact = bool(capacity_wait.get("next_eligible_exact"))
+    elif lifecycle == "stalled" and stall_recovery:
+        next_check = stall_recovery.get("next_eligible_at")
+    pause_reason = execution.get("pause_reason")
+    if lifecycle == "paused" and pause_reason == "uncertain_sends":
+        tone = "action"
+    if lifecycle == "paused" and pause_reason in ("evidence_unresolved", "evidence_unreadable",
+                                                  "provider_repeated_error", "run_ended_with_queue",
+                                                  "consent_unreadable"):
+        tone = "action"
+    return {
+        "tone": tone,
+        "auto_resume": auto,
+        "worker_running": bool(execution.get("worker_running")),
+        "next_check_at": next_check,
+        "next_check_known": next_check is not None,
+        "next_check_exact": exact,
+        "pause_reason": pause_reason if lifecycle in ("paused", "needs_review", "offer_expired",
+                                                      "provider_throttled") else None,
+        "remaining": queued,
+    }
+
+
+def _template_components_by_campaign(db: Session, campaigns: List[Campaign]) -> Dict[int, Any]:
+    """The BUTTONS shape of each campaign's template, for click-tracking
+    availability. Read-only; a missing template maps to None."""
+    ids: Dict[int, int] = {}
+    for c in campaigns:
+        try:
+            ids[int(c.id)] = int(c.template_id)
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return {}
+    rows = (
+        db.query(WhatsAppTemplate.id, WhatsAppTemplate.components)
+        .filter(WhatsAppTemplate.id.in_(set(ids.values())))
+        .all()
+    )
+    comps = {int(tid): comp for tid, comp in rows}
+    return {cid: comps.get(tid) for cid, tid in ids.items()}
+
+
 def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str, Any]]:
     ids = [c.id for c in campaigns]
     stats_by_id = _campaign_canonical_stats(db, ids)
     exec_by_id = _campaign_executions(db, ids)
+    try:
+        comps_by_id = _template_components_by_campaign(db, campaigns)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[campaigns] template lookup for click tracking failed: %s", exc)
+        comps_by_id = {}
     for c in campaigns:
-        ex = exec_by_id.get(c.id)
+        ex = exec_by_id.setdefault(c.id, {"worker_running": False})
+        ex["_template_components"] = comps_by_id.get(int(c.id))
         if (c.status or "").lower() == "paused" and ex and ex.get("pause_reason") == "provider_throttling":
             # Only the post-accept breaker is a sliding window whose
             # clearing can be read back; a per-run breaker (spam at send
@@ -431,13 +565,18 @@ def _campaigns_payload(db: Session, campaigns: List[Campaign]) -> List[Dict[str,
                         ex["throttle_checked"] = True
                 except Exception:  # noqa: BLE001, silent-ok — display only; the label still shows the reason
                     ex["throttle"] = None
-    return [
+    out = [
         _campaign_to_dict(
             c, canonical_stats=stats_by_id.get(c.id),
             execution=exec_by_id.get(c.id, {"worker_running": False}),
         )
         for c in campaigns
     ]
+    for item in out:
+        ex = item.get("execution")
+        if isinstance(ex, dict):
+            ex.pop("_template_components", None)
+    return out
 
 
 def _campaign_to_dict(
@@ -566,12 +705,16 @@ def _campaign_to_dict(
             and authorized_capacity_wait(c.template_variables, "provider_rate_limited") is not None
         ):
             lifecycle = "rate_limit_backoff"
-        elif (pr == "provider_throttling" and not stopped
-              and authorized_capacity_wait(c.template_variables, pr) is not None):
-            lifecycle = "marketing_delivery_backoff"
+        elif pr == "offer_expired":
+            lifecycle = "offer_expired"
+        elif pr in ("stalled_repeatedly", "consent_unreadable"):
+            lifecycle = "needs_review"
         elif pr == "provider_throttling":
             detail = str((execution or {}).get("pause_detail") or "")
-            lifecycle = ("marketing_delivery_blocked" if "marketing_blocked" in detail
+            # A pause the retired 131049 sender breaker left behind: the
+            # scheduler never continues it (the offer may be stale) — the
+            # merchant reviews the content and resumes explicitly.
+            lifecycle = ("needs_review" if "marketing_blocked" in detail
                          else "provider_throttled")
     elif raw_status == "draft":
         lifecycle = "draft"
@@ -673,30 +816,203 @@ def _campaign_to_dict(
             {k: (tpl_vars.get("_capacity_wait") or {}).get(k) for k in (
                 "next_eligible_at", "next_eligible_exact", "used_24h", "budget", "limit",
                 "limit_source")}
-            if lifecycle in ("waiting_for_capacity", "rate_limit_backoff", "marketing_delivery_backoff") else None
+            if lifecycle in ("waiting_for_capacity", "rate_limit_backoff") else None
         ),
         # Meta's post-accept breaker, live: what tripped it and when a
         # resume can proceed (None when it has cleared).
-        "throttle": (execution or {}).get("throttle") if lifecycle in (
-            "marketing_delivery_blocked", "provider_throttled") else None,
+        "throttle": (execution or {}).get("throttle") if lifecycle == "provider_throttled" else None,
         # True only when the live post-accept window was read: the UI may
         # say "cleared" only then.
-        "throttle_checked": bool((execution or {}).get("throttle_checked")) if lifecycle in (
-            "marketing_delivery_blocked", "provider_throttled") else False,
+        "throttle_checked": bool((execution or {}).get("throttle_checked")) if lifecycle == "provider_throttled" else False,
         "pause_reason_ar": (
             PAUSE_REASON_LABELS_AR.get(
-                "marketing_blocked" if lifecycle == "marketing_delivery_blocked"
+                "marketing_blocked"
+                if lifecycle == "needs_review"
+                and (execution or {}).get("pause_reason") == "provider_throttling"
                 else str((execution or {}).get("pause_reason") or ""))
             if raw_status == "paused" else None
         ),
-        "clicked_count": c.clicked_count,
+        "clicked_count": (
+            int(canonical_stats.get("clicked", 0) or 0)
+            if canonical_stats is not None else 0
+        ),
         "converted_count": c.converted_count,
         "created_at": c.created_at.isoformat() if c.created_at else None,
         "launched_at": c.launched_at.isoformat() if c.launched_at else None,
+        # ── Offer validity + content revisions ──────────────────────────
+        "offer_expires_at": (
+            c.offer_expires_at.isoformat() if getattr(c, "offer_expires_at", None) else None
+        ),
+        "content_revision": int(getattr(c, "content_revision", None) or 1),
+        # ── Click measurement availability (never a misleading zero) ────
+        "click_tracking": _click_tracking_summary(
+            template_components=(execution or {}).get("_template_components"),
+            stats=canonical_stats or {},
+        ),
+        # ── Automatic stall recovery bookkeeping (see resume_stalled_campaigns) ──
+        "stall_recovery": (tpl_vars.get("_stall_recovery") if isinstance(
+            tpl_vars.get("_stall_recovery"), dict) else None),
+        # ── Latest provider receipt we hold for this campaign ────────────
+        "last_provider_event_at": (canonical_stats or {}).get("last_receipt_at"),
+        # ── Merchant-facing explanation of the current state ─────────────
+        "status_explanation": _status_explanation(
+            lifecycle=lifecycle,
+            execution=execution or {},
+            capacity_wait=(tpl_vars.get("_capacity_wait") if isinstance(
+                tpl_vars.get("_capacity_wait"), dict) else None),
+            stall_recovery=(tpl_vars.get("_stall_recovery") if isinstance(
+                tpl_vars.get("_stall_recovery"), dict) else None),
+            queued=int((canonical_stats or {}).get("queued", 0) or 0),
+        ),
     }
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+# ── Filtered statistics (campaign scope × period) ─────────────────────────────
+
+_STATS_PERIODS = ("today", "week", "month", "year", "all", "custom")
+
+
+def _period_bounds(period: str, *, from_iso: Optional[str], to_iso: Optional[str],
+                   tz_offset_minutes: int, now: Optional[datetime] = None):
+    """``(start, end)`` naive-UTC bounds for a merchant-facing period.
+
+    ``today`` / ``week`` / ``month`` / ``year`` are calendar periods in the
+    merchant's local time (``tz_offset_minutes`` from the browser, e.g.
+    180 for Riyadh), converted back to UTC for the query. ``all`` → no
+    bounds. ``custom`` → the given ISO instants.
+    """
+    now = now or datetime.utcnow()
+    off = timedelta(minutes=max(-14 * 60, min(14 * 60, int(tz_offset_minutes or 0))))
+    local_now = now + off
+    if period == "all":
+        return None, None
+    if period == "custom":
+        def _parse(v: Optional[str]) -> Optional[datetime]:
+            if not v:
+                return None
+            d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            if d.tzinfo is not None:
+                d = d.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                d = d - off          # a bare local instant from the picker
+            return d
+        return _parse(from_iso), _parse(to_iso)
+    start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "week":
+        start_local = start_local - timedelta(days=start_local.weekday())
+    elif period == "month":
+        start_local = start_local.replace(day=1)
+    elif period == "year":
+        start_local = start_local.replace(month=1, day=1)
+    elif period != "today":
+        raise HTTPException(status_code=422, detail=f"period غير صالح: {period}")
+    return start_local - off, None
+
+
+@router.get("/campaigns/stats")
+async def campaign_stats(
+    request: Request,
+    db: Session = Depends(get_db),
+    scope: str = Query("all", description="all | running | <campaign_id>"),
+    period: str = Query("all"),
+    date_from: Optional[str] = Query(None, alias="from"),
+    date_to: Optional[str] = Query(None, alias="to"),
+    tz_offset_minutes: int = Query(0),
+):
+    """Aggregate counters for the summary tiles, filtered by campaign
+    scope and period.
+
+    **What the period means:** every counter is counted by the time its
+    own event happened — a message accepted, delivered, read, tapped or
+    finally failed inside the window — not by when the campaign was
+    created. Recipients are unique per campaign; messages count attempts.
+    ``remaining`` is the live queue now (not time-bounded).
+    """
+    from sqlalchemy import func, and_  # noqa: PLC0415
+    from models import CampaignSendAttempt  # noqa: PLC0415
+    from services.campaign_send_ledger import (  # noqa: PLC0415
+        ATTEMPT_ACCEPTED, RECIPIENT_SCOPED_POST_ACCEPT_CODES,
+    )
+
+    tenant_id = resolve_tenant_id(request)
+    if period not in _STATS_PERIODS:
+        raise HTTPException(status_code=422, detail=f"period غير صالح: {period}")
+    start, end = _period_bounds(period, from_iso=date_from, to_iso=date_to,
+                                tz_offset_minutes=tz_offset_minutes)
+
+    q = db.query(Campaign.id).filter(Campaign.tenant_id == tenant_id)
+    scope_key = (scope or "all").strip().lower()
+    if scope_key == "running":
+        q = q.filter(Campaign.status.in_(("active", "paused", "scheduled")))
+    elif scope_key not in ("all", ""):
+        try:
+            q = q.filter(Campaign.id == int(scope_key))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="scope غير صالح")
+    campaign_ids = [int(r[0]) for r in q.all()]
+
+    def _in_window(col):
+        conds = [col.isnot(None)]
+        if start is not None:
+            conds.append(col >= start)
+        if end is not None:
+            conds.append(col < end)
+        return and_(*conds)
+
+    out: Dict[str, Any] = {
+        "scope": scope_key or "all", "campaign_ids": campaign_ids, "period": period,
+        "range": {"from": start.isoformat() if start else None,
+                  "to": end.isoformat() if end else None},
+        "period_basis": "event_time",
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "recipients": {"accepted": 0, "reached": 0, "read": 0, "clicked": 0,
+                       "failed_final": 0, "recipient_limit": 0, "excluded": 0},
+        "messages": {"accepted": 0, "delivered": 0, "read": 0, "clicked": 0,
+                     "failed_after_accept": 0, "click_trackable": 0},
+        "remaining": 0,
+        "click_tracking": {"status": "unavailable", "reason": "no_data"},
+    }
+    if not campaign_ids:
+        return out
+    L = CampaignSendLog
+    base = db.query(func.count(L.id)).filter(L.campaign_id.in_(campaign_ids))
+    rec = out["recipients"]
+    rec["accepted"] = base.filter(L.status == "sent", _in_window(L.sent_at)).scalar() or 0
+    rec["reached"] = base.filter(L.status == "sent", _in_window(L.delivered_at)).scalar() or 0
+    rec["read"] = base.filter(L.status == "sent", _in_window(L.read_at)).scalar() or 0
+    rec["clicked"] = base.filter(L.status == "sent", _in_window(L.clicked_at)).scalar() or 0
+    failed_before = base.filter(L.status == "failed", _in_window(L.updated_at)).scalar() or 0
+    failed_after = base.filter(L.status == "sent", _in_window(L.failed_at)).scalar() or 0
+    rec["failed_final"] = int(failed_before) + int(failed_after)
+    rec["excluded"] = base.filter(L.status.like("skipped_%"), _in_window(L.created_at)).scalar() or 0
+    out["remaining"] = base.filter(L.status.in_(("queued", "sending"))).scalar() or 0
+
+    A = CampaignSendAttempt
+    abase = db.query(func.count(A.id)).filter(A.campaign_id.in_(campaign_ids))
+    msg = out["messages"]
+    msg["accepted"] = abase.filter(A.state == ATTEMPT_ACCEPTED, _in_window(A.accepted_at)).scalar() or 0
+    msg["delivered"] = abase.filter(A.state == ATTEMPT_ACCEPTED, _in_window(A.delivered_at)).scalar() or 0
+    msg["read"] = abase.filter(A.state == ATTEMPT_ACCEPTED, _in_window(A.read_at)).scalar() or 0
+    msg["clicked"] = abase.filter(_in_window(A.clicked_at)).scalar() or 0
+    msg["failed_after_accept"] = abase.filter(
+        A.state == ATTEMPT_ACCEPTED, _in_window(A.failed_at),
+        A.delivered_at.is_(None), A.read_at.is_(None)).scalar() or 0
+    msg["click_trackable"] = abase.filter(A.click_trackable.is_(True), _in_window(A.accepted_at)).scalar() or 0
+    rec["recipient_limit"] = abase.filter(
+        A.state == ATTEMPT_ACCEPTED, _in_window(A.failed_at),
+        A.delivered_at.is_(None), A.read_at.is_(None),
+        A.post_accept_error_code.in_(tuple(RECIPIENT_SCOPED_POST_ACCEPT_CODES))).scalar() or 0
+    any_trackable = db.query(A.id).filter(
+        A.campaign_id.in_(campaign_ids), A.click_trackable.is_(True)).first() is not None
+    if any_trackable:
+        out["click_tracking"] = {"status": "available", "reason": "quick_reply",
+                                 "partial": bool(msg["accepted"] > msg["click_trackable"])}
+    else:
+        out["click_tracking"] = {"status": "unavailable", "reason": "no_trackable_messages"}
+    return out
+
 
 @router.get("/campaigns/protection-info")
 async def get_protection_info(request: Request, db: Session = Depends(get_db)):
@@ -734,7 +1050,13 @@ async def list_campaigns(request: Request, db: Session = Depends(get_db)):
     # (``CampaignSendLog``). The legacy Campaign.{sent,delivered,read}
     # _count columns can drift after a dispatcher restart in wave
     # mode; the merchant-visible stats must never lie because of that.
-    return {"campaigns": _campaigns_payload(db, campaigns)}
+    return {
+        "campaigns": _campaigns_payload(db, campaigns),
+        # When these numbers were read from the durable log. Provider
+        # receipts (delivered / read / failed / taps) arrive with their own
+        # delay, so this is "as of the log", not "as of WhatsApp".
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/campaigns")
@@ -1052,6 +1374,14 @@ async def update_campaign_status(
     from services import campaign_send_ledger as _ledger  # noqa: PLC0415
     # Without the ledger tables no worker can run at all, so a pause needs
     # nothing more than the status change below.
+    if body.status == "active" and was_not_active and _ledger.offer_expired(campaign):
+        # Resuming an ended offer would send stale content: the merchant
+        # updates the expiry / content first (PUT /campaigns/{id}/content).
+        raise HTTPException(status_code=409, detail={
+            "error": "offer_expired",
+            "offer_expires_at": campaign.offer_expires_at.isoformat(),
+            "message": PAUSE_REASON_LABELS_AR["offer_expired"],
+        })
     if _ledger.ledger_available(db):
         if body.status == "active" and was_not_active:
             _throttle = _campaign_throttle(db, campaign)
@@ -1059,6 +1389,8 @@ async def update_campaign_status(
                 # Same as dispatch-now: a resume now would stop at once.
                 raise HTTPException(status_code=409, detail={
                     "error": "provider_throttled", **_throttled_refusal(_throttle)})
+            # An explicit resume is a fresh start for automatic stall recovery.
+            _ledger.clear_stall_recovery(campaign)
         if body.status == "paused":
             # Safe stop: the live worker (if any) finishes its in-flight
             # request and starts no new one.
@@ -1076,6 +1408,291 @@ async def update_campaign_status(
         _spawn_dispatch_in_background(campaign.id)
 
     return _campaigns_payload(db, [campaign])[0]
+
+
+# ── Content revisions (edit a stopped campaign, continue the remainder) ──────
+
+
+class UpdateCampaignContentIn(BaseModel):
+    template_id: Optional[str] = None
+    template_variables: Optional[Dict[str, Any]] = None
+    coupon_code: Optional[str] = None
+    # ISO-8601; ``null``/empty clears the expiry. Omit to keep the current value.
+    offer_expires_at: Optional[str] = None
+    clear_offer_expiry: bool = False
+    note: Optional[str] = None
+
+
+def _revision_dict(r: Any) -> Dict[str, Any]:
+    return {
+        "revision_no": int(r.revision_no),
+        "template_id": r.template_id,
+        "template_name": r.template_name,
+        "template_language": r.template_language,
+        "template_body": r.template_body,
+        "template_variables": r.template_variables or {},
+        "coupon_code": r.coupon_code or "",
+        "offer_expires_at": r.offer_expires_at.isoformat() if r.offer_expires_at else None,
+        "note": r.note,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+def _snapshot_revision(db: Session, campaign: Campaign, *, revision_no: int,
+                       note: Optional[str], user_id: Optional[int]):
+    from models import CampaignContentRevision  # noqa: PLC0415
+    tpl_vars = campaign.template_variables or {}
+    row = CampaignContentRevision(
+        tenant_id=campaign.tenant_id, campaign_id=campaign.id, revision_no=revision_no,
+        template_id=campaign.template_id, template_name=campaign.template_name,
+        template_language=campaign.template_language, template_body=campaign.template_body,
+        template_variables={k: v for k, v in tpl_vars.items() if not str(k).startswith("_")},
+        coupon_code=campaign.coupon_code, offer_expires_at=campaign.offer_expires_at,
+        note=note, created_by_user_id=user_id, created_at=datetime.utcnow(),
+    )
+    db.add(row)
+    return row
+
+
+def _parse_expiry(raw: Optional[str]) -> Optional[datetime]:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        d = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="offer_expires_at غير صالح (ISO-8601)")
+    if d.tzinfo is not None:
+        d = d.astimezone(timezone.utc).replace(tzinfo=None)
+    return d
+
+
+@router.get("/campaigns/{campaign_id}/revisions")
+async def list_campaign_revisions(campaign_id: int, request: Request, db: Session = Depends(get_db)):
+    """Every content version of the campaign with how many messages each
+    one produced (accepted / delivered / read / clicked). Revision 1 is the
+    launch content; attempts without a recorded revision belong to it."""
+    from sqlalchemy import case, func  # noqa: PLC0415
+    from models import CampaignContentRevision, CampaignSendAttempt  # noqa: PLC0415
+    from services.campaign_send_ledger import ATTEMPT_ACCEPTED  # noqa: PLC0415
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id, Campaign.tenant_id == tenant_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    rows = (
+        db.query(CampaignContentRevision)
+        .filter(CampaignContentRevision.campaign_id == campaign_id)
+        .order_by(CampaignContentRevision.revision_no.asc())
+        .all()
+    )
+    revisions = [_revision_dict(r) for r in rows]
+    if not revisions:
+        # No edit yet: the campaign row itself is revision 1.
+        revisions = [{
+            "revision_no": 1, "template_id": campaign.template_id,
+            "template_name": campaign.template_name, "template_language": campaign.template_language,
+            "template_body": campaign.template_body,
+            "template_variables": {k: v for k, v in (campaign.template_variables or {}).items()
+                                   if not str(k).startswith("_")},
+            "coupon_code": campaign.coupon_code or "",
+            "offer_expires_at": campaign.offer_expires_at.isoformat() if campaign.offer_expires_at else None,
+            "note": None, "created_at": (campaign.launched_at or campaign.created_at).isoformat()
+            if (campaign.launched_at or campaign.created_at) else None,
+        }]
+    A = CampaignSendAttempt
+    rev_col = func.coalesce(A.content_revision, 1)
+    agg = (
+        db.query(rev_col.label("rev"),
+                 func.count(A.id).label("attempted"),
+                 func.sum(case((A.state == ATTEMPT_ACCEPTED, 1), else_=0)).label("accepted"),
+                 func.count(A.delivered_at).label("delivered"),
+                 func.count(A.read_at).label("read"),
+                 func.count(A.clicked_at).label("clicked"),
+                 func.min(A.claimed_at).label("first_at"),
+                 func.max(A.claimed_at).label("last_at"))
+        .filter(A.campaign_id == campaign_id)
+        .group_by(rev_col)
+        .all()
+    )
+    by_rev = {int(r.rev): r for r in agg}
+    for rev in revisions:
+        r = by_rev.get(rev["revision_no"])
+        rev["sends"] = {
+            "attempted": int(r.attempted) if r else 0,
+            "accepted": int(r.accepted or 0) if r else 0,
+            "delivered": int(r.delivered) if r else 0,
+            "read": int(r.read) if r else 0,
+            "clicked": int(r.clicked) if r else 0,
+            "first_at": r.first_at.isoformat() if r and r.first_at else None,
+            "last_at": r.last_at.isoformat() if r and r.last_at else None,
+        }
+    return {"campaign_id": campaign_id, "current_revision": int(campaign.content_revision or 1),
+            "revisions": revisions}
+
+
+@router.put("/campaigns/{campaign_id}/content")
+async def update_campaign_content(
+    campaign_id: int,
+    body: UpdateCampaignContentIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Edit a stopped campaign's offer / expiry / content and record it as
+    a new revision. Applies to future sends only.
+
+    Safety: refused while a worker holds the lease or any attempt is in
+    flight (``409 worker_running``) — the merchant stops the campaign
+    first; in-flight requests keep the revision they were built from.
+    Recipients already sent, delivered or with an unknown outcome are
+    never re-sent by an edit; only queued recipients get the new content.
+    """
+    from models import CampaignSendAttempt  # noqa: PLC0415
+    from services import campaign_send_ledger as _ledger  # noqa: PLC0415
+    from services.campaign_dispatcher import validate_template_payload  # noqa: PLC0415
+    from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    campaign = db.query(Campaign).filter(Campaign.id == campaign_id, Campaign.tenant_id == tenant_id).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if (campaign.status or "").lower() == "active":
+        raise HTTPException(status_code=409, detail={
+            "error": "campaign_active",
+            "message": "أوقف الحملة أولًا ثم عدّل المحتوى؛ يُطبَّق التعديل على الرسائل القادمة فقط.",
+        })
+    if _ledger.ledger_available(db):
+        lease = _ledger.get_lease(db, campaign_id)
+        in_flight = db.query(CampaignSendAttempt.id).filter(
+            CampaignSendAttempt.campaign_id == campaign_id,
+            CampaignSendAttempt.state.in_(tuple(_ledger.IN_FLIGHT_STATES)),
+        ).first() is not None
+        if _ledger.lease_is_live(lease) or in_flight:
+            raise HTTPException(status_code=409, detail={
+                "error": "worker_running",
+                "message": "يوجد إرسال قيد التنفيذ أو محاولة لم تُحسم نتيجتها — أعد المحاولة بعد لحظات.",
+                "execution": _ledger.execution_snapshot(db, campaign_id),
+            })
+
+    user_id: Optional[int] = None
+    try:
+        user_id = int(getattr(getattr(getattr(request, "state", None), "user", None), "id", None) or 0) or None
+    except (TypeError, ValueError):
+        user_id = None
+
+    changed = False
+    new_template: Optional[WhatsAppTemplate] = None
+    if body.template_id is not None and str(body.template_id).strip() != str(campaign.template_id or ""):
+        try:
+            tid = int(body.template_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="template_id غير صالح")
+        new_template = db.query(WhatsAppTemplate).filter(
+            WhatsAppTemplate.id == tid, WhatsAppTemplate.tenant_id == tenant_id).first()
+        if not new_template:
+            raise HTTPException(status_code=404, detail="Template not found")
+        if new_template.status != "APPROVED":
+            raise HTTPException(status_code=422, detail="لا يمكن استخدام إلا قالب معتمد من Meta")
+        changed = True
+
+    tpl_vars = dict(campaign.template_variables or {})
+    if body.template_variables is not None:
+        import json as _json  # noqa: PLC0415
+        public_now = {k: v for k, v in tpl_vars.items() if not str(k).startswith("_")}
+        incoming: Dict[str, str] = {}
+        for k, v in (body.template_variables or {}).items():
+            if str(k).startswith("_"):
+                continue      # control keys are the platform's, never edited here
+            if isinstance(v, str):
+                incoming[k] = v
+            elif isinstance(v, (list, dict)):
+                incoming[k] = _json.dumps(v, ensure_ascii=False)
+            elif v is None:
+                incoming[k] = ""
+            else:
+                incoming[k] = str(v)
+        if incoming != public_now:
+            for k in list(public_now):
+                tpl_vars.pop(k, None)
+            tpl_vars.update(incoming)
+            changed = True
+
+    new_coupon = campaign.coupon_code
+    if body.coupon_code is not None and (body.coupon_code or None) != (campaign.coupon_code or None):
+        new_coupon = body.coupon_code or None
+        changed = True
+
+    new_expiry = campaign.offer_expires_at
+    if body.clear_offer_expiry:
+        if campaign.offer_expires_at is not None:
+            new_expiry, changed = None, True
+    elif body.offer_expires_at is not None:
+        parsed = _parse_expiry(body.offer_expires_at)
+        if parsed != campaign.offer_expires_at:
+            new_expiry, changed = parsed, True
+
+    if not changed:
+        raise HTTPException(status_code=422, detail="لا يوجد تغيير في المحتوى")
+
+    # Validate the resulting payload before anything is written.
+    template_for_check = new_template
+    if template_for_check is None and str(campaign.template_id or "").isdigit():
+        template_for_check = db.query(WhatsAppTemplate).filter(
+            WhatsAppTemplate.id == int(campaign.template_id),
+            WhatsAppTemplate.tenant_id == tenant_id,
+        ).first()
+    if template_for_check is not None:
+        issues = validate_template_payload(template_for_check, coupon_code=(new_coupon or "PREFLIGHT"))
+        if issues:
+            raise HTTPException(status_code=422, detail={"error": "template_invalid", "issues": issues})
+
+    from models import CampaignContentRevision  # noqa: PLC0415
+    current_rev = int(campaign.content_revision or 1)
+    has_rows = db.query(CampaignContentRevision.id).filter(
+        CampaignContentRevision.campaign_id == campaign_id).first() is not None
+    if not has_rows:
+        # Preserve the launch content as revision 1 before applying the edit.
+        _snapshot_revision(db, campaign, revision_no=current_rev, note=None, user_id=None)
+
+    if new_template is not None:
+        campaign.template_id = str(new_template.id)
+        campaign.template_name = new_template.name
+        campaign.template_language = new_template.language
+        campaign.template_category = new_template.category
+        campaign.template_body = next(
+            (c.get("text", "") for c in (new_template.components or [])
+             if isinstance(c, dict) and c.get("type") == "BODY"), campaign.template_body)
+    campaign.coupon_code = new_coupon
+    campaign.offer_expires_at = new_expiry
+    campaign.template_variables = tpl_vars
+    flag_modified(campaign, "template_variables")
+    campaign.content_revision = current_rev + 1
+    campaign.updated_at = datetime.now(timezone.utc)
+    rev = _snapshot_revision(db, campaign, revision_no=current_rev + 1, note=body.note, user_id=user_id)
+
+    # A campaign paused because its offer ended, or by the retired 131049
+    # breaker, is now reviewable: the lease's pause reason no longer
+    # describes the state, so record that the merchant edited it. Status
+    # stays paused — resuming is a separate, explicit action.
+    if _ledger.ledger_available(db):
+        lease = _ledger.get_lease(db, campaign_id)
+        if lease is not None and lease.pause_reason in (
+                _ledger.PAUSE_OFFER_EXPIRED, _ledger.PAUSE_PROVIDER_THROTTLING,
+                _ledger.PAUSE_STALLED_REPEATEDLY, _ledger.PAUSE_CONSENT_UNREADABLE):
+            if lease.pause_reason == _ledger.PAUSE_OFFER_EXPIRED and _ledger.offer_expired(campaign):
+                pass   # still expired: keep the reason honest
+            else:
+                lease.pause_reason = "content_revised"
+                lease.pause_detail = f"revision {current_rev + 1} saved; awaiting merchant resume"
+                lease.paused_at = datetime.utcnow()
+    db.commit()
+    db.refresh(campaign)
+    logger.info(
+        "[campaigns.content] tenant=%d campaign=%d revision=%d template=%s coupon=%s expires=%s",
+        tenant_id, campaign_id, campaign.content_revision, campaign.template_id,
+        bool(campaign.coupon_code), campaign.offer_expires_at,
+    )
+    payload = _campaigns_payload(db, [campaign])[0]
+    payload["revision"] = _revision_dict(rev)
+    return payload
 
 
 @router.delete("/campaigns/{campaign_id}")
@@ -2880,6 +3497,17 @@ async def dispatch_campaign_now(
             ),
         }
 
+    from services import campaign_send_ledger as _ledger0  # noqa: PLC0415
+    if _ledger0.offer_expired(campaign):
+        return {
+            "campaign_id": campaign_id,
+            "ok":          False,
+            "kicked":      False,
+            "reason":      "offer_expired",
+            "offer_expires_at": campaign.offer_expires_at.isoformat(),
+            "message":     PAUSE_REASON_LABELS_AR["offer_expired"],
+        }
+
     # ── Never start a second worker ──────────────────────────────
     # A double click, a retry from another tab, or a click while the
     # first thread is still sending used to start a second dispatcher
@@ -2938,8 +3566,10 @@ async def dispatch_campaign_now(
         from services.campaign_dispatcher import (  # noqa: PLC0415
             reschedule_failed_for_retry, _revive_zombie_sending,
         )
-        # Explicit merchant resume lifts a pending stop / pause.
+        # Explicit merchant resume lifts a pending stop / pause, and
+        # restarts automatic stall recovery from zero.
         _ledger.clear_stop(db, campaign_id=campaign_id)
+        _ledger.clear_stall_recovery(campaign)
         # Resolve ``sending`` rows a crashed prior run left behind:
         # provably-unsent ones go back to the queue, possibly-sent ones
         # become ``uncertain`` (never re-sent automatically).
