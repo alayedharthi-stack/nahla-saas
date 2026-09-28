@@ -359,6 +359,24 @@ def _observation_payload(observation: ac.ToolObservation) -> Dict[str, Any]:
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 1200
 
+# A history entry a person at the store typed (the seam's ``STAFF_ROLE``). The
+# model is shown it as data on the conversation's side, labelled with the
+# channel and kind the platform recorded — never as a turn the assistant spoke.
+STAFF_ROLE = "store_staff"
+STAFF_BLOCK = "store_staff_message"
+MAX_STAFF_TEXT_CHARS = 280
+
+
+def _staff_block(entry: Mapping[str, Any]) -> str:
+    payload: Dict[str, Any] = {
+        "channel": str(entry.get("channel") or ""),
+        "kind": str(entry.get("kind") or "text"),
+    }
+    text = str(entry.get("text") or "").strip()[:MAX_STAFF_TEXT_CHARS]
+    if text:
+        payload["text"] = text
+    return _json_block(STAFF_BLOCK, payload)
+
 
 def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[str, str]]:
     """The prior conversation as bounded, alternating chat turns.
@@ -368,13 +386,22 @@ def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[
     from the same side are merged so the transcript stays alternating, a leading
     assistant turn is dropped because the conversation must open with the
     customer, and only the most recent ``MAX_HISTORY_MESSAGES`` survive.
+
+    A store staff entry is not the assistant's turn. It joins the conversation's
+    side as a ``store_staff_message`` block, so the model can read what the
+    staff member sent without taking it for something it said itself.
     """
     cleaned: List[Dict[str, str]] = []
     for entry in list(history or [])[-(MAX_HISTORY_MESSAGES * 2):]:
         if not isinstance(entry, Mapping):
             continue
-        role = "assistant" if str(entry.get("role") or "") == "assistant" else "user"
-        text = str(entry.get("text") or "").strip()[:MAX_HISTORY_CHARS]
+        raw_role = str(entry.get("role") or "")
+        if raw_role == STAFF_ROLE:
+            role = "user"
+            text = _staff_block(entry)
+        else:
+            role = "assistant" if raw_role == "assistant" else "user"
+            text = str(entry.get("text") or "").strip()[:MAX_HISTORY_CHARS]
         if not text:
             continue
         if cleaned and cleaned[-1]["role"] == role:

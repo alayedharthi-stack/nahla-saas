@@ -1215,7 +1215,7 @@ def _messages(pilot: "Pilot") -> Any:
 
     def say(*, conversation_id: Optional[int], direction: str, body: str,
             phone: Optional[str] = None, wire: Optional[List[Dict[str, Any]]] = None,
-            metadata: Optional[Dict[str, Any]] = None) -> int:
+            metadata: Optional[Dict[str, Any]] = None, event_type: Optional[str] = None) -> int:
         meta: Dict[str, Any] = dict(metadata or {})
         if phone:
             meta["phone"] = phone
@@ -1224,10 +1224,10 @@ def _messages(pilot: "Pilot") -> Any:
         with pilot.engine.begin() as conn:
             row = int(conn.execute(
                 text("INSERT INTO message_events "
-                     "(tenant_id, conversation_id, direction, body, metadata) "
-                     "VALUES (:t, :c, :d, :b, CAST(:m AS JSONB)) RETURNING id"),
+                     "(tenant_id, conversation_id, direction, body, event_type, metadata) "
+                     "VALUES (:t, :c, :d, :b, :e, CAST(:m AS JSONB)) RETURNING id"),
                 {"t": pilot.tenant_a, "c": conversation_id, "d": direction, "b": body,
-                 "m": json.dumps(meta, ensure_ascii=False)}).scalar_one())
+                 "e": event_type, "m": json.dumps(meta, ensure_ascii=False)}).scalar_one())
         written.append(row)
         return row
 
@@ -1306,6 +1306,126 @@ def test_an_outbound_row_whose_wire_recorded_nothing_delivered_contributes_nothi
         say(conversation_id=pilot.conversation_id, direction="outbound", body="المسودة",
             wire=[{"classification": "provider_error_field", "text_fields": {"text.body": "x"}}])
         assert _history(pilot) == []
+
+
+# ── Messages a person at the store typed (#1170) ─────────────────────────────
+#
+# A shared number records what the merchant sends from the WhatsApp Business app
+# as outbound ``smb_message_echo`` rows, and the Nahla inbox records a staff reply
+# as ``manual_reply``. Neither is something the assistant said.
+
+
+def _echo(kind: str, **extra: Any) -> Dict[str, Any]:
+    return {"source": "merchant_mobile_app", "echo_type": kind, **extra}
+
+
+def test_a_message_typed_in_the_business_app_is_the_store_staff_s_not_the_assistant_s(pilot):
+    """Generic store: the staff member answers about a white sneaker from the app."""
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="inbound", body="عندكم حذاء رياضي أبيض؟")
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="إيه متوفر مقاس 42", event_type="smb_message_echo", metadata=_echo("text"))
+        turns = _history(pilot)
+    assert turns == [
+        {"role": "user", "text": "عندكم حذاء رياضي أبيض؟"},
+        {"role": "store_staff", "text": "إيه متوفر مقاس 42",
+         "channel": "whatsapp_business_app", "kind": "text"},
+    ]
+    assert all(t["role"] != "assistant" for t in turns)
+
+
+def test_an_echo_is_recognised_by_its_recorded_source_even_without_the_event_type(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="تمام", metadata=_echo("text"))
+        assert [t["role"] for t in _history(pilot)] == ["store_staff"]
+
+
+def test_a_media_echo_is_kept_as_its_kind_and_the_dashboard_placeholder_is_not_its_words(pilot):
+    with _messages(pilot) as say:
+        # Stored media: the body is the caption the platform also recorded.
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="المقاسات المتوفرة",
+            event_type="smb_message_echo",
+            metadata=_echo("image", normalized_inbound={"caption": "المقاسات المتوفرة"}))
+        # Media that could not be stored: the body is a display placeholder.
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="📎 رسالة document من تطبيق الجوال", event_type="smb_message_echo",
+            metadata=_echo("document", media_storage_status="download_failed"))
+        # An unsupported type: also a display placeholder.
+        say(conversation_id=pilot.conversation_id, direction="outbound",
+            body="📎 رسالة من تطبيق الجوال — صيغة غير مدعومة", event_type="smb_message_echo",
+            metadata=_echo("sticker", media_storage_status="unsupported_type"))
+        turns = _history(pilot)
+    assert turns == [
+        {"role": "store_staff", "text": "المقاسات المتوفرة",
+         "channel": "whatsapp_business_app", "kind": "image"},
+        {"role": "store_staff", "text": "", "channel": "whatsapp_business_app", "kind": "document"},
+        {"role": "store_staff", "text": "", "channel": "whatsapp_business_app", "kind": "sticker"},
+    ]
+
+
+def test_a_nahla_inbox_reply_is_the_staff_s_and_carries_what_the_wire_recorded(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="المسودة",
+            event_type="manual_reply", metadata={"is_ai": False},
+            wire=[{"classification": "ok", "wamid": "wamid.M1",
+                   "text_fields": {"text.body": "قميص قطني أزرق وصل المخزون"}}])
+        assert _history(pilot) == [{"role": "store_staff", "text": "قميص قطني أزرق وصل المخزون",
+                                    "channel": "nahla_inbox", "kind": "text"}]
+
+
+def test_an_outbound_row_with_no_staff_record_is_still_the_assistant_s(pilot):
+    """Only the platform's own record makes a row the staff's; nothing else changes."""
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="أهلًا بك",
+            event_type="ai_reply", metadata={"is_ai": True})
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="رسالة بلا مصدر")
+        assert _history(pilot) == [{"role": "assistant", "text": "أهلًا بك"},
+                                   {"role": "assistant", "text": "رسالة بلا مصدر"}]
+
+
+def test_the_model_reads_the_staff_message_as_the_staff_s_and_never_as_its_own_turn(pilot):
+    """End to end: stored rows → history → the request the model receives."""
+    staff_words = "حذاء رياضي أبيض محجوز لك"
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="inbound", body="ممكن تحجزه لي؟")
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="أكيد، لحظة",
+            event_type="ai_reply", metadata={"is_ai": True})
+        say(conversation_id=pilot.conversation_id, direction="outbound", body=staff_words,
+            event_type="smb_message_echo", metadata=_echo("text"))
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="",
+            event_type="smb_message_echo", metadata=_echo("image", normalized_inbound={"caption": ""}))
+        history = _history(pilot, current_text="شكرًا")
+    transport = Transport([accepted("wamid.STAFF")])
+    scripted = ScriptedAnthropic([step([reply("العفو", call_id="r1")])])
+    report = entry.run_commerce_runtime_turn(
+        engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+        conversation_id=pilot.conversation_id,
+        connection_ref=f"wa:{pilot.connection_id}", connection_id=str(pilot.connection_id),
+        customer_id=pilot.customer_id, normalized_customer_phone=PHONE,
+        provider_message_id="wamid." + uuid.uuid4().hex, inbound_text="شكرًا",
+        inbound_metadata={}, transport=transport, instructions="EXISTING-INSTRUCTIONS",
+        model=MODEL, history=history, anthropic_provider=scripted,
+    )
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    messages = scripted.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assistant_text = " ".join(b.get("text", "") for m in messages if m["role"] == "assistant"
+                              for b in m["content"])
+    assert assistant_text == "أكيد، لحظة"
+    assert staff_words not in assistant_text
+    blocks = [b["text"] for b in messages[-1]["content"]]
+    staff_blocks = [b for b in blocks if b.startswith("<store_staff_message>")]
+    assert len(staff_blocks) == 1
+    payloads = [json.loads(line) for line in staff_blocks[0].splitlines()
+                if line.startswith("{")]
+    assert payloads == [
+        {"channel": "whatsapp_business_app", "kind": "text", "text": staff_words},
+        {"channel": "whatsapp_business_app", "kind": "image"},
+    ]
+    assert blocks[-1] == "شكرًا"
+    # The instructions the model receives are the platform's own, unchanged.
+    assert scripted.calls[0]["system"] == "EXISTING-INSTRUCTIONS"
 
 
 def test_the_message_being_answered_now_is_not_shown_to_the_model_twice(pilot):

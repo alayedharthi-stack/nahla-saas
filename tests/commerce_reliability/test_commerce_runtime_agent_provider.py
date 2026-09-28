@@ -9,6 +9,7 @@ customer-facing sentence.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -701,6 +702,76 @@ def test_the_history_never_displaces_the_tool_result_replay():
     roles = [m["role"] for m in double.calls[1]["messages"]]
     assert roles == ["user", "assistant", "user", "assistant", "user"]
     assert double.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+# ── Messages a person at the store typed (#1170) ─────────────────────────────
+
+
+def staff(text: str, kind: str = "text", channel: str = "whatsapp_business_app") -> dict:
+    return {"role": ap.STAFF_ROLE, "text": text, "kind": kind, "channel": channel}
+
+
+def _staff_payloads(block_text: str) -> list:
+    return [json.loads(line) for line in block_text.splitlines() if line.startswith("{")]
+
+
+def test_a_staff_message_is_shown_as_labelled_data_and_never_as_an_assistant_turn():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "عندكم عطر ورد 100ml؟"},
+                                      {"role": "assistant", "text": "نعم متوفر"},
+                                      staff("باقي حبتين بس")])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert [b["text"] for b in messages[1]["content"]] == ["نعم متوفر"]
+    staff_block = messages[-1]["content"][0]["text"]
+    assert staff_block.startswith("<store_staff_message>") and staff_block.endswith("</store_staff_message>")
+    assert _staff_payloads(staff_block) == [
+        {"channel": "whatsapp_business_app", "kind": "text", "text": "باقي حبتين بس"}]
+    assert messages[-1]["content"][-1]["text"] == "عندكم حذاء رياضي؟"
+
+
+def test_a_staff_media_message_without_words_is_shown_as_its_kind_alone():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "سؤال"},
+                                      {"role": "assistant", "text": "جواب"},
+                                      staff("", kind="document"), staff("", kind="image")])
+    provider.step(request())
+    blocks = [b["text"] for b in double.calls[0]["messages"][-1]["content"]]
+    assert blocks[-1] == "عندكم حذاء رياضي؟"
+    payloads = [p for b in blocks[:-1] for p in _staff_payloads(b)]
+    assert payloads == [{"channel": "whatsapp_business_app", "kind": "document"},
+                        {"channel": "whatsapp_business_app", "kind": "image"}]
+
+
+def test_a_conversation_opening_with_the_staff_keeps_that_opening():
+    """Only an opening *assistant* turn is dropped; the staff's message is not the assistant's."""
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[staff("حياك الله", channel="nahla_inbox"),
+                                      {"role": "assistant", "text": "جواب"}])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert _staff_payloads(messages[0]["content"][0]["text"]) == [
+        {"channel": "nahla_inbox", "kind": "text", "text": "حياك الله"}]
+
+
+def test_a_long_staff_message_is_bounded_and_its_block_stays_well_formed():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "سؤال"},
+                                      {"role": "assistant", "text": "جواب"},
+                                      staff("ق" * 2000)])
+    provider.step(request())
+    block = double.calls[0]["messages"][-1]["content"][0]["text"]
+    (payload,) = _staff_payloads(block)
+    assert payload["text"] == "ق" * ap.MAX_STAFF_TEXT_CHARS
+    assert block.endswith("</store_staff_message>")
+
+
+def test_the_provider_and_the_pilot_name_the_staff_role_the_same_way():
+    from services import commerce_runtime_pilot as seam
+
+    assert ap.STAFF_ROLE == seam.STAFF_ROLE
 
 
 # ── Malformed tool input at the SDK boundary ─────────────────────────────────
