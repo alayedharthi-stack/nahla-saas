@@ -598,10 +598,14 @@ def _topic_words(text: str) -> set:
     return set(normalize_lookup_query(text).split())
 
 
-def _names_section_topic(*, title: str, question: str) -> bool:
-    """Whether the question names, as a whole word, a word of a section's title.
+def _title_coverage(*, title: str, question: str) -> float:
+    """The share of a section title's words the question names, as whole words.
 
-    A section's title is the merchant's own name for what it covers («التوصيل»,
+    ``question`` is the lookup query as ``normalize_lookup_query`` already cut
+    it, so its words are taken as they are; the title is cut the same way
+    (``_topic_words``). Zero when the title has no word to name.
+
+    A title is the merchant's own name for what a section covers («التوصيل»,
     «تغليف الهدايا»). A question naming it asks about that topic however many
     other words it carries — the ratio in ``_score_kb_section`` would let
     «رسوم التوصيل الشحن» or «توصيل الرياض delivery» drop the delivery section
@@ -610,7 +614,15 @@ def _names_section_topic(*, title: str, question: str) -> bool:
     is not the question naming the topic.
     """
     title_words = _topic_words(title)
-    return bool(title_words) and not title_words.isdisjoint(_topic_words(question))
+    if not title_words:
+        return 0.0
+    named = title_words & set(str(question or "").split())
+    return len(named) / len(title_words)
+
+
+def _names_section_topic(*, title: str, question: str) -> bool:
+    """Whether the (already cut) question names a word of the section's title."""
+    return _title_coverage(title=title, question=question) > 0.0
 
 
 def _combine_kb_relevance(
@@ -665,12 +677,14 @@ def _retrieve_product_kb_sections_status(
 ) -> tuple[bool, List[Dict[str, Any]]]:
     """Tenant-safe KB lookup. ``succeeded=False`` is operational failure, not empty facts.
 
-    ``title_names_topic`` (a store-wide lookup the model asked for): a section
-    whose title the question names qualifies whatever its word ratio. It
-    qualifies only: sections still rank by their score, so one that qualified
-    on its title alone ranks below every section that qualified on the ratio,
-    and never displaces one. Its payload says so (``qualified_by_title``).
-    Product-anchored retrieval is unchanged.
+    ``title_names_topic`` (a store-wide lookup the model asked for, whose
+    ``message`` is the query ``normalize_lookup_query`` cut): a section whose
+    title the question names qualifies whatever its word ratio. It qualifies
+    only: sections still rank by their score, so one that qualified on its
+    title alone ranks below every section that qualified on the ratio, and
+    never displaces one; among equal scores, the section whose title the
+    question names more fully comes first. Its payload says so
+    (``qualified_by_title``). Product-anchored retrieval is unchanged.
     """
     if db is None:
         return False, []
@@ -752,8 +766,9 @@ def _retrieve_product_kb_sections_status(
             subject_relevance=subject_relevance,
             question_relevance=question_relevance,
         )
-        by_title = (combined < _KB_RELEVANCE_THRESHOLD and bool(title_names_topic)
-                    and _names_section_topic(title=title, question=str(message or "").strip()))
+        coverage = (_title_coverage(title=title, question=str(message or "").strip())
+                    if title_names_topic else 0.0)
+        by_title = combined < _KB_RELEVANCE_THRESHOLD and coverage > 0.0
         if combined < _KB_RELEVANCE_THRESHOLD and not by_title:
             continue
         payload = {
@@ -767,10 +782,12 @@ def _retrieve_product_kb_sections_status(
         }
         if by_title:
             payload["qualified_by_title"] = True
-        scored.append((combined, question_relevance, payload))
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        scored.append((combined, question_relevance, coverage, payload))
+    # Title coverage breaks only exact ties (always 0.0 with the rule off): of
+    # «سياسة الاستبدال» and «التوصيل», «سياسة التوصيل» names all of the second.
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
     result_limit = int(limit or _KB_SECTION_RESULT_LIMIT)
-    return True, [payload for _, _, payload in scored[:result_limit]]
+    return True, [payload for _, _, _, payload in scored[:result_limit]]
 
 
 def _retrieve_product_kb_sections(

@@ -102,7 +102,7 @@ async def search_merchant_knowledge_impl(
         return KnowledgeSearchResult(
             status="error", failure_reason="knowledge_retrieval_failed"
         )
-    rows = retrieved_sections(context, scope=SCOPE_TURN, query=text)
+    rows = retrieved_sections(context, scope=SCOPE_TURN, query=text, title_names_topic=True)
     return _result_from_rows(
         context, rows, source="merchant_knowledge", required_product_id=None
     )

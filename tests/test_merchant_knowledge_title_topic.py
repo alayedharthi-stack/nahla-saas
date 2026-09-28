@@ -139,4 +139,43 @@ def test_the_tool_gate_and_product_anchored_retrieval_are_unchanged(seeded: Seed
     ("ساعات العمل", "ساعات رجالية", True),
 ])
 def test_what_names_a_topic(title: str, question: str, names: bool):
-    assert _names_section_topic(title=title, question=question) is names
+    # The retriever is handed the query already cut by the lookup.
+    assert _names_section_topic(title=title, question=normalize_lookup_query(question)) is names
+
+
+@pytest.mark.parametrize("title", ["الألعاب", "الإلكترونيات", "الألوان المتوفرة"])
+def test_a_word_whose_article_meets_a_hamza_is_cut_once_on_both_sides(title: str):
+    assert _names_section_topic(title=title, question=normalize_lookup_query(title)) is True
+
+
+def test_equal_scores_go_to_the_section_whose_title_the_question_names_most(seeded: Seed):
+    """The observed query in a store with several «سياسة …» sections: all tie
+    on the ratio, and «التوصيل», named whole, comes first."""
+    delivery = _add(seeded, "التوصيل", DELIVERY_BODY)
+    policies = [_add(seeded, title, "نص عام عن السياسة.")
+                for title in ("سياسة الخصوصية", "سياسة الاستبدال", "سياسة الدفع")]
+    # Whichever order the database returns ties in, the fully named title wins.
+    for first_row_order in (False, True):
+        if first_row_order:
+            for row in policies:
+                seeded.db.delete(row)
+            seeded.db.commit()
+            policies = [_add(seeded, title, "نص عام عن السياسة.")
+                        for title in ("سياسة الخصوصية", "سياسة الاستبدال", "سياسة الدفع")]
+        result = _lookup(seeded, "سياسة التوصيل الشحن")
+        assert _ids(result)[0] == delivery.id, first_row_order
+
+
+def test_an_earlier_lookup_of_the_same_words_without_the_rule_does_not_answer_for_it(seeded: Seed):
+    """The Agents-SDK gate looks the customer's own words up first, with the
+    rule off; the model's lookup of the same words is its own lookup."""
+    delivery = _add(seeded, "التوصيل", DELIVERY_BODY)
+    context = _context(seeded, user_input="رسوم التوصيل الشحن")
+    gate = run_knowledge_lookup(context, scope=SCOPE_TURN, purpose="turn_store_knowledge",
+                                query="رسوم التوصيل الشحن")
+    assert gate["status"] == STATUS_NO_RESULTS
+    result = asyncio.run(search_merchant_knowledge_impl(context, "رسوم التوصيل الشحن", 4))
+    assert _ids(result) == [delivery.id]
+    # The run ledger says which sections were found on their title alone.
+    (model_lookup,) = [r for r in context.knowledge_lookups if r.get("purpose") == "model_store_knowledge"]
+    assert model_lookup["title_qualified_section_ids"] == [delivery.id]
