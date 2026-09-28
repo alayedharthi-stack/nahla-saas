@@ -1544,3 +1544,27 @@ class TestProviderBlock:
         with pytest.raises(HTTPException) as exc:
             _call_support_bundle(db, t.id, 999_999)
         assert exc.value.status_code == 404
+
+
+@pytest.mark.parametrize('remaining', [0, 2])
+def test_debug_queue_uses_current_rows_not_launch_snapshot(remaining):
+    db, engine = _make_db()
+    try:
+        tenant, _, campaign = _seed(db, status='paused', audience_count=4)
+        campaign.template_variables = {'_audience_funnel': {
+            'raw_audience': 4, 'materialized_rows': 4, 'queued_for_send': 4,
+        }}
+        for i in range(4):
+            db.add(CampaignSendLog(
+                tenant_id=tenant.id, campaign_id=campaign.id,
+                customer_phone_e164=f'+9665000001{i:02}',
+                status='queued' if i < remaining else 'sent',
+            ))
+        db.commit()
+        result = _call_debug(db, tenant.id, campaign.id)
+        assert result['audience_funnel']['queued_for_send'] == remaining
+        assert result['recipients']['queued'] == remaining
+        assert result['audience_funnel']['raw_audience'] == 4
+    finally:
+        db.close()
+        engine.dispose()
