@@ -1364,6 +1364,25 @@ def test_a_media_echo_is_kept_as_its_kind_and_the_dashboard_placeholder_is_not_i
     ]
 
 
+def test_history_imported_from_the_business_app_is_the_staff_s_and_marked_imported(pilot):
+    with _messages(pilot) as say:
+        say(conversation_id=pilot.conversation_id, direction="inbound", body="عندكم عطر ورد 100ml؟",
+            event_type="coexistence_history", metadata={"source": "coexistence_history"})
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="إيه متوفر",
+            event_type="coexistence_history",
+            metadata={"source": "coexistence_history", "message_type": "text"})
+        say(conversation_id=pilot.conversation_id, direction="outbound", body="[image]",
+            event_type="coexistence_history", metadata={"source": "coexistence_history"})
+        turns = _history(pilot)
+    assert turns == [
+        {"role": "user", "text": "عندكم عطر ورد 100ml؟"},
+        {"role": "store_staff", "text": "إيه متوفر", "channel": "whatsapp_business_app",
+         "kind": "text", "imported_history": True},
+        {"role": "store_staff", "text": "", "channel": "whatsapp_business_app",
+         "kind": "image", "imported_history": True},
+    ]
+
+
 def test_a_nahla_inbox_reply_is_the_staff_s_and_carries_what_the_wire_recorded(pilot):
     with _messages(pilot) as say:
         say(conversation_id=pilot.conversation_id, direction="outbound", body="المسودة",
@@ -1416,8 +1435,8 @@ def test_the_model_reads_the_staff_message_as_the_staff_s_and_never_as_its_own_t
     assert staff_words not in assistant_text
     blocks = [b["text"] for b in messages[-1]["content"]]
     staff_blocks = [b for b in blocks if b.startswith("<store_staff_message>")]
-    assert len(staff_blocks) == 1
-    payloads = [json.loads(line) for line in staff_blocks[0].splitlines()
+    assert len(staff_blocks) == 2 and all(b.endswith("</store_staff_message>") for b in staff_blocks)
+    payloads = [json.loads(line) for block in staff_blocks for line in block.splitlines()
                 if line.startswith("{")]
     assert payloads == [
         {"channel": "whatsapp_business_app", "kind": "text", "text": staff_words},

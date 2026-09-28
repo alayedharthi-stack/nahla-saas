@@ -36,6 +36,7 @@ import json
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core import store_staff_rows as _staff_rows
 from core.commerce_runtime import agent_contracts as ac
 from core.commerce_runtime import reply_card as rcard
 from core.commerce_runtime import reply_choices as rc
@@ -359,26 +360,37 @@ def _observation_payload(observation: ac.ToolObservation) -> Dict[str, Any]:
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 1200
 
-# A history entry a person at the store typed (the seam's ``STAFF_ROLE``). The
+# A history entry a person at the store typed (``core.store_staff_rows``). The
 # model is shown it as data on the conversation's side, labelled with the
 # channel and kind the platform recorded — never as a turn the assistant spoke.
-STAFF_ROLE = "store_staff"
+STAFF_ROLE = _staff_rows.STAFF_ROLE
 STAFF_BLOCK = "store_staff_message"
-MAX_STAFF_TEXT_CHARS = 280
 
 
-def _staff_block(entry: Mapping[str, Any]) -> str:
+def _staff_payload(entry: Mapping[str, Any]) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "channel": str(entry.get("channel") or ""),
-        "kind": str(entry.get("kind") or "text"),
+        "kind": str(entry.get("kind") or _staff_rows.TEXT_KIND),
     }
-    text = str(entry.get("text") or "").strip()[:MAX_STAFF_TEXT_CHARS]
+    if entry.get("imported_history"):
+        payload["imported_history"] = True
+    text = str(entry.get("text") or "").strip()
     if text:
-        payload["text"] = text
-    return _json_block(STAFF_BLOCK, payload)
+        payload["text"] = text[:MAX_HISTORY_CHARS]
+        if len(text) > MAX_HISTORY_CHARS:
+            payload["text_truncated"] = True
+    return payload
 
 
-def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[str, str]]:
+def _same_wordless_media(previous: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    """Consecutive staff media of one kind with no words are one block with a count."""
+    if "text" in payload or "text" in previous or payload["kind"] == _staff_rows.TEXT_KIND:
+        return False
+    keys = ("channel", "kind", "imported_history")
+    return all(previous.get(k) == payload.get(k) for k in keys)
+
+
+def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[str, Any]]:
     """The prior conversation as bounded, alternating chat turns.
 
     The platform owns what the earlier turns *were*; this only shapes them into
@@ -387,31 +399,42 @@ def _clean_history(history: Optional[Sequence[Mapping[str, Any]]]) -> List[Dict[
     assistant turn is dropped because the conversation must open with the
     customer, and only the most recent ``MAX_HISTORY_MESSAGES`` survive.
 
-    A store staff entry is not the assistant's turn. It joins the conversation's
-    side as a ``store_staff_message`` block, so the model can read what the
-    staff member sent without taking it for something it said itself.
+    Each message is a list of ``parts`` (one text block each). Consecutive
+    words from one side join one part, bounded by ``MAX_HISTORY_CHARS`` as
+    before. A store staff entry is not the assistant's turn: it joins the
+    conversation's side as its own ``store_staff_message`` part, so it can
+    neither push the customer's words out of the bound nor be cut mid-block,
+    and consecutive wordless media of one kind are one part with a count.
     """
-    cleaned: List[Dict[str, str]] = []
+    cleaned: List[Dict[str, Any]] = []
     for entry in list(history or [])[-(MAX_HISTORY_MESSAGES * 2):]:
         if not isinstance(entry, Mapping):
             continue
         raw_role = str(entry.get("role") or "")
         if raw_role == STAFF_ROLE:
-            role = "user"
-            text = _staff_block(entry)
+            role, part = "user", {"staff": _staff_payload(entry)}
         else:
             role = "assistant" if raw_role == "assistant" else "user"
             text = str(entry.get("text") or "").strip()[:MAX_HISTORY_CHARS]
-        if not text:
+            if not text:
+                continue
+            part = {"text": text}
+        if not cleaned or cleaned[-1]["role"] != role:
+            cleaned.append({"role": role, "parts": [part]})
             continue
-        if cleaned and cleaned[-1]["role"] == role:
-            merged = (cleaned[-1]["text"] + "\n" + text)[:MAX_HISTORY_CHARS]
-            cleaned[-1] = {"role": role, "text": merged}
-            continue
-        cleaned.append({"role": role, "text": text})
+        last = cleaned[-1]["parts"][-1]
+        if "text" in part and "text" in last:
+            last["text"] = (last["text"] + "\n" + part["text"])[:MAX_HISTORY_CHARS]
+        elif "staff" in part and "staff" in last and _same_wordless_media(last["staff"], part["staff"]):
+            last["staff"]["count"] = int(last["staff"].get("count", 1)) + 1
+        else:
+            cleaned[-1]["parts"].append(part)
     while cleaned and cleaned[0]["role"] == "assistant":
         cleaned.pop(0)
-    return cleaned[-MAX_HISTORY_MESSAGES:]
+    return [{"role": entry["role"],
+             "parts": [p["text"] if "text" in p else _json_block(STAFF_BLOCK, p["staff"])
+                       for p in entry["parts"]]}
+            for entry in cleaned[-MAX_HISTORY_MESSAGES:]]
 
 
 def _inbound_text(inbound: Mapping[str, Any]) -> str:
@@ -609,9 +632,10 @@ class AnthropicReasoningProvider:
         # and nothing is dropped.
         trailing: List[Dict[str, Any]] = []
         while earlier and earlier[-1]["role"] == "user":
-            trailing.insert(0, {"type": "text", "text": earlier.pop()["text"]})
+            trailing[:0] = [{"type": "text", "text": part} for part in earlier.pop()["parts"]]
         messages: List[Dict[str, Any]] = [
-            {"role": entry["role"], "content": [{"type": "text", "text": entry["text"]}]}
+            {"role": entry["role"], "content": [{"type": "text", "text": part}
+                                                for part in entry["parts"]]}
             for entry in earlier
         ]
         messages.append({"role": "user", "content": trailing + opening})

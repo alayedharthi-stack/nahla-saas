@@ -99,6 +99,11 @@ from core.wa_conn_write_metrics import (
 from session import SessionLocal
 from sqlalchemy import text
 from core.nahla_knowledge import build_nahla_system_prompt
+from core.store_staff_rows import (
+    SMB_ECHO_UNSUPPORTED_DISPLAY,
+    history_media_placeholder,
+    smb_echo_media_placeholder,
+)
 from core.wa_usage import track_conversation
 from modules.ai.media.normalizer import inbound_persist_body, normalize_whatsapp_inbound
 from modules.ai.orchestrator.adapter import generate_ai_reply
@@ -1261,7 +1266,8 @@ def _ingest_coexistence_history(db, wa_conn: WhatsAppConnection, value: Dict[str
                 if msg_type == "text":
                     body_text = str(((msg.get("text") or {}).get("body")) or "")
                 elif msg_type != "media_placeholder":
-                    body_text = str(((msg.get(msg_type) or {}).get("caption")) or "") or f"[{msg_type}]"
+                    body_text = (str(((msg.get(msg_type) or {}).get("caption")) or "")
+                                 or history_media_placeholder(msg_type))
                 from_phone = str(msg.get("from") or "")
                 direction = "outbound" if from_phone and from_phone != customer_phone else "inbound"
                 db.add(MessageEvent(
@@ -1272,6 +1278,7 @@ def _ingest_coexistence_history(db, wa_conn: WhatsAppConnection, value: Dict[str
                     event_type="coexistence_history",
                     extra_metadata={
                         "message_id": wamid,
+                        "message_type": msg_type,
                         "source": "coexistence_history",
                         "historical_only": True,
                         "historical_import": True,
@@ -1626,7 +1633,7 @@ _SMB_ECHO_MEDIA_TYPES: tuple[str, ...] = ("image", "video", "audio", "document")
 # Display copy for echo types we can't decode (sticker, location, contacts,
 # interactive, "unsupported"). Keeps the merchant-facing string readable
 # rather than the cryptic ``[merchant_unsupported]`` bracket form.
-_SMB_ECHO_UNSUPPORTED_DISPLAY = "📎 رسالة من تطبيق الجوال — صيغة غير مدعومة"
+_SMB_ECHO_UNSUPPORTED_DISPLAY = SMB_ECHO_UNSUPPORTED_DISPLAY
 
 
 async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dict[str, Any]) -> None:
@@ -1771,7 +1778,7 @@ async def _ingest_smb_message_echoes(db, wa_conn: WhatsAppConnection, value: Dic
             # (often empty). When it failed, surface a readable
             # placeholder so the merchant sees something landed.
             if storage_status != "ok" and not body_text:
-                body_text = f"📎 رسالة {msg_type} من تطبيق الجوال"
+                body_text = smb_echo_media_placeholder(msg_type)
 
         else:
             # sticker / location / contacts / interactive / "unsupported"

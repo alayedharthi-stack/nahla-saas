@@ -28,6 +28,7 @@ import hashlib
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core import store_staff_rows as _staff_rows
 from services.turn_trace import SOURCE_COMMERCE_RUNTIME as TRACE_SOURCE
 
 logger = logging.getLogger("nahla.commerce_runtime.pilot")
@@ -45,17 +46,8 @@ HISTORY_LIMIT = 15
 # never recorded as *unchanged*: an unobserved wire is unknown, not clean.
 WIRE_UNOBSERVED = "wire_text_unobserved"
 
-# Outbound rows a person at the store typed, known only from what the platform
-# recorded when it stored them: the WhatsApp Business app echo (shared number)
-# and the Nahla inbox reply. Each reaches the model as the store staff's
-# message, never as the assistant's own. An outbound row with neither marker is
-# left as it is today.
-STAFF_ROLE = "store_staff"
-STAFF_CHANNEL_BUSINESS_APP = "whatsapp_business_app"
-STAFF_CHANNEL_NAHLA_INBOX = "nahla_inbox"
-SMB_ECHO_EVENT = "smb_message_echo"
-SMB_ECHO_SOURCE = "merchant_mobile_app"
-MANUAL_REPLY_EVENT = "manual_reply"
+# The role a row a person at the store typed is kept under (``core.store_staff_rows``).
+STAFF_ROLE = _staff_rows.STAFF_ROLE
 
 # Prefixes the reason when a refused turn is nevertheless kept, because this
 # runtime owns that exact inbound message: ``unfinished_`` when it still has
@@ -501,38 +493,6 @@ def _history_rows(db: Any, *, tenant_id: int, conversation_id: int,
              str(event.event_type or "")) for event in reversed(events)]
 
 
-def _staff_typed(event_type: str, metadata: Any) -> Optional[Dict[str, str]]:
-    """Where a person at the store typed this outbound row, and what kind it is.
-
-    ``None`` unless the row carries the platform's own record of it: the echo of
-    a message sent from the WhatsApp Business app on a shared number, or a reply
-    sent from the Nahla inbox. Nothing here reads the message text.
-    """
-    meta = metadata if isinstance(metadata, dict) else {}
-    kind = str(event_type or "").strip().lower()
-    if kind == SMB_ECHO_EVENT or meta.get("source") == SMB_ECHO_SOURCE:
-        return {"channel": STAFF_CHANNEL_BUSINESS_APP,
-                "kind": str(meta.get("echo_type") or "text").strip().lower() or "text"}
-    if kind == MANUAL_REPLY_EVENT:
-        return {"channel": STAFF_CHANNEL_NAHLA_INBOX, "kind": "text"}
-    return None
-
-
-def _staff_text(staffed: Mapping[str, str], body: str, metadata: Any) -> str:
-    """The words the staff member sent, and nothing the platform wrote for display.
-
-    A media echo's stored body is its caption, or, when the media could not be
-    stored, the dashboard's own placeholder. Only a caption the platform recorded
-    as the caption is the staff member's words.
-    """
-    if staffed.get("kind") == "text":
-        return str(body or "").strip()
-    meta = metadata if isinstance(metadata, dict) else {}
-    normalized = meta.get("normalized_inbound")
-    caption = normalized.get("caption") if isinstance(normalized, dict) else None
-    return str(caption or "").strip()
-
-
 def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
                  current_text: str) -> list:
     """The conversation so far, bound to the conversation being answered.
@@ -548,10 +508,10 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
     persisted it, so the model is not shown the same customer turn twice. A read
     that fails yields no history rather than a guess.
 
-    An outbound row a person at the store typed (``_staff_typed``) is the staff
-    member's message, not the assistant's: it is kept under ``STAFF_ROLE`` with
-    the channel and kind the platform recorded, and a media row without a
-    caption is kept as its kind alone rather than as placeholder words.
+    An outbound row a person at the store typed (``core.store_staff_rows``) is
+    the staff member's message, not the assistant's: it is kept under
+    ``STAFF_ROLE`` with the channel and kind the platform recorded, and a media
+    row without words is kept as its kind alone rather than as placeholder text.
     """
     try:
         rows = _history_rows(db, tenant_id=int(tenant_id),
@@ -567,7 +527,6 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
         direction, body, metadata = row[0], row[1], row[2]
         event_type = row[3] if len(row) > 3 else ""
         outbound = direction in {"out", "outbound"}
-        wire_body = None
         if outbound:
             meta = metadata or {}
             wire_body = wire_transcript_text(meta.get("wire_attempts"))
@@ -581,13 +540,15 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
                             "row from the model's history tenant=%s conversation=%s",
                             tenant_id, conversation_id)
                 continue
-            staffed = _staff_typed(event_type, metadata)
+            staffed = _staff_rows.staff_row(event_type, metadata, body)
             if staffed is not None:
-                words = (str(wire_body).strip() if wire_body is not None
-                         else _staff_text(staffed, body, metadata))
-                if not words and staffed["kind"] == "text":
+                if not staffed.text and staffed.kind == _staff_rows.TEXT_KIND:
                     continue
-                turns.append({"role": STAFF_ROLE, "text": words, **staffed})
+                turn = {"role": STAFF_ROLE, "text": staffed.text,
+                        "channel": staffed.channel, "kind": staffed.kind}
+                if staffed.imported:
+                    turn["imported_history"] = True
+                turns.append(turn)
                 continue
         text = str(body or "").strip()
         if not text:

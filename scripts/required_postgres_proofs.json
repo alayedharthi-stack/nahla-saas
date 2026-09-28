@@ -271,6 +271,7 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_message_typed_in_the_business_app_is_the_store_staff_s_not_the_assistant_s",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_echo_is_recognised_by_its_recorded_source_even_without_the_event_type",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_media_echo_is_kept_as_its_kind_and_the_dashboard_placeholder_is_not_its_words",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_history_imported_from_the_business_app_is_the_staff_s_and_marked_imported",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_nahla_inbox_reply_is_the_staff_s_and_carries_what_the_wire_recorded",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_outbound_row_with_no_staff_record_is_still_the_assistant_s",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_model_reads_the_staff_message_as_the_staff_s_and_never_as_its_own_turn",
