@@ -1661,6 +1661,12 @@ def _revive_zombie_sending(
     return sum(out.values())
 
 
+# Sentinel "status" returned by ``_consent_skip_for_row`` when the
+# recipient's consent could not be read: not a send-log status. The row
+# stays ``queued`` and is not sent in this run.
+CONSENT_UNREADABLE = "consent_unreadable"
+
+
 def _consent_skip_for_row(
     db: Session,
     row: CampaignSendLog,
@@ -1668,36 +1674,71 @@ def _consent_skip_for_row(
     customers_by_phone: Dict[str, Customer],
     blocked_phones: Optional[set] = None,
 ) -> Optional[Tuple[str, str]]:
-    """``(status, skip_reason)`` when this queued recipient must not be sent
-    to any more — merchant block list, customer unsubscribe (confirmed or
-    pending), or the merchant's marketing opt-out — read fresh from the
-    database now, not from the snapshot taken at launch. ``None`` = send."""
+    """Decide, from the database as it is NOW, whether this queued recipient
+    may still be sent to.
+
+    Returns ``None`` when sending is allowed; ``(skipped_* status, reason)``
+    when consent was withdrawn since the snapshot (merchant block list,
+    customer unsubscribe — confirmed or pending — or the merchant's
+    marketing opt-out); or ``(CONSENT_UNREADABLE, detail)`` when the
+    current state could not be established — the refresh failed, or the
+    stored consent flags have a shape this code does not understand.
+
+    Fail closed: an unreadable state is never permission to send. The
+    caller leaves such a recipient queued (not sent in this attempt) with
+    the reason recorded, and the run ends paused for the merchant.
+    Only a missing metadata column (legacy ``NULL``) counts as "no flags";
+    any other non-dict value is treated as unreadable.
+    """
     phone = row.customer_phone_e164 or ""
     if blocked_phones:
         if {phone, _normalize_blocked_phone(phone)} & blocked_phones:
             return LOG_SKIPPED_BLOCKED_CUSTOMER, REASON_BLOCKED_CUSTOMER
     cust: Optional[Customer] = None
-    if isinstance(row.customer_id, int):
-        cust = db.get(Customer, row.customer_id)
-    if cust is None:
-        cust = customers_by_phone.get(phone)
-    if cust is None:
-        return None
     try:
+        if isinstance(row.customer_id, int):
+            cust = db.get(Customer, row.customer_id)
+        if cust is None:
+            cust = customers_by_phone.get(phone)
+        if cust is None:
+            return None
+        # Re-read the customer's current flags; the object in hand may be
+        # the launch-time snapshot.
         db.refresh(cust)
-    except Exception:  # noqa: silent-ok — BLE001; a detached/stale object still carries the snapshot flags
-        pass
-    # Only a real metadata dict carries consent flags; anything else
-    # (legacy NULL, an unexpected shape) is "no flag", never "skip".
+    except Exception as exc:  # noqa: BLE001
+        try:
+            db.rollback()
+        except Exception:  # noqa: silent-ok — BLE001; the read already failed, we only restore the session
+            pass
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s consent state unreadable "
+            "(refresh failed: %s) — not sent in this attempt",
+            row.campaign_id, row.id, type(exc).__name__,
+        )
+        return CONSENT_UNREADABLE, f"refresh_failed:{type(exc).__name__}"
     meta = getattr(cust, "extra_metadata", None)
-    if not isinstance(meta, dict):
-        meta = {}
+    if meta is None:
+        meta = {}                      # legacy row: no consent flags were ever set
+    elif not isinstance(meta, dict):
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s consent flags have an unexpected "
+            "shape (%s) — not sent in this attempt", row.campaign_id, row.id, type(meta).__name__,
+        )
+        return CONSENT_UNREADABLE, f"metadata_shape:{type(meta).__name__}"
     if meta.get("is_unsubscribed"):
         return LOG_SKIPPED_UNSUBSCRIBED, REASON_UNSUBSCRIBED
     if meta.get("pending_unsubscribe"):
         return LOG_SKIPPED_UNSUBSCRIBED, REASON_PENDING_OPT_OUT
-    from services.manual_segments import is_marketing_opted_out_from_meta  # noqa: PLC0415
-    if is_marketing_opted_out_from_meta(meta):
+    try:
+        from services.manual_segments import is_marketing_opted_out_from_meta  # noqa: PLC0415
+        opted_out = is_marketing_opted_out_from_meta(meta)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[campaign_dispatcher] campaign=%s row=%s marketing opt-out flags unreadable "
+            "(%s) — not sent in this attempt", row.campaign_id, row.id, type(exc).__name__,
+        )
+        return CONSENT_UNREADABLE, f"opt_out_flags:{type(exc).__name__}"
+    if opted_out:
         return LOG_SKIPPED_MANUAL_EXCLUSION, REASON_MARKETING_OPT_OUT
     return None
 
@@ -1992,6 +2033,8 @@ async def _dispatch_queued_rows(
     same_code_counts: Dict[str, int] = {}
     abort_reason: Optional[str] = None
     consecutive_uncertain = 0
+    # Recipients left queued because their consent state could not be read.
+    consent_unreadable = 0
 
     # Resolve whatever a dead worker left in flight before drawing work,
     # and apply status events that arrived before their attempts.
@@ -2103,6 +2146,21 @@ async def _dispatch_queued_rows(
                     db, row, customers_by_phone=customers_by_phone,
                     blocked_phones=blocked_phones,
                 )
+                if skip_now is not None and skip_now[0] == CONSENT_UNREADABLE:
+                    # Fail closed: no request for this recipient in this run.
+                    # The row stays queued (nothing was sent, so a later run
+                    # may retry it safely) with the reason recorded; the run
+                    # ends paused for the merchant (see after the loop).
+                    row = db.get(CampaignSendLog, log_id)
+                    if row is not None:
+                        row.error_code = ledger.CONSENT_UNREADABLE_ERROR
+                        row.error_message = f"[{ledger.CONSENT_UNREADABLE_ERROR}] {skip_now[1]}"[:500]
+                        row.updated_at = datetime.now(timezone.utc)
+                        db.commit()
+                    consent_unreadable += 1
+                    if len(errors) < 10:
+                        errors.append(f"{phone}: consent state unreadable [{ledger.CONSENT_UNREADABLE_ERROR}]")
+                    continue
                 if skip_now is not None:
                     row.status, row.skip_reason = skip_now
                     row.updated_at = datetime.now(timezone.utc)
@@ -2112,6 +2170,10 @@ async def _dispatch_queued_rows(
                         campaign_id, log_id, skip_now[1],
                     )
                     continue
+                if row.error_code == ledger.CONSENT_UNREADABLE_ERROR:
+                    # Readable again on this attempt: drop the stale note.
+                    row.error_code = None
+                    row.error_message = None
                 if _force_terminate_runaway(row, campaign_id=campaign_id):
                     failed += 1
                     db.commit()
@@ -2470,6 +2532,20 @@ async def _dispatch_queued_rows(
                 break
             if pause > 0:
                 await asyncio.sleep(pause)
+        if consent_unreadable and not ctx.stopped:
+            # Everyone readable has been handled; the recipients whose
+            # consent could not be read were not sent to and are still
+            # queued. That is a stop for the merchant, never a completion
+            # and never a silent send.
+            ctx.pause(
+                ledger.PAUSE_CONSENT_UNREADABLE,
+                f"{consent_unreadable} recipient(s) not sent: consent state unreadable; "
+                "still queued for review",
+            )
+            logger.warning(
+                "[campaign_dispatcher] campaign=%d paused: %d recipient(s) with unreadable "
+                "consent state were not sent", campaign_id, consent_unreadable,
+            )
     finally:
         if own_lease:
             try:

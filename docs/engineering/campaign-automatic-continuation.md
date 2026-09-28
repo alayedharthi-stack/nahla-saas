@@ -71,7 +71,13 @@ Contributing gaps:
   reports sends per version. Edits reach only recipients not yet sent.
 * **Consent re-read at send time**: block list, `is_unsubscribed`,
   `pending_unsubscribe` and the merchant opt-out are checked per queued row
-  before the claim, not only at snapshot (a campaign can span days).
+  before the claim, not only at snapshot (a campaign can span days). The
+  check fails closed: if the customer's current state cannot be read
+  (refresh error) or the stored flags have an unexpected shape, that
+  recipient gets no request in this attempt, stays queued with
+  `error_code=consent_unreadable`, and the run ends paused as
+  `consent_unreadable` (needs review); only a legacy `NULL` counts as "no
+  flags". Unreadable consent is never permission to send.
 * **Button taps** (`services/campaign_click_tracking.py`): a quick-reply tap
   quotes our wamid (`context.id`) and is counted once per attempt, only for
   attempts flagged `click_trackable` at send time. URL / copy-code buttons

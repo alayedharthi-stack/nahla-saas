@@ -173,6 +173,13 @@ RATE_LIMIT_BACKOFF_MAX = timedelta(minutes=_env_int("NAHLA_CAMPAIGN_RATE_BACKOFF
 PAUSE_OFFER_EXPIRED = "offer_expired"
 # A worker died mid-run repeatedly; automatic recovery gave up.
 PAUSE_STALLED_REPEATEDLY = "stalled_repeatedly"
+# A recipient's current consent state could not be read at send time
+# (refresh failed, or the stored flags have an unexpected shape). The
+# recipient was NOT sent to and stays queued with ``error_code`` =
+# ``CONSENT_UNREADABLE_ERROR``; the run ends paused for the merchant.
+# Unreadable consent is never permission to send.
+PAUSE_CONSENT_UNREADABLE = "consent_unreadable"
+CONSENT_UNREADABLE_ERROR = "consent_unreadable"
 # Automatic recovery of a run whose worker died (deploy, crash, OOM). The
 # scheduler re-dispatches an ``active`` campaign with queued recipients and
 # no live lease, with a bounded backoff between attempts.

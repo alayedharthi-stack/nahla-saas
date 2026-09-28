@@ -474,6 +474,117 @@ def test_a_customer_who_unsubscribed_after_the_snapshot_is_not_sent(dbf, fake_me
     assert base._status(dbf, ids.campaign_id) == "completed"
 
 
+def _link_customer(Session, ids, phone):
+    db = Session()
+    cust = db.query(Customer).filter(Customer.tenant_id == ids.tenant_id,
+                                     Customer.normalized_phone == phone).one()
+    row = db.query(CampaignSendLog).filter(CampaignSendLog.campaign_id == ids.campaign_id,
+                                           CampaignSendLog.customer_phone_e164 == phone).one()
+    row.customer_id = cust.id
+    db.commit()
+    cid = cust.id
+    db.close()
+    return cid
+
+
+def _attempt_phones(Session, cid):
+    db = Session()
+    try:
+        return sorted({a.customer_phone_e164 for a in db.query(CampaignSendAttempt)
+                       .filter(CampaignSendAttempt.campaign_id == cid)})
+    finally:
+        db.close()
+
+
+def test_unreadable_consent_state_never_sends_and_pauses_for_review(dbf, fake_meta, world, monkeypatch):
+    """Reading the customer's current flags fails (a database error at
+    send time): that recipient gets NO request, stays queued with the
+    reason, the others are still sent, and the run ends paused for the
+    merchant. Once the read works again, an explicit resume sends them."""
+    from sqlalchemy.orm import Session as _Session
+    ids = base._seed(dbf, phones=PHONES[:3])
+    _link_customer(dbf, ids, PHONES[1])
+    real_refresh = _Session.refresh
+
+    def flaky_refresh(self, instance, *a, **kw):
+        if isinstance(instance, Customer) and instance.normalized_phone == PHONES[1]:
+            raise RuntimeError("customer store unavailable")
+        return real_refresh(self, instance, *a, **kw)
+
+    monkeypatch.setattr(_Session, "refresh", flaky_refresh)
+    meta = fake_meta(base.FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)
+    # No WhatsApp request for the unreadable recipient; the others went out.
+    assert sorted(meta.calls) == sorted([PHONES[0], PHONES[2]])
+    assert PHONES[1] not in _attempt_phones(dbf, ids.campaign_id)
+    logs = base._logs(dbf, ids.campaign_id)
+    assert logs[PHONES[1]] == ("queued", ledger.CONSENT_UNREADABLE_ERROR, None)
+    assert base._status(dbf, ids.campaign_id) == "paused"
+    assert base._lease(dbf, ids.campaign_id).reason == ledger.PAUSE_CONSENT_UNREADABLE
+    payload = cap._lifecycle(dbf, ids.campaign_id)
+    assert payload["lifecycle"] == "needs_review"
+    assert payload["status_explanation"]["tone"] == "action"
+    assert payload["stats"]["queued"] == 1
+    # Nothing continues it on its own while the state is unreadable.
+    assert world.resume(dbf) == [] and _recover(dbf) == []
+    assert sorted(meta.calls) == sorted([PHONES[0], PHONES[2]])
+    # The read works again: the merchant's resume sends exactly the one left.
+    monkeypatch.setattr(_Session, "refresh", real_refresh)
+    rc = _router(monkeypatch, ids, dbf)
+    db = dbf()
+    asyncio.run(rc.update_campaign_status(
+        ids.campaign_id, rc.UpdateCampaignStatusIn(status="active"), request=None, db=db))
+    db.close()
+    world.dispatch(dbf, ids.campaign_id)
+    assert sorted(meta.calls) == sorted(PHONES[:3])
+    assert meta.calls.count(PHONES[1]) == 1
+    logs = base._logs(dbf, ids.campaign_id)
+    assert logs[PHONES[1]][0] == "sent" and logs[PHONES[1]][1] is None
+    assert base._status(dbf, ids.campaign_id) == "completed"
+
+
+@pytest.mark.parametrize("shape", ["oops", ["is_unsubscribed"], 7], ids=["string", "list", "int"])
+def test_malformed_consent_flags_are_not_permission_to_send(dbf, fake_meta, world, shape):
+    """Consent flags of a shape this code does not understand are treated as
+    unreadable: no request, still queued, run paused for review. Only a
+    legacy NULL means 'no flags were ever set'."""
+    ids = base._seed(dbf, phones=PHONES[:3])
+    _link_customer(dbf, ids, PHONES[1])
+    legacy_id = _link_customer(dbf, ids, PHONES[2])
+    db = dbf()
+    db.query(Customer).filter(Customer.normalized_phone == PHONES[1]).one().extra_metadata = shape
+    db.get(Customer, legacy_id).extra_metadata = None
+    db.commit()
+    db.close()
+    meta = fake_meta(base.FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)
+    assert sorted(meta.calls) == sorted([PHONES[0], PHONES[2]])
+    logs = base._logs(dbf, ids.campaign_id)
+    assert logs[PHONES[1]] == ("queued", ledger.CONSENT_UNREADABLE_ERROR, None)
+    assert logs[PHONES[2]][0] == "sent"
+    assert base._lease(dbf, ids.campaign_id).reason == ledger.PAUSE_CONSENT_UNREADABLE
+    assert cap._lifecycle(dbf, ids.campaign_id)["lifecycle"] == "needs_review"
+
+
+def test_consent_withdrawn_between_two_runs_is_honoured(dbf, fake_meta, world):
+    """The check reads the database at each attempt, not a cached copy."""
+    world.budget(1)
+    ids = base._seed(dbf, phones=PHONES[:2])
+    _link_customer(dbf, ids, PHONES[1])
+    meta = fake_meta(base.FakeMeta())
+    world.dispatch(dbf, ids.campaign_id)                  # capacity for one
+    assert len(meta.calls) == 1
+    db = dbf()
+    c = db.query(Customer).filter(Customer.normalized_phone == PHONES[1]).one()
+    c.extra_metadata = dict(c.extra_metadata or {}, pending_unsubscribe=True)
+    db.commit()
+    db.close()
+    cap._age_window(dbf)
+    world.resume(dbf)
+    assert len(meta.calls) == 1 and PHONES[1] not in meta.calls
+    assert base._logs(dbf, ids.campaign_id)[PHONES[1]][0] == disp.LOG_SKIPPED_UNSUBSCRIBED
+
+
 # ── 6. Button taps: counted once, only where reported, never retroactively ─
 
 

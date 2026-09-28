@@ -388,6 +388,10 @@ PAUSE_REASON_LABELS_AR: Dict[str, str] = {
     "offer_expired": "انتهى تاريخ العرض — لن تُرسل رسائل جديدة حتى تحدّث العرض أو تاريخ انتهائه",
     "content_revised": "حُفظت نسخة جديدة من المحتوى — استأنف الحملة لإرسالها للمتبقين",
     "stalled_repeatedly": "تعطّل عامل الإرسال مرارًا أثناء الإرسال — توقف التعافي التلقائي للمراجعة",
+    "consent_unreadable": (
+        "تعذّرت قراءة حالة موافقة بعض العملاء وقت الإرسال — لم تُرسل لهم الرسالة وبقوا في الطابور؛ "
+        "راجع ثم استأنف"
+    ),
     "run_ended_with_queue": "انتهت جولة الإرسال قبل اكتمال المستلمين — تحتاج استئنافًا",
     "uncertain_sends": "نتيجة عدة رسائل غير محسومة — توقف للمراجعة",
     "merchant_stop": "أوقف التاجر الإرسال",
@@ -498,7 +502,8 @@ def _status_explanation(*, lifecycle: str, execution: Dict[str, Any],
     if lifecycle == "paused" and pause_reason == "uncertain_sends":
         tone = "action"
     if lifecycle == "paused" and pause_reason in ("evidence_unresolved", "evidence_unreadable",
-                                                  "provider_repeated_error", "run_ended_with_queue"):
+                                                  "provider_repeated_error", "run_ended_with_queue",
+                                                  "consent_unreadable"):
         tone = "action"
     return {
         "tone": tone,
@@ -702,7 +707,7 @@ def _campaign_to_dict(
             lifecycle = "rate_limit_backoff"
         elif pr == "offer_expired":
             lifecycle = "offer_expired"
-        elif pr == "stalled_repeatedly":
+        elif pr in ("stalled_repeatedly", "consent_unreadable"):
             lifecycle = "needs_review"
         elif pr == "provider_throttling":
             detail = str((execution or {}).get("pause_detail") or "")
@@ -1671,7 +1676,7 @@ async def update_campaign_content(
         lease = _ledger.get_lease(db, campaign_id)
         if lease is not None and lease.pause_reason in (
                 _ledger.PAUSE_OFFER_EXPIRED, _ledger.PAUSE_PROVIDER_THROTTLING,
-                _ledger.PAUSE_STALLED_REPEATEDLY):
+                _ledger.PAUSE_STALLED_REPEATEDLY, _ledger.PAUSE_CONSENT_UNREADABLE):
             if lease.pause_reason == _ledger.PAUSE_OFFER_EXPIRED and _ledger.offer_expired(campaign):
                 pass   # still expired: keep the reason honest
             else:
