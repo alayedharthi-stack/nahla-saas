@@ -584,6 +584,26 @@ def _score_kb_section(*, title: str, body: str, subject: str) -> float:
     return min(1.0, hits / max(1, len(subj_tokens)) + (0.2 if hits >= 2 else 0.0))
 
 
+def _names_section_topic(*, title: str, question: str) -> bool:
+    """Whether the question names the topic a merchant section is titled by.
+
+    A section's title is the merchant's own name for what it covers («التوصيل»,
+    «تغليف الهدايا»). A question sharing a word with that title asks about that
+    topic however many other words it carries — the ratio in
+    ``_score_kb_section`` would let «رسوم التوصيل الشحن» or «توصيل الرياض
+    delivery» drop the delivery section only because the query grew longer.
+    Words match in either direction (a question word inside a title word, or a
+    title word inside the question), on the same normalized three-letter tokens
+    the score uses.
+    """
+    title_norm = _norm(title)
+    question_norm = _norm(question)
+    if not title_norm or not question_norm:
+        return False
+    return (any(token in title_norm for token in _subject_tokens(question))
+            or any(token in question_norm for token in _subject_tokens(title)))
+
+
 def _combine_kb_relevance(
     *,
     subject_relevance: float,
@@ -632,8 +652,14 @@ def _retrieve_product_kb_sections_status(
     product_ids: Any = None,
     limit: int = 4,
     kinds_filter: Optional[frozenset] = None,
+    title_names_topic: bool = False,
 ) -> tuple[bool, List[Dict[str, Any]]]:
-    """Tenant-safe KB lookup. ``succeeded=False`` is operational failure, not empty facts."""
+    """Tenant-safe KB lookup. ``succeeded=False`` is operational failure, not empty facts.
+
+    ``title_names_topic`` (store-wide questions only): a section whose title the
+    question names qualifies whatever its word ratio, and ranks ahead of those
+    that qualify on the ratio alone. Product-anchored retrieval is unchanged.
+    """
     if db is None:
         return False, []
     try:
@@ -714,11 +740,13 @@ def _retrieve_product_kb_sections_status(
             subject_relevance=subject_relevance,
             question_relevance=question_relevance,
         )
-        if combined < _KB_RELEVANCE_THRESHOLD:
+        names_topic = bool(title_names_topic) and _names_section_topic(
+            title=title, question=str(message or "").strip())
+        if combined < _KB_RELEVANCE_THRESHOLD and not names_topic:
             continue
         scored.append(
             (
-                combined,
+                (1.0 if names_topic else 0.0) + combined,
                 question_relevance,
                 {
                     "section_id": getattr(row, "id", None),
@@ -807,6 +835,7 @@ def retrieve_catalog_candidate_kb_sections(
         product_ids=product_ids,
         limit=limit,
         kinds_filter=kinds_filter,
+        title_names_topic=include_merchant_facts,
     )
     if not succeeded:
         return catalog_kb_retrieval_failure_payload()
