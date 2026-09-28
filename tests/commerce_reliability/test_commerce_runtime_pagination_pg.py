@@ -53,6 +53,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 from core.commerce_runtime import agent_contracts as ac
+from core.commerce_runtime import agent_live_tools as lt
 from core.commerce_runtime import agent_provider as ap
 from core.commerce_runtime import browse as br
 from core.commerce_runtime import delivery_dispatch as dd
@@ -1460,3 +1461,68 @@ def test_other_products_past_a_capped_read_does_not_claim_more(shop: Shop, monke
     shop.turn(conversation, model, question="غيرها؟", max_steps=PILOT_STEPS)
     shown = model.search_result()["result"]
     assert shown["found"] is False and shown["more_results"] is False
+
+
+# ── A phrase that misses on one word ─────────────────────────────────────────
+#
+# Off-send evaluation, 2026-09-26/27: «بلوزة بيضاء» matched nothing though the
+# store's blouse is described «بلوزة أبيض», and the model had to search again
+# with one word to find it. After every other step misses, the runtime's search
+# now returns the products holding the most of the query's words, and each of
+# them says which words it does not hold. Here the shirts are «قميص قطني أزرق»
+# and the query names the colour in the other gender.
+
+PARTIAL = f"{SHIRTS} زرقاء"
+
+
+def _searched_then(query: str) -> LiteralModel:
+    def script(call: int, messages: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if call == 1:
+            return _step([_tool_use("s1", "search_products", query=query)])
+        return _step([_reply("ok")])
+    return LiteralModel(script)
+
+
+def test_a_phrase_missing_on_one_word_opens_the_products_the_rest_name(shop: Shop):
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    model = browse(PARTIAL)
+    report, transport = shop.turn(conversation, model, max_steps=PILOT_STEPS)
+    result = model.search_result()["result"]
+    assert [p["product_id"] for p in result["products"]] == ids[:5]
+    assert all(p[lt.QUERY_WORDS_NOT_HELD] == ["زرقاء"] for p in result["products"])
+    assert result["found"] is True and result["more_results"] is True
+    page_one, more, _button = _rows(transport.sent[0])
+    assert page_one == ids[:9] and more is not None and report.browse_outcome == br.OPENED
+    # "More" continues the same match in the same order.
+    _report, second, _model = _tap_more(shop, conversation, more)
+    assert _rows(second.sent[0])[0] == ids[9:18]
+
+
+def test_other_products_after_a_partial_match_still_say_what_they_do_not_hold(shop: Shop):
+    conversation = shop.conversation()
+    ids = shop.products[SHIRTS]
+    shop.turn(conversation, browse(PARTIAL), max_steps=PILOT_STEPS)
+    model = _other_products(PARTIAL)
+    shop.turn(conversation, model, question="غيرها؟", max_steps=PILOT_STEPS)
+    shown = model.search_result()["result"]
+    assert [p["product_id"] for p in shown["products"]] == ids[9:14]
+    assert all(p[lt.QUERY_WORDS_NOT_HELD] == ["زرقاء"] for p in shown["products"])
+
+
+@pytest.mark.parametrize("query", [SHIRTS, "قميص قطني أزرق", "ساعات"])
+def test_a_search_that_matched_in_full_says_nothing_about_missing_words(shop: Shop, query: str):
+    model = _searched_then(query)
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["found"] is True and result["products"]
+    assert all(lt.QUERY_WORDS_NOT_HELD not in p for p in result["products"])
+
+
+@pytest.mark.parametrize("query", ["عيال محمد", "نظارة"])
+def test_words_this_store_does_not_hold_are_still_a_miss(shop: Shop, query: str):
+    model = _searched_then(query)
+    shop.turn(shop.conversation(), model)
+    result = model.search_result()["result"]
+    assert result["found"] is False and result["status"] == "not_found"
+    assert "products" not in result

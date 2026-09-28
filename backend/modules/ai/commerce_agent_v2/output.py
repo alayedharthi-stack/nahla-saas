@@ -208,6 +208,10 @@ class CatalogSearchResult(BaseModel):
     # deterministic step. It may be empty, and it never carries a commercial fact.
     knowledge_sections: list[KnowledgeSectionSnapshot] = Field(default_factory=list)
     failure_reason: str | None = None
+    # Only for a search asked to match on part of its words: the query's words
+    # each product's title and description do not hold, by product id. Never
+    # serialized; the caller that asked for such a search places it itself.
+    query_words_missing: dict[int, list[str]] = Field(default_factory=dict, exclude=True)
 
 
 class ProductDetailsResult(BaseModel):

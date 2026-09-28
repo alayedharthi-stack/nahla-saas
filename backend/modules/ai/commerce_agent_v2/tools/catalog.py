@@ -429,6 +429,8 @@ async def search_products_impl(
     context: CommerceAgentContext,
     query: str,
     limit: int,
+    *,
+    partial_words: bool = False,
 ) -> CatalogSearchResult:
     """SDK-free implementation of the ``search_products`` read tool.
 
@@ -436,6 +438,11 @@ async def search_products_impl(
     decorated wrapper below; this body is unchanged and is the single
     implementation shared by the Agents-SDK tool and by the commerce
     runtime's own loop, which passes the trusted context directly.
+
+    ``partial_words`` (the commerce runtime's loop only) lets a phrase that
+    matched nothing fall back to the products holding most of its words;
+    the result then carries, per product, the words it does not hold
+    (``CatalogSearchResult.query_words_missing``).
     """
     context.assert_scope()
     bounded_limit = max(1, min(int(limit), 10))
@@ -450,16 +457,22 @@ async def search_products_impl(
             status="not_found",
             failure_reason="ambiguous_product_reference_requires_clarification",
         )
+    query_words_missing: dict[int, list[str]] = {}
     if clean_query:
         domain_result = catalog.search_products(
             clean_query,
             limit=bounded_limit,
             include_non_orderable_facts=True,
+            partial_words=partial_words,
         )
         rows = [
             *list(domain_result.products or []),
             *list(domain_result.catalog_fact_products or []),
         ]
+        query_words_missing = {
+            int(pid): list(words)
+            for pid, words in (domain_result.query_words_missing or {}).items()
+        }
     else:
         # General browsing otherwise sends ten full product/evidence records
         # into the compose turn. Live Phase 2.7A evidence showed that payload
@@ -504,6 +517,7 @@ async def search_products_impl(
         products=snapshots,
         evidence=evidence,
         knowledge_sections=knowledge_sections,
+        query_words_missing=query_words_missing,
     )
 
 
@@ -563,6 +577,8 @@ def search_product_candidates_impl(
     context: CommerceAgentContext,
     query: str,
     limit: int,
+    *,
+    partial_words: bool = False,
 ) -> CatalogCandidates:
     """Every product the search ``search_products_impl`` runs would match, in order.
 
@@ -574,15 +590,34 @@ def search_product_candidates_impl(
     nothing here is shown to anyone until a trusted read hydrates it.
 
     An empty query is the general browse, whose membership is the orderable
-    products ``get_top_products`` offers.
+    products ``get_top_products`` offers. ``partial_words`` must be what the
+    search it continues was run with.
     """
     context.assert_scope()
     catalog = CatalogContextBuilder(context.db, context.tenant_id)
     clean_query = str(query or "").strip()
-    candidates = (catalog.search_product_candidates(clean_query, limit) if clean_query
-                  else catalog.top_product_candidates(limit))
+    candidates = (catalog.search_product_candidates(clean_query, limit, partial_words=partial_words)
+                  if clean_query else catalog.top_product_candidates(limit))
     _assert_catalog_ids_belong_to_tenant(context, candidates.product_ids)
     return candidates
+
+
+def query_words_missing_impl(
+    context: CommerceAgentContext,
+    query: str,
+    product_ids: list[int],
+) -> dict[int, list[str]]:
+    """Per product, the words of ``query`` its title and description do not hold.
+
+    Never a model tool: for a result the partial-words step decided and
+    ``search_products_window_impl`` hydrated, so its products say what a
+    partial match says on the search's own path. Tenant-scoped; an id this
+    tenant does not hold is absent.
+    """
+    context.assert_scope()
+    missing = CatalogContextBuilder(context.db, context.tenant_id).query_words_missing(
+        str(query or "").strip(), list(product_ids or ()))
+    return {int(pid): list(words) for pid, words in missing.items()}
 
 
 def search_products_window_impl(

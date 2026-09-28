@@ -635,7 +635,7 @@
       "id": "commerce_runtime_pagination",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py",
-      "origin": "Pagination PR — the whole flow through the real run_commerce_runtime_turn: one search with more than ten matches opens page one while the model sees at most five products; More continues the stored order with no search through the final page; boundaries at 10, 11, 23 and above the cap of 50; a changing catalogue changes row values never page membership; every refused token is a named fact and no page, search or selection; a redelivered tap is the same finished turn and its page is sent once; taps on platform-composed rows verify and become Cards; focused answers, comparisons and narrowed searches are never expanded whatever words the model gives; whether a list pages never waits on the model's optional words — a list that pages and lacks them asks the model once (never with one step left), and however that step ends — failure, lookup, truncation, refused reply — the verified reply goes exactly as the model asked; a page that cannot be spent goes as lines and mints nothing; without revision 0113 the turn is unchanged",
+      "origin": "Pagination PR — the whole flow through the real run_commerce_runtime_turn: one search with more than ten matches opens page one while the model sees at most five products; More continues the stored order with no search through the final page; boundaries at 10, 11, 23 and above the cap of 50; a changing catalogue changes row values never page membership; every refused token is a named fact and no page, search or selection; a redelivered tap is the same finished turn and its page is sent once; taps on platform-composed rows verify and become Cards; focused answers, comparisons and narrowed searches are never expanded whatever words the model gives; whether a list pages never waits on the model's optional words — a list that pages and lacks them asks the model once (never with one step left), and however that step ends — failure, lookup, truncation, refused reply — the verified reply goes exactly as the model asked; a page that cannot be spent goes as lines and mints nothing; without revision 0113 the turn is unchanged; and a phrase that misses on one word — the colour in the other gender — opening, paging and continuing the products the rest of it names, each saying the words it does not hold, while a full match, a plural and words the store does not hold are unchanged",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -693,7 +693,14 @@
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_when_everything_was_shown_says_so_and_is_not_a_new_list",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_the_observed_turn_a_general_browse_then_other_products_in_words",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_walk_in_text_past_ten_products_never_comes_back_to_its_start",
-        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_past_a_capped_read_does_not_claim_more"
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_past_a_capped_read_does_not_claim_more",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_phrase_missing_on_one_word_opens_the_products_the_rest_name",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_other_products_after_a_partial_match_still_say_what_they_do_not_hold",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_search_that_matched_in_full_says_nothing_about_missing_words[\\u0642\\u0645\\u064a\\u0635]",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_search_that_matched_in_full_says_nothing_about_missing_words[\\u0642\\u0645\\u064a\\u0635 \\u0642\\u0637\\u0646\\u064a \\u0623\\u0632\\u0631\\u0642]",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_search_that_matched_in_full_says_nothing_about_missing_words[\\u0633\\u0627\\u0639\\u0627\\u062a]",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_words_this_store_does_not_hold_are_still_a_miss[\\u0639\\u064a\\u0627\\u0644 \\u0645\\u062d\\u0645\\u062f]",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_words_this_store_does_not_hold_are_still_a_miss[\\u0646\\u0638\\u0627\\u0631\\u0629]"
       ]
     },
     {
@@ -722,6 +729,32 @@
         "tests/commerce_reliability/test_catalog_search_order_pg.py::test_candidates_never_cross_tenants",
         "tests/commerce_reliability/test_catalog_search_order_pg.py::test_the_general_browse_candidates_follow_its_own_order",
         "tests/commerce_reliability/test_catalog_search_order_pg.py::test_a_listing_read_is_two_statements_and_this_tenants_only"
+      ]
+    },
+    {
+      "id": "catalog_search_partial_words",
+      "kind": "proof",
+      "module": "tests/commerce_reliability/test_catalog_search_partial_words_pg.py",
+      "origin": "Partial-words search — a multi-word phrase whose every other step matched nothing returns, only for a caller that asks, the products whose title and description hold the most of its words, in the one total order, each with the words it does not hold; another tenant's products neither appear nor raise the count; LIKE wildcards are literal; single words and words no product holds still find nothing; a search that already matched is unchanged; the candidate read is the row search in the same order",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_a_phrase_that_misses_on_one_word_finds_the_products_holding_the_rest",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_without_the_request_the_search_is_exactly_what_it_was",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_the_most_words_held_decides_membership_never_the_order",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_the_search_folds_and_article_apply_to_each_word",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_a_search_that_already_matched_is_unchanged[\\u0628\\u0644\\u0648\\u0632\\u0629-fts]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_a_search_that_already_matched_is_unchanged[\\u062d\\u0630\\u0627\\u0621 \\u0631\\u064a\\u0627\\u0636\\u064a \\u0623\\u0628\\u064a\\u0636-fts]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_a_search_that_already_matched_is_unchanged[\\u0639\\u0637\\u0631 \\u0648\\u0631\\u062f-fts]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_words_no_product_holds_and_single_words_find_nothing[\\u0639\\u064a\\u0627\\u0644 \\u0645\\u062d\\u0645\\u062f]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_words_no_product_holds_and_single_words_find_nothing[\\u0633\\u0627\\u0639\\u0629]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_words_no_product_holds_and_single_words_find_nothing[\\u0633\\u0627\\u0639\\u0629 \\u064a\\u062f \\u0641\\u0636\\u064a\\u0629]",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_like_wildcards_in_a_word_match_only_themselves",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_the_candidates_are_the_row_search_in_the_same_order",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_the_words_missing_read_is_this_stores_and_the_steps_own",
+        "tests/commerce_reliability/test_catalog_search_partial_words_pg.py::test_a_partial_match_needs_the_result_that_can_say_so"
       ]
     },
     {

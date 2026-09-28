@@ -228,6 +228,11 @@ class CatalogSearchProductsResult:
 
     products: List[Dict[str, Any]]
     catalog_fact_products: List[Dict[str, Any]] = field(default_factory=list)
+    # The step of ``_search_steps`` that matched, and — for a partial-words
+    # match only — the query's words each returned product's title and
+    # description do not hold, keyed by product id.
+    method: str = ""
+    query_words_missing: Dict[int, Tuple[str, ...]] = field(default_factory=dict)
 
 
 # The one total order every catalogue search returns its matches in: stocked
@@ -352,6 +357,65 @@ def _catalog_title_arabic_norm_expr(column) -> Any:
     return expr
 
 
+def _catalog_text_arabic_norm(text: str) -> str:
+    """``_catalog_title_arabic_norm_expr`` in Python, for text read back from a row."""
+    t = (text or "").lower().replace("ـ", "")
+    for variant in ("أ", "إ", "آ"):
+        t = t.replace(variant, "ا")
+    return t.replace("ى", "ي").replace("ة", "ه")
+
+
+# A search of several words whose phrase matched nothing, on every other step,
+# may — only when its caller asks — return the products whose title and
+# description hold the most of its words (``_search_steps``). A phrase can miss
+# on one word the product holds in another form (a colour's other gender, a
+# size kept in the variants) while every other word names the product exactly.
+# Such a match is never presented as a full one: each product comes back with
+# the query's words it does not hold (``query_words_missing_from``).
+PARTIAL_WORDS_METHOD = "partial_words"
+_PARTIAL_MAX_WORDS = 8
+_PARTIAL_MIN_SEARCH_CHARS = 3
+_PARTIAL_TRIM = "؟?!.،,:;\"'()[]«»"
+
+
+def _catalog_search_words(query: str) -> List[Tuple[str, Tuple[str, ...]]]:
+    """The query's words, each with the folded forms a product may hold it in.
+
+    Split on whitespace and trimmed of punctuation; folded exactly as the
+    title search folds a query (``_normalize_catalog_search_arabic``); a word
+    with a leading definite article may also be held without it. A word is
+    kept once, in the query's order, and at most ``_PARTIAL_MAX_WORDS``.
+    """
+    words: List[Tuple[str, Tuple[str, ...]]] = []
+    seen: set = set()
+    for raw in (query or "").split():
+        word = raw.strip(_PARTIAL_TRIM)
+        folded = _normalize_catalog_search_arabic(word)
+        if not folded or folded in seen:
+            continue
+        seen.add(folded)
+        forms = [folded]
+        bare = folded[len(_AR_DEF_ARTICLE):]
+        if folded.startswith(_AR_DEF_ARTICLE) and len(bare) >= _PARTIAL_MIN_SEARCH_CHARS:
+            forms.append(bare)
+        words.append((word, tuple(forms)))
+        if len(words) >= _PARTIAL_MAX_WORDS:
+            break
+    return words
+
+
+def query_words_missing_from(query: str, title: Any, description: Any) -> Tuple[str, ...]:
+    """The words of ``query`` that a product's title and description do not hold.
+
+    The same text and the same fold the partial-words step matched on, so a
+    word it counted is never reported missing and a word it did not count is.
+    Words are returned as the query spelled them.
+    """
+    held = _catalog_text_arabic_norm(f"{title or ''} {description or ''}")
+    return tuple(word for word, forms in _catalog_search_words(query)
+                 if not any(form in held for form in forms))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CatalogContextBuilder
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,6 +436,7 @@ class CatalogContextBuilder:
         limit: int = 10,
         *,
         include_non_orderable_facts: bool = False,
+        partial_words: bool = False,
     ) -> Union[List[Dict], CatalogSearchProductsResult]:
         """
         Search synced products by keyword.
@@ -384,9 +449,16 @@ class CatalogContextBuilder:
         When ``include_non_orderable_facts`` is True, also returns skipped
         formatted rows in ``catalog_fact_products`` (price/availability Q&A).
 
+        ``partial_words`` adds the last, miss-only step ``_search_steps``
+        describes. It needs the structured result, which is where a partial
+        match says which of the query's words each product does not hold.
+
         Rows come back in ``CATALOG_SEARCH_ORDER_SQL`` order on every path;
         see ``_search_steps``.
         """
+        if partial_words and not include_non_orderable_facts:
+            raise ValueError("partial_words needs include_non_orderable_facts: "
+                             "a partial match must say which words it does not hold")
         q_clean = query.strip()
         if not q_clean:
             if include_non_orderable_facts:
@@ -413,9 +485,14 @@ class CatalogContextBuilder:
                     len(fact_rows),
                     _raw_count - len(orderable) - len(fact_rows),
                 )
+                missing = ({int(p.id): query_words_missing_from(q_clean, p.title, p.description)
+                            for p in rows}
+                           if method == PARTIAL_WORDS_METHOD else {})
                 return CatalogSearchProductsResult(
                     products=orderable,
                     catalog_fact_products=fact_rows,
+                    method=method,
+                    query_words_missing=missing,
                 )
             logger.info(
                 "[CATALOG SEARCH] tenant=%s query=%r method=%s "
@@ -429,7 +506,7 @@ class CatalogContextBuilder:
             )
             return filtered
 
-        for method, source, match in self._search_steps(q_clean):
+        for method, source, match in self._search_steps(q_clean, partial_words=partial_words):
             rows = match(limit, False)
             if rows:
                 return _finalize(rows, source=source, method=method)
@@ -478,7 +555,7 @@ class CatalogContextBuilder:
         return sorted(rows, key=lambda row: position.get(int(row.id), len(position)))
 
     def _search_steps(
-        self, q_clean: str,
+        self, q_clean: str, *, partial_words: bool = False,
     ) -> Iterator[Tuple[str, str, Callable[[int, bool], List[Any]]]]:
         """Every way this builder matches a query, in the order it tries them.
 
@@ -488,6 +565,13 @@ class CatalogContextBuilder:
         candidate read walk this same sequence and stop at the same first step
         that matches anything, so they cannot disagree about which search ran,
         what it matched, or the order it matched it in.
+
+        With ``partial_words``, a query of two or more words whose every other
+        step matched nothing gets one last step: the products whose title and
+        description hold the most of its words (at least one), in the same
+        total order. The count decides membership only, never the order, so a
+        partial match is one tier of equally good products and a continuation
+        of it is read exactly like any other.
         """
 
         def fts(search_q: str) -> Callable[[int, bool], List[Any]]:
@@ -536,7 +620,76 @@ class CatalogContextBuilder:
                     yield ("ilike_plural_singular_arabic_norm", "search_ilike",
                            like(_catalog_title_arabic_norm_expr(Product.title).like(f"%{norm_q}%")))
 
-    def search_product_candidates(self, query: str, limit: int) -> CatalogCandidates:
+        if partial_words:
+            words = _catalog_search_words(q_clean)
+            searchable = [forms for forms in (
+                tuple(form for form in word_forms if len(form) >= _PARTIAL_MIN_SEARCH_CHARS)
+                for _word, word_forms in words) if forms]
+            if len(words) >= 2 and searchable:
+                yield (PARTIAL_WORDS_METHOD, "search_partial", self._partial_words_match(searchable))
+
+    def _partial_words_match(
+        self, words: List[Tuple[str, ...]],
+    ) -> Callable[[int, bool], List[Any]]:
+        """The products holding the most of ``words``, in ``CATALOG_SEARCH_ORDER_SQL`` order.
+
+        Each entry of ``words`` is one word's folded forms; a product holds the
+        word when its folded title and description contain any of them, as a
+        literal substring. One statement: each row's text is folded once (the
+        ``OFFSET 0`` keeps PostgreSQL from folding it again per word), counted,
+        and kept when its count is the best any of this tenant's products
+        reached, in the total order — so the step's matches, and a bounded read
+        of them, are a prefix-stable sequence like every other step's.
+        """
+        from functools import reduce  # noqa: PLC0415
+
+        from sqlalchemy import case, func as sa_func, or_, select  # noqa: PLC0415
+
+        def match(limit: int, ids_only: bool) -> List[Any]:
+            find = sa_func.strpos if self.db.get_bind().dialect.name == "postgresql" else sa_func.instr
+            folded = (
+                select(Product.id.label("id"), Product.in_stock.label("in_stock"),
+                       _catalog_title_arabic_norm_expr(
+                           sa_func.coalesce(Product.title, "") + " "
+                           + sa_func.coalesce(Product.description, "")).label("held"))
+                .where(Product.tenant_id == self.tenant_id)
+                .offset(0)
+                .subquery()
+            )
+            count = reduce(lambda a, b: a + b, [
+                case((or_(*[find(folded.c.held, form) > 0 for form in forms]), 1), else_=0)
+                for forms in words])
+            counted = select(folded.c.id, folded.c.in_stock, count.label("held_words")).subquery()
+            ranked = select(counted.c.id, counted.c.in_stock, counted.c.held_words,
+                            sa_func.max(counted.c.held_words).over().label("best")).subquery()
+            ids = [int(row[0]) for row in self.db.execute(
+                select(ranked.c.id)
+                .where(ranked.c.held_words > 0, ranked.c.held_words == ranked.c.best)
+                .order_by(ranked.c.in_stock.desc(), ranked.c.id.asc())
+                .limit(limit))]
+            return ids if ids_only else self._rows_in_order(ids)
+        return match
+
+    def query_words_missing(self, query: str, product_ids: List[int]) -> Dict[int, Tuple[str, ...]]:
+        """``query_words_missing_from`` for this tenant's products, keyed by id.
+
+        For a result the partial-words step decided but another read hydrated:
+        read from the same title and description the step matched on. An id
+        this tenant does not hold is simply absent.
+        """
+        wanted = [int(pid) for pid in product_ids or ()]
+        if not wanted:
+            return {}
+        rows = (
+            self.db.query(Product.id, Product.title, Product.description)
+            .filter(Product.tenant_id == self.tenant_id, Product.id.in_(wanted))
+            .all()
+        )
+        return {int(pid): query_words_missing_from(query, title, description)
+                for pid, title, description in rows}
+
+    def search_product_candidates(self, query: str, limit: int, *,
+                                  partial_words: bool = False) -> CatalogCandidates:
         """Every product ``search_products`` would match, as ordered ids, up to ``limit``.
 
         The same strategy, the same predicate and the same total order as the
@@ -549,7 +702,7 @@ class CatalogContextBuilder:
         bound = max(1, int(limit))
         if not q_clean:
             return CatalogCandidates(product_ids=(), method="", exhausted=True)
-        for method, _source, match in self._search_steps(q_clean):
+        for method, _source, match in self._search_steps(q_clean, partial_words=partial_words):
             ids = match(bound + 1, True)
             if ids:
                 return CatalogCandidates(product_ids=tuple(ids[:bound]), method=method,

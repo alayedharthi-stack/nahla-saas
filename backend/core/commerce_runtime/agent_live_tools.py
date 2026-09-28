@@ -298,6 +298,24 @@ def _product_view(snapshot: Any) -> Dict[str, Any]:
     }
 
 
+# A search that matched on part of its words (``store_knowledge``'s
+# partial-words step) says, on each product, which of the query's words that
+# product's title and description do not hold — the one thing that tells such
+# a match from a full one. Absent on every product a full match returned.
+QUERY_WORDS_NOT_HELD = "query_words_not_in_title_or_description"
+
+
+def _with_words_not_held(products: List[Dict[str, Any]],
+                         missing: Optional[Mapping[int, Sequence[str]]]) -> List[Dict[str, Any]]:
+    if not missing:
+        return products
+    for product in products:
+        words = [_text(word, 40) for word in list(missing.get(int(product["product_id"])) or ())]
+        if words:
+            product[QUERY_WORDS_NOT_HELD] = words
+    return products
+
+
 def _variant_options_view(options: Any) -> Dict[str, List[str]]:
     if not isinstance(options, Mapping):
         return {}
@@ -365,10 +383,12 @@ def _catalog_search(binding: LiveToolBinding) -> at.ToolFunction:
             return _search_excluding_shown(binding, scope, query, min(limit, MAX_SEARCH_LIMIT),
                                            shown, narrowed=narrowed)
         result = _run(search_products_impl(
-            binding.context, query=query, limit=min(limit, MAX_SEARCH_LIMIT)))
+            binding.context, query=query, limit=min(limit, MAX_SEARCH_LIMIT), partial_words=True))
         if getattr(result, "status", "") != "ok":
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
-        products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
+        products = _with_words_not_held(
+            [_product_view(p) for p in (getattr(result, "products", None) or ())],
+            getattr(result, "query_words_missing", None))
         payload: Dict[str, Any] = {"status": "ok", "found": bool(products), "products": products}
         candidates = (_search_candidates(binding, scope, query, products)
                       if binding.paging_available else None)
@@ -398,14 +418,17 @@ def _search_excluding_shown(binding: LiveToolBinding, scope: at.ToolScope, query
     the customer or the model wrote decides it.
     """
     from core.commerce_runtime import search_candidates as sc
+    from core.store_knowledge import PARTIAL_WORDS_METHOD
     from modules.ai.commerce_agent_v2.tools.catalog import (
+        query_words_missing_impl,
         search_product_candidates_impl,
         search_products_window_impl,
     )
 
     try:
         with _savepoint(binding):
-            read = search_product_candidates_impl(binding.context, query=query, limit=sc.CANDIDATE_CAP)
+            read = search_product_candidates_impl(binding.context, query=query, limit=sc.CANDIDATE_CAP,
+                                                  partial_words=True)
     except Exception as exc:  # noqa: BLE001 - reported as the failure it is, never as "nothing else"
         logger.warning("[COMMERCE_RUNTIME] search candidates unavailable tenant=%s error=%s",
                        scope.tenant_id, type(exc).__name__)
@@ -415,6 +438,11 @@ def _search_excluding_shown(binding: LiveToolBinding, scope: at.ToolScope, query
     window = remaining[:max(1, int(size))]
     result = search_products_window_impl(binding.context, window)
     products = [_product_view(p) for p in (getattr(result, "products", None) or ())]
+    if read.method == PARTIAL_WORDS_METHOD:
+        # The candidates matched on part of the query's words: what this
+        # window's products do not hold is said here as on the search's path.
+        products = _with_words_not_held(
+            products, query_words_missing_impl(binding.context, query, window))
     # As on the normal path: more only when more is stored and reachable. A
     # read that stopped at its cap says nothing about buyable products beyond
     # it, and "we have more" must not rest on it.
@@ -463,7 +491,7 @@ def _search_candidates(binding: LiveToolBinding, scope: at.ToolScope, query: str
         # session's transaction aborted under them.
         with _savepoint(binding):
             read = search_product_candidates_impl(binding.context, query=query,
-                                                  limit=sc.CANDIDATE_CAP)
+                                                  limit=sc.CANDIDATE_CAP, partial_words=True)
         candidates = sc.SearchCandidates(
             tenant_id=int(scope.tenant_id), namespace=str(scope.namespace),
             conversation_id=int(scope.conversation_id), turn_id=int(scope.turn_id),
