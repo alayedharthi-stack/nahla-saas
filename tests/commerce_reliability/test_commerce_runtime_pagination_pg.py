@@ -838,6 +838,9 @@ def test_a_words_step_that_fails_still_sends_the_verified_reply(shop: Shop, fail
     assert products == shop.products[SHIRTS][:5] and more is None
     assert transport.sent[0]["text"] == "These are some of the options."
     assert report.paging_words == outcome
+    if fail == "malformed":
+        # Recorded as refused on step three, and not handed back: nothing was.
+        assert report.malformed_evidence and report.malformed_evidence[0].startswith("step3:digits")
     assert report.tools_called == ("search_products",)
     assert report.browse_outcome == br.WORDS_MISSING and shop.tokens_for(conversation) == before
 

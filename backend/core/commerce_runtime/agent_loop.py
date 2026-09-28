@@ -410,7 +410,7 @@ class AgentLoop:
                 observations=session.provider_observations(), feedback=session.provider_feedback(),
                 budget=session.budget_view(),
             )
-            result = self._provider_step(provider, request, session)
+            result = self._provider_step(provider, request, session, answering_once=True)
             session.check_cancelled(cancelled)
             if isinstance(result, ac.ProviderReply):
                 problems = ac.verify_reply_draft(result.draft, session.observations,
@@ -435,8 +435,14 @@ class AgentLoop:
             session.record(answered_event, {"outcome": outcome})
         return answer if answer is not None else draft
 
-    def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
-        """Invoke the provider under an enforced wait and validate its result whole."""
+    def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session", *,
+                       answering_once: bool = False) -> ac.ProviderResult:
+        """Invoke the provider under an enforced wait and validate its result whole.
+
+        ``answering_once``: the step ``_ask_once`` gives, where nothing is run
+        on — a refused reply there leaves the reply verified before it as the
+        answer, and is never handed back to the model.
+        """
         wait = session.wait_for(session.limits.provider_timeout_seconds)
         try:
             raw = _bounded_call(lambda: provider.step(request), wait)
@@ -459,14 +465,15 @@ class AgentLoop:
             # answers again; nothing from the refused reply is used or sent.
             # With no step left it ends as before.
             refs = getattr(getattr(raw, "draft", None), "evidence_refs", ())
-            handed_back = isinstance(raw, ac.ProviderReply) and session.steps_left()
+            correctable = isinstance(raw, ac.ProviderReply) and session.steps_left()
             # What the refused values looked like, never what they said, so a
             # turn that recovered — or one that could not — is diagnosable
             # from its log line alone.
             shapes = list(ac.malformed_evidence_shapes(refs))
-            session.record("malformed_evidence", {"step_no": request.step_no, "shapes": shapes,
-                                                  "handed_back": bool(handed_back)})
-            if handed_back:
+            session.record("malformed_evidence", {
+                "step_no": request.step_no, "shapes": shapes,
+                "handed_back": bool(correctable) and not answering_once})
+            if correctable:
                 return ac.ProviderInvalid(ac.MALFORMED_EVIDENCE,
                                           detail=ac.malformed_evidence_detail(refs))
             raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc),

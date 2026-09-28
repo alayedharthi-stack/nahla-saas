@@ -166,7 +166,9 @@ class TurnReport:
     # Each step whose reply cited values that are not evidence references, as
     # "step<n>:<shape>+<shape>" (``agent_contracts.evidence_ref_shape``): what
     # the values looked like, never what they said. The step was handed back
-    # to the model when a step remained; otherwise the turn stopped.
+    # to the model when a step remained; on the one step a follow-up question
+    # gives (``paging_words``/``list_offer`` then say ``malformed_evidence``)
+    # the reply verified before it went instead; otherwise the turn stopped.
     malformed_evidence: Tuple[str, ...] = ()
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
