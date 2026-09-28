@@ -9,7 +9,6 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
-import StatCard from '../components/ui/StatCard'
 import PageHeader from '../components/ui/PageHeader'
 import AdminDirectSendModal from '../components/admin/AdminDirectSendModal'
 import MediaEnvModal from '../components/admin/MediaEnvModal'
@@ -3356,14 +3355,10 @@ function CampaignRow({ campaign, onStatusChange, checked, onCheck, onDelete, onE
               />
             </div>
           )}
-          {/* last_error gets the same surface as failed_count: a small
-              one-line hint under the status badge so the merchant
-              doesn't have to open the drawer to know "what broke?".
-              We surface the Arabic translation (last_error_ar) and
-              a tiny "نسخ الخطأ التقني" copy icon so support can
-              paste the raw Meta payload into a ticket without having
-              to ask the merchant to find it. */}
-          {(campaign.last_error_ar || campaign.last_error || campaign.last_error_key) && (
+          {/* Historical dispatch errors remain in the details, but must not
+              be presented as the current status of a sending campaign. */}
+          {campaign.status === 'failed' &&
+            (campaign.last_error_ar || campaign.last_error || campaign.last_error_key) && (
             <div className="flex items-center gap-1 mt-1 max-w-[200px]">
               <p
                 className="text-[10px] text-red-500 truncate flex-1"
@@ -3794,74 +3789,6 @@ export default function Campaigns() {
     })
   }
 
-  const stats = useMemo(() => {
-    // Prefer the canonical ``stats`` object emitted by /campaigns —
-    // that field is derived from CampaignSendLog at read time, so it
-    // never lies because of a drifting Campaign.sent_count counter
-    // (wave-mode restarts, half-finished dispatches, …). The legacy
-    // flat ``*_count`` fields are only used as a fallback for older
-    // backends that didn't ship the canonical aggregator yet.
-    const completed = campaigns.filter(c => c.status === 'completed').length
-    const failedCampaigns = campaigns.filter(c => c.status === 'failed').length
-
-    let metaAccepted = 0
-    let delivered = 0
-    let totalRead = 0
-    let failedPreAccept = 0
-    let totalConv = 0
-
-    for (const c of campaigns) {
-      if (c.stats) {
-        metaAccepted   += c.stats.meta_accepted
-        delivered      += c.stats.delivered
-        totalRead      += c.stats.read
-        failedPreAccept += c.stats.failed
-      } else {
-        // Legacy fallback — these fields can be stale but at least
-        // we surface something while the backend rolls out.
-        metaAccepted   += c.sent_count ?? 0
-        delivered      += c.delivered_count ?? 0
-        totalRead      += c.read_count ?? 0
-        failedPreAccept += c.failed_count ?? 0
-      }
-      totalConv += c.converted_count ?? 0
-    }
-
-    // "معدل القراءة من الواصل" — read / delivered. We pick this
-    // denominator over `read / meta_accepted` because the merchant
-    // actually wants to know "of the people who got the message, how
-    // many read it?". Showing the denominator in the label keeps it
-    // unambiguous. Falls back to read/meta_accepted only if Meta has
-    // not echoed any delivered events yet (race window during early
-    // sending).
-    const openRateDen = delivered > 0 ? delivered : metaAccepted
-    const openRate = openRateDen > 0
-      ? Math.round((totalRead / openRateDen) * 100)
-      : 0
-    const openRateBasis: 'delivered' | 'accepted' | 'none' =
-      delivered > 0 ? 'delivered'
-        : (metaAccepted > 0 ? 'accepted' : 'none')
-
-    const convRate = metaAccepted > 0
-      ? Math.round((totalConv / metaAccepted) * 100)
-      : 0
-
-    return {
-      completed,
-      failedCampaigns,
-      // Headline ``إجمالي المُرسَل`` = Meta accepted (the canonical
-      // "actually handed to Meta" count). This matches the detail
-      // panel's "قبلتها Meta" row exactly.
-      totalSent: metaAccepted,
-      totalDelivered: delivered,
-      totalRead,
-      totalFailed: failedPreAccept,
-      openRate,
-      openRateBasis,
-      convRate,
-    }
-  }, [campaigns])
-
   return (
     <div dir={dir} className="space-y-6">
       <PageHeader
@@ -3915,7 +3842,11 @@ export default function Campaigns() {
         </div>
       )}
 
-      {/* Live campaigns first: full width, name + message + calm status +
+      {/* The same filtered, event-time counters serve as the headline.
+          Default to the newest campaign; merchants can select all history. */}
+      <CampaignStatsFilters campaigns={campaigns} lang={lang} dir={dir} refreshToken={refreshToken} />
+
+      {/* Live campaigns: full width, name + message + calm status +
           unique-customer counters, refreshed from the send log. */}
       <ActiveCampaignHero
         campaigns={liveCampaigns}
@@ -3928,65 +3859,6 @@ export default function Campaigns() {
         onResume={c => handleStatusChange(c.id, 'active')}
         onEdit={c => setEditing(c)}
       />
-
-      {/* Statistics with campaign + period filters (counted by event time). */}
-      <CampaignStatsFilters campaigns={campaigns} lang={lang} dir={dir} refreshToken={refreshToken} />
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label={list.stats.completed} value={stats.completed.toString()} icon={CheckCircle} />
-        <div
-          title={
-            stats.totalDelivered > 0
-              ? list.stats.totalSentTooltipBoth
-                  .replace('{accepted}', fmtCount(stats.totalSent, lang))
-                  .replace('{delivered}', fmtCount(stats.totalDelivered, lang))
-              : list.stats.totalSentTooltipAccepted
-                  .replace('{accepted}', fmtCount(stats.totalSent, lang))
-          }
-        >
-          <StatCard
-            label={list.stats.totalSent}
-            value={`${fmtCount(stats.totalSent, lang)}${
-              stats.totalFailed > 0
-                ? list.stats.totalSentFailedSuffix.replace('{n}', fmtCount(stats.totalFailed, lang))
-                : ''
-            }`}
-            icon={Send}
-          />
-        </div>
-        <div
-          title={
-            stats.openRateBasis === 'delivered'
-              ? list.stats.openRateTooltipDelivered
-                  .replace('{read}', fmtCount(stats.totalRead, lang))
-                  .replace('{delivered}', fmtCount(stats.totalDelivered, lang))
-              : stats.openRateBasis === 'accepted'
-                ? list.stats.openRateTooltipAccepted
-                    .replace('{read}', fmtCount(stats.totalRead, lang))
-                    .replace('{accepted}', fmtCount(stats.totalSent, lang))
-                : list.stats.openRateTooltipNone
-          }
-        >
-          <StatCard
-            label={
-              stats.openRateBasis === 'delivered'
-                ? list.stats.openRateDelivered
-                : list.stats.openRateAccepted
-            }
-            value={`${stats.openRate}%`}
-            icon={BarChart2}
-          />
-        </div>
-        <StatCard label={list.stats.conversionRate} value={`${stats.convRate}%`} icon={TrendingUp} />
-      </div>
-
-      {stats.failedCampaigns > 0 && (
-        <div className="rounded-lg bg-red-50 border border-red-200 p-3 flex items-center gap-2">
-          <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
-          <p className="text-sm text-red-700">
-            {list.failedBanner.replace('{count}', fmtCount(stats.failedCampaigns, lang))}
-          </p>
-        </div>
-      )}
 
       <div className="card overflow-hidden">
         {selectedIds.size > 0 && (
