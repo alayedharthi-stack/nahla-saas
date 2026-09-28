@@ -421,10 +421,11 @@ class AgentLoop:
                 else:
                     answer, outcome = result.draft, "answered"
             else:
-                # A lookup, or a step cut off before it finished. Neither is
-                # run on: the question was for the words, and one step was all
-                # it was given.
-                outcome = type(result).__name__
+                # A lookup, a step cut off before it finished, or a reply that
+                # cited non-references. None is run on: the question was for
+                # the words, and one step was all it was given.
+                outcome = (ac.MALFORMED_EVIDENCE if isinstance(result, ac.ProviderInvalid)
+                           and result.reason == ac.MALFORMED_EVIDENCE else type(result).__name__)
         except _Stop as stop:
             outcome = stop.reason
             if stop.reason not in _WORDS_FALLBACK_STOPS:
@@ -458,16 +459,22 @@ class AgentLoop:
             # answers again; nothing from the refused reply is used or sent.
             # With no step left it ends as before.
             refs = getattr(getattr(raw, "draft", None), "evidence_refs", ())
-            if isinstance(raw, ac.ProviderReply) and session.steps_left():
-                session.record("malformed_evidence", {"step_no": request.step_no})
+            handed_back = isinstance(raw, ac.ProviderReply) and session.steps_left()
+            # What the refused values looked like, never what they said, so a
+            # turn that recovered — or one that could not — is diagnosable
+            # from its log line alone.
+            shapes = list(ac.malformed_evidence_shapes(refs))
+            session.record("malformed_evidence", {"step_no": request.step_no, "shapes": shapes,
+                                                  "handed_back": bool(handed_back)})
+            if handed_back:
                 return ac.ProviderInvalid(ac.MALFORMED_EVIDENCE,
                                           detail=ac.malformed_evidence_detail(refs))
-            raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
+            raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc),
+                        malformed_evidence=",".join(shapes)) from exc
         except c.ValidationError as exc:
             raise _Stop(ac.StopReason.PROVIDER_INVALID.value, error=str(exc)) from exc
         session.record("provider_step", {"result": type(result).__name__})
-        if (isinstance(result, ac.ProviderInvalid)
-                and result.reason in (ac.TRUNCATED_OUTPUT, ac.MALFORMED_EVIDENCE)
+        if (isinstance(result, ac.ProviderInvalid) and result.reason == ac.TRUNCATED_OUTPUT
                 and session.steps_left()):
             # A step that ran out of room is recoverable while the budget still
             # allows another: the loop hands the fact back rather than ending a

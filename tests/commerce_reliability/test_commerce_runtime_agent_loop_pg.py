@@ -1260,7 +1260,7 @@ def test_a_reply_citing_a_bare_id_is_told_back_and_the_corrected_answer_is_deliv
         return sp.reply("قميص قطني أزرق متوفر.", refs=[ref], commerce=True)
 
     provider = sp.ScriptedReasoningProvider([
-        sp.reply("قميص قطني أزرق متوفر.", refs=["140", "قميص قطني أزرق"], commerce=True),
+        sp.reply("قميص قطني أزرق متوفر بسعر 140.", refs=["140", "قميص قطني أزرق"], commerce=True),
         corrected,
         answered,
     ])
@@ -1268,9 +1268,12 @@ def test_a_reply_citing_a_bare_id_is_told_back_and_the_corrected_answer_is_deliv
     assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
     assert [(step, codes) for step, codes, _ in seen] == [(2, [ac.MALFORMED_EVIDENCE])]
     assert '"140"' in seen[0][2] and "2 value(s)" in seen[0][2]
-    assert _kinds(outcome).count("malformed_evidence") == 1
+    (event,) = [e for e in outcome.events if e.kind == "malformed_evidence"]
+    # What the refused values looked like, for the log line — never their text.
+    assert event.detail == {"step_no": 1, "shapes": ["digits", "no_colon"], "handed_back": True}
     assert agent.sequences(turn) == 1, "the refused reply reserved nothing of its own"
     assert outcome.detail["evidence_refs"] == ["product:blue_cotton_shirt"]
+    assert agent.snapshot(turn).state_payload["reply"]["text"] == "قميص قطني أزرق متوفر."
 
 
 def test_a_malformed_reference_with_no_step_left_still_stops_and_sends_nothing(agent: Harness) -> None:
@@ -1300,8 +1303,39 @@ def test_a_reply_that_keeps_citing_non_references_never_reaches_the_customer(age
                         loop=agent.loop(budget=ac.LoopBudget(max_steps=3, max_tool_calls=1)))
     assert outcome.status == ac.LoopStatus.STOPPED.value
     assert outcome.stop_reason == ac.StopReason.PROVIDER_INVALID.value
-    assert _kinds(outcome).count("malformed_evidence") == 2
+    events = [e.detail for e in outcome.events if e.kind == "malformed_evidence"]
+    assert [(e["shapes"], e["handed_back"]) for e in events] == [
+        (["digits"], True), (["no_colon"], True), (["empty"], False)]
+    assert outcome.detail["malformed_evidence"] == "empty"
     assert agent.sequences(turn) == 0
+
+
+def test_a_reply_mixing_a_real_reference_and_a_non_reference_is_handed_back_whole(
+        agent: Harness) -> None:
+    """One valid reference does not carry a reply that also cites a bare id:
+    the reply is refused whole, and only the corrected one is delivered."""
+    turn, lease = agent.start()
+
+    def mixed(request: ac.ProviderRequest) -> ac.ProviderResult:
+        ref = sp.observed(request, "c1").result["products"][0]["ref"]
+        return sp.reply("قميص قطني أزرق وحذاء رياضي أبيض متوفران.", refs=[ref, "812"], commerce=True)
+
+    def answered(request: ac.ProviderRequest) -> ac.ProviderResult:
+        ref = sp.observed(request, "c1").result["products"][0]["ref"]
+        return sp.reply("قميص قطني أزرق متوفر.", refs=[ref], commerce=True)
+
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="قميص")),
+        mixed,
+        answered,
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    (event,) = [e.detail for e in outcome.events if e.kind == "malformed_evidence"]
+    assert event == {"step_no": 2, "shapes": ["digits"], "handed_back": True}
+    assert outcome.detail["evidence_refs"] == ["product:blue_cotton_shirt"]
+    assert agent.sequences(turn) == 1
+    assert agent.snapshot(turn).state_payload["reply"]["text"] == "قميص قطني أزرق متوفر."
 
 
 # ── The customer's own words reach verification, and only theirs ────────────

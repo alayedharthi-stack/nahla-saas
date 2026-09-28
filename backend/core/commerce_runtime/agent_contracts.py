@@ -276,10 +276,12 @@ MALFORMED_EVIDENCE = "malformed_evidence"
 class ProviderInvalid(ProviderResult):
     """Incomplete or malformed output (truncation, unparsable structure).
 
-    Not a usable reply. ``TRUNCATED_OUTPUT`` and ``MALFORMED_EVIDENCE`` are the
-    reasons the loop may hand back to the provider instead of stopping the
-    turn, because the model can finish or correct what it produced; every other
-    reason ends the turn. ``detail`` says what to correct, for the model only.
+    Not a usable reply. ``TRUNCATED_OUTPUT`` is the one reason a provider may
+    report that the loop hands back instead of stopping the turn, because the
+    model can finish what it started; every other reason a provider reports
+    ends the turn. ``MALFORMED_EVIDENCE`` is never taken from a provider: the
+    loop produces it itself for a reply that cited values that are not
+    references, with ``detail`` saying which, for the model only.
     """
 
     reason: str
@@ -605,6 +607,35 @@ def validate_evidence_ref(value: Any) -> str:
     return value
 
 
+def evidence_ref_shape(value: Any) -> str:
+    """What a value that is not a reference looks like, never what it says.
+
+    For the turn's log line, so a refused citation can be diagnosed from
+    production without carrying a product title or anything the customer
+    wrote: ``digits`` (a bare id), ``no_colon`` (a title or word), and so on.
+    """
+    if not isinstance(value, str):
+        return "not_text"
+    if not value.strip():
+        return "empty"
+    if len(value) > MAX_EVIDENCE_REF_LENGTH:
+        return "too_long"
+    if value.strip().isdigit():
+        return "digits"
+    if ":" not in value:
+        return "no_colon"
+    if any(ch.isspace() for ch in value):
+        return "has_space"
+    if not value.isascii():
+        return "non_ascii"
+    return "other"
+
+
+def malformed_evidence_shapes(refs: Sequence[Any]) -> Tuple[str, ...]:
+    """``evidence_ref_shape`` of each refused value, at most five."""
+    return tuple(evidence_ref_shape(r) for r in (refs or ()) if not is_evidence_ref(r))[:5]
+
+
 def malformed_evidence_detail(refs: Sequence[Any]) -> str:
     """What the model is told about the values it cited that are not references.
 
@@ -906,7 +937,8 @@ __all__ = [
     "LoopBudget", "LoopEvent", "LoopOutcome", "LoopPhase", "LoopProgress", "LoopStatus", "MAX_ARGUMENTS_BYTES",
     "MAX_CHECKPOINT_BYTES", "MAX_CHECKPOINT_OBSERVATIONS", "MAX_OBSERVATION_BYTES", "MAX_REPLY_TEXT_LENGTH",
     "MAX_TOOL_ATTEMPTS_PER_SIGNATURE", "MAX_TOOL_REQUESTS_PER_STEP", "ObservationCheckpoint", "ProviderBlocked",
-    "MALFORMED_EVIDENCE", "MalformedEvidenceReference",
+    "MALFORMED_EVIDENCE", "MalformedEvidenceReference", "evidence_ref_shape", "malformed_evidence_detail",
+    "malformed_evidence_shapes",
     "ProviderCapabilities", "ProviderFailure", "ProviderInvalid", "ProviderReply", "ProviderRequest",
     "ProviderResult", "ProviderToolRequests", "READABLE_STATE_VERSIONS", "RESERVED_SCOPE_ARGUMENTS", "ReplyDraft",
     "TRUNCATED_OUTPUT", "StopReason", "ToolDefinition", "ToolError", "ToolErrorCode", "ToolObservation", "ToolRequest",

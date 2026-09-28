@@ -21,3 +21,13 @@ def test_the_shape_check_still_refuses_everywhere_else_as_a_validation_error():
     with pytest.raises(ac.MalformedEvidenceReference):
         ac.validate_evidence_ref("product 140")
     assert ac.validate_evidence_ref("catalog:product:140") == "catalog:product:140"
+
+
+def test_a_refused_value_is_described_by_its_shape_never_its_text():
+    refs = ["catalog:product:1", "140", "قميص قطني أزرق", "catalog:product: 1", "منتج:قميص",
+            "", "x:" + "y" * 200, 140]
+    shapes = ac.malformed_evidence_shapes(refs)
+    assert shapes == ("digits", "no_colon", "has_space", "non_ascii", "empty")      # at most five
+    assert ac.evidence_ref_shape("x:" + "y" * 200) == "too_long"
+    assert ac.evidence_ref_shape(140) == "not_text"
+    assert not any("قميص" in shape or "140" in shape for shape in shapes)

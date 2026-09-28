@@ -163,6 +163,11 @@ class TurnReport:
     # With ``skipped_reply_cites_fewer``: "<cited>/<offered>", so a reply about
     # one product ("1/5") is told apart from one citing none of them ("0/5").
     list_offer_cited: Optional[str] = None
+    # Each step whose reply cited values that are not evidence references, as
+    # "step<n>:<shape>+<shape>" (``agent_contracts.evidence_ref_shape``): what
+    # the values looked like, never what they said. The step was handed back
+    # to the model when a step remained; otherwise the turn stopped.
+    malformed_evidence: Tuple[str, ...] = ()
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
@@ -198,6 +203,7 @@ class TurnReport:
         fields["evidence_refs"] = ",".join(self.evidence_refs)
         fields["choice_row_ids"] = ",".join(self.choice_row_ids)
         fields["text_additions"] = ",".join(self.text_additions)
+        fields["malformed_evidence"] = ",".join(self.malformed_evidence)
         fields["stop_detail"] = ";".join(f"{key}={value}" for key, value in self.stop_detail)
         fields["replied"] = self.replied
         fields["reply_chars"] = len(self.reply_text)
@@ -830,6 +836,9 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     offer = next((event for event in outcome.events if event.kind == "list_offer_answer"), None)
     offer_skipped = next((event for event in outcome.events if event.kind == "list_offer_skipped"),
                          None)
+    malformed = tuple(
+        f"step{event.detail.get('step_no')}:" + "+".join(str(s) for s in event.detail.get("shapes") or ())
+        for event in outcome.events if event.kind == "malformed_evidence")
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
     stop_detail = _stop_detail(outcome)
@@ -853,6 +862,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         list_offer_cited=(f"{offer_skipped.detail.get('cited')}/{offer_skipped.detail.get('offered')}"
                           if offer is None and offer_skipped is not None
                           and "cited" in offer_skipped.detail else None),
+        malformed_evidence=malformed,
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,

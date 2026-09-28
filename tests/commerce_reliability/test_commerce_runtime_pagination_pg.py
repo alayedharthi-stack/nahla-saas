@@ -761,6 +761,12 @@ def words_later(query: str, *, second: Optional[Dict[str, Any]] = None,
             return _step([_tool_use("d1", "get_product_details", product_id=ids[0])])
         if call == 3 and fail == "truncated":
             return _step([{"type": "text", "text": "partial"}], stop_reason="max_tokens")
+        if call == 3 and fail == "malformed":
+            # A reply citing bare ids rather than references: refused and, with
+            # the one step spent, never run on.
+            return _step([_reply("Other words.", commerce=True, refs=[str(pid) for pid in ids],
+                                 choices={"product_ids": ids, "button": BUTTON, "more_label": MORE},
+                                 call_id="reply_3")])
         if call == 3 and fail == "unverified":
             return _step([_reply("These are some of the options.", commerce=True,
                                  refs=["catalog:product:999999999"],
@@ -818,6 +824,7 @@ def test_a_list_whose_words_never_come_is_exactly_what_the_model_named(shop: Sho
     ("lookup", "ProviderToolRequests"),
     ("truncated", "ProviderInvalid"),
     ("unverified", "verification_failed"),
+    ("malformed", ac.MALFORMED_EVIDENCE),
 ])
 def test_a_words_step_that_fails_still_sends_the_verified_reply(shop: Shop, fail, outcome):
     """Asking must never leave the customer worse off than not asking: however

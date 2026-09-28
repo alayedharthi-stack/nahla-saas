@@ -163,7 +163,7 @@
       "id": "commerce_runtime_agent_loop",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py",
-      "origin": "Agent loop PR — dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; repeat policy: duplicates inside one bundle refused before the first tool runs, and a durable crash-safe recovery allowance of one original attempt plus one repeat",
+      "origin": "Agent loop PR — dormant agent loop core and its durable guarantees: one turn through reasoning, read-only fixture tools and observations feeding the next decision; durable ownership- and revision-guarded attempt debits with concurrency arbitration and re-entry restoration; enforced provider and tool waits with the deadline re-checked inside the reservation transaction; scope, eligibility and ownership boundaries; complete provider-result validation; isolation of authoritative schemas and context; closed ownership-loss outcomes; repeat policy: duplicates inside one bundle refused before the first tool runs, and a durable crash-safe recovery allowance of one original attempt plus one repeat; and a reply citing values that are not evidence references — a bare id, a title — handed back while a step remains, refused whole even beside a valid reference, recorded by the shapes of what was refused, and stopping as before with no step left",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -211,6 +211,10 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_reply_citing_a_bare_id_is_told_back_and_the_corrected_answer_is_delivered",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_malformed_reference_with_no_step_left_still_stops_and_sends_nothing",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_reply_that_keeps_citing_non_references_never_reaches_the_customer",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_reply_mixing_a_real_reference_and_a_non_reference_is_handed_back_whole",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_number_the_customer_wrote_survives_verification_and_is_delivered",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_the_same_sentence_on_a_turn_that_never_mentioned_it_is_refused"
       ]
@@ -219,7 +223,7 @@
       "id": "commerce_runtime_pilot",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py",
-      "origin": "Pilot integration PR — the owner pilot end to end on real PostgreSQL with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger, and only the model's HTTP call and the WhatsApp transport scripted: one inbound message answered at most once (redelivery, re-entry reusing the reserved intent, two concurrent invocations sending once), never a success the send does not support (rejected, unknown, a transport that raises, a provider failure, a model refusal, a draft citing unobserved evidence), no blind retry of an uncertain send, a follow-up answered from the conversation the platform already recorded, tenant and conversation scope, and refusal when the runtime schema is not present",
+      "origin": "Pilot integration PR — the owner pilot end to end on real PostgreSQL with the real admission, ownership, agent loop, Anthropic adapter, trusted read context and delivery ledger, and only the model's HTTP call and the WhatsApp transport scripted: one inbound message answered at most once (redelivery, re-entry reusing the reserved intent, two concurrent invocations sending once), never a success the send does not support (rejected, unknown, a transport that raises, a provider failure, a model refusal, a draft citing unobserved evidence), no blind retry of an uncertain send, a follow-up answered from the conversation the platform already recorded, tenant and conversation scope, and refusal when the runtime schema is not present; and a reply citing a bare id through the real entry and adapter, shown back to the model as its own call's result and replaced by the corrected reply, the only one sent",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -336,7 +340,8 @@
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_the_general_coupon_the_merchant_declared_reaches_a_real_customer",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_code_recording_no_declaration_is_still_refused_on_postgres",
         "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unreadable_assistant_name_leaves_the_turns_session_usable_and_unflushed",
-        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unreadable_customer_name_leaves_the_turns_session_usable_and_unflushed"
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_an_unreadable_customer_name_leaves_the_turns_session_usable_and_unflushed",
+        "tests/commerce_reliability/test_commerce_runtime_pilot_pg.py::test_a_bare_id_in_evidence_refs_is_shown_back_and_the_corrected_reply_is_sent"
       ]
     },
     {
@@ -635,7 +640,7 @@
       "id": "commerce_runtime_pagination",
       "kind": "proof",
       "module": "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py",
-      "origin": "Pagination PR — the whole flow through the real run_commerce_runtime_turn: one search with more than ten matches opens page one while the model sees at most five products; More continues the stored order with no search through the final page; boundaries at 10, 11, 23 and above the cap of 50; a changing catalogue changes row values never page membership; every refused token is a named fact and no page, search or selection; a redelivered tap is the same finished turn and its page is sent once; taps on platform-composed rows verify and become Cards; focused answers, comparisons and narrowed searches are never expanded whatever words the model gives; whether a list pages never waits on the model's optional words — a list that pages and lacks them asks the model once (never with one step left), and however that step ends — failure, lookup, truncation, refused reply — the verified reply goes exactly as the model asked; a page that cannot be spent goes as lines and mints nothing; without revision 0113 the turn is unchanged",
+      "origin": "Pagination PR — the whole flow through the real run_commerce_runtime_turn: one search with more than ten matches opens page one while the model sees at most five products; More continues the stored order with no search through the final page; boundaries at 10, 11, 23 and above the cap of 50; a changing catalogue changes row values never page membership; every refused token is a named fact and no page, search or selection; a redelivered tap is the same finished turn and its page is sent once; taps on platform-composed rows verify and become Cards; focused answers, comparisons and narrowed searches are never expanded whatever words the model gives; whether a list pages never waits on the model's optional words — a list that pages and lacks them asks the model once (never with one step left), and however that step ends — failure, lookup, truncation, refused reply — the verified reply goes exactly as the model asked; a page that cannot be spent goes as lines and mints nothing; without revision 0113 the turn is unchanged; and a words step answered with a reply citing bare ids leaving the verified reply before it as the answer",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -668,6 +673,7 @@
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_words_step_that_fails_still_sends_the_verified_reply[lookup-ProviderToolRequests]",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_words_step_that_fails_still_sends_the_verified_reply[truncated-ProviderInvalid]",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_words_step_that_fails_still_sends_the_verified_reply[unverified-verification_failed]",
+        "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_words_step_that_fails_still_sends_the_verified_reply[malformed-malformed_evidence]",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_no_words_are_asked_for_with_one_step_left",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_result_that_fits_one_list_asks_for_no_more_word",
         "tests/commerce_reliability/test_commerce_runtime_pagination_pg.py::test_a_selector_the_model_asks_for_on_a_more_turn_stands_down_for_the_page",
