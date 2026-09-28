@@ -211,6 +211,7 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_is_told_back_and_the_finished_answer_is_accepted",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_truncated_step_with_no_step_left_still_stops_rather_than_sending_half",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_provider_cannot_ask_for_the_malformed_evidence_hand_back_itself",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_reply_citing_a_bare_id_is_told_back_and_the_corrected_answer_is_delivered",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_malformed_reference_with_no_step_left_still_stops_and_sends_nothing",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_reply_that_keeps_citing_non_references_never_reaches_the_customer",

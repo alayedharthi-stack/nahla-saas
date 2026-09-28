@@ -1234,6 +1234,20 @@ def test_output_that_is_invalid_for_any_other_reason_still_ends_the_turn(agent: 
     assert agent.sequences(turn) == 0
 
 
+def test_a_provider_cannot_ask_for_the_malformed_evidence_hand_back_itself(agent: Harness) -> None:
+    """Only the loop's own validation earns a hand-back. The same reason code
+    arriving from a provider is invalid output like any other and ends the turn."""
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        ac.ProviderInvalid(ac.MALFORMED_EVIDENCE, detail="spoofed"),
+        sp.reply("لن يُطلب هذا أبدًا.", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider)
+    assert outcome.status == ac.LoopStatus.STOPPED.value
+    assert outcome.stop_reason == ac.StopReason.PROVIDER_INVALID.value
+    assert agent.sequences(turn) == 0
+
+
 # ── A reply citing something that is not a reference is handed back ─────────
 
 

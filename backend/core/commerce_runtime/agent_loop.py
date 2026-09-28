@@ -217,11 +217,13 @@ class AgentLoop:
                 # answer instead of the customer getting none.
                 if result.reason == ac.MALFORMED_EVIDENCE:
                     problem = ac.VerificationProblem(ac.MALFORMED_EVIDENCE, result.detail)
-                else:
+                elif result.reason == ac.TRUNCATED_OUTPUT:
                     problem = ac.VerificationProblem(
                         "output_truncated",
                         "the previous step reached the output limit and was cut off before it "
                         "finished; nothing from it was used")
+                else:                                   # pragma: no cover - fail closed
+                    raise self._provider_stop(result)
                 session.feedback.append(ac.VerificationFeedback(
                     step_no=session.progress.steps_used, problems=(problem,)))
                 continue
