@@ -189,6 +189,7 @@
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_repeated_tool_requests_terminate_explicitly",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_the_last_step_is_asked_for_the_reply_alone_and_the_answer_is_delivered",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_step_with_no_tool_call_left_is_asked_for_the_reply_alone",
+        "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_marked_step_is_reported",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_every_step_that_can_be_followed_may_still_look_up",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_budget_exhaustion_and_cancellation_stop_without_false_success",
         "tests/commerce_reliability/test_commerce_runtime_agent_loop_pg.py::test_a_turn_of_another_conversation_is_refused_before_any_work_is_read",

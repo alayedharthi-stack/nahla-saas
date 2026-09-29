@@ -516,7 +516,7 @@ def test_the_last_step_asks_the_model_for_the_reply_alone_end_to_end(pilot):
     )
     assert report.dispatch_status == dd.SENT_ACCEPTED
     assert [c["tool_choice"] for c in scripted.calls] == [
-        {"type": "any"}, {"type": "tool", "name": "submit_reply"}]
+        {"type": "any"}, {"type": "tool", "name": "submit_reply", "disable_parallel_tool_use": True}]
     assert report.reply_only_step == "2:last_step"
     assert report.as_log_fields()["reply_only_step"] == "2:last_step"
     assert all(c["system"] == "EXISTING-INSTRUCTIONS" for c in scripted.calls)

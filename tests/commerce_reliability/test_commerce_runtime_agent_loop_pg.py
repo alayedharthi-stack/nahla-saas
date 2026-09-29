@@ -692,6 +692,19 @@ def test_a_step_with_no_tool_call_left_is_asked_for_the_reply_alone(agent: Harne
     assert [e.detail["reason"] for e in outcome.events if e.kind == "reply_only_step"] == ["no_tool_calls"]
 
 
+def test_every_marked_step_is_reported(agent: Harness) -> None:
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر ورد")),
+        ac.ProviderInvalid(ac.TRUNCATED_OUTPUT),
+        sp.reply("متوفر", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider, loop=agent.loop(budget=ac.LoopBudget(max_steps=3, max_tool_calls=1)))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert [(e.detail["step_no"], e.detail["reason"]) for e in outcome.events
+            if e.kind == "reply_only_step"] == [(2, "no_tool_calls"), (3, "last_step")]
+
+
 def test_every_step_that_can_be_followed_may_still_look_up(agent: Harness) -> None:
     turn, lease = agent.start()
     provider = sp.ScriptedReasoningProvider([
@@ -716,6 +729,9 @@ def test_budget_exhaustion_and_cancellation_stop_without_false_success(agent: Ha
     assert outcome.stop_reason == ac.StopReason.BUDGET_EXHAUSTED.value
     assert outcome.detail["limit"] == "max_steps" and outcome.steps_used == 2
     assert agent.sequences(turn) == 0
+    # The last step was asked for the reply alone; a provider that ignores
+    # that still ends the turn exactly as before, with nothing reserved.
+    assert provider.requests[-1].reply_only is True
 
     turn2, lease2 = agent.start()
     provider2 = sp.ScriptedReasoningProvider([

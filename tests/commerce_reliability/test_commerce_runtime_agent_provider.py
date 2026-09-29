@@ -129,7 +129,8 @@ def test_a_reply_only_step_names_the_reply_tool_and_keeps_every_tool_declared():
     provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])])
     provider.step(request(reply_only=True))
     call = double.calls[0]
-    assert call["tool_choice"] == {"type": "tool", "name": ap.REPLY_TOOL_NAME}
+    assert call["tool_choice"] == {"type": "tool", "name": ap.REPLY_TOOL_NAME,
+                                   "disable_parallel_tool_use": True}
     # Earlier steps' tool_use blocks are replayed, so their tools stay declared.
     assert {t["name"] for t in call["tools"]} == {"catalog_search", ap.REPLY_TOOL_NAME}
     assert call["system"] == INSTRUCTIONS

@@ -467,8 +467,8 @@ class AnthropicReasoningProvider:
             tools=tools,
             # Every declared tool stays declared (earlier steps' tool_use blocks
             # are replayed); a reply-only step may call the reply tool alone.
-            tool_choice=({"type": "tool", "name": REPLY_TOOL_NAME} if request.reply_only
-                         else {"type": "any"}),
+            tool_choice=({"type": "tool", "name": REPLY_TOOL_NAME, "disable_parallel_tool_use": True}
+                         if request.reply_only else {"type": "any"}),
             max_tokens=self._max_output_tokens,
             timeout_seconds=wait,
             audit_context=dict(self._audit_context, stage=f"agent_loop_step_{request.step_no}"),
