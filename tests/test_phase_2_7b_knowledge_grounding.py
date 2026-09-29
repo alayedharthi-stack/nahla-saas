@@ -1237,7 +1237,48 @@ def test_titles_never_include_what_a_store_wide_lookup_could_not_return(seeded: 
         seeded.db.add(MerchantKnowledgeSectionProduct(section_id=row.id, product_id=seeded.jacket.id))
     seeded.db.commit()
     result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
-    assert "قسم لا يجوز أن يظهر" not in (result.store_knowledge_titles or [])
+    # The listing is there — the excluded row is simply not in it.
+    assert result.store_knowledge_titles == ["سياسة الاسترجاع"]
+    assert result.store_knowledge_titles_total == 1
+
+
+def test_a_section_without_a_body_is_never_listed(seeded: Seed) -> None:
+    """Review finding: a title-only section matches a search but never becomes
+    evidence, so listing it would hand the model its title as a bare fact."""
+    seeded.db.add(MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="shipping_policy", title="التوصيل مجاني فوق 200 ريال",
+        body="   ", is_active=True, ai_status="approved"))
+    seeded.db.commit()
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert result.store_knowledge_titles == ["سياسة الاسترجاع"]
+    assert result.store_knowledge_titles_total == 1
+
+
+def test_an_untitled_section_is_counted_and_named_by_its_kind(seeded: Seed) -> None:
+    """Review finding: titles are optional; a store whose knowledge is untitled
+    must not read as a store with no knowledge."""
+    from services.knowledge_section_kinds import get_kind
+
+    seeded.db.query(MerchantKnowledgeSection).filter(
+        MerchantKnowledgeSection.tenant_id == seeded.tenant.id).delete()
+    seeded.db.add(MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="return_policy", title=None,
+        body="يمكن استبدال المنتج خلال 7 أيام.", is_active=True, ai_status="approved"))
+    seeded.db.commit()
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert result.store_knowledge_titles_total == 1
+    assert result.store_knowledge_titles == [get_kind("return_policy").label_ar]
+
+
+def test_the_listing_itself_reports_a_failed_read_as_unavailable(seeded: Seed) -> None:
+    from modules.ai.brain.commerce import product_knowledge_or_comparison as pkc
+
+    class _Broken:
+        def query(self, *a, **k):
+            raise RuntimeError("database unavailable")
+
+    assert pkc.list_store_wide_kb_titles(_Broken(), seeded.tenant.id) is None
+    assert pkc.list_store_wide_kb_titles(seeded.db, 0) is None
 
 
 def test_a_store_with_no_knowledge_says_so_by_an_empty_listing(seeded: Seed) -> None:
@@ -1271,6 +1312,7 @@ def test_the_listing_is_bounded_in_count_and_length(seeded: Seed) -> None:
         seeded.db.add(MerchantKnowledgeSection(
             tenant_id=seeded.tenant.id, kind="faq", title=f"سؤال شائع رقم {index} " + "ط" * 120,
             body="جواب", is_active=True, ai_status="approved"))
+    assert pkc.STORE_KB_TITLE_LIMIT == 20 and pkc.STORE_KB_TITLE_CHARS == 60
     seeded.db.commit()
     result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
     assert len(result.store_knowledge_titles) == pkc.STORE_KB_TITLE_LIMIT

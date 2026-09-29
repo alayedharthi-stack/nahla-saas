@@ -781,8 +781,21 @@ def _store_wide_kb_kinds() -> frozenset:
     return _PRODUCT_KB_KINDS | DOCUMENT_KINDS | _MERCHANT_OPERATIONAL_KB_KINDS
 
 
-STORE_KB_TITLE_LIMIT = 25
-STORE_KB_TITLE_CHARS = 80
+STORE_KB_TITLE_LIMIT = 20
+STORE_KB_TITLE_CHARS = 60
+
+
+def _section_label(title: str, kind: str) -> str:
+    """A section's own title, or — titles are optional — the platform's own
+    name for its kind, as the knowledge import names an untitled section."""
+    if title:
+        return title
+    try:
+        from services.knowledge_section_kinds import get_kind  # noqa: PLC0415
+        known = get_kind(kind)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — the raw kind still names the section
+        known = None
+    return str(getattr(known, "label_ar", "") or kind)
 
 
 def list_store_wide_kb_titles(
@@ -791,13 +804,16 @@ def list_store_wide_kb_titles(
     *,
     limit: int = STORE_KB_TITLE_LIMIT,
 ) -> Optional[Dict[str, Any]]:
-    """The titles of the knowledge a store-wide lookup can return, or ``None``.
+    """The labels of the knowledge a store-wide lookup can return, or ``None``.
 
-    The same rows ``retrieve_catalog_candidate_kb_sections`` reads for a
-    store-wide lookup: this tenant, AI-visible, a store-wide kind, not linked
-    to a product (a store-wide lookup leaves product-linked sections out), in
-    the retriever's own order. Titles only — no body, no evidence — bounded in
-    count and length. ``None`` is operational failure, never "no knowledge".
+    The rows ``retrieve_catalog_candidate_kb_sections`` reads for a store-wide
+    lookup — this tenant, AI-visible, a store-wide kind, in the retriever's own
+    order and 120-row window — narrowed to those that lookup can actually hand
+    over: not linked to a product, and with a body (a section without one
+    never becomes evidence). A section's label is its title, or its kind's
+    platform name when it has none. Labels only — no body, no evidence —
+    bounded in count and length; ``total`` counts every such section in the
+    window. ``None`` is operational failure, never "no knowledge".
     """
     if db is None:
         return None
@@ -808,24 +824,29 @@ def list_store_wide_kb_titles(
     if tenant <= 0:
         return None
     try:
+        from sqlalchemy import exists, func  # noqa: PLC0415
+        from sqlalchemy.orm import load_only  # noqa: PLC0415
+
         from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
-        from models import MerchantKnowledgeSection  # noqa: PLC0415
+        from models import MerchantKnowledgeSection, MerchantKnowledgeSectionProduct  # noqa: PLC0415
 
         kinds = _store_wide_kb_kinds()
+        section = MerchantKnowledgeSection
+        linked = exists().where(MerchantKnowledgeSectionProduct.section_id == section.id)
         rows = (
-            apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
+            apply_ai_visible_kb_query_filters(db.query(section))
+            .options(load_only(section.id, section.tenant_id, section.kind, section.title))
             .filter(
-                MerchantKnowledgeSection.tenant_id == tenant,
-                MerchantKnowledgeSection.kind.in_(tuple(kinds)),
+                section.tenant_id == tenant,
+                section.kind.in_(tuple(kinds)),
+                ~linked,
+                func.length(func.trim(func.coalesce(section.body, ""))) > 0,
             )
-            .order_by(
-                MerchantKnowledgeSection.priority.asc(),
-                MerchantKnowledgeSection.updated_at.desc(),
-            )
+            .order_by(section.priority.asc(), section.updated_at.desc())
             .limit(120)
             .all()
         )
-        titles: List[str] = []
+        labels: List[str] = []
         total = 0
         for row in rows:
             try:
@@ -834,17 +855,15 @@ def list_store_wide_kb_titles(
                 row_tenant = 0
             if row_tenant != tenant:
                 continue
-            if str(getattr(row, "kind", "") or "").strip().lower() not in kinds:
-                continue
-            if list(getattr(row, "product_links", None) or []):
-                continue
-            title = str(getattr(row, "title", "") or "").strip()[:STORE_KB_TITLE_CHARS]
-            if not title:
+            kind = str(getattr(row, "kind", "") or "").strip().lower()
+            if kind not in kinds:
                 continue
             total += 1
-            if len(titles) < int(limit) and title not in titles:
-                titles.append(title)
-        return {"titles": titles, "total": total}
+            label = _section_label(str(getattr(row, "title", "") or "").strip(), kind)
+            label = label[:STORE_KB_TITLE_CHARS]
+            if label and len(labels) < int(limit) and label not in labels:
+                labels.append(label)
+        return {"titles": labels, "total": total}
     except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — reported as unavailable, not as empty
         logger.debug("[PRODUCT_KNOWLEDGE] KB title listing failed tenant=%s err=%s", tenant, exc)
         return None

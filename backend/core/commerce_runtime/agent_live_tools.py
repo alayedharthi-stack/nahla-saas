@@ -607,7 +607,7 @@ def _merchant_knowledge(binding: LiveToolBinding) -> at.ToolFunction:
             titles = getattr(result, "store_knowledge_titles", None)
             extra: Dict[str, Any] = {}
             if isinstance(titles, list):
-                extra["store_knowledge_titles"] = [_text(t, 80) for t in titles]
+                extra["store_knowledge_titles"] = [_text(t, 60) for t in titles]
                 extra["store_knowledge_titles_total"] = getattr(result, "store_knowledge_titles_total", None)
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None),
                                **extra)
