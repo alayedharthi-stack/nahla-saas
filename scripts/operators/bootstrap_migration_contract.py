@@ -28,6 +28,9 @@ SHIPMENT_ALEMBIC_HEAD = "0112"
 # and 0111 application siblings are untouched, so bootstrap stays pinned to 0093
 # and bare ``head`` stays ambiguous — which is the point of naming every target.
 NAVIGATION_ALEMBIC_HEAD = "0113"
+# Marketplace payment tables form an independent, explicitly applied child of
+# 0112. Applying them must not implicitly run the dormant navigation revision.
+PAYMENTS_ALEMBIC_HEAD = "0114"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -36,14 +39,16 @@ BASE_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
 ADDRESS_REPOSITORY_ALEMBIC_HEADS = BASE_REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
 SHIPMENT_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
-REPOSITORY_ALEMBIC_HEADS = frozenset(
+NAVIGATION_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
+REPOSITORY_ALEMBIC_HEADS = NAVIGATION_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
     # A checkout that predates the navigation snapshot is still a supported
     # topology, so both are accepted rather than one replacing the other.
     SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
+    NAVIGATION_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -52,8 +57,10 @@ def repository_heads_expected(heads) -> bool:
     """Whether the script directory's heads are the ones this repository knows.
 
     Accepted source checkouts are exactly ``{0092, 0111}``, the intermediate
-    address checkout ``{0092, 0110, 0111}``, and the current shipment checkout
-    ``{0092, 0111, 0112}``. No arbitrary extra head is accepted.
+    address checkout ``{0092, 0110, 0111}``, the shipment checkout
+    ``{0092, 0111, 0112}``, the navigation checkout
+    ``{0092, 0111, 0113}``, and the payment sibling checkout
+    ``{0092, 0111, 0113, 0114}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS

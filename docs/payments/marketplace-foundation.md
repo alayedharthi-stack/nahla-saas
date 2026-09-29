@@ -31,7 +31,9 @@ be confirmed directly with Moyasar before activating an adapter.
 - Startup calls the application `Base.metadata.create_all`. Payments use a
   separate `PaymentBase`, so a code deployment cannot silently create these
   relations. Revision `0114` is an explicit sibling of dormant `0113`, both
-  descending from `0112`; the repository has multiple historical heads.
+  descending from `0112`; the repository has multiple historical heads. The
+  closed migration topology contract accepts this explicit fourth head while
+  normal bootstrap remains pinned to `0093`.
 
 ## Data rules
 
