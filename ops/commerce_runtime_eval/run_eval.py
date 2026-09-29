@@ -143,8 +143,18 @@ SCENARIOS: Tuple[Scenario, ...] = (
     # Questions that are not about a product but need another tool: still answered from it.
     Scenario("knowledge_delivery", "A", "توصلون للرياض؟", "fresh", "knowledge"),
     Scenario("order_where", "A", "وين طلبي؟", "fresh", "order"),
+    # A store with products and no knowledge sections at all (the shape of a
+    # newly connected store): delivery, returns and payment questions.
+    Scenario("ek_fee", "E", "كم رسوم التوصيل؟", "fresh", "kb_absent"),
+    Scenario("ek_riyadh", "E", "توصلون للرياض؟", "fresh", "kb_absent"),
+    Scenario("ek_days", "E", "كم يوم ياخذ التوصيل؟", "fresh", "kb_absent"),
+    Scenario("ek_kuwait", "E", "توصلون للكويت؟", "fresh", "kb_absent"),
+    Scenario("ek_return_policy", "E", "وش سياسة الاسترجاع عندكم؟", "fresh", "kb_absent"),
+    Scenario("ek_return_item", "E", "أقدر أرجع المنتج إذا ما ناسبني؟", "fresh", "kb_absent"),
+    Scenario("ek_exchange_size", "E", "أقدر أستبدل المقاس؟", "fresh", "kb_absent"),
+    Scenario("ek_cod", "E", "فيه دفع عند الاستلام؟", "fresh", "kb_absent"),
 )
-NAMES = {"A": "أحمد سالم", "C": "نورة عبدالله"}
+NAMES = {"A": "أحمد سالم", "C": "نورة عبدالله", "E": "نورة عبدالله"}
 
 # ── Output hygiene ───────────────────────────────────────────────────────────
 
@@ -566,7 +576,8 @@ def main() -> int:
         entry.reset_schema_probe()
         nav.reset_schema_probe()
         stores = {"A": seed_store(engine, "A", CLOTHING, KNOWLEDGE_A),
-                  "C": seed_store(engine, "C", PERFUME)}
+                  "C": seed_store(engine, "C", PERFUME),
+                  "E": seed_store(engine, "E", CLOTHING)}
         ctx = Context(engine=engine, session_factory=sessionmaker(bind=engine, expire_on_commit=False),
                       model=model, stores=stores)
         wanted = [s.strip() for s in os.environ.get("EVAL_SCENARIOS", "").split(",") if s.strip()]
