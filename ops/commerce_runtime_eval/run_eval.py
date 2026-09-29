@@ -132,6 +132,8 @@ SCENARIOS: Tuple[Scenario, ...] = (
     # A bare person name: answering with the product or asking what they mean are both fine.
     Scenario("bare_sultan_has_product", "C", "سلطان عندك؟", "fresh", "either"),
     Scenario("bare_sultan_no_product", "A", "سلطان عندك؟", "fresh", "either"),
+    # A shopping need that names no product type: searching or asking a preference are both fine.
+    Scenario("need_gift", "C", "ابي هدية لزوجتي", "fresh", "either"),
     # Products the store really does not have: saying so is correct.
     Scenario("absent_watches", "A", "عندكم ساعات؟", "fresh", "absent"),
     Scenario("absent_green_dress", "A", "عندكم فستان أخضر؟", "fresh", "absent"),
