@@ -540,7 +540,7 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
                             "row from the model's history tenant=%s conversation=%s",
                             tenant_id, conversation_id)
                 continue
-            staffed = _staff_rows.staff_row(event_type, metadata, body)
+            staffed = _staff_rows.staff_row(event_type, metadata, body, direction=direction)
             if staffed is not None:
                 if not staffed.text and staffed.kind == _staff_rows.TEXT_KIND:
                     continue

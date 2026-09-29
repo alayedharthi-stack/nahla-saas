@@ -35,6 +35,8 @@ HISTORY_EVENT = "coexistence_history"
 MANUAL_REPLY_EVENT = "manual_reply"
 
 TEXT_KIND = "text"
+UNSUPPORTED_KIND = "unsupported"
+OUTBOUND_DIRECTIONS = frozenset({"out", "outbound"})
 
 # What the dashboard shows for a Business app echo of a type it cannot render.
 SMB_ECHO_UNSUPPORTED_DISPLAY = "📎 رسالة من تطبيق الجوال — صيغة غير مدعومة"
@@ -44,6 +46,16 @@ def smb_echo_media_placeholder(msg_type: str) -> str:
     """The body stored for a Business app media echo that has no caption and
     whose media could not be stored."""
     return f"📎 رسالة {msg_type} من تطبيق الجوال"
+
+
+def legacy_smb_echo_placeholder(msg_type: str) -> str:
+    """The body the echo writer stored for every non-text echo before May 2026."""
+    return f"[merchant_{msg_type}]"
+
+
+def _smb_echo_placeholders(kind: str) -> frozenset:
+    return frozenset({SMB_ECHO_UNSUPPORTED_DISPLAY, smb_echo_media_placeholder(kind),
+                      legacy_smb_echo_placeholder(kind)})
 
 
 def history_media_placeholder(msg_type: str) -> str:
@@ -74,12 +86,16 @@ class StaffRow:
     imported: bool = False     # from the history imported when the number was connected
 
 
-def staff_row(event_type: Any, metadata: Any, body: Any) -> Optional[StaffRow]:
-    """The staff record of one outbound row, or ``None`` when no writer marked it.
+def staff_row(event_type: Any, metadata: Any, body: Any, *, direction: Any) -> Optional[StaffRow]:
+    """The staff record of one row, or ``None`` when no writer marked it as the staff's.
 
+    Only an outbound row can be the staff's: an imported history row from the
+    customer carries the same importer marker and stays the customer's.
     ``body`` is the row's text as the caller established it (for a sent reply,
     what the wire audit recorded).
     """
+    if str(direction or "").strip().lower() not in OUTBOUND_DIRECTIONS:
+        return None
     meta = metadata if isinstance(metadata, dict) else {}
     event = str(event_type or "").strip().lower()
     source = str(meta.get("source") or "").strip().lower()
@@ -91,8 +107,10 @@ def staff_row(event_type: Any, metadata: Any, body: Any) -> Optional[StaffRow]:
             normalized = meta.get("normalized_inbound")
             if isinstance(normalized, dict):
                 words = str(normalized.get("caption") or "").strip()
-            elif words in {smb_echo_media_placeholder(kind), SMB_ECHO_UNSUPPORTED_DISPLAY}:
-                words = ""
+        if words in _smb_echo_placeholders(kind):
+            words = ""
+            if kind == TEXT_KIND:            # an echo stored without its type
+                kind = UNSUPPORTED_KIND
         return StaffRow(CHANNEL_BUSINESS_APP, kind, words)
 
     if event == HISTORY_EVENT or source == HISTORY_EVENT:

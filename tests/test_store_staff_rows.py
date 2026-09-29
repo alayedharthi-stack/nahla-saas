@@ -20,8 +20,8 @@ from core import store_staff_rows as ssr
 CUSTOMER = "966500000001"
 
 
-def _row(event_type: str, metadata: Dict[str, Any], body: str) -> Any:
-    return ssr.staff_row(event_type, metadata, body)
+def _row(event_type: str, metadata: Dict[str, Any], body: str, direction: str = "outbound") -> Any:
+    return ssr.staff_row(event_type, metadata, body, direction=direction)
 
 
 # ── Classification from recorded markers ─────────────────────────────────────
@@ -87,7 +87,8 @@ def echo_ingest(monkeypatch):
             db, SimpleNamespace(id=1, tenant_id=5),
             {"metadata": {"phone_number_id": "PID"}, "message_echoes": [{"to": CUSTOMER, **echo}]}))
         (event,) = [m for m in db.added if hasattr(m, "event_type")]
-        return ssr.staff_row(event.event_type, event.extra_metadata, event.body)
+        return ssr.staff_row(event.event_type, event.extra_metadata, event.body,
+                             direction=event.direction)
 
     return SimpleNamespace(run=run, download=download, save=save)
 
@@ -151,8 +152,9 @@ def test_imported_history_from_the_store_is_the_staff_s_and_from_the_customer_is
         {"id": "h3", "from": "966511111111", "type": "image", "image": {"id": "I"}},
         {"id": "h4", "from": "966511111111", "type": "image", "image": {"id": "I", "caption": "عطر ورد 100ml"}},
     ])
-    rows = [(e.direction, ssr.staff_row(e.event_type, e.extra_metadata, e.body)) for e in added]
-    assert rows[0][0] == "inbound"
+    rows = [(e.direction, ssr.staff_row(e.event_type, e.extra_metadata, e.body, direction=e.direction))
+            for e in added]
+    assert rows[0] == ("inbound", None)
     assert rows[1:] == [
         ("outbound", ssr.StaffRow("whatsapp_business_app", "text", "إيه متوفر", imported=True)),
         ("outbound", ssr.StaffRow("whatsapp_business_app", "image", "", imported=True)),
@@ -162,7 +164,29 @@ def test_imported_history_from_the_store_is_the_staff_s_and_from_the_customer_is
 
 def test_history_imported_before_the_type_was_recorded_is_read_from_its_placeholder():
     legacy = {"source": "coexistence_history", "message_id": "old"}
-    assert ssr.staff_row("coexistence_history", legacy, "[document]") == ssr.StaffRow(
+    assert _row("coexistence_history", legacy, "[document]") == ssr.StaffRow(
         "whatsapp_business_app", "document", "", imported=True)
-    assert ssr.staff_row("coexistence_history", legacy, "تمام") == ssr.StaffRow(
+    assert _row("coexistence_history", legacy, "تمام") == ssr.StaffRow(
         "whatsapp_business_app", "text", "تمام", imported=True)
+
+
+@pytest.mark.parametrize("event_type, metadata", [
+    ("coexistence_history", {"source": "coexistence_history", "message_type": "text"}),
+    ("smb_message_echo", {"source": "merchant_mobile_app", "echo_type": "text"}),
+    ("manual_reply", {"is_ai": False}),
+])
+def test_an_inbound_row_is_never_the_staff_s_whatever_it_is_marked(event_type, metadata):
+    assert _row(event_type, metadata, "عندكم عطر ورد؟", direction="inbound") is None
+
+
+def test_echo_rows_stored_by_the_older_writer_carry_no_placeholder_words():
+    """Before May 2026 the echo writer stored ``[merchant_<type>]`` for every non-text echo."""
+    meta = {"source": "merchant_mobile_app", "echo_type": "image"}
+    assert _row("smb_message_echo", meta, "[merchant_image]") == ssr.StaffRow(
+        "whatsapp_business_app", "image", "")
+
+
+def test_an_echo_stored_without_its_type_is_not_read_as_placeholder_words():
+    meta = {"source": "merchant_mobile_app", "echo_type": ""}
+    assert _row("smb_message_echo", meta, ssr.SMB_ECHO_UNSUPPORTED_DISPLAY) == ssr.StaffRow(
+        "whatsapp_business_app", "unsupported", "")
