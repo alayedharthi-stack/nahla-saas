@@ -1190,3 +1190,109 @@ def test_a_cross_tenant_section_or_product_link_fails_closed(seeded: Seed) -> No
     links = linked_products(context, [seeded.origin_section.id])
     assert links[seeded.origin_section.id] == [seeded.jacket.id]
     assert foreign_product.id not in links[seeded.origin_section.id]
+
+
+# ── A store-wide miss names what the store does document ─────────────────────
+#
+# Off-send evaluation, 2026-09-28: a perfume store titled its section
+# «الاستبدال والاسترجاع»; the model searched «سياسة الإرجاع والاستبدال» and
+# «إرجاع منتجات», found nothing in 7 of 8 turns, and then generalised ("most
+# stores accept returns of opened products") against the store's own policy.
+# The words differed; the store's section existed. A miss now carries the
+# titles of the store's own AI-visible knowledge, so the search can be repeated
+# in the merchant's words. Titles are not evidence.
+
+
+def _miss(seeded: Seed, query: str) -> Any:
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    context = _context(seeded, user_input=query)
+    return asyncio.run(search_merchant_knowledge_impl(context, query, 4)), context
+
+
+def test_a_miss_lists_only_this_store_s_visible_store_wide_titles(seeded: Seed) -> None:
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert result.status != "ok" and result.sections == [] and result.evidence == []
+    # The product-linked «مصدر الجاكيت» and the other tenant's section are left out.
+    assert result.store_knowledge_titles == ["سياسة الاسترجاع"]
+    assert result.store_knowledge_titles_total == 1
+
+
+@pytest.mark.parametrize("excluded", ["tenant", "inactive", "deleted", "draft", "product_link",
+                                      "behaviour_kind"])
+def test_titles_never_include_what_a_store_wide_lookup_could_not_return(seeded: Seed,
+                                                                        excluded: str) -> None:
+    from datetime import datetime, timezone
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.other_tenant.id if excluded == "tenant" else seeded.tenant.id,
+        kind="reply_style" if excluded == "behaviour_kind" else "shipping_policy",
+        title="قسم لا يجوز أن يظهر", body="نص القسم",
+        is_active=excluded != "inactive", ai_status="draft" if excluded == "draft" else "approved",
+        deleted_at=datetime.now(timezone.utc) if excluded == "deleted" else None,
+    )
+    seeded.db.add(row)
+    seeded.db.flush()
+    if excluded == "product_link":
+        seeded.db.add(MerchantKnowledgeSectionProduct(section_id=row.id, product_id=seeded.jacket.id))
+    seeded.db.commit()
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert "قسم لا يجوز أن يظهر" not in (result.store_knowledge_titles or [])
+
+
+def test_a_store_with_no_knowledge_says_so_by_an_empty_listing(seeded: Seed) -> None:
+    seeded.db.query(MerchantKnowledgeSection).filter(
+        MerchantKnowledgeSection.tenant_id == seeded.tenant.id).delete()
+    seeded.db.commit()
+    result, _ = _miss(seeded, "توصلون للرياض؟")
+    assert result.status != "ok"
+    assert result.store_knowledge_titles == [] and result.store_knowledge_titles_total == 0
+
+
+def test_a_hit_carries_no_titles(seeded: Seed) -> None:
+    result, _ = _miss(seeded, "سياسة الاسترجاع")
+    assert result.status == "ok"
+    assert result.store_knowledge_titles is None and result.store_knowledge_titles_total is None
+
+
+def test_an_unreadable_listing_is_left_out_not_shown_as_empty(seeded: Seed, monkeypatch) -> None:
+    import modules.ai.commerce_agent_v2.tools.knowledge as knowledge_tools
+
+    monkeypatch.setattr(knowledge_tools, "list_store_wide_kb_titles", lambda *a, **k: None)
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert result.status != "ok"
+    assert result.store_knowledge_titles is None and result.store_knowledge_titles_total is None
+
+
+def test_the_listing_is_bounded_in_count_and_length(seeded: Seed) -> None:
+    from modules.ai.brain.commerce import product_knowledge_or_comparison as pkc
+
+    for index in range(pkc.STORE_KB_TITLE_LIMIT + 5):
+        seeded.db.add(MerchantKnowledgeSection(
+            tenant_id=seeded.tenant.id, kind="faq", title=f"سؤال شائع رقم {index} " + "ط" * 120,
+            body="جواب", is_active=True, ai_status="approved"))
+    seeded.db.commit()
+    result, _ = _miss(seeded, "أقدر أرجع المنتج؟")
+    assert len(result.store_knowledge_titles) == pkc.STORE_KB_TITLE_LIMIT
+    assert result.store_knowledge_titles_total == pkc.STORE_KB_TITLE_LIMIT + 5 + 1
+    assert all(len(title) <= pkc.STORE_KB_TITLE_CHARS for title in result.store_knowledge_titles)
+
+
+def test_a_search_repeated_with_a_listed_title_finds_the_section_with_evidence(seeded: Seed) -> None:
+    """Generic perfume store: the observed returns case, end to end in the tool."""
+    from modules.ai.commerce_agent_v2.tools.knowledge import search_merchant_knowledge_impl
+
+    row = MerchantKnowledgeSection(
+        tenant_id=seeded.tenant.id, kind="return_policy", title="الاستبدال والاسترجاع",
+        body="يمكن استبدال المنتج أو استرجاعه خلال 7 أيام من الاستلام بشرط أن يكون مغلقًا. "
+             "العطور المفتوحة لا تُسترجع.",
+        is_active=True, ai_status="approved")
+    seeded.db.add(row)
+    seeded.db.commit()
+    first, context = _miss(seeded, "إرجاع منتجات")
+    assert first.status != "ok"
+    assert "الاستبدال والاسترجاع" in first.store_knowledge_titles
+    again = asyncio.run(search_merchant_knowledge_impl(context, "الاستبدال والاسترجاع", 4))
+    assert again.status == "ok"
+    section = next(item for item in again.sections if item.section_id == row.id)
+    assert any(item.ref == section.evidence_ref for item in again.evidence)

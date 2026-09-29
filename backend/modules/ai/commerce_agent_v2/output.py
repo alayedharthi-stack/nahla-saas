@@ -227,6 +227,11 @@ class KnowledgeSearchResult(BaseModel):
     sections: list[KnowledgeSectionSnapshot] = Field(default_factory=list)
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     failure_reason: str | None = None
+    # Set only when a store-wide search found nothing and the store's own
+    # knowledge titles could be read: what the store does document, in its own
+    # words, so a search can be repeated with them. Titles are not evidence.
+    store_knowledge_titles: list[str] | None = None
+    store_knowledge_titles_total: int | None = None
 
 
 class OrderSummarySnapshot(BaseModel):

@@ -224,6 +224,27 @@ def test_merchant_knowledge_keeps_the_section_body_and_its_reference(binding, mo
     assert observation.result["sections"][0]["body"] == "التوصيل خلال ٣ أيام"
 
 
+def test_a_knowledge_miss_hands_the_store_s_titles_over_as_data_not_evidence(binding, monkeypatch):
+    patch_impl(monkeypatch, "knowledge", "search_merchant_knowledge_impl",
+               async_returning(result("no_evidence", failure_reason="no_matching_knowledge",
+                                      store_knowledge_titles=["الاستبدال والاسترجاع", "طرق الدفع"],
+                                      store_knowledge_titles_total=2)))
+    observation = run(binding, "search_merchant_knowledge", {"query": "إرجاع منتجات"})
+    assert observation.evidence_refs == ()
+    assert observation.result == {"status": "no_evidence", "found": False,
+                                  "reason": "no_matching_knowledge",
+                                  "store_knowledge_titles": ["الاستبدال والاسترجاع", "طرق الدفع"],
+                                  "store_knowledge_titles_total": 2}
+
+
+def test_a_knowledge_miss_without_a_listing_is_unchanged(binding, monkeypatch):
+    patch_impl(monkeypatch, "knowledge", "search_merchant_knowledge_impl",
+               async_returning(result("no_evidence", failure_reason="no_matching_knowledge")))
+    observation = run(binding, "search_merchant_knowledge", {"query": "x"})
+    assert observation.result == {"status": "no_evidence", "found": False,
+                                  "reason": "no_matching_knowledge"}
+
+
 # The reading of the customer a projected list was built against, as the tool
 # hands it over: four countable orders reaching bronze and silver.
 STANDING: Dict[str, Any] = {

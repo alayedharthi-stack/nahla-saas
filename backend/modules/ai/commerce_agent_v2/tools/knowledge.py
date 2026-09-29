@@ -16,6 +16,7 @@ from modules.ai.commerce_agent_v2.knowledge_retrieval import (
     retrieved_sections,
     run_knowledge_lookup,
 )
+from modules.ai.brain.commerce.product_knowledge_or_comparison import list_store_wide_kb_titles
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import KnowledgeSearchResult
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
@@ -100,9 +101,20 @@ async def search_merchant_knowledge_impl(
             status="error", failure_reason="knowledge_retrieval_failed"
         )
     rows = retrieved_sections(context, scope=SCOPE_TURN, query=text)
-    return _result_from_rows(
+    result = _result_from_rows(
         context, rows, source="merchant_knowledge", required_product_id=None
     )
+    if result.status == "ok":
+        return result
+    # Nothing matched these words. What the store does document is a fact of
+    # its own; an unreadable listing is left out rather than shown as empty.
+    listing = list_store_wide_kb_titles(context.db, context.tenant_id)
+    if listing is None:
+        return result
+    return result.model_copy(update={
+        "store_knowledge_titles": list(listing["titles"]),
+        "store_knowledge_titles_total": int(listing["total"]),
+    })
 
 
 async def search_product_knowledge_impl(

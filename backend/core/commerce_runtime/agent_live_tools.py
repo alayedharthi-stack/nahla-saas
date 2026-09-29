@@ -604,7 +604,13 @@ def _merchant_knowledge(binding: LiveToolBinding) -> at.ToolFunction:
             binding.context, query=str(arguments.get("query") or ""),
             limit=int(arguments.get("limit") or MAX_KNOWLEDGE_SECTIONS)))
         if getattr(result, "status", "") != "ok":
-            return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None))
+            titles = getattr(result, "store_knowledge_titles", None)
+            extra: Dict[str, Any] = {}
+            if isinstance(titles, list):
+                extra["store_knowledge_titles"] = [_text(t, 80) for t in titles]
+                extra["store_knowledge_titles_total"] = getattr(result, "store_knowledge_titles_total", None)
+            return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None),
+                               **extra)
         sections = _knowledge_view(getattr(result, "sections", None) or ())
         return at.ToolResult(
             result={"status": "ok", "found": bool(sections), "sections": sections},

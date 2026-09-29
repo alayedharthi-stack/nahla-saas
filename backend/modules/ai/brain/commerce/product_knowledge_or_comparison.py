@@ -775,6 +775,81 @@ def catalog_kb_retrieval_failure_payload() -> Dict[str, Any]:
     }
 
 
+def _store_wide_kb_kinds() -> frozenset:
+    """The section kinds a store-wide (not product-anchored) lookup may return."""
+    from services.merchant_document_retrieval import DOCUMENT_KINDS  # noqa: PLC0415
+    return _PRODUCT_KB_KINDS | DOCUMENT_KINDS | _MERCHANT_OPERATIONAL_KB_KINDS
+
+
+STORE_KB_TITLE_LIMIT = 25
+STORE_KB_TITLE_CHARS = 80
+
+
+def list_store_wide_kb_titles(
+    db: Any,
+    tenant_id: int,
+    *,
+    limit: int = STORE_KB_TITLE_LIMIT,
+) -> Optional[Dict[str, Any]]:
+    """The titles of the knowledge a store-wide lookup can return, or ``None``.
+
+    The same rows ``retrieve_catalog_candidate_kb_sections`` reads for a
+    store-wide lookup: this tenant, AI-visible, a store-wide kind, not linked
+    to a product (a store-wide lookup leaves product-linked sections out), in
+    the retriever's own order. Titles only — no body, no evidence — bounded in
+    count and length. ``None`` is operational failure, never "no knowledge".
+    """
+    if db is None:
+        return None
+    try:
+        tenant = int(tenant_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if tenant <= 0:
+        return None
+    try:
+        from core.knowledge import apply_ai_visible_kb_query_filters  # noqa: PLC0415
+        from models import MerchantKnowledgeSection  # noqa: PLC0415
+
+        kinds = _store_wide_kb_kinds()
+        rows = (
+            apply_ai_visible_kb_query_filters(db.query(MerchantKnowledgeSection))
+            .filter(
+                MerchantKnowledgeSection.tenant_id == tenant,
+                MerchantKnowledgeSection.kind.in_(tuple(kinds)),
+            )
+            .order_by(
+                MerchantKnowledgeSection.priority.asc(),
+                MerchantKnowledgeSection.updated_at.desc(),
+            )
+            .limit(120)
+            .all()
+        )
+        titles: List[str] = []
+        total = 0
+        for row in rows:
+            try:
+                row_tenant = int(getattr(row, "tenant_id", 0) or 0)
+            except (TypeError, ValueError):
+                row_tenant = 0
+            if row_tenant != tenant:
+                continue
+            if str(getattr(row, "kind", "") or "").strip().lower() not in kinds:
+                continue
+            if list(getattr(row, "product_links", None) or []):
+                continue
+            title = str(getattr(row, "title", "") or "").strip()[:STORE_KB_TITLE_CHARS]
+            if not title:
+                continue
+            total += 1
+            if len(titles) < int(limit) and title not in titles:
+                titles.append(title)
+        return {"titles": titles, "total": total}
+    except Exception as exc:  # noqa: BLE001  # noqa: silent-ok — reported as unavailable, not as empty
+        logger.debug("[PRODUCT_KNOWLEDGE] KB title listing failed tenant=%s err=%s", tenant, exc)
+        return None
+
+
 def retrieve_catalog_candidate_kb_sections(
     db: Any,
     tenant_id: int,
@@ -794,10 +869,7 @@ def retrieve_catalog_candidate_kb_sections(
     catalog callers retain the product-only default. Visibility, relevance,
     product associations and result/body limits are shared by both modes.
     """
-    kinds_filter = None
-    if include_merchant_facts:
-        from services.merchant_document_retrieval import DOCUMENT_KINDS  # noqa: PLC0415
-        kinds_filter = _PRODUCT_KB_KINDS | DOCUMENT_KINDS | _MERCHANT_OPERATIONAL_KB_KINDS
+    kinds_filter = _store_wide_kb_kinds() if include_merchant_facts else None
     succeeded, sections = _retrieve_product_kb_sections_status(
         db,
         tenant_id,
