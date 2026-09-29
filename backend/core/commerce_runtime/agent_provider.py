@@ -17,8 +17,10 @@ The model answers through one declared tool, ``submit_reply``, rather than free
 text, so a reply arrives with its evidence references and its own statement of
 whether it asserts commerce facts — the two things the loop's verifier needs and
 cannot infer from prose. ``tool_choice`` is therefore ``any``: every step is
-either read-tool requests or the reply. Text alongside a reply is ignored; text
-without any tool call is reported as invalid output, never delivered.
+either read-tool requests or the reply — except a step the loop marks
+``reply_only`` (nothing could follow a lookup), whose ``tool_choice`` names the
+reply tool alone. Text alongside a reply is ignored; text without any tool call
+is reported as invalid output, never delivered.
 
 Transcript
 ----------
@@ -463,7 +465,10 @@ class AnthropicReasoningProvider:
             messages=messages,
             system=self._instructions,
             tools=tools,
-            tool_choice={"type": "any"},
+            # Every declared tool stays declared (earlier steps' tool_use blocks
+            # are replayed); a reply-only step may call the reply tool alone.
+            tool_choice=({"type": "tool", "name": REPLY_TOOL_NAME} if request.reply_only
+                         else {"type": "any"}),
             max_tokens=self._max_output_tokens,
             timeout_seconds=wait,
             audit_context=dict(self._audit_context, stage=f"agent_loop_step_{request.step_no}"),

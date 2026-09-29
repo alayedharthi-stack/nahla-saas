@@ -72,13 +72,15 @@ def observation(call_id: str, tool: str = "catalog_search", *, ok_: bool = True,
 
 
 def request(*, step_no: int = 1, observations: tuple = (), feedback: tuple = (),
-            remaining_seconds: float = 40.0, tools: tuple = (CATALOG_TOOL,)) -> ac.ProviderRequest:
+            remaining_seconds: float = 40.0, tools: tuple = (CATALOG_TOOL,),
+            reply_only: bool = False) -> ac.ProviderRequest:
     return ac.ProviderRequest(
         step_no=step_no,
         context=ac.AuthorizedContext(tenant_id=4, namespace="live", conversation_id=9, turn_id=11,
                                      inbound={"text": "عندكم حذاء رياضي؟"}, state_payload={}),
         tools=tools, observations=observations, feedback=feedback,
         budget=ac.BudgetView(remaining_steps=3, remaining_tool_calls=5, remaining_seconds=remaining_seconds),
+        reply_only=reply_only,
     )
 
 
@@ -121,6 +123,16 @@ def test_one_step_asks_for_one_attempt_with_the_loop_s_own_wait_and_prompt():
     assert call["timeout_seconds"] == 17.5           # the loop's remaining budget, not a library default
     assert call["tool_choice"] == {"type": "any"}    # every step is a tool call or the reply channel
     assert call["max_tokens"] == ap.MAX_OUTPUT_TOKENS
+
+
+def test_a_reply_only_step_names_the_reply_tool_and_keeps_every_tool_declared():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])])
+    provider.step(request(reply_only=True))
+    call = double.calls[0]
+    assert call["tool_choice"] == {"type": "tool", "name": ap.REPLY_TOOL_NAME}
+    # Earlier steps' tool_use blocks are replayed, so their tools stay declared.
+    assert {t["name"] for t in call["tools"]} == {"catalog_search", ap.REPLY_TOOL_NAME}
+    assert call["system"] == INSTRUCTIONS
 
 
 def test_a_nearly_spent_budget_still_asks_with_a_usable_floor():

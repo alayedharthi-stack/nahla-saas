@@ -661,6 +661,50 @@ def test_repeated_tool_requests_terminate_explicitly(agent: Harness) -> None:
     assert outcome.tool_calls_used == 1 and agent.sequences(turn) == 0
 
 
+# ── The last step answers (a lookup there could never be followed) ──────────
+
+
+def test_the_last_step_is_asked_for_the_reply_alone_and_the_answer_is_delivered(agent: Harness) -> None:
+    """Eval store A and production T33 turn 53: the model spent the last step
+    on another lookup, the lookup ran, and no step was left to answer with."""
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="حذاء رياضي أبيض")),
+        sp.reply("ما لقيت هذا المنتج، تبي أبحث لك عن شي ثاني؟", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider, loop=agent.loop(budget=ac.LoopBudget(max_steps=2, max_tool_calls=4)))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert [r.reply_only for r in provider.requests] == [False, True]
+    marked = [e.detail for e in outcome.events if e.kind == "reply_only_step"]
+    assert marked == [{"step_no": 2, "reason": "last_step"}]
+    assert agent.sequences(turn) == 1
+
+
+def test_a_step_with_no_tool_call_left_is_asked_for_the_reply_alone(agent: Harness) -> None:
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="قميص قطني أزرق")),
+        sp.reply("متوفر بمقاس M", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider, loop=agent.loop(budget=ac.LoopBudget(max_steps=4, max_tool_calls=1)))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert [r.reply_only for r in provider.requests] == [False, True]
+    assert [e.detail["reason"] for e in outcome.events if e.kind == "reply_only_step"] == ["no_tool_calls"]
+
+
+def test_every_step_that_can_be_followed_may_still_look_up(agent: Harness) -> None:
+    turn, lease = agent.start()
+    provider = sp.ScriptedReasoningProvider([
+        sp.tools(sp.tool_call("c1", "catalog_search", query="عطر ورد")),
+        sp.tools(sp.tool_call("c2", "catalog_search", query="عطر عود")),
+        sp.reply("عندنا الاثنين", commerce=False),
+    ])
+    outcome = agent.run(turn, lease, provider, loop=agent.loop(budget=ac.LoopBudget(max_steps=4, max_tool_calls=4)))
+    assert outcome.status == ac.LoopStatus.PENDING_DELIVERY.value
+    assert [r.reply_only for r in provider.requests] == [False, False, False]
+    assert not [e for e in outcome.events if e.kind == "reply_only_step"]
+
+
 def test_budget_exhaustion_and_cancellation_stop_without_false_success(agent: Harness) -> None:
     turn, lease = agent.start()
     provider = sp.ScriptedReasoningProvider([

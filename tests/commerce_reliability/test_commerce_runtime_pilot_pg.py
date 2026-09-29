@@ -495,6 +495,33 @@ def test_a_follow_up_sees_the_conversation_the_platform_already_recorded(pilot):
     assert messages[-1]["content"][-1]["text"] == "وكم سعره؟"
 
 
+def test_the_last_step_asks_the_model_for_the_reply_alone_end_to_end(pilot):
+    """The real adapter: the final step's request names the reply tool, so the
+    model cannot spend it on a lookup that nothing could follow."""
+    transport = Transport([accepted("wamid.LAST")])
+    scripted = ScriptedAnthropic([
+        step([tool_use("t1", "search_products", query="حذاء رياضي أبيض")]),
+        step([reply("متوفر", refs=(f"catalog:product:{pilot.product_id}",), commerce=True, call_id="r1")]),
+    ])
+    report = entry.run_commerce_runtime_turn(
+        engine=pilot.engine, session_factory=pilot.session_factory, tenant_id=pilot.tenant_a,
+        conversation_id=pilot.conversation_id,
+        connection_ref=f"wa:{pilot.connection_id}", connection_id=str(pilot.connection_id),
+        customer_id=pilot.customer_id, normalized_customer_phone=PHONE,
+        provider_message_id="wamid." + uuid.uuid4().hex, inbound_text=QUESTION,
+        inbound_metadata={}, transport=transport, instructions="EXISTING-INSTRUCTIONS",
+        model=MODEL, budget=ac.LoopBudget(max_steps=2, max_tool_calls=4, tool_timeout_seconds=10.0,
+                                          provider_timeout_seconds=15.0, deadline_seconds=45.0),
+        anthropic_provider=scripted,
+    )
+    assert report.dispatch_status == dd.SENT_ACCEPTED
+    assert [c["tool_choice"] for c in scripted.calls] == [
+        {"type": "any"}, {"type": "tool", "name": "submit_reply"}]
+    assert report.reply_only_step == "2:last_step"
+    assert report.as_log_fields()["reply_only_step"] == "2:last_step"
+    assert all(c["system"] == "EXISTING-INSTRUCTIONS" for c in scripted.calls)
+
+
 def test_a_draft_citing_evidence_that_was_never_observed_is_refused_before_any_send(pilot):
     transport = Transport([])
     report = pilot.run(

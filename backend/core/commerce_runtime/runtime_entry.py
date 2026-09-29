@@ -163,6 +163,10 @@ class TurnReport:
     # With ``skipped_reply_cites_fewer``: "<cited>/<offered>", so a reply about
     # one product ("1/5") is told apart from one citing none of them ("0/5").
     list_offer_cited: Optional[str] = None
+    # "<step>:<reason>" when a step was asked for the reply alone because no
+    # lookup could have been followed by another step (``last_step``) or no
+    # tool call remained (``no_tool_calls``). None when every step could look up.
+    reply_only_step: Optional[str] = None
     navigation_tap: Optional[str] = None
     navigation_page: Optional[int] = None
     navigation_has_next: Optional[bool] = None
@@ -830,6 +834,7 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
     offer = next((event for event in outcome.events if event.kind == "list_offer_answer"), None)
     offer_skipped = next((event for event in outcome.events if event.kind == "list_offer_skipped"),
                          None)
+    reply_only = next((event for event in outcome.events if event.kind == "reply_only_step"), None)
     evidence = tuple(str(ref) for ref in (outcome.detail.get("evidence_refs") or ()))
     usage_model = next((u.model for u in reversed(reasoner.usage) if u.model), None)
     stop_detail = _stop_detail(outcome)
@@ -853,6 +858,8 @@ def _after_loop(*, ledgers: LedgerRepository, outcome: ac.LoopOutcome, tenant_id
         list_offer_cited=(f"{offer_skipped.detail.get('cited')}/{offer_skipped.detail.get('offered')}"
                           if offer is None and offer_skipped is not None
                           and "cited" in offer_skipped.detail else None),
+        reply_only_step=(f"{reply_only.detail.get('step_no')}:{reply_only.detail.get('reason')}"
+                         if reply_only is not None else None),
         evidence_refs=evidence,
         input_tokens=reasoner.total_input_tokens,
         output_tokens=reasoner.total_output_tokens,
