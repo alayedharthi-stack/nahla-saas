@@ -4,3 +4,4 @@ dockerfilePath = "Dockerfile"
 
 [deploy]
 startCommand = "python -u ops/readonly_trace/run.py"
+restartPolicyType = "NEVER"
