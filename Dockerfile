@@ -1,40 +1,15 @@
-# ── Nahla SaaS — Python services image ────────────────────────────────────────
-# Shared by: backend, whatsapp-service, ai-engine, catalog-service,
-#            order-service, coupon-service, campaign-service, widget-service,
-#            conversation-service, automation-service, analytics-service,
-#            billing-service, location-service, marketplace-service,
-#            integrations/salla, integrations/zid
-#
-# Each service overrides CMD in docker-compose.yml.
-# ──────────────────────────────────────────────────────────────────────────────
-
-FROM python:3.11-slim
-
-# System deps:
-#   gcc + libpq-dev — needed by psycopg2-binary
-#   ffmpeg          — required for inbound WhatsApp media processing:
-#                     voice notes (OGG/opus), videos (MP4 audio
-#                     extraction), and any future codec the customer
-#                     sends. Without it, Whisper STT fails on every
-#                     audio format that isn't raw WAV/MP3. Keep
-#                     parity with nixpacks.toml (the Railway build).
+# Off-send evaluation image (ops branch only — never merged).
+# PostgreSQL 16 in the container for a disposable database; the application
+# code of this commit; the real model through ANTHROPIC_API_KEY. No WhatsApp,
+# no production database. Idle unless EVAL_CONFIRM=RUN_OFFSEND_EVAL.
+FROM postgres:16-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc \
-        libpq-dev \
-        ffmpeg \
+        python3 python3-venv python3-dev gcc libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-
+RUN python3 -m venv /opt/venv
 WORKDIR /app
-
-# Install Python dependencies first (better layer caching)
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy entire repo into the image
-# (all services reference each other via sys.path / relative imports)
+RUN /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 COPY . .
-
-# Default: backend on port 8000 (Railway injects $PORT automatically)
-EXPOSE 8000
-RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
-CMD ["/app/start.sh"]
+ENTRYPOINT []
+CMD ["bash", "ops/commerce_runtime_eval/run.sh"]
