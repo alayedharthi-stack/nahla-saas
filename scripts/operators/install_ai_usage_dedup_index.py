@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--project", required=True)
     parser.add_argument("--environment", required=True)
     parser.add_argument("--service", required=True)
+    parser.add_argument("--tenant", type=int, action="append", required=True)
     args = parser.parse_args()
     expected = {"RAILWAY_PROJECT_ID": args.project, "RAILWAY_ENVIRONMENT_ID": args.environment,
                 "RAILWAY_SERVICE_ID": args.service}
@@ -39,7 +40,7 @@ def main():
         connection = psycopg2.connect(dsn, connect_timeout=10,
             options="-c statement_timeout=10000 -c default_transaction_read_only=on",
             application_name="nahla-ai-cost-predeploy-readonly")
-        before = audit(connection, [1, 33], as_of=datetime.now(timezone.utc), days=7, recent=5)
+        before = audit(connection, args.tenant, as_of=datetime.now(timezone.utc), days=7, recent=5)
         print("AI_COST_AUDIT_BEFORE " + json.dumps(before, default=encode), flush=True)
         if before["duplicate_request_groups"]:
             print(json.dumps({"status": "blocked", "reason": "historical_duplicates_require_review"}))

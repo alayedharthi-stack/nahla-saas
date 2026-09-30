@@ -37,7 +37,7 @@ def test_wrong_existing_index_definition_blocks():
 def test_scope_mismatch_never_connects(monkeypatch, capsys):
     connect = Mock(side_effect=AssertionError('must not connect'))
     monkeypatch.setattr(operator.psycopg2, 'connect', connect)
-    monkeypatch.setattr(sys, 'argv', ['operator', '--apply', '--project', 'test-project', '--environment', 'test-env', '--service', 'test-service'])
+    monkeypatch.setattr(sys, 'argv', ['operator', '--apply', '--project', 'test-project', '--environment', 'test-env', '--service', 'test-service', '--tenant', '1', '--tenant', '33'])
     for key in ('RAILWAY_PROJECT_ID', 'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_SERVICE_ID'):
         monkeypatch.delenv(key, raising=False)
     assert operator.main() == 2
@@ -46,7 +46,7 @@ def test_scope_mismatch_never_connects(monkeypatch, capsys):
 
 
 def configure(monkeypatch):
-    monkeypatch.setattr(sys, 'argv', ['operator', '--apply', '--project', 'test-project', '--environment', 'test-env', '--service', 'test-service'])
+    monkeypatch.setattr(sys, 'argv', ['operator', '--apply', '--project', 'test-project', '--environment', 'test-env', '--service', 'test-service', '--tenant', '1', '--tenant', '33'])
     for key, value in [('RAILWAY_PROJECT_ID', 'test-project'), ('RAILWAY_ENVIRONMENT_ID', 'test-env'), ('RAILWAY_SERVICE_ID', 'test-service'), ('DATABASE_URL', 'postgresql://example:private-test-value@localhost/test')]:
         monkeypatch.setenv(key, value)
 
