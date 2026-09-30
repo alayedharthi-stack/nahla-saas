@@ -657,13 +657,15 @@ def _order_history(binding: LiveToolBinding) -> at.ToolFunction:
         result = _run(list_customer_orders_impl(binding.context))
         if getattr(result, "status", "") != "ok":
             # Unreadable says only that: never a customer without orders.
-            return at.ToolResult(result={"status": "unavailable", "read_complete": False},
+            return at.ToolResult(result={"status": "unavailable", "read_complete": False,
+                                         "reason": getattr(result, "failure_reason", None)},
                                  evidence_refs=())
         return at.ToolResult(
             result={"status": "ok",
                     "read_complete": bool(getattr(result, "read_complete", False)),
                     "incomplete_reasons": list(getattr(result, "incomplete_reasons", None) or ()),
                     "total_orders": getattr(result, "total_orders", None),
+                    "total_orders_at_least": getattr(result, "total_orders_at_least", None),
                     "ongoing": _history_group_view(getattr(result, "ongoing", None)),
                     "finished": _history_group_view(getattr(result, "finished", None)),
                     "unknown": _history_group_view(getattr(result, "unknown", None))},
@@ -1004,8 +1006,10 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         "are and a short list, grouped as ongoing, finished, or of a status the platform "
         "cannot read. Each group lists at most a few orders; listed says how many it shows. "
         "Counts and total_orders are given only when read_complete is true; otherwise the "
-        "total is not known. An unavailable result means the history could not be read, not "
-        "that there are no orders. Listing an order does not open its details or shipment.",
+        "total is not known, total_orders_at_least is how many orders the customer has at "
+        "least, and the listed orders are not all of them. An unavailable result means the "
+        "history could not be read, not that there are no orders. Abandoned carts are not "
+        "orders and are not included. Listing an order does not open its details or shipment.",
         {"type": "object", "properties": {}, "required": []},
         "order_history",
         _order_history,
