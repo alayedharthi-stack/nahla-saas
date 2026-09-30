@@ -5,13 +5,15 @@ handed the model nothing else, although the resolver had read twenty of that
 customer's orders; the reply said the customer had one order. These tests drive
 the real resolver and the real ``resolve_customer_order_impl`` against a
 database and assert what the lookup now carries: the resolved order unchanged,
-the customer's other orders split into current and previous, bounded, counted,
-and marked complete only when the read held every order. What is proved is the
-data, never a sentence. Generic store data only.
+the customer's orders grouped by what their status says (in progress, finished,
+or a status the platform does not know), bounded, and counted only when the
+read held every order. What is proved is the data, never a sentence. Generic
+store data only.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from typing import Any
 
 import pytest
@@ -25,6 +27,7 @@ from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tools import orders as orders_module
 from modules.ai.commerce_agent_v2.tools.orders import (
     MAX_LISTED_CURRENT_ORDERS,
+    MAX_LISTED_OTHER_ORDERS,
     MAX_LISTED_PREVIOUS_ORDERS,
     get_order_details_impl,
     resolve_customer_order_impl,
@@ -70,16 +73,18 @@ class Store:
         self._n = 0
 
     def order(self, status: str, *, linked: bool = True, phone: str = PHONE, customer_id: Any = "self",
-              tenant_id: Any = None) -> Order:
+              tenant_id: Any = None, source: str = "salla", external_id: str = "",
+              metadata: Any = None) -> Order:
         """An order of this customer's, by customer id (``linked``) or by phone only."""
         self._n += 1
         if customer_id == "self":
             customer_id = self.customer.id if linked else None
         row = Order(tenant_id=tenant_id or self.tenant.id, customer_id=customer_id,
-                    external_id=f"platform-order-{self._n}", external_order_number=f"GEN-{1000 + self._n}",
-                    status=status, total="99", source="salla", customer_name="أحمد سالم",
-                    customer_info={"phone": phone},
-                    line_items=[{"name": "قميص قطني أزرق", "quantity": 1}])
+                    external_id=external_id or f"platform-order-{self._n}",
+                    external_order_number=f"GEN-{1000 + self._n}",
+                    status=status, total="99", source=source, customer_name="أحمد سالم",
+                    customer_info={"phone": phone} if phone else {},
+                    line_items=[{"name": "قميص قطني أزرق", "quantity": 1}], extra_metadata=metadata)
         self.db.add(row)
         self.db.flush()
         return row
@@ -180,9 +185,9 @@ def test_the_lists_are_bounded_but_the_counts_are_not():
     assert (listing.current_count, listing.previous_count, listing.counts_complete) == (7, 8, True)
 
 
-def test_a_read_that_reached_its_limit_never_claims_complete_counts():
-    """The customer may have older orders than one read holds; the counts are
-    then only what was read and say so."""
+def test_a_read_that_reached_its_limit_gives_no_counts():
+    """The customer may have older orders than one read holds; the listed orders
+    stand, and no count is given that could be taken for the total."""
     store = Store()
     for _ in range(CUSTOMER_ORDER_READ_LIMIT + 3):
         store.order("cancelled")
@@ -190,7 +195,38 @@ def test_a_read_that_reached_its_limit_never_claims_complete_counts():
     listing = resolve(store.context()).customer_orders
     assert listing.status == "ok"
     assert listing.counts_complete is False
-    assert listing.current_count + listing.previous_count <= CUSTOMER_ORDER_READ_LIMIT
+    assert (listing.current_count, listing.previous_count, listing.other_count) == (None, None, None)
+    assert len(listing.current) == 1 and len(listing.previous) == MAX_LISTED_PREVIOUS_ORDERS
+
+
+@pytest.mark.parametrize("orders,complete", [(CUSTOMER_ORDER_READ_LIMIT - 1, True),
+                                             (CUSTOMER_ORDER_READ_LIMIT, False)])
+def test_completeness_at_the_read_limit_is_conservative(orders: int, complete: bool):
+    """A read that came back full cannot tell whether an older order exists."""
+    store = Store()
+    for _ in range(orders):
+        store.order("delivered")
+    listing = resolve(store.context()).customer_orders
+    assert listing.counts_complete is complete
+    assert listing.previous_count == (orders if complete else None)
+
+
+def test_an_order_gone_between_the_two_reads_withholds_the_counts(monkeypatch):
+    store = Store()
+    older = store.order("delivered")
+    store.order("processing")
+    real = orders_module.resolve_customer_order_context
+
+    def then_deleted(*args: Any, **kwargs: Any) -> Any:
+        resolved = real(*args, **kwargs)
+        store.db.delete(older)
+        store.db.flush()
+        return resolved
+
+    monkeypatch.setattr(orders_module, "resolve_customer_order_context", then_deleted)
+    listing = resolve(store.context()).customer_orders
+    assert listing.status == "ok" and listing.counts_complete is False
+    assert listing.previous == [] and listing.current_count is None
 
 
 # ── A failed read ────────────────────────────────────────────────────────────
@@ -204,7 +240,7 @@ def test_a_list_that_cannot_be_read_is_reported_unavailable_and_the_order_still_
     def boom(status: str) -> bool:
         raise RuntimeError("list read failed")
 
-    monkeypatch.setattr(orders_module, "_is_open_status", boom)
+    monkeypatch.setattr(orders_module, "_order_list_group", boom)
     result = resolve(store.context())
     assert result.status == "ok"
     assert result.order.order_reference == open_order.external_order_number
@@ -212,6 +248,23 @@ def test_a_list_that_cannot_be_read_is_reported_unavailable_and_the_order_still_
     assert result.customer_orders.current == [] and result.customer_orders.previous == []
     assert result.customer_orders.current_count is None
     assert result.customer_orders.counts_complete is False
+
+
+def test_a_listed_order_whose_evidence_changed_costs_the_list_not_the_order():
+    """Evidence is registered once per run; a listed order that changed since it
+    was listed collides with its earlier record. The list is then reported
+    unavailable and the resolved order still stands."""
+    store = Store()
+    older = store.order("processing")
+    newest = store.order("processing")
+    context = store.context()
+    assert older.external_order_number in refs(resolve(context).customer_orders.current)
+    older.status = "delivered"
+    store.db.commit()
+    again = resolve(context)
+    assert again.status == "ok"
+    assert again.order.order_reference == newest.external_order_number
+    assert again.customer_orders.status == "unavailable"
 
 
 def test_an_order_read_that_fails_outright_is_still_an_error_not_an_empty_list(monkeypatch):
@@ -248,6 +301,86 @@ def test_orders_of_another_customer_or_another_store_are_neither_listed_nor_coun
     assert refs(listing.current) == [mine.external_order_number]
 
 
+def _with_extra_candidate(monkeypatch: Any, order: Order) -> None:
+    """The resolver's read, with one more order handed to the list than it matched."""
+    real = orders_module.resolve_customer_order_context
+
+    def widened(*args: Any, **kwargs: Any) -> Any:
+        resolved = real(*args, **kwargs)
+        extra = dataclasses.replace(resolved.orders_by_priority[0], order_id=order.id)
+        return dataclasses.replace(resolved, orders_by_priority=[*resolved.orders_by_priority, extra])
+
+    monkeypatch.setattr(orders_module, "resolve_customer_order_context", widened)
+
+
+def test_the_list_filters_by_store_itself_whatever_the_read_handed_it(monkeypatch):
+    store = Store()
+    foreign = store.order("processing", linked=False, tenant_id=store.other_tenant.id)
+    mine = store.order("processing")
+    _with_extra_candidate(monkeypatch, foreign)
+    listing = resolve(store.context()).customer_orders
+    assert refs(listing.current) == [mine.external_order_number]
+    assert listing.counts_complete is False and listing.current_count is None
+
+
+def test_an_order_whose_owner_cannot_be_proven_is_left_out_and_withholds_the_counts(monkeypatch):
+    """Not linked to another customer, not carrying this customer's phone: it may
+    be the customer's, so it is not listed and no count is given as a total."""
+    store = Store()
+    unproven = store.order("processing", linked=False, phone=OTHER_PHONE)
+    mine = store.order("processing")
+    _with_extra_candidate(monkeypatch, unproven)
+    listing = resolve(store.context()).customer_orders
+    assert refs(listing.current) == [mine.external_order_number]
+    assert listing.counts_complete is False and listing.current_count is None
+
+
+def test_an_order_linked_to_another_customer_does_not_withhold_the_counts(monkeypatch):
+    store = Store()
+    theirs = store.order("processing", customer_id=store.neighbour.id, phone=OTHER_PHONE)
+    mine = store.order("processing")
+    _with_extra_candidate(monkeypatch, theirs)
+    listing = resolve(store.context()).customer_orders
+    assert refs(listing.current) == [mine.external_order_number]
+    assert (listing.current_count, listing.counts_complete) == (1, True)
+
+
+def test_this_conversations_draft_is_listed_as_current():
+    from services.nahla_order_bridge import nahla_wa_external_id
+
+    store = Store()
+    delivered = store.order("delivered")
+    context = store.context()
+    draft = store.order("draft", linked=False, phone="", source="whatsapp",
+                        external_id=nahla_wa_external_id(store.tenant.id, store.conversation.id),
+                        metadata={"lifecycle": "whatsapp_draft"})
+    store.db.commit()
+    result = resolve(context)
+    assert result.order.order_reference == draft.external_order_number
+    listing = result.customer_orders
+    assert refs(listing.current) == [draft.external_order_number]
+    assert refs(listing.previous) == [delivered.external_order_number]
+    assert (listing.current_count, listing.previous_count, listing.counts_complete) == (1, 1, True)
+
+
+# ── What a status says ───────────────────────────────────────────────────────
+
+
+def test_finished_orders_are_previous_and_unknown_statuses_are_not_claimed_either_way():
+    """Refunded, returned and failed orders are finished, not current. A status
+    the platform does not know is listed apart: neither in progress nor done."""
+    store = Store()
+    finished = [store.order(s) for s in ("refunded", "returned", "failed", "delivered", "cancelled")]
+    unknown = [store.order(s) for s in ("merchant_custom_stage", "")]
+    in_progress = [store.order(s) for s in ("pending_payment", "under_review", "shipped", "processing")]
+    listing = resolve(store.context()).customer_orders
+    assert (listing.current_count, listing.previous_count, listing.other_count) == (4, 5, 2)
+    assert set(refs(listing.current)) == {o.external_order_number for o in in_progress}
+    assert set(refs(listing.previous)) == {o.external_order_number for o in finished}
+    assert set(refs(listing.other)) == {o.external_order_number for o in unknown}
+    assert len(listing.other) <= MAX_LISTED_OTHER_ORDERS
+
+
 def test_listing_an_order_does_not_authorize_reading_it():
     """The details and shipment reads stay limited to the order resolved in this
     run; a listed order is read by resolving it by its reference."""
@@ -271,5 +404,5 @@ def test_listed_entries_carry_no_internal_order_id():
     store.order("delivered")
     store.order("processing")
     listing = resolve(store.context()).customer_orders
-    for entry in [*listing.current, *listing.previous]:
+    for entry in [*listing.current, *listing.previous, *listing.other]:
         assert set(entry.model_dump()) == {"order_reference", "status", "status_label", "evidence_ref"}

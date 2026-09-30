@@ -510,9 +510,10 @@ def test_with_several_orders_the_observation_says_which_one_and_why(binding, mon
 def test_the_customers_other_orders_reach_the_model_split_counted_and_without_ids(binding, monkeypatch):
     """Tenant 1 turn 112: the lookup handed the model one order and the reply
     said the customer had one order. The observation now carries the customer's
-    orders beside the resolved one: current and previous, their counts, whether
-    the read held every order, and each entry's evidence — but no order id, so
-    listing an order never opens the details or shipment reads for it."""
+    orders, the resolved one included: current, previous and those of a status
+    the platform does not know, their counts, whether the read held every order,
+    and each entry's evidence — but no order id, so listing an order never opens
+    the details or shipment reads for it."""
     resolved = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
                         status="processing", status_label="قيد التجهيز")
     listed = [Snapshot(order_reference="A-31", status="processing", status_label="قيد التجهيز",
@@ -521,13 +522,15 @@ def test_the_customers_other_orders_reach_the_model_split_counted_and_without_id
                        evidence_ref="order:summary:30")]
     earlier = [Snapshot(order_reference="A-12", status="delivered", status_label="تم التوصيل",
                         evidence_ref="order:summary:12")]
-    listing = Snapshot(status="ok", current=listed, previous=earlier, current_count=2,
-                       previous_count=1, counts_complete=True)
+    unknown = [Snapshot(order_reference="A-5", status="merchant_custom_stage",
+                        status_label="merchant_custom_stage", evidence_ref="order:summary:5")]
+    listing = Snapshot(status="ok", current=listed, previous=earlier, other=unknown, current_count=2,
+                       previous_count=1, other_count=1, counts_complete=True)
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("ok", order=resolved, selection_reason="latest_open_order",
                                       customer_orders=listing,
                                       evidence=[Record("order:summary:31"), Record("order:summary:30"),
-                                                Record("order:summary:12")])))
+                                                Record("order:summary:12"), Record("order:summary:5")])))
     observation = run(binding, "resolve_customer_order", {"purpose": "status"})
     body = observation.result
     assert body["order"]["order_id"] == 31
@@ -535,10 +538,30 @@ def test_the_customers_other_orders_reach_the_model_split_counted_and_without_id
     assert orders["status"] == "ok"
     assert [o["order_reference"] for o in orders["current"]] == ["A-31", "A-30"]
     assert [o["order_reference"] for o in orders["previous"]] == ["A-12"]
-    assert (orders["current_count"], orders["previous_count"], orders["counts_complete"]) == (2, 1, True)
-    for entry in [*orders["current"], *orders["previous"]]:
+    assert [o["order_reference"] for o in orders["other"]] == ["A-5"]
+    assert (orders["current_count"], orders["previous_count"], orders["other_count"],
+            orders["counts_complete"]) == (2, 1, 1, True)
+    for entry in [*orders["current"], *orders["previous"], *orders["other"]]:
         assert set(entry) == {"order_reference", "status", "status_label", "evidence_ref"}
-    assert set(observation.evidence_refs) == {"order:summary:31", "order:summary:30", "order:summary:12"}
+    assert set(observation.evidence_refs) == {"order:summary:31", "order:summary:30", "order:summary:12",
+                                              "order:summary:5"}
+
+
+def test_an_incomplete_order_list_reaches_the_model_without_counts(binding, monkeypatch):
+    resolved = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                        status="processing", status_label="قيد التجهيز")
+    listing = Snapshot(status="ok", current=[Snapshot(order_reference="A-31", status="processing",
+                                                      status_label="قيد التجهيز",
+                                                      evidence_ref="order:summary:31")],
+                       previous=[], other=[], current_count=None, previous_count=None, other_count=None,
+                       counts_complete=False)
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=resolved, selection_reason="latest_open_order",
+                                      customer_orders=listing, evidence=[Record("order:summary:31")])))
+    orders = run(binding, "resolve_customer_order", {"purpose": "status"}).result["customer_orders"]
+    assert orders["counts_complete"] is False
+    assert (orders["current_count"], orders["previous_count"], orders["other_count"]) == (None, None, None)
+    assert [o["order_reference"] for o in orders["current"]] == ["A-31"]
 
 
 def test_an_unreadable_order_list_says_so_and_nothing_more(binding, monkeypatch):
