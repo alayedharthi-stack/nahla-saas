@@ -28,7 +28,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
 from core.local_order_resolver import CUSTOMER_ORDER_HISTORY_LIMIT
-from core.order_status_label import ORDER_STATUS_LABELS_AR
+from core.order_status_label import ORDER_STATUS_LABELS_AR, order_status_label_ar
 from models import Base, Conversation, Customer, Order, Tenant, WhatsAppConnection
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.output import OrderResolveResult
@@ -38,6 +38,7 @@ from modules.ai.commerce_agent_v2.tools.orders import (
     MAX_LISTED_ONGOING_ORDERS,
     MAX_LISTED_UNKNOWN_ORDERS,
     get_order_details_impl,
+    get_order_shipment_impl,
     list_customer_orders_impl,
     resolve_customer_order_impl,
 )
@@ -83,9 +84,9 @@ class Store:
 
     def order(self, status: str, *, linked: bool = False, phone: str = PHONE, customer_id: Any = "self",
               tenant_id: Any = None, source: str = "salla", number: Any = "auto",
-              cart: bool = False) -> Order:
+              cart: bool | None = False) -> Order:
         """An order of this customer's: by phone only (as observed), or by customer id.
-        ``cart`` stores it as store sync stores an abandoned cart."""
+        ``cart`` stores it as store sync stores an abandoned cart (``None``: no flag stored)."""
         self._n += 1
         if customer_id == "self":
             customer_id = self.customer.id if linked else None
@@ -98,6 +99,9 @@ class Store:
                     line_items=[{"name": "قميص قطني أزرق", "quantity": 1}])
         self.db.add(row)
         self.db.flush()
+        if cart is None:                  # the column's default fills a None on insert
+            self.db.query(Order).filter(Order.id == row.id).update(
+                {Order.is_abandoned: None}, synchronize_session="fetch")
         return row
 
     def context(self) -> CommerceAgentContext:
@@ -154,9 +158,11 @@ def test_an_abandoned_cart_is_not_an_order():
     store.order("abandoned")                              # the status alone
     flagged = store.order("pending", cart=True)           # the flag alone
     mine = store.order("delivered")
+    unflagged = store.order("processing", cart=None)      # no flag stored: an order, not a cart
     result = history(store.context())
-    assert (result.total_orders, result.read_complete) == (1, True)
+    assert (result.total_orders, result.read_complete) == (2, True)
     assert refs(result.finished) == [mine.external_order_number]
+    assert refs(result.ongoing) == [unflagged.external_order_number]
     assert flagged.external_order_number not in refs(result.ongoing)
 
 
@@ -168,9 +174,12 @@ def test_the_one_order_lookup_still_returns_one_order_and_no_history():
     result = resolve(store.context())
     assert result.order.order_reference == newest_open.external_order_number
     assert result.selection_reason == "latest_open_order"
-    assert result.order.stage == "ongoing"
     assert set(OrderResolveResult.model_fields) == {"status", "order", "selection_reason", "evidence",
                                                     "failure_reason"}
+    # The order in the fields it always had: where it stands is the history's grouping.
+    assert set(result.model_dump()["order"]) == {"order_id", "order_reference", "status", "status_label",
+                                                 "evidence_ref"}
+    assert set(result.evidence[0].fields) == {"order_id", "order_reference", "status", "status_label"}
 
 
 # ── One, finished only, none ─────────────────────────────────────────────────
@@ -300,17 +309,21 @@ def test_a_salla_completed_order_is_fulfilled_not_finished_in_both_reads():
     assert entry.status_label == ORDER_STATUS_LABELS_AR["fulfilled"]
     assert entry.status_label != ORDER_STATUS_LABELS_AR["completed"]
     resolved = resolve(context)
-    assert (resolved.order.stage, resolved.order.status_label) == ("ongoing", entry.status_label)
+    assert resolved.order.status_label == entry.status_label
 
 
-@pytest.mark.parametrize("status,label_key", [("ready", "fulfilled"), ("packed", "fulfilled"),
-                                              ("preparing", "processing")])
-def test_statuses_the_salla_adapter_reads_as_under_way_are_ongoing(status: str, label_key: str):
+@pytest.mark.parametrize("status", ["ready", "packed", "ready_for_pickup", "preparing", "in_review"])
+def test_statuses_the_salla_adapter_reads_as_under_way_are_ongoing_and_keep_their_own_label(status: str):
+    """The adapter places them; the label stays the word's own reading, which
+    claims no more than the word (a pickup order is not prepared for shipping,
+    an order in review is not confirmed)."""
     store = Store()
     order = store.order(status)
     result = history(store.context())
     assert refs(result.ongoing) == [order.external_order_number]
-    assert result.ongoing.orders[0].status_label == ORDER_STATUS_LABELS_AR[label_key]
+    label = result.ongoing.orders[0].status_label
+    assert label == order_status_label_ar(status)
+    assert label not in {ORDER_STATUS_LABELS_AR[k] for k in ("fulfilled", "confirmed", "shipped", "delivered")}
 
 
 def test_a_completed_order_from_a_store_without_that_meaning_is_finished():
@@ -406,7 +419,7 @@ def test_nothing_listed_is_an_internal_number():
     identifiers are never offered in its place, by either read."""
     store = Store()
     numbered = store.order("delivered")
-    unnumbered = store.order("processing", number=None)
+    unnumbered = store.order("shipped", number=None)
     context = store.context()
     result = history(context)
     for entry in [*result.ongoing.orders, *result.finished.orders]:
@@ -419,3 +432,5 @@ def test_nothing_listed_is_an_internal_number():
     assert resolved.order.order_reference is None
     details = asyncio.run(get_order_details_impl(context, order_id=resolved.order.order_id))
     assert details.order.order_reference is None                 # the same in every order tool
+    shipment = asyncio.run(get_order_shipment_impl(context, order_id=resolved.order.order_id))
+    assert shipment.status == "ok" and shipment.shipment.order_reference is None
