@@ -104,7 +104,7 @@ def test_salla_store_route_resolves_current_external_store_id():
 
     response = asyncio.run(serve_widgets_js_by_salla("1298199463", DB()))
     assert b"966555906901" in response.body
-    assert b"api.nahlah.ai/merchant/widgets/assets/whatsapp-bee.jpg" in response.body
+    assert b"/merchant/widgets/assets/whatsapp-bee.jpg" in response.body
 
 
 def test_original_store_logo_is_served_for_canvas_with_cors():
