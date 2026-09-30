@@ -62,8 +62,8 @@ Security & caching answers:
     - No endpoint returns another tenant's data.
 
 • Production domain:
-    Configure in Salla Partner Portal → App Snippets:
-    URL: https://api.nahlah.ai/merchant/widgets/salla-auto.js
+    Configure the JavaScript App Snippet in the Salla Partner Portal as
+    documented in docs/runbooks/salla-sales-widget-snippet.md.
 """
 from __future__ import annotations
 
@@ -72,6 +72,7 @@ import os
 import re
 import ipaddress
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
@@ -262,7 +263,7 @@ _JS_HEADERS = {
 
 
 
-_NAHLA_STORE_LOGO = "https://app.nahlah.ai/whatsapp-bee-transparent.png"
+_NAHLA_STORE_LOGO = f"{_API_BASE}/merchant/widgets/assets/whatsapp-bee.jpg"
 
 
 def _safe_widget_image_url(value: Any) -> str:
@@ -534,6 +535,28 @@ function initWhatsApp(c){{
   brand.className='nahla-bee';
   brand.src=logo;
   brand.alt=c.logo_url?'شعار المتجر':'نحلة';
+  if(!c.logo_url){{
+    // Match the original Salla button's white-background extraction exactly.
+    var source=new Image();
+    source.crossOrigin='anonymous';
+    source.onload=function(){{
+      try{{
+        var canvas=document.createElement('canvas');
+        canvas.width=source.width;canvas.height=source.height;
+        var context=canvas.getContext('2d');
+        context.drawImage(source,0,0);
+        var pixels=context.getImageData(0,0,canvas.width,canvas.height);
+        for(var pixel=0;pixel<pixels.data.length;pixel+=4){{
+          if(pixels.data[pixel]>210&&pixels.data[pixel+1]>210&&pixels.data[pixel+2]>210){{
+            pixels.data[pixel+3]=0;
+          }}
+        }}
+        context.putImageData(pixels,0,0);
+        brand.src=canvas.toDataURL('image/png');
+      }}catch(error){{/* Show the original logo if canvas is unavailable. */}}
+    }};
+    source.src=logo;
+  }}
   var circle=document.createElement('div');
   circle.className='nw-circle';
   for(var orbit=1;orbit<=4;orbit++){{
@@ -1070,6 +1093,17 @@ async def create_unique_coupon(tenant_id: int, db: Session = Depends(get_db)):
     if static_code:
         return {"success": True, "code": static_code, "method": "static"}
     return {"success": False, "reason": "api_failed", "code": ""}
+
+
+@router.get("/merchant/widgets/assets/whatsapp-bee.jpg", include_in_schema=False)
+async def serve_whatsapp_bee_image():
+    """Public original storefront artwork with CORS for the canvas cutout."""
+    path = Path(__file__).resolve().parents[1] / "assets" / "whatsapp-bee.jpg"
+    return Response(
+        content=path.read_bytes(),
+        media_type="image/jpeg",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @router.get("/merchant/widgets/{tenant_id}/nahla-widgets.js", include_in_schema=False)

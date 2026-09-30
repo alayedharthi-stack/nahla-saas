@@ -12,6 +12,7 @@ from routers.widgets import (
     _build_nahla_widgets_js,
     _safe_widget_image_url,
     serve_salla_auto_snippet,
+    serve_whatsapp_bee_image,
     serve_widgets_js_by_salla,
 )
 from services import widget_media_storage as media
@@ -38,6 +39,7 @@ def test_widget_bundle_matches_store_sizes_and_uses_safe_image_nodes():
         "for(var orbit=1;orbit<=4;orbit++)",
         "window.scrollY<=threshold",
         "brand.src=logo",
+        "pixels.data[pixel]>210&&pixels.data[pixel+1]>210&&pixels.data[pixel+2]>210",
     ):
         assert declaration in js
     assert "wrap.innerHTML" not in js
@@ -102,7 +104,15 @@ def test_salla_store_route_resolves_current_external_store_id():
 
     response = asyncio.run(serve_widgets_js_by_salla("1298199463", DB()))
     assert b"966555906901" in response.body
-    assert b"app.nahlah.ai/whatsapp-bee-transparent.png" in response.body
+    assert b"api.nahlah.ai/merchant/widgets/assets/whatsapp-bee.jpg" in response.body
+
+
+def test_original_store_logo_is_served_for_canvas_with_cors():
+    response = asyncio.run(serve_whatsapp_bee_image())
+    assert response.media_type == "image/jpeg"
+    assert response.headers["access-control-allow-origin"] == "*"
+    with Image.open(BytesIO(response.body)) as image:
+        assert image.size == (1000, 666)
 
 
 def test_salla_loader_detects_theme_store_class():

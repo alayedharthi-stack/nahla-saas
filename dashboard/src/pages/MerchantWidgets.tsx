@@ -14,7 +14,7 @@ import { apiCall } from '../api/client'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
-const NAHLA_CDN_LOGO = '/whatsapp-bee-transparent.png'
+const NAHLA_ORIGINAL_LOGO = `${API_BASE}/merchant/widgets/assets/whatsapp-bee.jpg`
 
 function getTenantId(): string {
   return localStorage.getItem('nahla_tenant_id') || ''
@@ -258,9 +258,37 @@ function RulesEditor({
 // ── Settings forms per widget type ────────────────────────────────────────────
 
 function WhatsAppWidgetPreview({ logo, color }: { logo: string; color: string }) {
+  const [defaultLogo, setDefaultLogo] = useState(NAHLA_ORIGINAL_LOGO)
+
+  useEffect(() => {
+    let active = true
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = image.width
+        canvas.height = image.height
+        const context = canvas.getContext('2d')
+        if (!context) return
+        context.drawImage(image, 0, 0)
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height)
+        for (let pixel = 0; pixel < pixels.data.length; pixel += 4) {
+          if (pixels.data[pixel] > 210 && pixels.data[pixel + 1] > 210 && pixels.data[pixel + 2] > 210) {
+            pixels.data[pixel + 3] = 0
+          }
+        }
+        context.putImageData(pixels, 0, 0)
+        if (active) setDefaultLogo(canvas.toDataURL('image/png'))
+      } catch { /* Keep the original image if canvas is unavailable. */ }
+    }
+    image.src = NAHLA_ORIGINAL_LOGO
+    return () => { active = false }
+  }, [])
+
   return (
     <div className="flex flex-col items-center justify-end min-h-44 rounded-xl bg-slate-50 border border-slate-200 py-3">
-      <img src={logo || NAHLA_CDN_LOGO} alt="معاينة شعار الزر"
+      <img src={logo || defaultLogo} alt="معاينة شعار الزر"
         className="nahla-preview-bee object-contain w-[90px] h-[90px]" />
       <div className="nahla-preview-circle relative flex items-center justify-center w-[58px] h-[58px] rounded-full mt-1"
         style={{ backgroundColor: color, boxShadow: `0 4px 18px ${color}73` }}>
