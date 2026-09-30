@@ -17,7 +17,8 @@ Public endpoints (no auth — served to external stores via <script> tag):
   GET  /merchant/widgets/{tenant_id}/config.json
        ↳ JSON config for enabled widgets (used by advanced integrations).
   GET  /merchant/widgets/salla-auto.js
-       ↳ Universal Salla Partner Portal snippet — auto-detects store_id,
+       ↳ Universal loader called by the published Salla Partner App Snippet;
+         auto-detects store_id,
          maps to tenant, then loads the per-tenant bundle.
   GET  /merchant/widgets/salla/{salla_store_id}/nahla-widgets.js
        ↳ Salla store-ID-based entry point (used by salla-auto.js).
@@ -32,8 +33,9 @@ Security & caching answers:
     can resolve tenant_id from the Integration table.
 
 • store_id → tenant_id mapping:
-    SELECT tenant_id FROM integrations
-    WHERE provider='salla' AND config->>'store_id' = :salla_store_id;
+    SELECT tenant_id FROM integrations WHERE provider='salla'
+    AND external_store_id = :salla_store_id;
+    Legacy connections fall back to config->>'store_id'.
     No cross-tenant leakage is possible — each store_id is unique per Salla
     and only returns config for its linked tenant.
 
@@ -47,8 +49,8 @@ Security & caching answers:
     No client-side fetch = no runtime failure on the store.
 
 • Caching:
-    Cache-Control: public, max-age=60, stale-while-revalidate=300
-    CDN caches the JS for up to 60 s. Changes take effect within 1 min.
+    Cache-Control: no-store
+    Changes take effect on the next storefront page load.
     tenant_id is part of the URL so CDN cannot mix responses across tenants.
 
 • Endpoint security:
@@ -254,7 +256,7 @@ _STUB = "/* Nahla Widgets — all disabled */"
 
 _JS_HEADERS = {
     "Content-Type":  "application/javascript; charset=utf-8",
-    "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+    "Cache-Control": "no-store",
     "X-Robots-Tag":  "noindex",
 }
 
@@ -1127,10 +1129,10 @@ async def serve_widgets_config(tenant_id: int, db: Session = Depends(get_db)):
 
 
 # ── Universal Salla Partner Portal snippet ────────────────────────────────────
-# Configure ONCE in Salla Partner Portal → App → App Snippets:
-#   URL: https://api.nahlah.ai/merchant/widgets/salla-auto.js
+# Publish the JavaScript loader in docs/runbooks/salla-sales-widget-snippet.md
+# once through Salla Partner Portal → App → App Snippets.
 # After that: every Salla store that installs the Nahla app loads widgets
-# automatically.  Enabling / disabling from Nahla takes effect within 60 s.
+# automatically. Enabling / disabling from Nahla takes effect on the next page load.
 
 @router.get("/merchant/widgets/salla-auto.js", include_in_schema=False)
 async def serve_salla_auto_snippet():
@@ -1314,10 +1316,7 @@ async def serve_widgets_js_by_salla(salla_store_id: str, db: Session = Depends(g
     return Response(content=_build_nahla_widgets_js(widgets, tenant_id, db=db), headers=_JS_HEADERS)
 
 
-# ── Public aliases for salla-auto.js (configured in Salla Partner Portal) ────
-# Salla Partner Portal → App Script URL must point to one of:
-#   https://api.nahlah.ai/salla-auto.js          ← preferred (short)
-#   https://api.nahlah.ai/static/salla-auto.js   ← legacy alias
+# ── Public legacy aliases for the universal loader ───────────────────────────
 
 async def _salla_auto_snippet_content() -> str:
     """Return the salla-auto.js bundle (delegates to main handler)."""

@@ -824,7 +824,7 @@ export default function MerchantWidgets() {
           <p className="font-semibold">كيف يعمل النظام؟</p>
           <p className="text-xs text-blue-600 leading-relaxed">
             أضف رابط السكريبت مرة واحدة في متجرك — بعدها كل ما تفعّله أو تعطّله من هنا يظهر في متجرك
-            خلال دقيقة تلقائياً بدون الرجوع لسلة مجدداً.
+            عند تحميل الصفحة التالية دون الرجوع إلى سلة.
           </p>
         </div>
       </div>
