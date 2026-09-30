@@ -8,8 +8,8 @@ matched by the phone in ``customer_info`` (JSONB), none carrying a customer id,
 nine still open and eleven closed — and the tool handed the model one of them.
 The reply said the customer had one order. What is proved here is the list the
 tool now carries on the database it runs on: every order counted by the same
-JSONB phone match the resolver uses, split into current and previous, bounded,
-complete only when the read held everything, and scoped exactly as the resolved
+JSONB phone match the resolver uses, grouped by what its status says, bounded,
+counted only when the read held everything, and scoped exactly as the resolved
 order is — never another tenant's, never an order linked to another customer.
 A listed order is not authorized for the details read.
 
@@ -135,13 +135,23 @@ def test_another_tenants_and_another_customers_orders_are_not_counted(store) -> 
     assert refs(listing.current) == [mine.external_order_number]
 
 
-def test_a_read_that_reaches_its_limit_is_not_reported_complete(store) -> None:
+def test_a_read_that_reaches_its_limit_gives_no_counts(store) -> None:
     for _ in range(CUSTOMER_ORDER_READ_LIMIT + 2):
         store.order("cancelled")
-    store.order("processing")
+    mine = store.order("processing")
     listing = resolve(store.context()).customer_orders
     assert listing.counts_complete is False
-    assert listing.current_count == 1
+    assert (listing.current_count, listing.previous_count) == (None, None)
+    assert refs(listing.current) == [mine.external_order_number]
+
+
+def test_finished_and_unknown_statuses_are_grouped_by_what_they_say(store) -> None:
+    for status in ("refunded", "returned", "failed"):
+        store.order(status)
+    store.order("merchant_custom_stage")
+    store.order("in_progress")
+    listing = resolve(store.context()).customer_orders
+    assert (listing.current_count, listing.previous_count, listing.other_count) == (1, 3, 1)
 
 
 def test_a_listed_order_is_not_authorized_for_the_details_read(store) -> None:

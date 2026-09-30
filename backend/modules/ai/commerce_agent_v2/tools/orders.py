@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 from agents import RunContextWrapper
 
 from core.local_order_resolver import (
-    _is_open_status,
     _order_matches_phone,
     _phone_lookup_keys,
     _snapshot_from_order,
@@ -20,7 +19,7 @@ from core.local_order_resolver import (
 from core.order_shipment_service import (
     get_order_shipment as get_persisted_order_shipment,
 )
-from core.order_status_label import order_status_label_ar
+from core.order_status_label import ORDER_STATUS_LABELS_AR, order_status_label_ar
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
@@ -316,25 +315,46 @@ async def resolve_customer_order_impl(
     )
 
 
-# How many orders of each kind one lookup lists beside the resolved order.
+# How many orders of each kind one lookup lists with the resolved order.
 MAX_LISTED_CURRENT_ORDERS = 5
 MAX_LISTED_PREVIOUS_ORDERS = 5
+MAX_LISTED_OTHER_ORDERS = 3
+
+# Statuses that mean an order is finished. The listing's own reading: which
+# order the resolver selects first is decided by its open/closed rule, unchanged.
+_FINISHED_ORDER_STATUSES = frozenset({
+    "cancelled", "canceled", "abandoned", "delivered", "completed", "complete",
+    "refunded", "returned", "failed",
+})
+
+
+def _order_list_group(status: Any) -> str:
+    """``previous`` for a finished status, ``current`` for one the platform knows
+    as still in progress, ``other`` for a status it does not know (or none)."""
+    slug = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if slug in _FINISHED_ORDER_STATUSES:
+        return "previous"
+    if slug in ORDER_STATUS_LABELS_AR:
+        return "current"
+    return "other"
 
 
 def _customer_order_list(
     context: CommerceAgentContext,
     resolved: Any,
 ) -> tuple[CustomerOrderList, list[EvidenceRecord]]:
-    """The customer's orders the resolver held, current and previous, bounded.
+    """The customer's orders the resolver held, grouped by status and bounded.
 
     Built only from the orders the resolver already read for this customer, and
     each one is held to the same customer scope as the resolved order before it
-    is listed or counted: an order linked to another customer, or one whose
-    identity no longer matches, is neither listed nor counted.
+    is listed or counted. An order linked to another customer is not this
+    customer's and is left out. An order whose link to this customer cannot be
+    proven is left out too, and the counts are then withheld, because the
+    customer may own it.
 
-    A listing is not an authorization. Entries carry no internal id and nothing
-    here widens which orders the details and shipment reads may open; a listed
-    order is read in detail by resolving it by its reference, as before.
+    A listing is not an authorization: nothing here widens which orders the
+    details and shipment reads may open; a listed order is read in detail by
+    resolving it by its reference, as before.
 
     A failure here costs the list, never the resolved order: the list is then
     reported unavailable rather than left out, because an absent list reads as
@@ -354,8 +374,8 @@ def _customer_order_list(
                 .all()
             }
         complete = bool(getattr(resolved, "customer_orders_read_complete", False))
-        current: list[Any] = []
-        previous: list[Any] = []
+        groups: dict[str, list[Any]] = {"current": [], "previous": [], "other": []}
+        left_out = 0
         for snapshot in priority:
             row = rows.get(int(snapshot.order_id))
             if row is None:
@@ -364,27 +384,46 @@ def _customer_order_list(
             try:
                 _assert_discovered_order_is_customer_scoped(context, row)
             except TenantIsolationViolation:
+                left_out += 1
+                if not _linked_to_another_customer(context, row):
+                    complete = False
                 continue
-            (current if _is_open_status(getattr(row, "status", "")) else previous).append(row)
-        listed_current = [_summary_evidence(row) for row in current[:MAX_LISTED_CURRENT_ORDERS]]
-        listed_previous = [_summary_evidence(row) for row in previous[:MAX_LISTED_PREVIOUS_ORDERS]]
+            groups[_order_list_group(getattr(row, "status", ""))].append(row)
+        if left_out:
+            logger.info("[COMMERCE_V2_ORDERS] customer order list left out %s order(s) outside the "
+                        "customer scope tenant=%s", left_out, context.tenant_id)
+        limits = {"current": MAX_LISTED_CURRENT_ORDERS, "previous": MAX_LISTED_PREVIOUS_ORDERS,
+                  "other": MAX_LISTED_OTHER_ORDERS}
+        listed = {name: [_summary_evidence(row) for row in rows_[:limits[name]]]
+                  for name, rows_ in groups.items()}
+        evidence = [record for name in ("current", "previous", "other") for _, record in listed[name]]
+        context.register_evidence(evidence)
     except Exception as exc:  # noqa: BLE001 - the resolved order stands; the list is reported unavailable
         logger.warning("[COMMERCE_V2_ORDERS] customer order list unavailable tenant=%s error=%s",
                        context.tenant_id, type(exc).__name__)
         return CustomerOrderList(status="unavailable"), []
-    evidence = [record for _, record in (*listed_current, *listed_previous)]
-    context.register_evidence(evidence)
+
+    def count(name: str) -> int | None:
+        return len(groups[name]) if complete else None
+
     return (
         CustomerOrderList(
             status="ok",
-            current=[_list_entry(summary) for summary, _ in listed_current],
-            previous=[_list_entry(summary) for summary, _ in listed_previous],
-            current_count=len(current),
-            previous_count=len(previous),
+            current=[_list_entry(summary) for summary, _ in listed["current"]],
+            previous=[_list_entry(summary) for summary, _ in listed["previous"]],
+            other=[_list_entry(summary) for summary, _ in listed["other"]],
+            current_count=count("current"),
+            previous_count=count("previous"),
+            other_count=count("other"),
             counts_complete=complete,
         ),
         evidence,
     )
+
+
+def _linked_to_another_customer(context: CommerceAgentContext, order: Any) -> bool:
+    linked = getattr(order, "customer_id", None)
+    return context.customer_id is not None and linked is not None and int(linked) != int(context.customer_id)
 
 
 def _list_entry(summary: OrderSummarySnapshot) -> OrderListEntry:

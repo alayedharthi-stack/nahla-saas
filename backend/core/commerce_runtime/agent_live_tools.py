@@ -328,10 +328,10 @@ def _order_view(summary: Any) -> Dict[str, Any]:
 
 
 def _customer_orders_view(listing: Any) -> Optional[Dict[str, Any]]:
-    """The customer's orders beside the resolved one, as the read established them.
+    """The customer's orders, the resolved one included, as the read established them.
 
     Without this the model sees one order and nothing else, and "you have one
-    order" reads as a fact. The counts come with whether the read held every
+    order" reads as a fact. Counts are present only when the read held every
     order; an unreadable list says only that it could not be read. Entries carry
     no order id: listing an order does not authorize the details or shipment
     reads for it.
@@ -350,8 +350,10 @@ def _customer_orders_view(listing: Any) -> Optional[Dict[str, Any]]:
         "status": "ok",
         "current": [entry(o) for o in list(getattr(listing, "current", None) or ())],
         "previous": [entry(o) for o in list(getattr(listing, "previous", None) or ())],
+        "other": [entry(o) for o in list(getattr(listing, "other", None) or ())],
         "current_count": getattr(listing, "current_count", None),
         "previous_count": getattr(listing, "previous_count", None),
+        "other_count": getattr(listing, "other_count", None),
         "counts_complete": bool(getattr(listing, "counts_complete", False)),
     }
 

@@ -242,9 +242,10 @@ class OrderSummarySnapshot(BaseModel):
 
 
 class OrderListEntry(BaseModel):
-    """One of the customer's orders as listed beside the resolved one.
+    """One of the customer's orders as listed with the resolved one.
 
-    A listing, not an authorization: it carries no internal id, so the details
+    A listing, not an authorization: it carries no order id field to act on,
+    and its evidence reference is a citation that opens nothing, so the details
     and shipment reads stay limited to orders resolved in this run. Its
     reference is what the customer (or a later lookup) names the order by.
     """
@@ -258,15 +259,17 @@ class OrderListEntry(BaseModel):
 
 
 class CustomerOrderList(BaseModel):
-    """The customer's orders beside the one resolved, split current / previous.
+    """The customer's orders, the resolved one included, by what their status says.
 
-    ``current`` are orders still open; ``previous`` are closed ones (delivered,
-    completed, cancelled or abandoned). Each list is bounded; the counts are of
-    every order the read held for this customer. ``counts_complete`` is true
-    only when that read held all of the customer's orders, so a count is never
-    presented as the customer's total unless it is. ``status`` is
-    ``unavailable`` when the list could not be read; that says nothing about how
-    many orders the customer has.
+    ``current`` are orders whose status is one the platform knows as still in
+    progress; ``previous`` are finished ones (delivered, completed, cancelled,
+    abandoned, refunded, returned or failed); ``other`` are orders whose status
+    the platform does not know, so neither is claimed. Each list is bounded.
+    The counts are given only when the read held every one of the customer's
+    orders (``counts_complete``); otherwise they are absent, so no count can be
+    presented as the customer's total. ``status`` is ``unavailable`` when the
+    list could not be read; that says nothing about how many orders the
+    customer has.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -274,8 +277,10 @@ class CustomerOrderList(BaseModel):
     status: Literal["ok", "unavailable"]
     current: list[OrderListEntry] = Field(default_factory=list)
     previous: list[OrderListEntry] = Field(default_factory=list)
+    other: list[OrderListEntry] = Field(default_factory=list)
     current_count: int | None = Field(default=None, ge=0)
     previous_count: int | None = Field(default=None, ge=0)
+    other_count: int | None = Field(default=None, ge=0)
     counts_complete: bool = False
 
 
