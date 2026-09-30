@@ -241,12 +241,51 @@ class OrderSummarySnapshot(BaseModel):
     evidence_ref: str
 
 
+class OrderListEntry(BaseModel):
+    """One of the customer's orders as listed beside the resolved one.
+
+    A listing, not an authorization: it carries no internal id, so the details
+    and shipment reads stay limited to orders resolved in this run. Its
+    reference is what the customer (or a later lookup) names the order by.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_reference: str | None = None
+    status: str
+    status_label: str
+    evidence_ref: str
+
+
+class CustomerOrderList(BaseModel):
+    """The customer's orders beside the one resolved, split current / previous.
+
+    ``current`` are orders still open; ``previous`` are closed ones (delivered,
+    completed, cancelled or abandoned). Each list is bounded; the counts are of
+    every order the read held for this customer. ``counts_complete`` is true
+    only when that read held all of the customer's orders, so a count is never
+    presented as the customer's total unless it is. ``status`` is
+    ``unavailable`` when the list could not be read; that says nothing about how
+    many orders the customer has.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "unavailable"]
+    current: list[OrderListEntry] = Field(default_factory=list)
+    previous: list[OrderListEntry] = Field(default_factory=list)
+    current_count: int | None = Field(default=None, ge=0)
+    previous_count: int | None = Field(default=None, ge=0)
+    counts_complete: bool = False
+
+
 class OrderResolveResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: ToolStatus
     order: OrderSummarySnapshot | None = None
     selection_reason: str | None = None
+    customer_orders: CustomerOrderList | None = None
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     failure_reason: str | None = None
 

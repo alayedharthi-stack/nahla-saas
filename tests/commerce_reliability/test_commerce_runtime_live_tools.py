@@ -507,6 +507,64 @@ def test_with_several_orders_the_observation_says_which_one_and_why(binding, mon
     assert body["selection_reason"] == "latest_open_order"
 
 
+def test_the_customers_other_orders_reach_the_model_split_counted_and_without_ids(binding, monkeypatch):
+    """Tenant 1 turn 112: the lookup handed the model one order and the reply
+    said the customer had one order. The observation now carries the customer's
+    orders beside the resolved one: current and previous, their counts, whether
+    the read held every order, and each entry's evidence — but no order id, so
+    listing an order never opens the details or shipment reads for it."""
+    resolved = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                        status="processing", status_label="قيد التجهيز")
+    listed = [Snapshot(order_reference="A-31", status="processing", status_label="قيد التجهيز",
+                       evidence_ref="order:summary:31"),
+              Snapshot(order_reference="A-30", status="processing", status_label="قيد التجهيز",
+                       evidence_ref="order:summary:30")]
+    earlier = [Snapshot(order_reference="A-12", status="delivered", status_label="تم التوصيل",
+                        evidence_ref="order:summary:12")]
+    listing = Snapshot(status="ok", current=listed, previous=earlier, current_count=2,
+                       previous_count=1, counts_complete=True)
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=resolved, selection_reason="latest_open_order",
+                                      customer_orders=listing,
+                                      evidence=[Record("order:summary:31"), Record("order:summary:30"),
+                                                Record("order:summary:12")])))
+    observation = run(binding, "resolve_customer_order", {"purpose": "status"})
+    body = observation.result
+    assert body["order"]["order_id"] == 31
+    orders = body["customer_orders"]
+    assert orders["status"] == "ok"
+    assert [o["order_reference"] for o in orders["current"]] == ["A-31", "A-30"]
+    assert [o["order_reference"] for o in orders["previous"]] == ["A-12"]
+    assert (orders["current_count"], orders["previous_count"], orders["counts_complete"]) == (2, 1, True)
+    for entry in [*orders["current"], *orders["previous"]]:
+        assert set(entry) == {"order_reference", "status", "status_label", "evidence_ref"}
+    assert set(observation.evidence_refs) == {"order:summary:31", "order:summary:30", "order:summary:12"}
+
+
+def test_an_unreadable_order_list_says_so_and_nothing_more(binding, monkeypatch):
+    resolved = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                        status="processing", status_label="قيد التجهيز")
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=resolved, selection_reason="latest_open_order",
+                                      customer_orders=Snapshot(status="unavailable", current=[], previous=[],
+                                                               current_count=None, previous_count=None,
+                                                               counts_complete=False),
+                                      evidence=[Record("order:summary:31")])))
+    body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert body["customer_orders"] == {"status": "unavailable"}
+    assert body["order"]["order_reference"] == "A-31"
+
+
+def test_a_lookup_without_a_list_keeps_its_previous_shape(binding, monkeypatch):
+    resolved = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                        status="processing", status_label="قيد التجهيز")
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=resolved, selection_reason="latest_open_order",
+                                      evidence=[Record("order:summary:31")])))
+    body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert "customer_orders" not in body
+
+
 def test_an_order_the_conversation_never_authorized_is_reported_as_not_found(binding, monkeypatch):
     """`_load_authorized_order` refuses an id the turn never authorized, and the
     details read turns that into `not_found`. What matters here is that the

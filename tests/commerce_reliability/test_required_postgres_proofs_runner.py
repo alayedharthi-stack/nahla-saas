@@ -210,7 +210,10 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "catalog_search_order", "campaign_marketing_continuation",
                    # A coupon the customer could be given is read before the
                    # resolver's window is cut, so newer rows cannot hide it.
-                   "promotion_scoped_read"]
+                   "promotion_scoped_read",
+                   # The customer's other orders beside the resolved one, counted
+                   # by the resolver's own phone match and never another's.
+                   "customer_order_list"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -237,6 +240,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "catalog_search_order": ("proof", harness_env),
         "campaign_marketing_continuation": ("proof", {"NAHLA_RELIABILITY_PG_ADMIN_DSN": None}),
         "promotion_scoped_read": ("proof", harness_env),
+        "customer_order_list": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

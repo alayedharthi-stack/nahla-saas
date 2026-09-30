@@ -1,6 +1,7 @@
 """Trusted customer-scoped, read-only order and shipment tools."""
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -9,6 +10,7 @@ from urllib.parse import urlparse
 from agents import RunContextWrapper
 
 from core.local_order_resolver import (
+    _is_open_status,
     _order_matches_phone,
     _phone_lookup_keys,
     _snapshot_from_order,
@@ -23,7 +25,9 @@ from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CanonicalEvidenceFact,
+    CustomerOrderList,
     EvidenceRecord,
+    OrderListEntry,
     OrderDetailsResult,
     OrderDetailsSnapshot,
     OrderLineItemSnapshot,
@@ -38,6 +42,8 @@ from modules.ai.security.tenant_isolation import (
 )
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 
+
+logger = logging.getLogger("nahla.commerce_agent_v2.orders")
 
 _SHIPMENT_ORDER_STATUSES = frozenset(
     {
@@ -300,11 +306,93 @@ async def resolve_customer_order_impl(
     context.authorize_orders([selected.order_id])
     summary, evidence = _summary_evidence(order)
     context.register_evidence([evidence])
+    customer_orders, list_evidence = _customer_order_list(context, resolved)
     return OrderResolveResult(
         status="ok",
         order=summary,
         selection_reason=resolved.selected_reason,
-        evidence=[evidence],
+        customer_orders=customer_orders,
+        evidence=[evidence, *(e for e in list_evidence if e.ref != evidence.ref)],
+    )
+
+
+# How many orders of each kind one lookup lists beside the resolved order.
+MAX_LISTED_CURRENT_ORDERS = 5
+MAX_LISTED_PREVIOUS_ORDERS = 5
+
+
+def _customer_order_list(
+    context: CommerceAgentContext,
+    resolved: Any,
+) -> tuple[CustomerOrderList, list[EvidenceRecord]]:
+    """The customer's orders the resolver held, current and previous, bounded.
+
+    Built only from the orders the resolver already read for this customer, and
+    each one is held to the same customer scope as the resolved order before it
+    is listed or counted: an order linked to another customer, or one whose
+    identity no longer matches, is neither listed nor counted.
+
+    A listing is not an authorization. Entries carry no internal id and nothing
+    here widens which orders the details and shipment reads may open; a listed
+    order is read in detail by resolving it by its reference, as before.
+
+    A failure here costs the list, never the resolved order: the list is then
+    reported unavailable rather than left out, because an absent list reads as
+    "this customer has one order".
+    """
+    try:
+        from models import Order
+
+        priority = list(getattr(resolved, "orders_by_priority", None) or ())
+        ids = [int(s.order_id) for s in priority if getattr(s, "order_id", 0)]
+        rows: dict[int, Any] = {}
+        if ids:
+            rows = {
+                int(row.id): row
+                for row in context.db.query(Order)
+                .filter(Order.tenant_id == context.tenant_id, Order.id.in_(ids))
+                .all()
+            }
+        complete = bool(getattr(resolved, "customer_orders_read_complete", False))
+        current: list[Any] = []
+        previous: list[Any] = []
+        for snapshot in priority:
+            row = rows.get(int(snapshot.order_id))
+            if row is None:
+                complete = False
+                continue
+            try:
+                _assert_discovered_order_is_customer_scoped(context, row)
+            except TenantIsolationViolation:
+                continue
+            (current if _is_open_status(getattr(row, "status", "")) else previous).append(row)
+        listed_current = [_summary_evidence(row) for row in current[:MAX_LISTED_CURRENT_ORDERS]]
+        listed_previous = [_summary_evidence(row) for row in previous[:MAX_LISTED_PREVIOUS_ORDERS]]
+    except Exception as exc:  # noqa: BLE001 - the resolved order stands; the list is reported unavailable
+        logger.warning("[COMMERCE_V2_ORDERS] customer order list unavailable tenant=%s error=%s",
+                       context.tenant_id, type(exc).__name__)
+        return CustomerOrderList(status="unavailable"), []
+    evidence = [record for _, record in (*listed_current, *listed_previous)]
+    context.register_evidence(evidence)
+    return (
+        CustomerOrderList(
+            status="ok",
+            current=[_list_entry(summary) for summary, _ in listed_current],
+            previous=[_list_entry(summary) for summary, _ in listed_previous],
+            current_count=len(current),
+            previous_count=len(previous),
+            counts_complete=complete,
+        ),
+        evidence,
+    )
+
+
+def _list_entry(summary: OrderSummarySnapshot) -> OrderListEntry:
+    return OrderListEntry(
+        order_reference=summary.order_reference,
+        status=summary.status,
+        status_label=summary.status_label,
+        evidence_ref=summary.evidence_ref,
     )
 
 

@@ -327,6 +327,35 @@ def _order_view(summary: Any) -> Dict[str, Any]:
     }
 
 
+def _customer_orders_view(listing: Any) -> Optional[Dict[str, Any]]:
+    """The customer's orders beside the resolved one, as the read established them.
+
+    Without this the model sees one order and nothing else, and "you have one
+    order" reads as a fact. The counts come with whether the read held every
+    order; an unreadable list says only that it could not be read. Entries carry
+    no order id: listing an order does not authorize the details or shipment
+    reads for it.
+    """
+    if listing is None:
+        return None
+    if getattr(listing, "status", None) != "ok":
+        return {"status": "unavailable"}
+    def entry(order: Any) -> Dict[str, Any]:
+        return {"order_reference": getattr(order, "order_reference", None),
+                "status": getattr(order, "status", None),
+                "status_label": getattr(order, "status_label", None),
+                "evidence_ref": getattr(order, "evidence_ref", None)}
+
+    return {
+        "status": "ok",
+        "current": [entry(o) for o in list(getattr(listing, "current", None) or ())],
+        "previous": [entry(o) for o in list(getattr(listing, "previous", None) or ())],
+        "current_count": getattr(listing, "current_count", None),
+        "previous_count": getattr(listing, "previous_count", None),
+        "counts_complete": bool(getattr(listing, "counts_complete", False)),
+    }
+
+
 # ── Tool bodies ──────────────────────────────────────────────────────────────
 
 
@@ -627,11 +656,12 @@ def _order_lookup(binding: LiveToolBinding) -> at.ToolFunction:
         if getattr(result, "status", "") != "ok":
             return _unresolved(getattr(result, "status", None), getattr(result, "failure_reason", None),
                                selection_reason=getattr(result, "selection_reason", None))
-        return at.ToolResult(
-            result={"status": "ok", "found": True, "order": _order_view(getattr(result, "order", None)),
-                    "selection_reason": getattr(result, "selection_reason", None)},
-            evidence_refs=_refs(getattr(result, "evidence", None) or ()),
-        )
+        body = {"status": "ok", "found": True, "order": _order_view(getattr(result, "order", None)),
+                "selection_reason": getattr(result, "selection_reason", None)}
+        listing = _customer_orders_view(getattr(result, "customer_orders", None))
+        if listing is not None:
+            body["customer_orders"] = listing
+        return at.ToolResult(result=body, evidence_refs=_refs(getattr(result, "evidence", None) or ()))
 
     return _guarded(binding, body)
 
