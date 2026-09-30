@@ -1999,14 +1999,26 @@ def _tenant_ai_usage_payload(
     tenant_id: int,
     *,
     period: str = "7d",
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
+    as_of = as_of or datetime.now(timezone.utc)
+    since = ledger_period_start(period, now=as_of)
+    turn_query = db.query(ConversationTrace).filter(
+        ConversationTrace.tenant_id == tenant_id,
+        ConversationTrace.created_at <= as_of,
+    )
+    action_query = db.query(func.count(AIActionLog.id)).filter(
+        AIActionLog.tenant_id == tenant_id, AIActionLog.created_at <= as_of,
+    )
+    if since is not None:
+        turn_query = turn_query.filter(ConversationTrace.created_at >= since)
+        action_query = action_query.filter(AIActionLog.created_at >= since)
     turns = (
-        db.query(ConversationTrace)
-        .filter(ConversationTrace.tenant_id == tenant_id)
+        turn_query
         .order_by(ConversationTrace.created_at.desc(), ConversationTrace.id.desc())
         .all()
     )
-    action_count = db.query(func.count(AIActionLog.id)).filter(AIActionLog.tenant_id == tenant_id).scalar() or 0
+    action_count = action_query.scalar() or 0
     latency_values: List[int] = []
     orchestrated_turns = 0
     for turn in turns:
@@ -2015,16 +2027,23 @@ def _tenant_ai_usage_payload(
         if turn.latency_ms is not None:
             latency_values.append(int(turn.latency_ms))
 
-    ledger = aggregate_tenant_ledger(db, tenant_id, period=period)
+    ledger = aggregate_tenant_ledger(db, tenant_id, period=period, as_of=as_of)
     avg_latency = round(sum(latency_values) / len(latency_values), 1) if latency_values else 0.0
     return {
         "tenant_id": tenant_id,
         "period": period,
+        "period_start": ledger["period_start"],
+        "period_end": ledger["period_end"],
+        "period_timezone": ledger["period_timezone"],
+        "cost_basis": ledger["cost_basis"],
+        "provider_reported_total_cost_usd": ledger["provider_reported_total_cost_usd"],
+        "pricing_versions": ledger["pricing_versions"],
         "turns_total": len(turns),
         "turns_orchestrated": orchestrated_turns,
         "ai_actions_logged": int(action_count),
         "avg_latency_ms": avg_latency,
         "calls_total": ledger["calls_total"],
+        "unpriced_calls": ledger["unpriced_calls"],
         "actual_total_tokens": ledger["actual_total_tokens"],
         "estimated_total_tokens": ledger["estimated_total_tokens"],
         "actual_total_cost_usd": ledger["actual_total_cost_usd"],
@@ -2045,8 +2064,9 @@ async def admin_ai_usage(
 ):
     tenants = db.query(Tenant).order_by(Tenant.created_at.desc(), Tenant.id.desc()).limit(min(limit, 200)).all()
     rows = []
+    as_of = datetime.now(timezone.utc)
     for tenant in tenants:
-        payload = _tenant_ai_usage_payload(db, tenant.id, period=period)
+        payload = _tenant_ai_usage_payload(db, tenant.id, period=period, as_of=as_of)
         payload["tenant_name"] = tenant.name
         rows.append(payload)
     return {"tenants": rows, "period": period}
@@ -2073,11 +2093,12 @@ async def admin_ai_costs(
     _admin: Dict[str, Any] = Depends(require_admin),
     period: str = Query("7d", description="24h | 7d | mtd | all"),
 ):
-    platform = aggregate_platform_ledger(db, period=period)
+    as_of = datetime.now(timezone.utc)
+    platform = aggregate_platform_ledger(db, period=period, as_of=as_of)
     tenants = db.query(Tenant).all()
     per_tenant = []
     for tenant in tenants:
-        usage = _tenant_ai_usage_payload(db, tenant.id, period=period)
+        usage = aggregate_tenant_ledger(db, tenant.id, period=period, as_of=as_of)
         tenant_cost = usage["actual_total_cost_usd"] + usage["estimated_total_cost_usd"]
         if tenant_cost <= 0 and usage["calls_total"] <= 0:
             continue
@@ -2091,16 +2112,24 @@ async def admin_ai_costs(
             "actual_total_tokens": usage["actual_total_tokens"],
             "estimated_total_tokens": usage["estimated_total_tokens"],
             "calls_total": usage["calls_total"],
+            "unpriced_calls": usage["unpriced_calls"],
         })
     per_tenant.sort(key=lambda item: item["total_cost_usd"], reverse=True)
     return {
         "period": period,
+        "period_start": platform["period_start"],
+        "period_end": platform["period_end"],
+        "period_timezone": platform["period_timezone"],
+        "cost_basis": platform["cost_basis"],
+        "provider_reported_total_cost_usd": platform["provider_reported_total_cost_usd"],
+        "pricing_versions": platform["pricing_versions"],
         "actual_total_cost_usd": platform["actual_total_cost_usd"],
         "estimated_total_cost_usd": platform["estimated_total_cost_usd"],
         "unattributed_total_cost_usd": platform["unattributed_total_cost_usd"],
         "actual_total_tokens": platform["actual_total_tokens"],
         "estimated_total_tokens": platform["estimated_total_tokens"],
         "calls_total": platform["calls_total"],
+        "unpriced_calls": platform["unpriced_calls"],
         "providers": platform["providers"],
         "models": platform["models"],
         "reasons": platform["reasons"],
