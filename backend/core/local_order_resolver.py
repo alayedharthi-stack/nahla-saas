@@ -28,11 +28,6 @@ _SHIPPED_STATUSES = frozenset({
     "shipped", "delivered", "out_for_delivery", "delivering", "in_transit",
 })
 
-# The most orders one customer read holds. A read that comes back this full may
-# have stopped short of the customer's oldest orders, so it is never reported
-# as the customer's whole order history.
-CUSTOMER_ORDER_READ_LIMIT = 50
-
 @dataclass(frozen=True)
 class LocalOrderSnapshot:
     """Lightweight view of a local Order row for AI / tool consumers."""
@@ -80,9 +75,6 @@ class CustomerOrderContext:
     orders_by_priority: List[LocalOrderSnapshot]
     selected_order: Optional[LocalOrderSnapshot]
     selected_reason: str
-    # False when the customer read reached CUSTOMER_ORDER_READ_LIMIT: the
-    # customer may have older orders that ``orders_by_priority`` does not hold.
-    customer_orders_read_complete: bool = True
 
 
 def _is_open_status(status: str) -> bool:
@@ -259,7 +251,7 @@ def _fetch_tenant_orders_for_customer(
     tenant_id: int,
     phone: str,
     customer_id: Optional[int],
-    limit: int = CUSTOMER_ORDER_READ_LIMIT,
+    limit: int = 50,
 ) -> List[Any]:
     """Load this customer's orders with tenant+identity filter before LIMIT.
 
@@ -284,7 +276,7 @@ def _fetch_tenant_orders_for_customer(
         db.query(Order)
         .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
         .order_by(Order.id.desc())
-        .limit(max(int(limit or CUSTOMER_ORDER_READ_LIMIT), 10))
+        .limit(max(int(limit or 50), 10))
         .all()
     )
 
@@ -604,7 +596,6 @@ def resolve_customer_order_context(
         orders_by_priority=priority_list,
         selected_order=selected,
         selected_reason=selected_reason,
-        customer_orders_read_complete=len(customer_rows) < CUSTOMER_ORDER_READ_LIMIT,
     )
 
 
@@ -665,11 +656,50 @@ def has_local_orders(ctx: CustomerOrderContext) -> bool:
     )
 
 
+# The most orders one history read holds. A read that comes back this full may
+# have stopped short of the customer's oldest orders, so it is never reported
+# as the customer's whole order history.
+CUSTOMER_ORDER_HISTORY_LIMIT = 50
+
+
+def read_customer_order_history(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int],
+    phone: str,
+    limit: int = CUSTOMER_ORDER_HISTORY_LIMIT,
+) -> tuple:
+    """This customer's orders in this tenant, newest first, and whether the read
+    held every one of them.
+
+    The same identity clauses the resolver matches by (customer id, or a phone
+    key in ``customer_info``), filtered by tenant before the limit. Unlike the
+    resolver's lookups this read swallows nothing: a history that could not be
+    read must never read as a customer with no orders, so a failure is raised to
+    the caller, and so is a read with no identity to match by.
+    """
+    from models import Order  # noqa: PLC0415
+
+    clauses = _customer_order_identity_clauses(Order, phone=phone, customer_id=customer_id)
+    if not clauses:
+        raise ValueError("customer_identity_missing")
+    rows = (
+        db.query(Order)
+        .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
+        .order_by(Order.id.desc())
+        .limit(int(limit))
+        .all()
+    )
+    return rows, len(rows) < int(limit)
+
+
 __all__ = [
-    "CUSTOMER_ORDER_READ_LIMIT",
+    "CUSTOMER_ORDER_HISTORY_LIMIT",
     "CustomerOrderContext",
     "LocalOrderSnapshot",
     "has_local_orders",
     "local_order_to_track_payload",
+    "read_customer_order_history",
     "resolve_customer_order_context",
 ]

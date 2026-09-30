@@ -962,6 +962,20 @@ as well as through the ledger.
   tappable product selector (see below). No template message, and never two
   messages, except the one bounded text recovery after a list the provider
   definitively refused.
+* It **reads** a customer's order history only when the agent asks for it, through
+  `list_customer_orders` (owner decision, 30 September 2026: a read the registry declares
+  beyond the tools the instructions name, like the two below; its declaration is text the
+  model sees and is recorded as a declaration change). The one-order lookup,
+  `resolve_customer_order`, is unchanged and still returns one order. The history is this
+  customer's orders in this store, matched by the same trusted identity and held to the same
+  customer-scope check as a resolved order: counted, grouped as ongoing, finished or of a
+  status the platform cannot read — each store's status read through its lifecycle adapter,
+  so a Salla `completed` order (fulfilled, not yet shipped) is ongoing — and listed a few per
+  group. A total is given only when the read held every order and each was proven the
+  customer's; a failed read is reported unavailable, never as no orders, and runs in a
+  savepoint so the tools after it are unaffected. Listing opens nothing: the details and
+  shipment reads stay limited to orders resolved in the turn, and an entry carries no
+  internal number — only the store's customer-facing order number, or none.
 * It performs **no** commerce write: no order, payment, cancellation or coupon.
   It **reads** the merchant's currently valid, shareable coupons and offers through
   `list_shareable_promotions` (the platform's promotion-truth resolver: campaign-only,

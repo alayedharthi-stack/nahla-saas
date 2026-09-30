@@ -229,6 +229,12 @@ class KnowledgeSearchResult(BaseModel):
     failure_reason: str | None = None
 
 
+# Where an order stands, as its store's own status reads through the platform's
+# lifecycle adapter: still under way, finished, or a status the platform cannot
+# read (claimed neither way).
+OrderStage = Literal["ongoing", "finished", "unknown"]
+
+
 class OrderSummarySnapshot(BaseModel):
     """Customer-safe projection of one authorized local order."""
 
@@ -238,51 +244,63 @@ class OrderSummarySnapshot(BaseModel):
     order_reference: str | None = None
     status: str
     status_label: str
+    stage: OrderStage
     evidence_ref: str
 
 
-class OrderListEntry(BaseModel):
-    """One of the customer's orders as listed with the resolved one.
+class OrderHistoryEntry(BaseModel):
+    """One of the customer's orders as the history lists it.
 
-    A listing, not an authorization: it carries no order id field to act on,
-    and its evidence reference is a citation that opens nothing, so the details
-    and shipment reads stay limited to orders resolved in this run. Its
-    reference is what the customer (or a later lookup) names the order by.
+    A listing, not an authorization: no order id to act on, and an evidence
+    reference that is an opaque citation — it carries no internal number that
+    could pass for an order number. The reference, when present, is the
+    store's customer-facing order number and nothing else.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     order_reference: str | None = None
-    status: str
     status_label: str
     evidence_ref: str
 
 
-class CustomerOrderList(BaseModel):
-    """The customer's orders, the resolved one included, by what their status says.
+class OrderHistoryGroup(BaseModel):
+    """The customer's orders at one stage: how many, and the newest few.
 
-    ``current`` are orders whose status is one the platform knows as still in
-    progress; ``previous`` are finished ones (delivered, completed, cancelled,
-    abandoned, refunded, returned or failed), each status read as its own store
-    means it; ``other`` are orders whose status the platform does not know, so
-    neither is claimed. Each list is bounded.
-    The counts are given only when the read held every one of the customer's
-    orders (``counts_complete``); otherwise they are absent, so no count can be
-    presented as the customer's total. ``status`` is ``unavailable`` when the
-    list could not be read; that says nothing about how many orders the
-    customer has.
+    ``listed`` is how many ``orders`` holds. ``count`` and ``by_status`` are
+    given only when the read held every order of the customer; a count of the
+    orders read is never given in their place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int | None = Field(default=None, ge=0)
+    listed: int = Field(default=0, ge=0)
+    orders: list[OrderHistoryEntry] = Field(default_factory=list)
+    by_status: dict[str, int] | None = None
+
+
+class CustomerOrderHistoryResult(BaseModel):
+    """The customer's order history in this store, read on request.
+
+    ``status`` is ``unavailable`` when the history could not be read: that says
+    nothing about how many orders the customer has, and nothing is listed.
+    ``read_complete`` is true only when the read held every one of the
+    customer's orders and each was proven to be theirs; only then are
+    ``total_orders`` and the group counts given.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok", "unavailable"]
-    current: list[OrderListEntry] = Field(default_factory=list)
-    previous: list[OrderListEntry] = Field(default_factory=list)
-    other: list[OrderListEntry] = Field(default_factory=list)
-    current_count: int | None = Field(default=None, ge=0)
-    previous_count: int | None = Field(default=None, ge=0)
-    other_count: int | None = Field(default=None, ge=0)
-    counts_complete: bool = False
+    read_complete: bool = False
+    incomplete_reasons: list[str] = Field(default_factory=list)
+    total_orders: int | None = Field(default=None, ge=0)
+    ongoing: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    finished: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    unknown: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    failure_reason: str | None = None
 
 
 class OrderResolveResult(BaseModel):
@@ -291,7 +309,6 @@ class OrderResolveResult(BaseModel):
     status: ToolStatus
     order: OrderSummarySnapshot | None = None
     selection_reason: str | None = None
-    customer_orders: CustomerOrderList | None = None
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     failure_reason: str | None = None
 

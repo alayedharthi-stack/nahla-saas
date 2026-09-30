@@ -72,13 +72,15 @@ def test_every_tool_the_instructions_name_is_declared_and_nothing_else_is_unacco
     in the registry (a rename on one side leaves the model calling nothing),
     and a tool the registry declares beyond those names must be one the
     registry names on purpose (``PILOT_ONLY_TOOL_NAMES``: the owner-approved
-    read of shareable promotions), never an accidental exposure."""
+    reads of the customer's order history, saved addresses and shareable
+    promotions), never an accidental exposure."""
     assert set(pi.INSTRUCTION_TOOL_NAMES) <= set(alt.LIVE_TOOL_NAMES)
     assert set(alt.LIVE_TOOL_NAMES) - set(pi.INSTRUCTION_TOOL_NAMES) == set(alt.PILOT_ONLY_TOOL_NAMES)
     # Reads the owner approved and the instructions deliberately never name, so
     # when to use them stays the model's call rather than a step it is ordered
     # through.
-    assert alt.PILOT_ONLY_TOOL_NAMES == ("get_customer_addresses",
+    assert alt.PILOT_ONLY_TOOL_NAMES == ("list_customer_orders",
+                                         "get_customer_addresses",
                                          "list_shareable_promotions")
 
 
@@ -177,7 +179,7 @@ def test_no_declaration_refers_to_a_tool_that_is_not_exposed():
             if "_" in token and token.islower() and token.replace("_", "").isalpha():
                 if token in {"order_number", "product_id", "order_id", "evidence_ref",
                              "evidence_refs", "claims_commerce_facts", "input_schema",
-                             "more_results", "exclude_shown"}:
+                             "more_results", "exclude_shown", "total_orders", "read_complete"}:
                     continue
                 assert token in declared, (tool["name"], token)
 

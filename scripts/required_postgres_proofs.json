@@ -801,21 +801,21 @@
       ]
     },
     {
-      "id": "customer_order_list",
+      "id": "customer_order_history",
       "kind": "proof",
-      "module": "tests/commerce_reliability/test_customer_order_list_pg.py",
-      "origin": "Customer order list — the order lookup carries the customer's other orders beside the resolved one, on real PostgreSQL: every order counted by the resolver's own JSONB phone match (all three stored phone formats), grouped by what each status says (in progress, finished including refunded, returned and failed, or a status the platform does not know) and bounded, counted only when the read held every order (a read at its limit gives no count), never another tenant's order or an order linked to another customer even when it carries this customer's phone, and a listed order not authorized for the details read",
+      "module": "tests/commerce_reliability/test_customer_order_history_pg.py",
+      "origin": "Customer order history - the runtime reads a customer's order history on request, on real PostgreSQL: every order counted by the resolver's own JSONB phone match in every stored phone format and never another store's or another customer's, no total when the read reaches its limit, a Salla completed order read as ongoing (fulfilled, not shipped), a listed order not authorized for the details read, and a history read that fails inside the database leaving the session's transaction usable for the tools after it (savepoint)",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
       },
       "nodeids": [
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_the_observed_shape_is_counted_by_the_jsonb_phone_match",
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_the_phone_formats_the_resolver_matches_are_all_counted",
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_another_tenants_and_another_customers_orders_are_not_counted",
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_a_read_that_reaches_its_limit_gives_no_counts",
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_finished_and_unknown_statuses_are_grouped_by_what_they_say",
-        "tests/commerce_reliability/test_customer_order_list_pg.py::test_a_listed_order_is_not_authorized_for_the_details_read"
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_the_observed_shape_is_counted_by_the_jsonb_phone_match",
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_every_stored_phone_format_is_counted_and_no_other_store_or_customer",
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_read_at_its_limit_gives_no_total",
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_salla_completed_order_is_ongoing",
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_listed_order_is_not_authorized_for_the_details_read",
+        "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_failed_history_read_leaves_the_transaction_usable"
       ]
     }
   ]
