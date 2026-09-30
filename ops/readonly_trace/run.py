@@ -111,16 +111,15 @@ def orders(conn):
                        "cod": {k: _small(meta.get(k)) for k in COD_KEYS if k in meta},
                        "cod_reminders": _small(meta.get("cod_reminders"))})
         events = conn.execute(text(
-            "SELECT event_type, severity, created_at, payload FROM system_events "
-            "WHERE tenant_id = :t AND reference_id = :r ORDER BY created_at"),
+            "SELECT event_type, count(*), min(created_at), max(created_at), "
+            "min((payload->>'elapsed_minutes')::int), max((payload->>'elapsed_minutes')::int), "
+            "max((payload->>'cancel_after_minutes')::int) FROM system_events "
+            "WHERE tenant_id = :t AND reference_id = :r GROUP BY event_type ORDER BY min(created_at)"),
             {"t": TENANT, "r": str(order_id)}).all()
-        for event_type, severity, created_at, payload in events:
-            payload = payload or {}
-            emit("system_event", {"alias": alias, "event_type": event_type, "severity": severity,
-                                  "created_at": created_at,
-                                  "payload": {k: _small(payload.get(k)) for k in
-                                              ("elapsed_minutes", "cancel_after_minutes", "status",
-                                               "reason", "step") if k in payload}})
+        for event_type, count, first, last, min_elapsed, max_elapsed, cancel_after in events:
+            emit("system_events", {"alias": alias, "event_type": event_type, "count": count,
+                                   "first": first, "last": last, "elapsed_minutes": [min_elapsed, max_elapsed],
+                                   "cancel_after_minutes": cancel_after})
         if external_id:
             hooks = conn.execute(text(
                 "SELECT event_type, received_at, status, parsed_payload FROM webhook_events "
