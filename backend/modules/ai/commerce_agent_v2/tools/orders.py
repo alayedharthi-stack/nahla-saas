@@ -320,7 +320,7 @@ MAX_LISTED_CURRENT_ORDERS = 5
 MAX_LISTED_PREVIOUS_ORDERS = 5
 MAX_LISTED_OTHER_ORDERS = 3
 
-# Statuses that mean an order is finished. The listing's own reading: which
+# States that mean an order is finished. The listing's own reading: which
 # order the resolver selects first is decided by its open/closed rule, unchanged.
 _FINISHED_ORDER_STATUSES = frozenset({
     "cancelled", "canceled", "abandoned", "delivered", "completed", "complete",
@@ -328,13 +328,22 @@ _FINISHED_ORDER_STATUSES = frozenset({
 })
 
 
-def _order_list_group(status: Any) -> str:
-    """``previous`` for a finished status, ``current`` for one the platform knows
-    as still in progress, ``other`` for a status it does not know (or none)."""
+def _order_list_group(status: Any, source: Any = "") -> str:
+    """``previous`` for a finished order, ``current`` for one the platform knows
+    as still in progress, ``other`` for a status it does not know (or none).
+
+    A store's own status words are read through that store's adapter first
+    (``resolve_customer_relevant_state``): the same word can mean different
+    stages on different platforms, so no store's meaning is assumed here.
+    """
+    from store_integration.lifecycle_normalization import resolve_customer_relevant_state
+
     slug = str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
-    if slug in _FINISHED_ORDER_STATUSES:
+    state = str(resolve_customer_relevant_state(provider=str(source or ""), raw_status=slug) or "")
+    state = state.strip().lower().replace(" ", "_").replace("-", "_")
+    if state in _FINISHED_ORDER_STATUSES:
         return "previous"
-    if slug in ORDER_STATUS_LABELS_AR:
+    if state != slug or slug in ORDER_STATUS_LABELS_AR:
         return "current"
     return "other"
 
@@ -388,7 +397,7 @@ def _customer_order_list(
                 if not _linked_to_another_customer(context, row):
                     complete = False
                 continue
-            groups[_order_list_group(getattr(row, "status", ""))].append(row)
+            groups[_order_list_group(getattr(row, "status", ""), getattr(row, "source", ""))].append(row)
         if left_out:
             logger.info("[COMMERCE_V2_ORDERS] customer order list left out %s order(s) outside the "
                         "customer scope tenant=%s", left_out, context.tenant_id)
@@ -397,6 +406,11 @@ def _customer_order_list(
         listed = {name: [_summary_evidence(row) for row in rows_[:limits[name]]]
                   for name, rows_ in groups.items()}
         evidence = [record for name in ("current", "previous", "other") for _, record in listed[name]]
+        # All or nothing: a collision found part-way would leave records of an
+        # unavailable list registered, citable though never shown.
+        known = context.evidence
+        if any(record.ref in known and known[record.ref] != record for record in evidence):
+            raise TenantIsolationViolation("evidence_ref_collision")
         context.register_evidence(evidence)
     except Exception as exc:  # noqa: BLE001 - the resolved order stands; the list is reported unavailable
         logger.warning("[COMMERCE_V2_ORDERS] customer order list unavailable tenant=%s error=%s",
