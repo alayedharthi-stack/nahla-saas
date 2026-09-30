@@ -114,23 +114,35 @@ class Scenario:
 # A customer's order history: (status, days ago), newest last. Every order is
 # matched by the phone in customer_info only (no customer id) - the shape the
 # read-only trace found in production. Statuses are the ones a synced store uses.
+# "many": eleven orders - in progress, one Salla ``completed`` (fulfilled, not
+# shipped), delivered, cancelled, abandoned, and one status the platform cannot
+# read. "over_limit": more orders than one history read holds. "fulfilled_only":
+# the newest order is Salla ``completed``, an older one delivered.
 ORDER_SETS: Dict[str, Tuple[Tuple[str, int], ...]] = {
     "many": (("delivered", 150), ("delivered", 120), ("cancelled", 90), ("abandoned", 60),
-             ("in_progress", 45), ("completed", 30), ("in_progress", 20), ("cancelled", 6),
-             ("cancelled", 5), ("in_progress", 3)),
+             ("in_progress", 45), ("completed", 30), ("merchant_custom_stage", 25), ("in_progress", 20),
+             ("cancelled", 6), ("cancelled", 5), ("in_progress", 3)),
     "one": (("in_progress", 4),),
     "closed_only": (("delivered", 90), ("cancelled", 40), ("delivered", 12)),
     "none": (),
+    "over_limit": tuple((("delivered", "cancelled")[i % 2], 400 - 7 * i) for i in range(53))
+                  + (("in_progress", 4), ("in_progress", 2)),
+    "fulfilled_only": (("delivered", 60), ("completed", 2)),
 }
+# Orders that carry the customer's phone but are not theirs to count: two in
+# another store, one in this store linked to another customer.
+FOREIGN_SETS = {"many": True, "one": True}
 
 SCENARIOS: Tuple[Scenario, ...] = (
-    # Order history questions (tenant 1, runtime turn 112 and the earlier turns).
+    # Order questions (tenant 1, runtime turn 112 and the earlier turns).
+    Scenario("where_many", "A", "وين طلبي؟", "fresh", "orders", "many"),
     Scenario("hist_many", "A", "وش طلباتي السابقة؟", "fresh", "orders", "many"),
+    Scenario("count_many", "A", "كم طلب عندي عندكم؟", "fresh", "orders", "many"),
     Scenario("hist_one", "A", "وش طلباتي السابقة؟", "fresh", "orders", "one"),
     Scenario("hist_closed_only", "A", "وش طلباتي السابقة؟", "fresh", "orders", "closed_only"),
     Scenario("hist_none", "A", "وش طلباتي السابقة؟", "fresh", "orders", "none"),
-    Scenario("count_many", "A", "كم طلب عندي عندكم؟", "fresh", "orders", "many"),
-    Scenario("where_many", "A", "وين طلبي؟", "fresh", "orders", "many"),
+    Scenario("count_over_limit", "A", "كم طلب عندي عندكم؟", "fresh", "orders", "over_limit"),
+    Scenario("where_fulfilled", "A", "وين طلبي؟", "fresh", "orders", "fulfilled_only"),
     # The observed message (tenant 33) and the owner's variant.
     Scenario("orig_fresh", "A", "عيال محمد عندك", "fresh", "clarify"),
     Scenario("orig_social", "A", "عيال محمد عندك", "social", "clarify"),
@@ -287,13 +299,32 @@ def new_conversation(engine: Any, store: Store, name: str) -> Tuple[int, int, st
     return customer_id, conversation_id, phone
 
 
-def seed_orders(engine: Any, store: Store, phone: str, name: str, key: str) -> set:
-    """The customer's orders, phone-only; returns the numbers a reply may truthfully carry."""
+def seed_orders(engine: Any, store: Store, phone: str, name: str, key: str,
+                other_store: Any = None) -> set:
+    """The customer's orders, phone-only; returns the numbers a reply may truthfully carry.
+
+    With a foreign set, orders that carry the same phone but are not this
+    customer's are seeded too; their numbers are not returned (a reply that
+    carries one is wrong)."""
     from sqlalchemy import text
 
     numbers: set = set()
     now = time.time()
     with engine.begin() as conn:
+        if FOREIGN_SETS.get(key) and other_store is not None:
+            neighbour = int(conn.execute(text(
+                "INSERT INTO customers (tenant_id, phone, normalized_phone, name) VALUES (:t, :p, :p, :n) "
+                "RETURNING id"), {"t": store.tenant_id, "p": "+96659" + str(uuid.uuid4().int)[:7],
+                                  "n": "نورة عبدالله"}).scalar_one())
+            for tenant_id, customer_id in ((other_store.tenant_id, None), (other_store.tenant_id, None),
+                                           (store.tenant_id, neighbour)):
+                conn.execute(text(
+                    "INSERT INTO orders (tenant_id, customer_id, external_id, external_order_number, status, "
+                    "total, customer_info, source, metadata) VALUES (:t, :c, :x, :n, 'in_progress', '99', "
+                    "CAST(:ci AS JSONB), 'salla', CAST('{}' AS JSONB))"),
+                    {"t": tenant_id, "c": customer_id, "x": "ext-" + uuid.uuid4().hex[:10],
+                     "n": str(9000000 + int(uuid.uuid4().int % 900000)),
+                     "ci": json.dumps({"phone": phone})})
         for index, (status, days) in enumerate(ORDER_SETS.get(key) or ()):
             number = str(2000000 + int(uuid.uuid4().int % 7000000))
             total = str(99 + 50 * (index % 4))
@@ -424,15 +455,17 @@ class RecordingProvider:
                         "reason": result.get("reason"),
                         "products": [p.get("title") for p in result.get("products") or []][:5],
                         "sections": [s.get("title") for s in result.get("sections") or []][:5],
-                        "order_status": (result.get("order") or {}).get("status")
+                        "order": {k: (result.get("order") or {}).get(k) for k in
+                                  ("status", "stage", "status_label")}
                         if isinstance(result.get("order"), dict) else None,
-                        "customer_orders": {k: (result.get("customer_orders") or {}).get(k) for k in
-                                            ("status", "current_count", "previous_count", "other_count",
-                                             "counts_complete")}
-                        if isinstance(result.get("customer_orders"), dict) else None,
-                        "listed": [len((result.get("customer_orders") or {}).get(g) or [])
-                                   for g in ("current", "previous", "other")]
-                        if isinstance(result.get("customer_orders"), dict) else None,
+                        "history": {"read_complete": result.get("read_complete"),
+                                    "total_orders": result.get("total_orders"),
+                                    "incomplete_reasons": result.get("incomplete_reasons"),
+                                    "counts": [(result.get(g) or {}).get("count")
+                                               for g in ("ongoing", "finished", "unknown")],
+                                    "listed": [(result.get(g) or {}).get("listed")
+                                               for g in ("ongoing", "finished", "unknown")]}
+                        if call.get("name") == "list_customer_orders" else None,
                     })
         return out
 
@@ -484,7 +517,8 @@ def run_turn(ctx: "Context", store: Store, scenario: Scenario) -> Dict[str, Any]
     name = NAMES[scenario.store]
     customer_id, conversation_id, phone = new_conversation(ctx.engine, store, name)
     seed_context(ctx.engine, store, conversation_id, phone, CONTEXTS[scenario.context])
-    order_numbers = seed_orders(ctx.engine, store, phone, name, scenario.orders)
+    order_numbers = seed_orders(ctx.engine, store, phone, name, scenario.orders,
+                                other_store=ctx.stores.get("C"))
     db = ctx.session_factory()
     try:
         StateManager.save_message(db, phone, scenario.message, "inbound", conversation_id=conversation_id,
