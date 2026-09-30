@@ -966,7 +966,7 @@ as well as through the ledger.
   `list_customer_orders` (owner decision, 30 September 2026: a read the registry declares
   beyond the tools the instructions name, like the two below; its declaration is text the
   model sees and is recorded as a declaration change). The one-order lookup,
-  `resolve_customer_order`, still returns one order, in the same fields, and nothing about a
+  `resolve_customer_order`, still returns one order, in the same fields on every path, and nothing about a
   history; two of its values changed with the history: the status label is read the same
   way as the history's (a Salla `completed` order is labelled as fulfilled, not as
   complete; any other status keeps its own label), and — in every order tool — the order
@@ -978,7 +978,8 @@ as well as through the ledger.
   finished or of a status the platform cannot read — each store's status read through its
   lifecycle adapter, so a Salla `completed` order (fulfilled, not yet shipped) is ongoing —
   and listed a few per group. A total is given only when the read held every order and each
-  was proven the customer's; otherwise only a lower bound (`total_orders_at_least`). A
+  was proven the customer's; otherwise only lower bounds (`total_orders_at_least`, and each
+  group's `count_at_least`). A
   failed read is reported unavailable, never as no orders, and runs in a savepoint so the
   tools after it are unaffected. Listing opens nothing: the details and shipment reads stay
   limited to orders resolved in the turn, and an entry carries no internal number.

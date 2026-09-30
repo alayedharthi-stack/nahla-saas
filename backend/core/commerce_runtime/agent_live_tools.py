@@ -1007,7 +1007,7 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         "cannot read. Each group lists at most a few orders; listed says how many it shows. "
         "Counts and total_orders are given only when read_complete is true; otherwise the "
         "total is not known: total_orders_at_least and each group's count_at_least are how "
-        "many orders there are at least, and the listed orders are not all of them. An "
+        "many orders there are at least, and there may be more than are listed. An "
         "unavailable result means the "
         "history could not be read, not that there are no orders. Abandoned carts are not "
         "orders and are not included. Listing an order does not open its details or shipment.",

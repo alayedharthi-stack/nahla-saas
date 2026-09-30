@@ -229,12 +229,6 @@ class KnowledgeSearchResult(BaseModel):
     failure_reason: str | None = None
 
 
-# Where an order stands, as its store's own status reads through the platform's
-# lifecycle adapter: still under way, finished, or a status the platform cannot
-# read (claimed neither way).
-OrderStage = Literal["ongoing", "finished", "unknown"]
-
-
 class OrderSummarySnapshot(BaseModel):
     """Customer-safe projection of one authorized local order."""
 
@@ -244,7 +238,6 @@ class OrderSummarySnapshot(BaseModel):
     order_reference: str | None = None
     status: str
     status_label: str
-    stage: OrderStage
     evidence_ref: str
 
 
@@ -292,7 +285,7 @@ class CustomerOrderHistoryResult(BaseModel):
     ``total_orders`` and the group counts given. Otherwise
     ``total_orders_at_least`` is how many of the customer's orders the read
     proved: the customer has at least that many, and how many more is not
-    known — the orders listed are never all of them.
+    known — there may be more than are listed.
     """
 
     model_config = ConfigDict(extra="forbid")

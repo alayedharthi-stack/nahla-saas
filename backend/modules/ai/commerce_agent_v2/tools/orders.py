@@ -212,10 +212,8 @@ _ONGOING_ORDER_STATES = frozenset({
 })
 # The label for a store's finished-sounding word that its adapter reads as still
 # under way. An order the adapter reads as "ready" is fulfilled and not yet
-# shipped (store_adapters/salla_lifecycle), which the map labels ``fulfilled``;
-# one it reads as "preparing" is being processed, which the map labels
-# ``processing``.
-_STATE_LABEL_SLUG = {"ready": "fulfilled", "preparing": "processing"}
+# shipped (store_adapters/salla_lifecycle), which the map labels ``fulfilled``.
+_STATE_LABEL_SLUG = {"ready": "fulfilled"}
 
 
 def _status_slug(value: Any) -> str:
@@ -272,7 +270,9 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
     order_id = snapshot.order_id
     reference = _customer_reference(snapshot)
     status = str(snapshot.status or "").strip()
-    stage, status_label = _order_reading(status, snapshot.source)
+    # Where the order stands is the history's grouping; the lookup carries the
+    # label only, in the fields it always had.
+    _, status_label = _order_reading(status, snapshot.source)
     evidence_ref = f"order:summary:{order_id}"
     facts: list[CanonicalEvidenceFact] = []
     if reference:
@@ -308,7 +308,6 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
             "order_reference": reference,
             "status": status,
             "status_label": status_label,
-            "stage": stage,
         },
         provenance={
             "service": "core.local_order_resolver.resolve_customer_order_context",
@@ -322,7 +321,6 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
             order_reference=reference,
             status=status,
             status_label=status_label,
-            stage=stage,
             evidence_ref=evidence_ref,
         ),
         evidence,
@@ -414,7 +412,7 @@ def _history_evidence(context: CommerceAgentContext, order: Any) -> tuple[str, O
         source="order_summary",
         source_id=f"h{token}",
         facts=facts,
-        fields={"order_reference": reference, "status_label": status_label, "stage": stage},
+        fields={"order_reference": reference, "status_label": status_label},
         provenance={
             "service": "core.local_order_resolver.read_customer_order_history",
             "record": "orders",

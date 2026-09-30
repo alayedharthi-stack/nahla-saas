@@ -174,9 +174,12 @@ def test_the_one_order_lookup_still_returns_one_order_and_no_history():
     result = resolve(store.context())
     assert result.order.order_reference == newest_open.external_order_number
     assert result.selection_reason == "latest_open_order"
-    assert result.order.stage == "ongoing"
     assert set(OrderResolveResult.model_fields) == {"status", "order", "selection_reason", "evidence",
                                                     "failure_reason"}
+    # The order in the fields it always had: where it stands is the history's grouping.
+    assert set(result.model_dump()["order"]) == {"order_id", "order_reference", "status", "status_label",
+                                                 "evidence_ref"}
+    assert set(result.evidence[0].fields) == {"order_id", "order_reference", "status", "status_label"}
 
 
 # ── One, finished only, none ─────────────────────────────────────────────────
@@ -306,7 +309,7 @@ def test_a_salla_completed_order_is_fulfilled_not_finished_in_both_reads():
     assert entry.status_label == ORDER_STATUS_LABELS_AR["fulfilled"]
     assert entry.status_label != ORDER_STATUS_LABELS_AR["completed"]
     resolved = resolve(context)
-    assert (resolved.order.stage, resolved.order.status_label) == ("ongoing", entry.status_label)
+    assert resolved.order.status_label == entry.status_label
 
 
 @pytest.mark.parametrize("status", ["ready", "packed", "ready_for_pickup", "preparing", "in_review"])
