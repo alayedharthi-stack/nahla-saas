@@ -268,13 +268,15 @@ class OrderHistoryGroup(BaseModel):
     """The customer's orders at one stage: how many, and the newest few.
 
     ``listed`` is how many ``orders`` holds. ``count`` and ``by_status`` are
-    given only when the read held every order of the customer; a count of the
-    orders read is never given in their place.
+    given only when the read held every order of the customer; otherwise
+    ``count_at_least`` is how many of this stage's orders the read proved — a
+    bound, never the count, and never the number listed.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     count: int | None = Field(default=None, ge=0)
+    count_at_least: int | None = Field(default=None, ge=0)
     listed: int = Field(default=0, ge=0)
     orders: list[OrderHistoryEntry] = Field(default_factory=list)
     by_status: dict[str, int] | None = None

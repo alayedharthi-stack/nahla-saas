@@ -495,6 +495,7 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
             by_status[entry.status_label] = by_status.get(entry.status_label, 0) + 1
         return OrderHistoryGroup(
             count=len(grouped[name]) if read_complete else None,
+            count_at_least=None if read_complete else len(grouped[name]),
             listed=len(listed[name]),
             orders=[entry for entry, _ in listed[name]],
             by_status=by_status if read_complete else None,
