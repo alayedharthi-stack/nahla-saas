@@ -506,7 +506,7 @@ def test_the_order_history_reaches_the_model_counted_grouped_and_without_ids(bin
     finished = [Snapshot(order_reference="A-12", status_label="ملغي", evidence_ref="order:history:h2b"),
                 Snapshot(order_reference=None, status_label="تم التسليم", evidence_ref="order:history:h3c")]
     patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
-        "ok", read_complete=True, incomplete_reasons=[], total_orders=9,
+        "ok", read_complete=True, incomplete_reasons=[], total_orders=9, total_orders_at_least=None,
         ongoing=_history_group(1, ongoing, {"قيد التنفيذ": 1}),
         finished=_history_group(8, finished, {"ملغي": 6, "تم التسليم": 2}),
         unknown=_history_group(0, []),
@@ -527,10 +527,11 @@ def test_an_incomplete_history_reaches_the_model_without_a_total(binding, monkey
     listed = [Snapshot(order_reference="A-31", status_label="قيد التنفيذ", evidence_ref="order:history:h1a")]
     patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
         "ok", read_complete=False, incomplete_reasons=["read_limit_reached"], total_orders=None,
+        total_orders_at_least=50,
         ongoing=_history_group(None, listed), finished=_history_group(None, []),
         unknown=_history_group(None, []), evidence=[Record("order:history:h1a")])))
     body = run(binding, "list_customer_orders", {}).result
-    assert (body["read_complete"], body["total_orders"]) == (False, None)
+    assert (body["read_complete"], body["total_orders"], body["total_orders_at_least"]) == (False, None, 50)
     assert body["incomplete_reasons"] == ["read_limit_reached"]
     assert body["ongoing"]["count"] is None and body["ongoing"]["listed"] == 1
 
@@ -540,7 +541,8 @@ def test_an_unreadable_history_says_so_and_never_reads_as_no_orders(binding, mon
         "unavailable", read_complete=False, total_orders=None, evidence=[],
         failure_reason="history_unreadable")))
     observation = run(binding, "list_customer_orders", {})
-    assert observation.result == {"status": "unavailable", "read_complete": False}
+    assert observation.result == {"status": "unavailable", "read_complete": False,
+                                  "reason": "history_unreadable"}
     assert observation.evidence_refs == ()
 
 

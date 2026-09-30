@@ -8,7 +8,8 @@ here, on the database it runs on:
 
 * every order is counted by the same JSONB phone match the resolver uses, in
   every stored phone format, and never another store's or another customer's;
-* a read at its limit gives no total;
+* an abandoned cart, kept by store sync as an order row, is not counted;
+* a read at its limit gives no total, only a lower bound;
 * a Salla ``completed`` order is ongoing (fulfilled, not yet shipped);
 * listing an order does not authorize reading it;
 * a history read that fails inside the database leaves the session's
@@ -67,12 +68,14 @@ class Store:
         self._n = 0
 
     def order(self, status: str, *, phone: str = PHONE, customer_id: Any = None,
-              tenant_id: Any = None, source: str = "salla") -> Any:
+              tenant_id: Any = None, source: str = "salla", cart: bool = False) -> Any:
         from models import Order
 
         self._n += 1
         row = Order(tenant_id=tenant_id or self.tenant.id, customer_id=customer_id,
-                    external_id=f"pg-order-{self.tenant.id}-{self._n}",
+                    external_id=(f"cart-{self.tenant.id}-{self._n}" if cart
+                                 else f"pg-order-{self.tenant.id}-{self._n}"),
+                    is_abandoned=cart,
                     external_order_number=f"GEN-{self.tenant.id}-{self._n}", status=status, total="99",
                     source=source, customer_info={"phone": phone},
                     line_items=[{"name": "عطر ورد 100ml", "quantity": 1}])
@@ -109,14 +112,24 @@ def refs(group: Any) -> list:
 
 
 def test_the_observed_shape_is_counted_by_the_jsonb_phone_match(store) -> None:
-    for status in ("cancelled", "cancelled", "abandoned", "delivered", "cancelled", "canceled",
+    for status in ("cancelled", "cancelled", "delivered", "cancelled", "canceled",
                    "cancelled", "cancelled", "cancelled", "cancelled", "cancelled"):
         store.order(status)
+    store.order("abandoned", cart=True)
     for _ in range(9):
         store.order("in_progress")
     result = history(store.context())
-    assert (result.read_complete, result.total_orders) == (True, 20)
-    assert (result.ongoing.count, result.finished.count) == (9, 11)
+    assert (result.read_complete, result.total_orders) == (True, 19)
+    assert (result.ongoing.count, result.finished.count) == (9, 10)
+
+
+def test_an_abandoned_cart_is_not_counted(store) -> None:
+    store.order("abandoned", cart=True)
+    store.order("abandoned")
+    store.order("pending", cart=True)
+    store.order("delivered")
+    result = history(store.context())
+    assert (result.read_complete, result.total_orders) == (True, 1)
 
 
 def test_every_stored_phone_format_is_counted_and_no_other_store_or_customer(store) -> None:
@@ -134,6 +147,7 @@ def test_a_read_at_its_limit_gives_no_total(store) -> None:
         store.order("cancelled")
     result = history(store.context())
     assert (result.read_complete, result.total_orders, result.finished.count) == (False, None, None)
+    assert result.total_orders_at_least == CUSTOMER_ORDER_HISTORY_LIMIT
 
 
 def test_a_salla_completed_order_is_ongoing(store) -> None:

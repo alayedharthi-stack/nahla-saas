@@ -287,7 +287,10 @@ class CustomerOrderHistoryResult(BaseModel):
     nothing about how many orders the customer has, and nothing is listed.
     ``read_complete`` is true only when the read held every one of the
     customer's orders and each was proven to be theirs; only then are
-    ``total_orders`` and the group counts given.
+    ``total_orders`` and the group counts given. Otherwise
+    ``total_orders_at_least`` is how many of the customer's orders the read
+    proved: the customer has at least that many, and how many more is not
+    known — the orders listed are never all of them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -296,6 +299,7 @@ class CustomerOrderHistoryResult(BaseModel):
     read_complete: bool = False
     incomplete_reasons: list[str] = Field(default_factory=list)
     total_orders: int | None = Field(default=None, ge=0)
+    total_orders_at_least: int | None = Field(default=None, ge=0)
     ongoing: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
     finished: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
     unknown: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)

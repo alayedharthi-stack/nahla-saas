@@ -82,13 +82,16 @@ class Store:
         self._n = 0
 
     def order(self, status: str, *, linked: bool = False, phone: str = PHONE, customer_id: Any = "self",
-              tenant_id: Any = None, source: str = "salla", number: Any = "auto") -> Order:
-        """An order of this customer's: by phone only (as observed), or by customer id."""
+              tenant_id: Any = None, source: str = "salla", number: Any = "auto",
+              cart: bool = False) -> Order:
+        """An order of this customer's: by phone only (as observed), or by customer id.
+        ``cart`` stores it as store sync stores an abandoned cart."""
         self._n += 1
         if customer_id == "self":
             customer_id = self.customer.id if linked else None
         row = Order(tenant_id=tenant_id or self.tenant.id, customer_id=customer_id,
-                    external_id=f"platform-{700000 + self._n}",
+                    external_id=(f"cart-{900000 + self._n}" if cart else f"platform-{700000 + self._n}"),
+                    is_abandoned=cart,
                     external_order_number=(f"GEN-{1000 + self._n}" if number == "auto" else number),
                     status=status, total="99", source=source, customer_name="أحمد سالم",
                     customer_info={"phone": phone} if phone else {},
@@ -121,22 +124,39 @@ def refs(group: Any) -> list:
 
 
 def test_the_observed_customer_gets_every_order_counted_and_a_few_listed():
-    """Tenant 1 turn 112: twenty orders matched by phone only, nine in
-    progress and eleven closed. The history counts them all."""
+    """Tenant 1 turn 112: twenty rows matched by phone only, nine in progress
+    and eleven closed — one of them abandoned, which is how store sync keeps a
+    cart. The history counts every order and leaves the cart out."""
     store = Store()
-    closed = [store.order(s) for s in ("cancelled", "cancelled", "abandoned", "delivered", "cancelled",
-                                       "canceled", "cancelled", "cancelled", "cancelled", "cancelled",
-                                       "cancelled")]
+    closed = [store.order(s) for s in ("cancelled", "cancelled", "delivered", "cancelled", "canceled",
+                                       "cancelled", "cancelled", "cancelled", "cancelled", "cancelled")]
+    cart = store.order("abandoned", cart=True)
     open_ = [store.order("in_progress") for _ in range(9)]
     result = history(store.context())
     assert result.status == "ok" and result.read_complete is True and result.incomplete_reasons == []
-    assert result.total_orders == 20
+    assert result.total_orders == 19 and result.total_orders_at_least is None
     assert (result.ongoing.count, result.ongoing.listed) == (9, MAX_LISTED_ONGOING_ORDERS)
-    assert (result.finished.count, result.finished.listed) == (11, MAX_LISTED_FINISHED_ORDERS)
+    assert (result.finished.count, result.finished.listed) == (10, MAX_LISTED_FINISHED_ORDERS)
     assert refs(result.ongoing) == [o.external_order_number for o in reversed(open_)][:MAX_LISTED_ONGOING_ORDERS]
     assert refs(result.finished) == [o.external_order_number for o in reversed(closed)][:MAX_LISTED_FINISHED_ORDERS]
-    assert sum(result.finished.by_status.values()) == 11          # the unlisted ones are counted too
+    assert cart.external_order_number not in refs(result.finished)
+    assert sum(result.finished.by_status.values()) == 10          # the unlisted ones are counted too
     assert sum(result.ongoing.by_status.values()) == 9
+
+
+def test_an_abandoned_cart_is_not_an_order():
+    """Store sync keeps a cart as an order row (``is_abandoned``, status
+    ``abandoned``, a cart id). The platform's customer ledger counts either
+    mark as abandoned; the history lists and counts neither."""
+    store = Store()
+    store.order("abandoned", cart=True)
+    store.order("abandoned")                              # the status alone
+    flagged = store.order("pending", cart=True)           # the flag alone
+    mine = store.order("delivered")
+    result = history(store.context())
+    assert (result.total_orders, result.read_complete) == (1, True)
+    assert refs(result.finished) == [mine.external_order_number]
+    assert flagged.external_order_number not in refs(result.ongoing)
 
 
 def test_the_one_order_lookup_still_returns_one_order_and_no_history():
@@ -190,6 +210,7 @@ def test_a_read_at_its_limit_gives_no_total_and_no_counts():
     assert result.status == "ok" and result.read_complete is False
     assert result.incomplete_reasons == ["read_limit_reached"]
     assert result.total_orders is None
+    assert result.total_orders_at_least == CUSTOMER_ORDER_HISTORY_LIMIT     # a bound, never a total
     for group in (result.ongoing, result.finished, result.unknown):
         assert group.count is None and group.by_status is None
     assert result.ongoing.listed == 1 and result.finished.listed == MAX_LISTED_FINISHED_ORDERS
@@ -279,6 +300,16 @@ def test_a_salla_completed_order_is_fulfilled_not_finished_in_both_reads():
     assert (resolved.order.stage, resolved.order.status_label) == ("ongoing", entry.status_label)
 
 
+@pytest.mark.parametrize("status,label_key", [("ready", "fulfilled"), ("packed", "fulfilled"),
+                                              ("preparing", "processing")])
+def test_statuses_the_salla_adapter_reads_as_under_way_are_ongoing(status: str, label_key: str):
+    store = Store()
+    order = store.order(status)
+    result = history(store.context())
+    assert refs(result.ongoing) == [order.external_order_number]
+    assert result.ongoing.orders[0].status_label == ORDER_STATUS_LABELS_AR[label_key]
+
+
 def test_a_completed_order_from_a_store_without_that_meaning_is_finished():
     store = Store()
     order = store.order("completed", source="manual")
@@ -329,6 +360,7 @@ def test_an_order_whose_owner_cannot_be_proven_is_left_out_and_withholds_the_tot
     assert refs(result.ongoing) == [mine.external_order_number]
     assert result.read_complete is False and result.incomplete_reasons == ["order_scope_unverified"]
     assert result.total_orders is None and result.ongoing.count is None
+    assert result.total_orders_at_least == 1
 
 
 def test_an_order_linked_to_another_customer_is_left_out_without_withholding_the_total(monkeypatch):
@@ -380,4 +412,7 @@ def test_nothing_listed_is_an_internal_number():
         for internal in (str(numbered.id), str(unnumbered.id), unnumbered.external_id):
             assert internal not in entry.evidence_ref.split(":")
     assert refs(result.ongoing) == [None] and refs(result.finished) == [numbered.external_order_number]
-    assert resolve(context).order.order_reference is None
+    resolved = resolve(context)
+    assert resolved.order.order_reference is None
+    details = asyncio.run(get_order_details_impl(context, order_id=resolved.order.order_id))
+    assert details.order.order_reference is None                 # the same in every order tool

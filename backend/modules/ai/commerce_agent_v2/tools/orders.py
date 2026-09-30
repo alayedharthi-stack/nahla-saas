@@ -204,10 +204,17 @@ _FINISHED_ORDER_STATES = frozenset({
     "cancelled", "canceled", "abandoned", "delivered", "completed", "complete",
     "refunded", "returned", "failed",
 })
-# The one adapter state the platform's label map names differently: an order
-# the adapter reads as "ready" is fulfilled and not yet shipped
-# (store_adapters/salla_lifecycle), which the map labels ``fulfilled``.
-_STATE_LABEL_SLUG = {"ready": "fulfilled"}
+# The platform's lifecycle states an order is still under way in: the states a
+# store's lifecycle adapter reads a status into
+# (store_integration.lifecycle_normalization), before shipment is complete.
+_ONGOING_ORDER_STATES = frozenset({
+    "payment_pending", "paid", "confirmed", "preparing", "ready", "shipped", "out_for_delivery",
+})
+# Adapter states the platform's label map names differently. An order the
+# adapter reads as "ready" is fulfilled and not yet shipped
+# (store_adapters/salla_lifecycle), which the map labels ``fulfilled``; one it
+# reads as "preparing" is being processed, which the map labels ``processing``.
+_STATE_LABEL_SLUG = {"ready": "fulfilled", "preparing": "processing"}
 
 
 def _status_slug(value: Any) -> str:
@@ -237,12 +244,14 @@ def _order_reading(status: Any, source: Any) -> tuple[str, str]:
         state = slug
     if state in _FINISHED_ORDER_STATES:
         stage = "finished"
-    elif state != slug or slug in ORDER_STATUS_LABELS_AR:
+    elif state in _ONGOING_ORDER_STATES or slug in ORDER_STATUS_LABELS_AR:
         stage = "ongoing"
     else:
         stage = "unknown"
     if slug in _FINISHED_ORDER_STATES and stage != "finished":
         return stage, order_status_label_ar(_STATE_LABEL_SLUG.get(state, state))
+    if slug not in ORDER_STATUS_LABELS_AR and state in _STATE_LABEL_SLUG:
+        return stage, order_status_label_ar(_STATE_LABEL_SLUG[state])
     return stage, order_status_label_ar(str(status or "").strip())
 
 
@@ -491,11 +500,13 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
             by_status=by_status if read_complete else None,
         )
 
+    proven = sum(len(items) for items in grouped.values())
     return CustomerOrderHistoryResult(
         status="ok",
         read_complete=read_complete,
         incomplete_reasons=reasons,
-        total_orders=sum(len(items) for items in grouped.values()) if read_complete else None,
+        total_orders=proven if read_complete else None,
+        total_orders_at_least=None if read_complete else proven,
         ongoing=group("ongoing"),
         finished=group("finished"),
         unknown=group("unknown"),
@@ -540,7 +551,7 @@ async def get_order_details_impl(
         return OrderDetailsResult(status="not_found", failure_reason="authorized_order_missing")
 
     snapshot = _snapshot_from_order(order)
-    reference = snapshot.display_reference or None
+    reference = _customer_reference(snapshot)
     total = _canonical_money(snapshot.total)
     currency = _persisted_order_currency(order)
     items = _line_item_snapshots(order)
@@ -693,7 +704,7 @@ def _shipment_snapshot(
         # label_url. Relative internal label routes are deliberately rejected.
         tracking_url = _absolute_http_url(getattr(shipment, "label_url", ""))
     tracking_url = tracking_url or order_meta_facts["tracking_url"] or ""
-    reference = snapshot.display_reference or None
+    reference = _customer_reference(snapshot)
     # The carrier's own last scan. Read from the shipment row only: an order's
     # metadata never carries a verified carrier event.
     latest_event = getattr(shipment, "latest_event", None) if shipment is not None else None

@@ -179,7 +179,8 @@ def test_no_declaration_refers_to_a_tool_that_is_not_exposed():
             if "_" in token and token.islower() and token.replace("_", "").isalpha():
                 if token in {"order_number", "product_id", "order_id", "evidence_ref",
                              "evidence_refs", "claims_commerce_facts", "input_schema",
-                             "more_results", "exclude_shown", "total_orders", "read_complete"}:
+                             "more_results", "exclude_shown", "total_orders", "read_complete",
+                             "total_orders_at_least"}:
                     continue
                 assert token in declared, (tool["name"], token)
 

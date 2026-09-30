@@ -674,12 +674,16 @@ def read_customer_order_history(
     held every one of them.
 
     The same identity clauses the resolver matches by (customer id, or a phone
-    key in ``customer_info``), filtered by tenant before the limit. Unlike the
+    key in ``customer_info``), filtered by tenant before the limit. An abandoned
+    cart is not an order: store sync keeps carts as order rows, so rows the
+    platform's customer ledger counts as abandoned (``is_abandoned``, or the
+    ``abandoned`` status) are left out before the limit too. Unlike the
     resolver's lookups this read swallows nothing: a history that could not be
     read must never read as a customer with no orders, so a failure is raised to
     the caller, and so is a read with no identity to match by.
     """
     from models import Order  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
 
     clauses = _customer_order_identity_clauses(Order, phone=phone, customer_id=customer_id)
     if not clauses:
@@ -687,6 +691,8 @@ def read_customer_order_history(
     rows = (
         db.query(Order)
         .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
+        .filter(Order.is_abandoned.isnot(True),
+                func.lower(func.coalesce(Order.status, "")) != "abandoned")
         .order_by(Order.id.desc())
         .limit(int(limit))
         .all()
