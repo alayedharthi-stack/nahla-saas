@@ -102,7 +102,7 @@ def test_salla_store_route_resolves_current_external_store_id():
 
     response = asyncio.run(serve_widgets_js_by_salla("1298199463", DB()))
     assert b"966555906901" in response.body
-    assert b"app.nahlah.ai/whatsapp-bee.jpg" in response.body
+    assert b"app.nahlah.ai/whatsapp-bee-transparent.png" in response.body
 
 
 def test_salla_loader_detects_theme_store_class():

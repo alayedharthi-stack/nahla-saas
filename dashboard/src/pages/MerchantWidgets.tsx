@@ -14,7 +14,7 @@ import { apiCall } from '../api/client'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
-const NAHLA_CDN_LOGO = '/whatsapp-bee.jpg'
+const NAHLA_CDN_LOGO = '/whatsapp-bee-transparent.png'
 
 function getTenantId(): string {
   return localStorage.getItem('nahla_tenant_id') || ''

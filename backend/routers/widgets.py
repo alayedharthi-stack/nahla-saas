@@ -262,7 +262,7 @@ _JS_HEADERS = {
 
 
 
-_NAHLA_STORE_LOGO = "https://app.nahlah.ai/whatsapp-bee.jpg"
+_NAHLA_STORE_LOGO = "https://app.nahlah.ai/whatsapp-bee-transparent.png"
 
 
 def _safe_widget_image_url(value: Any) -> str:
@@ -484,7 +484,7 @@ function initWhatsApp(c){{
     }}
     #nahla-wa.show{{opacity:1;transform:scale(1);pointer-events:auto;}}
     #nahla-wa .nahla-bee{{
-      width:110px;height:110px;object-fit:contain;mix-blend-mode:normal;
+      width:110px;height:110px;object-fit:contain;
       animation:bee-float 3s ease-in-out infinite;
     }}
     @keyframes bee-float{{
