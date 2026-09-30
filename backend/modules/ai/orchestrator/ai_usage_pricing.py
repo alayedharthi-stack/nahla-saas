@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
 
-PRICING_VERSION = "2026-06-v1"
+PRICING_VERSION = "2026-09-30-v2"
 
 # cost_source distinguishes ledger estimate origin (routing unchanged by this field):
 #   "provisional" — placeholder rates until billing confirms list pricing
@@ -34,10 +34,10 @@ class ModelPricingV2:
 _MODEL_PRICING_V2: Dict[str, ModelPricingV2] = {
     # Anthropic Claude — Opus
     "claude-opus-4-8": ModelPricingV2(
-        Decimal("15"), Decimal("75"), Decimal("1.50"), Decimal("18.75"),
+        Decimal("5"), Decimal("25"), Decimal("0.50"), Decimal("6.25"),
     ),
     "claude-opus-4-6": ModelPricingV2(
-        Decimal("15"), Decimal("75"), Decimal("1.50"), Decimal("18.75"),
+        Decimal("5"), Decimal("25"), Decimal("0.50"), Decimal("6.25"),
     ),
     "claude-opus-4": ModelPricingV2(
         Decimal("15"), Decimal("75"), Decimal("1.50"), Decimal("18.75"),
@@ -57,7 +57,7 @@ _MODEL_PRICING_V2: Dict[str, ModelPricingV2] = {
     ),
     # Haiku
     "claude-haiku-4-5": ModelPricingV2(
-        Decimal("0.80"), Decimal("4"), Decimal("0.08"), Decimal("1.00"),
+        Decimal("1"), Decimal("5"), Decimal("0.10"), Decimal("1.25"),
     ),
     "claude-3-5-haiku": ModelPricingV2(
         Decimal("0.80"), Decimal("4"), Decimal("0.08"), Decimal("1.00"),
