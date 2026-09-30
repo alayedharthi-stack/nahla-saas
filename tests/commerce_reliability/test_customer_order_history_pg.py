@@ -68,7 +68,7 @@ class Store:
         self._n = 0
 
     def order(self, status: str, *, phone: str = PHONE, customer_id: Any = None,
-              tenant_id: Any = None, source: str = "salla", cart: bool = False) -> Any:
+              tenant_id: Any = None, source: str = "salla", cart: bool | None = False) -> Any:
         from models import Order
 
         self._n += 1
@@ -81,6 +81,9 @@ class Store:
                     line_items=[{"name": "عطر ورد 100ml", "quantity": 1}])
         self.session.add(row)
         self.session.flush()
+        if cart is None:                  # the column's default fills a None on insert
+            self.session.query(Order).filter(Order.id == row.id).update(
+                {Order.is_abandoned: None}, synchronize_session="fetch")
         return row
 
     def context(self) -> Any:
@@ -128,8 +131,9 @@ def test_an_abandoned_cart_is_not_counted(store) -> None:
     store.order("abandoned")
     store.order("pending", cart=True)
     store.order("delivered")
+    store.order("processing", cart=None)          # no flag stored (NULL): an order, not a cart
     result = history(store.context())
-    assert (result.read_complete, result.total_orders) == (True, 1)
+    assert (result.read_complete, result.total_orders) == (True, 2)
 
 
 def test_every_stored_phone_format_is_counted_and_no_other_store_or_customer(store) -> None:

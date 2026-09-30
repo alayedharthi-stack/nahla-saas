@@ -210,10 +210,11 @@ _FINISHED_ORDER_STATES = frozenset({
 _ONGOING_ORDER_STATES = frozenset({
     "payment_pending", "paid", "confirmed", "preparing", "ready", "shipped", "out_for_delivery",
 })
-# Adapter states the platform's label map names differently. An order the
-# adapter reads as "ready" is fulfilled and not yet shipped
-# (store_adapters/salla_lifecycle), which the map labels ``fulfilled``; one it
-# reads as "preparing" is being processed, which the map labels ``processing``.
+# The label for a store's finished-sounding word that its adapter reads as still
+# under way. An order the adapter reads as "ready" is fulfilled and not yet
+# shipped (store_adapters/salla_lifecycle), which the map labels ``fulfilled``;
+# one it reads as "preparing" is being processed, which the map labels
+# ``processing``.
 _STATE_LABEL_SLUG = {"ready": "fulfilled", "preparing": "processing"}
 
 
@@ -230,9 +231,11 @@ def _order_reading(status: Any, source: Any) -> tuple[str, str]:
     platforms. On Salla ``completed`` is the merchant's «تنفيذ» — fulfilled, not
     yet shipped — so it is ongoing, and it is labelled as the fulfilled,
     not-yet-shipped order it is: the plain label of a finished word would claim
-    what the order has not reached. A status the platform cannot read stays
-    unknown. When the adapter cannot be consulted, the word's plain reading is
-    used, as before this existed.
+    what the order has not reached. Any other word keeps its plain label: the
+    adapter's reading places the order, but it may be coarser than the word
+    (``ready_for_pickup`` reads as ready, which is no shipment). A status the
+    platform cannot read stays unknown. When the adapter cannot be consulted,
+    the word's plain reading is used, as before this existed.
     """
     slug = _status_slug(status)
     try:
@@ -250,8 +253,6 @@ def _order_reading(status: Any, source: Any) -> tuple[str, str]:
         stage = "unknown"
     if slug in _FINISHED_ORDER_STATES and stage != "finished":
         return stage, order_status_label_ar(_STATE_LABEL_SLUG.get(state, state))
-    if slug not in ORDER_STATUS_LABELS_AR and state in _STATE_LABEL_SLUG:
-        return stage, order_status_label_ar(_STATE_LABEL_SLUG[state])
     return stage, order_status_label_ar(str(status or "").strip())
 
 

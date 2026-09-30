@@ -966,11 +966,12 @@ as well as through the ledger.
   `list_customer_orders` (owner decision, 30 September 2026: a read the registry declares
   beyond the tools the instructions name, like the two below; its declaration is text the
   model sees and is recorded as a declaration change). The one-order lookup,
-  `resolve_customer_order`, still returns one order and nothing about a history; what it
-  carries changed with the history: the order's stage (ongoing, finished, unknown), a label
-  read the same way as the history's (a Salla `completed` order is labelled as fulfilled,
-  not as complete), and — in every order tool — an order reference that is the store's
-  customer-facing number or none, never the store's internal id in its place. The history
+  `resolve_customer_order`, still returns one order, in the same fields, and nothing about a
+  history; two of its values changed with the history: the status label is read the same
+  way as the history's (a Salla `completed` order is labelled as fulfilled, not as
+  complete; any other status keeps its own label), and — in every order tool — the order
+  reference is the store's customer-facing number or none, never the store's internal id in
+  its place. The history
   is this customer's orders in this store, matched by the same trusted identity and held to
   the same customer-scope check as a resolved order; abandoned carts, which store sync keeps
   as order rows, are not orders and are left out. It is counted, grouped as ongoing,
