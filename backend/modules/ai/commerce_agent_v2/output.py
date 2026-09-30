@@ -263,8 +263,9 @@ class CustomerOrderList(BaseModel):
 
     ``current`` are orders whose status is one the platform knows as still in
     progress; ``previous`` are finished ones (delivered, completed, cancelled,
-    abandoned, refunded, returned or failed); ``other`` are orders whose status
-    the platform does not know, so neither is claimed. Each list is bounded.
+    abandoned, refunded, returned or failed), each status read as its own store
+    means it; ``other`` are orders whose status the platform does not know, so
+    neither is claimed. Each list is bounded.
     The counts are given only when the read held every one of the customer's
     orders (``counts_complete``); otherwise they are absent, so no count can be
     presented as the customer's total. ``status`` is ``unavailable`` when the

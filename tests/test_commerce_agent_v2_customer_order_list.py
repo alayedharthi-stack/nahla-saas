@@ -237,7 +237,7 @@ def test_a_list_that_cannot_be_read_is_reported_unavailable_and_the_order_still_
     store.order("delivered")
     open_order = store.order("processing")
 
-    def boom(status: str) -> bool:
+    def boom(*args: Any) -> str:
         raise RuntimeError("list read failed")
 
     monkeypatch.setattr(orders_module, "_order_list_group", boom)
@@ -265,6 +265,27 @@ def test_a_listed_order_whose_evidence_changed_costs_the_list_not_the_order():
     assert again.status == "ok"
     assert again.order.order_reference == newest.external_order_number
     assert again.customer_orders.status == "unavailable"
+
+
+def test_an_unavailable_list_leaves_none_of_its_evidence_registered():
+    """A collision on a previous order, found after a current one was built,
+    registers nothing from the list: no record the model was never shown can be
+    cited."""
+    store = Store()
+    older = store.order("processing")
+    done = store.order("delivered")
+    store.order("processing")
+    context = store.context()
+    resolve(context)
+    done.status = "cancelled"           # its summary evidence now differs
+    unseen = store.order("processing")  # a current order not yet registered
+    store.db.commit()
+    before = set(context.evidence)
+    again = resolve(context, order_number=older.external_order_number)
+    assert again.order.order_reference == older.external_order_number
+    assert again.customer_orders.status == "unavailable"
+    assert f"order:summary:{unseen.id}" not in context.evidence
+    assert set(context.evidence) == before
 
 
 def test_an_order_read_that_fails_outright_is_still_an_error_not_an_empty_list(monkeypatch):
@@ -379,6 +400,18 @@ def test_finished_orders_are_previous_and_unknown_statuses_are_not_claimed_eithe
     assert set(refs(listing.previous)) == {o.external_order_number for o in finished}
     assert set(refs(listing.other)) == {o.external_order_number for o in unknown}
     assert len(listing.other) <= MAX_LISTED_OTHER_ORDERS
+
+
+@pytest.mark.parametrize("source,group", [("salla", "current"), ("manual", "previous")])
+def test_a_status_word_is_read_as_its_own_store_means_it(source: str, group: str):
+    """On Salla, ``completed`` is the merchant's «تنفيذ»: fulfilled, not yet
+    shipped (store_adapters/salla_lifecycle). The list reads each status through
+    its store's adapter, so that order is still current there; a store without
+    such a meaning keeps the word's plain reading."""
+    store = Store()
+    order = store.order("completed", source=source)
+    listing = resolve(store.context()).customer_orders
+    assert refs(getattr(listing, group)) == [order.external_order_number]
 
 
 def test_listing_an_order_does_not_authorize_reading_it():
