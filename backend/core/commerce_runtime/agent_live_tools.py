@@ -325,13 +325,13 @@ def _order_view(summary: Any) -> Dict[str, Any]:
         "order_reference": getattr(summary, "order_reference", None),
         "status": getattr(summary, "status", None),
         "status_label": getattr(summary, "status_label", None),
-        "stage": getattr(summary, "stage", None),
     }
 
 
 def _history_group_view(group: Any) -> Dict[str, Any]:
     return {
         "count": getattr(group, "count", None),
+        "count_at_least": getattr(group, "count_at_least", None),
         "listed": getattr(group, "listed", 0),
         "orders": [{"order_reference": getattr(entry, "order_reference", None),
                     "status_label": getattr(entry, "status_label", None),
@@ -1006,8 +1006,9 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         "are and a short list, grouped as ongoing, finished, or of a status the platform "
         "cannot read. Each group lists at most a few orders; listed says how many it shows. "
         "Counts and total_orders are given only when read_complete is true; otherwise the "
-        "total is not known, total_orders_at_least is how many orders the customer has at "
-        "least, and the listed orders are not all of them. An unavailable result means the "
+        "total is not known: total_orders_at_least and each group's count_at_least are how "
+        "many orders there are at least, and the listed orders are not all of them. An "
+        "unavailable result means the "
         "history could not be read, not that there are no orders. Abandoned carts are not "
         "orders and are not included. Listing an order does not open its details or shipment.",
         {"type": "object", "properties": {}, "required": []},

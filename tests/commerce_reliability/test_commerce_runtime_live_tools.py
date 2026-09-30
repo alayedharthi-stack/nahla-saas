@@ -494,8 +494,9 @@ def test_an_order_read_the_merchant_disabled_is_a_denial_not_an_absence(binding,
     assert body["reason"] == "order_reads_disabled"
 
 
-def _history_group(count: Any, orders: List[Any], by_status: Any = None) -> Snapshot:
-    return Snapshot(count=count, listed=len(orders), orders=orders, by_status=by_status)
+def _history_group(count: Any, orders: List[Any], by_status: Any = None, at_least: Any = None) -> Snapshot:
+    return Snapshot(count=count, count_at_least=at_least, listed=len(orders), orders=orders,
+                    by_status=by_status)
 
 
 def test_the_order_history_reaches_the_model_counted_grouped_and_without_ids(binding, monkeypatch):
@@ -528,12 +529,13 @@ def test_an_incomplete_history_reaches_the_model_without_a_total(binding, monkey
     patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
         "ok", read_complete=False, incomplete_reasons=["read_limit_reached"], total_orders=None,
         total_orders_at_least=50,
-        ongoing=_history_group(None, listed), finished=_history_group(None, []),
-        unknown=_history_group(None, []), evidence=[Record("order:history:h1a")])))
+        ongoing=_history_group(None, listed, at_least=2), finished=_history_group(None, [], at_least=48),
+        unknown=_history_group(None, [], at_least=0), evidence=[Record("order:history:h1a")])))
     body = run(binding, "list_customer_orders", {}).result
     assert (body["read_complete"], body["total_orders"], body["total_orders_at_least"]) == (False, None, 50)
     assert body["incomplete_reasons"] == ["read_limit_reached"]
     assert body["ongoing"]["count"] is None and body["ongoing"]["listed"] == 1
+    assert (body["ongoing"]["count_at_least"], body["finished"]["count_at_least"]) == (2, 48)
 
 
 def test_an_unreadable_history_says_so_and_never_reads_as_no_orders(binding, monkeypatch):
@@ -546,15 +548,17 @@ def test_an_unreadable_history_says_so_and_never_reads_as_no_orders(binding, mon
     assert observation.evidence_refs == ()
 
 
-def test_the_one_order_lookup_carries_its_stage_and_no_history(binding, monkeypatch):
+def test_the_one_order_lookup_keeps_its_shape_and_carries_no_history(binding, monkeypatch):
+    """The lookup's view is what it was: one order, its store status and the
+    label the platform reads it by. The history is not attached to it."""
     summary = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
                        status="completed", status_label="تم التجهيز للشحن", stage="ongoing")
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("ok", order=summary, selection_reason="latest_open_order",
                                       evidence=[Record("order:summary:31")])))
     body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
-    assert body["order"]["stage"] == "ongoing"
     assert set(body) == {"status", "found", "order", "selection_reason"}
+    assert set(body["order"]) == {"order_id", "evidence_ref", "order_reference", "status", "status_label"}
 
 
 def test_the_history_declaration_takes_no_arguments_and_is_read_only(binding):

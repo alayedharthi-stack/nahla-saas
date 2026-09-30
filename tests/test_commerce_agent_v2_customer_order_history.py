@@ -135,6 +135,7 @@ def test_the_observed_customer_gets_every_order_counted_and_a_few_listed():
     result = history(store.context())
     assert result.status == "ok" and result.read_complete is True and result.incomplete_reasons == []
     assert result.total_orders == 19 and result.total_orders_at_least is None
+    assert result.ongoing.count_at_least is None and result.finished.count_at_least is None
     assert (result.ongoing.count, result.ongoing.listed) == (9, MAX_LISTED_ONGOING_ORDERS)
     assert (result.finished.count, result.finished.listed) == (10, MAX_LISTED_FINISHED_ORDERS)
     assert refs(result.ongoing) == [o.external_order_number for o in reversed(open_)][:MAX_LISTED_ONGOING_ORDERS]
@@ -214,6 +215,8 @@ def test_a_read_at_its_limit_gives_no_total_and_no_counts():
     for group in (result.ongoing, result.finished, result.unknown):
         assert group.count is None and group.by_status is None
     assert result.ongoing.listed == 1 and result.finished.listed == MAX_LISTED_FINISHED_ORDERS
+    # Per stage, a bound of the orders read - never the number listed.
+    assert (result.ongoing.count_at_least, result.finished.count_at_least) == (1, CUSTOMER_ORDER_HISTORY_LIMIT - 1)
 
 
 @pytest.mark.parametrize("orders,complete", [(CUSTOMER_ORDER_HISTORY_LIMIT - 1, True),
@@ -360,7 +363,7 @@ def test_an_order_whose_owner_cannot_be_proven_is_left_out_and_withholds_the_tot
     assert refs(result.ongoing) == [mine.external_order_number]
     assert result.read_complete is False and result.incomplete_reasons == ["order_scope_unverified"]
     assert result.total_orders is None and result.ongoing.count is None
-    assert result.total_orders_at_least == 1
+    assert result.total_orders_at_least == 1 and result.ongoing.count_at_least == 1
 
 
 def test_an_order_linked_to_another_customer_is_left_out_without_withholding_the_total(monkeypatch):
