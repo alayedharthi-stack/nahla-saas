@@ -7,13 +7,14 @@ import {
   ToggleLeft, ToggleRight, Settings2, CheckCircle, AlertCircle,
   Loader2, Copy, X, MessageCircle, Gift, Tag, Zap,
   ExternalLink, Rocket, ChevronRight, TrendingUp, LayoutGrid,
-  Clock, MousePointerClick, Bell, Save, Eye, EyeOff,
+  Clock, MousePointerClick, Bell, ImagePlus,
 } from 'lucide-react'
 import { widgetsApi, type WidgetItem, type DisplayRules, type SallaInstallResult } from '../api/widgets'
 import { apiCall } from '../api/client'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
+const NAHLA_ORIGINAL_LOGO = `${API_BASE}/merchant/widgets/assets/whatsapp-bee.jpg`
 
 function getTenantId(): string {
   return localStorage.getItem('nahla_tenant_id') || ''
@@ -48,10 +49,10 @@ function QuickInstallPanel({ tenantId }: { tenantId: string }) {
   const [tagCopied, setTagCopied] = useState(false)
 
   const embedUrl  = `${API_BASE}/merchant/widgets/${tenantId}/nahla-widgets.js`
-  const scriptTag = `<script src="${embedUrl}" defer></script>`
+  const loaderCode = `(function(){if(document.querySelector('script[data-nahla-widgets]'))return;var s=document.createElement('script');s.src='${embedUrl}';s.defer=true;s.dataset.nahlaWidgets='';document.head.appendChild(s)})()`
 
   const copyTag = () => {
-    navigator.clipboard.writeText(scriptTag)
+    navigator.clipboard.writeText(loaderCode)
     setTagCopied(true)
     setTimeout(() => setTagCopied(false), 2500)
   }
@@ -63,7 +64,7 @@ function QuickInstallPanel({ tenantId }: { tenantId: string }) {
       setResult(res)
       setState(res.success ? 'success' : 'manual')
       if (!res.success) {
-        navigator.clipboard.writeText(res.script_tag || scriptTag).catch(() => {})
+        navigator.clipboard.writeText(loaderCode).catch(() => {})
         setTagCopied(true)
         setTimeout(() => setTagCopied(false), 3000)
       }
@@ -107,7 +108,7 @@ function QuickInstallPanel({ tenantId }: { tenantId: string }) {
   )
 
   const adminUrl = result?.salla_admin_url || 'https://s.salla.sa/settings/scripts'
-  const tag      = result?.script_tag || scriptTag
+  const tag      = loaderCode
 
   return (
     <div className="rounded-2xl border border-amber-200 bg-amber-50 overflow-hidden">
@@ -120,7 +121,7 @@ function QuickInstallPanel({ tenantId }: { tenantId: string }) {
         <div className="flex gap-3">
           <div className="w-6 h-6 rounded-full bg-brand-500 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-0.5">١</div>
           <div className="flex-1 space-y-2">
-            <p className="text-sm font-medium text-slate-700">انسخ كود التثبيت</p>
+            <p className="text-sm font-medium text-slate-700">انسخ كود JavaScript للتثبيت</p>
             <div className="relative">
               <code dir="ltr" className="block w-full bg-white border border-slate-200 rounded-lg px-3 py-2.5 text-xs font-mono text-slate-700 overflow-x-auto whitespace-nowrap pe-20">
                 {tag}
@@ -163,8 +164,8 @@ function QuickInstallPanel({ tenantId }: { tenantId: string }) {
 // ── Display Rules Editor ──────────────────────────────────────────────────────
 
 function RulesEditor({
-  rules, onChange,
-}: { rules: DisplayRules; onChange: (r: Partial<DisplayRules>) => void }) {
+  rules, onChange, showScrollPercent = true,
+}: { rules: DisplayRules; onChange: (r: Partial<DisplayRules>) => void; showScrollPercent?: boolean }) {
   const pages = ['all', 'home', 'product', 'cart', 'checkout']
   const pageLabels: Record<string, string> = {
     all: 'كل الصفحات', home: 'الرئيسية', product: 'المنتج', cart: 'السلة', checkout: 'الدفع',
@@ -214,7 +215,7 @@ function RulesEditor({
             value={rules.show_after_seconds ?? 0}
             onChange={e => onChange({ show_after_seconds: Number(e.target.value) })} />
         </div>
-        {rules.trigger === 'scroll' && (
+        {rules.trigger === 'scroll' && showScrollPercent && (
           <div className="flex-1">
             <label className="label">نسبة التمرير (%)</label>
             <input type="number" min={0} max={100} className="input" dir="ltr"
@@ -256,6 +257,53 @@ function RulesEditor({
 
 // ── Settings forms per widget type ────────────────────────────────────────────
 
+function WhatsAppWidgetPreview({ logo, color }: { logo: string; color: string }) {
+  const [defaultLogo, setDefaultLogo] = useState(NAHLA_ORIGINAL_LOGO)
+
+  useEffect(() => {
+    let active = true
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = image.width
+        canvas.height = image.height
+        const context = canvas.getContext('2d')
+        if (!context) return
+        context.drawImage(image, 0, 0)
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height)
+        for (let pixel = 0; pixel < pixels.data.length; pixel += 4) {
+          if (pixels.data[pixel] > 210 && pixels.data[pixel + 1] > 210 && pixels.data[pixel + 2] > 210) {
+            pixels.data[pixel + 3] = 0
+          }
+        }
+        context.putImageData(pixels, 0, 0)
+        if (active) setDefaultLogo(canvas.toDataURL('image/png'))
+      } catch { /* Keep the original image if canvas is unavailable. */ }
+    }
+    image.src = NAHLA_ORIGINAL_LOGO
+    return () => { active = false }
+  }, [])
+
+  return (
+    <div className="flex flex-col items-center justify-end min-h-44 rounded-xl bg-slate-50 border border-slate-200 py-3">
+      <img src={logo || defaultLogo} alt="معاينة شعار الزر"
+        className="nahla-preview-bee object-contain w-[90px] h-[90px]" />
+      <div className="nahla-preview-circle relative flex items-center justify-center w-[58px] h-[58px] rounded-full mt-1"
+        style={{ backgroundColor: color, boxShadow: `0 4px 18px ${color}73` }}>
+        {[0, 1, 2, 3].map(index => (
+          <span key={index} className="nahla-preview-orbit absolute inset-0 rounded-full border-[2.5px]"
+            style={{ borderColor: color, animationDelay: `${index * .7}s` }} />
+        ))}
+        <img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg"
+          alt="واتساب" className="relative z-10 w-[26px] h-[26px]" />
+      </div>
+      <span className="text-xs text-slate-500 mt-2">معاينة حجم الجوال الفعلي</span>
+    </div>
+  )
+}
+
 function WhatsAppSettingsForm({
   settings, rules, onChange, onRulesChange,
 }: {
@@ -264,8 +312,27 @@ function WhatsAppSettingsForm({
   onChange: (k: string, v: unknown) => void
   onRulesChange: (r: Partial<DisplayRules>) => void
 }) {
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const logoUrl = String(settings.logo_url ?? '')
+
+  const handleLogoUpload = async (file?: File) => {
+    if (!file) return
+    setUploadError('')
+    setUploading(true)
+    try {
+      const result = await widgetsApi.uploadWhatsAppLogo(file)
+      onChange('logo_url', result.image_url)
+    } catch {
+      setUploadError('تعذّر رفع الصورة. استخدم PNG أو JPG بحجم أقل من 5 ميجابايت.')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   return (
     <div className="space-y-5">
+      <WhatsAppWidgetPreview logo={logoUrl} color={String(settings.theme_color || '#25D366')} />
       <div>
         <label className="label">رقم واتساب <span className="text-red-400">*</span></label>
         <input className="input" dir="ltr" placeholder="966555906901"
@@ -279,10 +346,20 @@ function WhatsAppSettingsForm({
           onChange={e => onChange('message', e.target.value)} />
       </div>
       <div>
-        <label className="label">رابط الشعار (اختياري)</label>
+        <label className="label">صورة الشعار فوق واتساب</label>
+        <label className="flex items-center justify-center gap-2 w-full py-2.5 mb-2 rounded-xl border border-dashed border-brand-300 bg-brand-50 text-brand-700 text-sm font-medium cursor-pointer hover:bg-brand-100">
+          {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ImagePlus className="w-4 h-4" />}
+          {uploading ? 'جاري رفع الصورة…' : 'رفع شعار أو صورة من الجهاز'}
+          <input type="file" accept="image/png,image/jpeg" className="sr-only" disabled={uploading}
+            onChange={e => { void handleLogoUpload(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+        {uploadError && <p className="text-xs text-red-600 mb-2">{uploadError}</p>}
+        <p className="text-xs text-slate-500 mb-2">أو ضع رابط صورة HTTPS. اتركه فارغًا لشعار نحلة.</p>
         <input className="input" dir="ltr" placeholder="https://… — اتركه فارغاً لشعار نحلة 🐝"
-          value={String(settings.logo_url ?? '')}
+          value={logoUrl}
           onChange={e => onChange('logo_url', e.target.value)} />
+        {logoUrl && <button onClick={() => onChange('logo_url', '')}
+          className="text-xs text-brand-700 mt-2 hover:underline">استعادة شعار نحلة</button>}
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
@@ -309,6 +386,13 @@ function WhatsAppSettingsForm({
           </div>
         </div>
       </div>
+      <div>
+        <label className="label">الظهور بعد تمرير (بكسل)</label>
+        <input type="number" min={0} max={2000} className="input" dir="ltr"
+          value={Number(settings.scroll_threshold_px ?? 250)}
+          onChange={e => onChange('scroll_threshold_px', Number(e.target.value))} />
+        <p className="text-xs text-slate-400 mt-1">250 بكسل هو سلوك الزر في المتجر الحالي. الصفر يظهره فورًا.</p>
+      </div>
       <div className="grid grid-cols-2 gap-4">
         {[{ k: 'show_on_mobile', l: 'إظهار في الجوال' }, { k: 'show_on_desktop', l: 'إظهار في الحاسب' }].map(({ k, l }) => (
           <div key={k} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
@@ -320,7 +404,7 @@ function WhatsAppSettingsForm({
           </div>
         ))}
       </div>
-      <RulesEditor rules={rules} onChange={onRulesChange} />
+      <RulesEditor rules={rules} onChange={onRulesChange} showScrollPercent={false} />
     </div>
   )
 }
@@ -589,16 +673,23 @@ function WidgetCard({
   widget, onToggle, onOpenSettings,
 }: {
   widget: WidgetItem
-  onToggle: (key: string, enabled: boolean) => void
+  onToggle: (key: string, enabled: boolean) => Promise<void>
   onOpenSettings: (widget: WidgetItem) => void
 }) {
   const [toggling, setToggling] = useState(false)
+  const [toggleError, setToggleError] = useState('')
 
   const handleToggle = async () => {
     if (toggling || widget.badge === 'coming_soon') return
     setToggling(true)
+    setToggleError('')
     try {
       await onToggle(widget.key, !widget.is_enabled)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      setToggleError(message === 'whatsapp_phone_required'
+        ? 'أضف رقم واتساب من الإعدادات قبل التفعيل.'
+        : 'تعذّر تحديث حالة الأداة. حاول مرة أخرى.')
     } finally {
       setToggling(false)
     }
@@ -636,7 +727,7 @@ function WidgetCard({
           : 'bg-slate-50 text-slate-500'
       }`}>
         <span className={`w-2 h-2 rounded-full ${widget.is_enabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`} />
-        {widget.is_enabled ? 'مُفعَّل — يظهر في متجرك' : 'معطّل'}
+        {widget.is_enabled ? 'مُفعَّل في نحلة — يظهر بعد تثبيت كود المتجر' : 'معطّل'}
       </div>
 
       {/* Actions */}
@@ -666,280 +757,10 @@ function WidgetCard({
           }
         </button>
       </div>
+      {toggleError && <p className="text-xs text-red-600">{toggleError}</p>}
     </div>
   )
 }
-
-// ── WhatsApp Floating Button Widget ──────────────────────────────────────────
-
-const NAHLA_CDN_LOGO = 'https://cdn.salla.sa/XVEDq/b1ec4359-6895-49dc-80e7-06fd33b75df8-1000x666.66666666667-xMM28RbT68xVWoSgEtzBgpW1w4cDN7sEQAhQmLwD.jpg'
-
-interface WaBubbleCfg {
-  enabled: boolean
-  phone: string
-  message: string
-  logo_url: string
-  position: 'left' | 'right'
-  scroll_threshold: number
-}
-
-function generateBubbleCode(cfg: WaBubbleCfg): string {
-  const logo   = cfg.logo_url || NAHLA_CDN_LOGO
-  const posX   = cfg.position === 'right' ? 'right:40px' : 'left:40px'
-  const posXMo = cfg.position === 'right' ? 'right:20px' : 'left:20px'
-  return `/* ====================================================
-   Nahla WhatsApp Widget — نحلة
-   انسخ هذا الكود كاملاً في حقل الجافاسكريبت بمتجرك
-   ==================================================== */
-(function(){
-  var WA_NUMBER  = '${cfg.phone}';
-  var WA_MESSAGE = '${cfg.message}';
-  var LOGO = '${logo}';
-
-  var btn = document.createElement('a');
-  btn.href   = 'https://wa.me/' + WA_NUMBER + '?text=' + encodeURIComponent(WA_MESSAGE);
-  btn.target = '_blank';
-  btn.rel    = 'noopener noreferrer';
-  btn.id     = 'nahla-whatsapp';
-  btn.innerHTML =
-    '<img src="' + LOGO + '" class="nahla-bee" alt="نحلة">' +
-    '<div class="circle">' +
-      '<span class="orbit o1"></span>' +
-      '<span class="orbit o2"></span>' +
-      '<span class="orbit o3"></span>' +
-      '<span class="orbit o4"></span>' +
-      '<img src="https://upload.wikimedia.org/wikipedia/commons/6/6b/WhatsApp.svg" class="icon" alt="واتساب">' +
-    '</div>';
-  document.body.appendChild(btn);
-
-  function checkShow() {
-    if (window.scrollY > ${cfg.scroll_threshold} || document.body.scrollHeight <= window.innerHeight + 300) {
-      btn.classList.add('show');
-    }
-  }
-  window.addEventListener('scroll', checkShow, { passive: true });
-  checkShow();
-
-  var s = document.createElement('style');
-  s.innerHTML = [
-    '#nahla-whatsapp{position:fixed;bottom:55px;${posX};z-index:9999;opacity:0;transform:scale(.8);transition:opacity .4s,transform .4s;display:flex;flex-direction:column;align-items:center;gap:6px;text-decoration:none;}',
-    '#nahla-whatsapp.show{opacity:1;transform:scale(1);}',
-    '.nahla-bee{width:110px;height:110px;object-fit:contain;animation:bee-float 3s ease-in-out infinite;}',
-    '@keyframes bee-float{0%,100%{transform:translateY(0) rotate(-4deg);}50%{transform:translateY(-7px) rotate(4deg);}}',
-    '.circle{position:relative;width:65px;height:65px;background:#25D366;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 18px rgba(37,211,102,.45);}',
-    '.icon{width:30px;height:30px;z-index:2;position:relative;}',
-    '.orbit{position:absolute;inset:0;border-radius:50%;border:2.5px solid rgba(37,211,102,.65);animation:apple-wave 2.8s cubic-bezier(.4,0,.2,1) infinite;}',
-    '.o1{animation-delay:0s;}.o2{animation-delay:.7s;}.o3{animation-delay:1.4s;}.o4{animation-delay:2.1s;}',
-    '@keyframes apple-wave{0%{transform:scale(.92);opacity:.85;}30%{transform:scale(1.25);opacity:.55;}60%{transform:scale(1.65);opacity:.22;}85%{transform:scale(1.95);opacity:.05;}100%{transform:scale(2.05);opacity:0;}}',
-    '@media(max-width:600px){.circle{width:58px;height:58px;}.icon{width:26px;height:26px;}.nahla-bee{width:90px;height:90px;}#nahla-whatsapp{bottom:50px;${posXMo};}}'
-  ].join('');
-  document.head.appendChild(s);
-})();`
-}
-
-function WhatsAppBubbleWidget() {
-  const [cfg, setCfg] = useState<WaBubbleCfg>({
-    enabled: false, phone: '', message: 'السلام عليكم، أبغى الاستفسار',
-    logo_url: '', position: 'left', scroll_threshold: 250,
-  })
-  const [loading,  setLoading]  = useState(true)
-  const [saving,   setSaving]   = useState(false)
-  const [saved,    setSaved]    = useState(false)
-  const [copied,   setCopied]   = useState(false)
-  const [saveErr,  setSaveErr]  = useState<string | null>(null)
-  const [open,     setOpen]     = useState(false)
-
-  useEffect(() => {
-    apiCall<WaBubbleCfg>('/settings/widget')
-      .then(d => setCfg({ ...d, position: d.position === 'right' ? 'right' : 'left' }))
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const patch = (partial: Partial<WaBubbleCfg>) => setCfg(prev => ({ ...prev, ...partial }))
-
-  const handleSave = async () => {
-    setSaving(true); setSaveErr(null)
-    try {
-      const saved_ = await apiCall<WaBubbleCfg>('/settings/widget', {
-        method: 'PUT', body: JSON.stringify(cfg),
-      })
-      setCfg({ ...saved_, position: saved_.position === 'right' ? 'right' : 'left' })
-      setSaved(true); setTimeout(() => setSaved(false), 3000)
-    } catch { setSaveErr('فشل الحفظ — حاول مرة أخرى') }
-    finally { setSaving(false) }
-  }
-
-  const code = generateBubbleCode(cfg)
-  const copyCode = () => {
-    navigator.clipboard.writeText(code)
-    setCopied(true); setTimeout(() => setCopied(false), 2500)
-  }
-
-  return (
-    <div className="rounded-2xl border border-emerald-200 bg-white overflow-hidden">
-      {/* Header */}
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between gap-3 px-5 py-4 hover:bg-slate-50 transition-colors"
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center shrink-0">
-            <MessageCircle className="w-5 h-5 text-emerald-600" />
-          </div>
-          <div className="text-start">
-            <div className="flex items-center gap-2">
-              <p className="text-sm font-bold text-slate-900">زر واتساب العائم</p>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${
-                cfg.enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-              }`}>
-                {loading ? '...' : cfg.enabled ? 'مُفعّل' : 'معطّل'}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              زر واتساب متحرك يظهر في متجرك — يُحوّل الزوار لمحادثات مباشرة
-            </p>
-          </div>
-        </div>
-        <ChevronRight className={`w-4 h-4 text-slate-400 shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
-      </button>
-
-      {open && (
-        <div className="border-t border-slate-100 p-5 space-y-5">
-
-          {/* Enable toggle */}
-          <div className="flex items-center justify-between py-2">
-            <div>
-              <p className="text-sm font-medium text-slate-800">تفعيل الويدجت</p>
-              <p className="text-xs text-slate-400 mt-0.5">عند التفعيل يظهر زر واتساب في الزاوية السفلية للمتجر</p>
-            </div>
-            <button onClick={() => patch({ enabled: !cfg.enabled })}>
-              {cfg.enabled
-                ? <ToggleRight className="w-7 h-7 text-brand-500" />
-                : <ToggleLeft  className="w-7 h-7 text-slate-300" />}
-            </button>
-          </div>
-
-          {/* Config fields */}
-          <div className="space-y-4">
-            <div>
-              <label className="label">رقم واتساب التاجر <span className="text-red-400">*</span></label>
-              <input
-                className="input" dir="ltr"
-                placeholder="966555906901"
-                value={cfg.phone}
-                onChange={e => patch({ phone: e.target.value.replace(/\D/g, '') })}
-              />
-              <p className="text-xs text-slate-400 mt-1">الرقم الدولي بدون + ومسافات (مثال: 966555906901)</p>
-            </div>
-            <div>
-              <label className="label">رسالة الترحيب الافتراضية</label>
-              <input
-                className="input"
-                value={cfg.message}
-                onChange={e => patch({ message: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="label">رابط الشعار (اختياري)</label>
-              <input
-                className="input" dir="ltr"
-                placeholder="https://cdn.example.com/logo.png — اتركه فارغاً لشعار نحلة"
-                value={cfg.logo_url}
-                onChange={e => patch({ logo_url: e.target.value })}
-              />
-              <p className="text-xs text-slate-400 mt-1">اتركه فارغاً لاستخدام شعار نحلة الافتراضي 🐝</p>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="label">موضع الزر</label>
-                <div className="flex gap-2 mt-1">
-                  {(['right', 'left'] as const).map(p => (
-                    <button
-                      key={p}
-                      onClick={() => patch({ position: p })}
-                      className={`flex-1 py-2 text-sm rounded-lg border transition-colors ${
-                        cfg.position === p
-                          ? 'bg-brand-500 border-brand-500 text-white font-medium'
-                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      {p === 'right' ? '⬅ يمين' : 'يسار ➡'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="label">إظهار بعد تمرير (px)</label>
-                <input
-                  type="number" min={0} max={2000}
-                  className="input" dir="ltr"
-                  value={cfg.scroll_threshold}
-                  onChange={e => patch({ scroll_threshold: Number(e.target.value) })}
-                />
-                <p className="text-xs text-slate-400 mt-1">0 = يظهر فوراً</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Save button */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleSave}
-              disabled={saving || !cfg.phone}
-              className="btn-primary disabled:opacity-50"
-            >
-              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-              حفظ الإعدادات
-            </button>
-            {saved   && <span className="text-sm text-emerald-600 flex items-center gap-1"><CheckCircle className="w-4 h-4" /> تم الحفظ</span>}
-            {saveErr && <span className="text-sm text-red-500">{saveErr}</span>}
-          </div>
-
-          {/* Generated code */}
-          <div className="space-y-3">
-            <div>
-              <p className="text-sm font-semibold text-slate-800 mb-1">كود التضمين</p>
-              <p className="text-xs text-slate-400">انسخ الكود وضعه في حقل الجافاسكريبت المخصص في متجرك (سلة / زد / غيرها)</p>
-            </div>
-            {!cfg.phone ? (
-              <div className="flex items-center gap-2 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-700">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                أدخل رقم واتساب أولاً لتوليد الكود
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="relative">
-                  <textarea
-                    readOnly dir="ltr" rows={10}
-                    className="w-full font-mono text-xs bg-slate-900 text-slate-100 rounded-xl p-4 resize-none border-0 outline-none leading-relaxed"
-                    value={code}
-                  />
-                  <button
-                    onClick={copyCode}
-                    className="absolute top-3 left-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium transition-colors"
-                  >
-                    {copied ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copied ? 'تم النسخ!' : 'نسخ الكود'}
-                  </button>
-                </div>
-                <div className="flex items-start gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-700">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-blue-500" />
-                  <div>
-                    <p className="font-semibold mb-0.5">كيفية إضافة الكود في متجر سلة:</p>
-                    <p>اذهب إلى <strong>المتجر ← الإعدادات ← سكريبت مخصص</strong> والصق الكود في حقل JavaScript</p>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function MerchantWidgets() {
   const [widgets,    setWidgets]    = useState<WidgetItem[]>([])
@@ -1010,7 +831,7 @@ export default function MerchantWidgets() {
             أدوات زيادة المبيعات
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            ويدجتات تحويلية تظهر مباشرة في متجرك — فعّلها من هنا وتحكم فيها بالكامل
+            فعّل أدوات المتجر وتحكم فيها من هنا بعد تثبيت كود نحلة مرة واحدة
           </p>
         </div>
         {enabledCount > 0 && (
@@ -1031,7 +852,7 @@ export default function MerchantWidgets() {
           <p className="font-semibold">كيف يعمل النظام؟</p>
           <p className="text-xs text-blue-600 leading-relaxed">
             أضف رابط السكريبت مرة واحدة في متجرك — بعدها كل ما تفعّله أو تعطّله من هنا يظهر في متجرك
-            خلال دقيقة تلقائياً بدون الرجوع لسلة مجدداً.
+            عند تحميل الصفحة التالية دون الرجوع إلى سلة.
           </p>
         </div>
       </div>
@@ -1048,8 +869,6 @@ export default function MerchantWidgets() {
         ))}
       </div>
 
-      {/* WhatsApp Floating Button Widget */}
-      <WhatsAppBubbleWidget />
 
       {/* Future widgets teaser */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
