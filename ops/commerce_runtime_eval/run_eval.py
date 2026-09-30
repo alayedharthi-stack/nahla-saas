@@ -427,10 +427,11 @@ class RecordingProvider:
                         "order_status": (result.get("order") or {}).get("status")
                         if isinstance(result.get("order"), dict) else None,
                         "customer_orders": {k: (result.get("customer_orders") or {}).get(k) for k in
-                                            ("status", "current_count", "previous_count", "counts_complete")}
+                                            ("status", "current_count", "previous_count", "other_count",
+                                             "counts_complete")}
                         if isinstance(result.get("customer_orders"), dict) else None,
                         "listed": [len((result.get("customer_orders") or {}).get(g) or [])
-                                   for g in ("current", "previous")]
+                                   for g in ("current", "previous", "other")]
                         if isinstance(result.get("customer_orders"), dict) else None,
                     })
         return out
