@@ -20,7 +20,7 @@ Adapters **must not** be the first lookup for customer-facing order answers.
 ```
 resolve_customer_order_context(db, tenant_id, conversation_id?, customer_id?, phone?, intent?)
         │
-        ├─► conversation-scoped WhatsApp draft (nahla-wa-{tenant}-{conv}%)
+        ├─► conversation-scoped WhatsApp draft (nahla-wa-{tenant}-{conv} or nahla-wa-{tenant}-{conv}-msg-*)
         ├─► tenant-scoped customer orders (phone / customer_id)
         └─► classify: open / paid / shipped + priority list
 ```
@@ -29,7 +29,7 @@ External adapter calls are **out of scope** for the resolver itself. `CommerceTo
 
 ## Priority (selection)
 
-1. **Active WhatsApp draft** for the current `conversation_id` (open, non-terminal, `nahla-wa-*` prefix).
+1. **Active WhatsApp draft** for the current `conversation_id` (open, non-terminal; its own id `nahla-wa-{tenant}-{conv}` or `nahla-wa-{tenant}-{conv}-msg-*` only — never another conversation's, e.g. conversation 10's for conversation 1).
 2. **Explicit order number** when provided (`external_order_number` / `external_id` / internal `id`).
 3. **Latest open order** for the customer (any source, highest `id`, not cancelled/abandoned/delivered/completed).
 4. **Latest shipped order** when `intent=track_order` and no open order matches.

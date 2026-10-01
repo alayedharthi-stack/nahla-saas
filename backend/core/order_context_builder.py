@@ -380,15 +380,21 @@ def _load_active_draft(
         return None
     try:
         from models import Order  # noqa: PLC0415
-        from services.nahla_order_bridge import is_open_wa_draft_order, nahla_wa_external_id  # noqa: PLC0415
+        from services.nahla_order_bridge import (  # noqa: PLC0415
+            conversation_wa_external_id_clause,
+            is_open_wa_draft_order,
+            nahla_wa_external_id,
+        )
 
-        prefix = nahla_wa_external_id(tenant_id, int(conversation_id))
+        base = nahla_wa_external_id(tenant_id, int(conversation_id))
         candidates = (
             db.query(Order)
             .filter(
                 Order.tenant_id == tenant_id,
                 Order.source == "whatsapp",
-                Order.external_id.like(f"{prefix}%"),
+                # This conversation's own drafts only; a bare prefix would also
+                # take conversation 10's draft (and its customer) for 1.
+                conversation_wa_external_id_clause(Order.external_id, tenant_id, int(conversation_id)),
             )
             .order_by(Order.id.desc())
             .limit(20)
@@ -417,7 +423,7 @@ def _load_active_draft(
         total_raw = getattr(order, "total", None)
         return ActiveDraftContext(
             order_id=getattr(order, "id", None),
-            external_id=str(getattr(order, "external_id", None) or prefix),
+            external_id=str(getattr(order, "external_id", None) or base),
             status=str(getattr(order, "status", "") or ""),
             lifecycle=lifecycle or "whatsapp_draft",
             line_items=list(getattr(order, "line_items", None) or []),
