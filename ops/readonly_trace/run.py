@@ -1,31 +1,26 @@
 """One-shot, scoped, read-only diagnostic; never starts the application.
 
-Question 1 (tenant 1): two cash-on-delivery orders were set to cancelled a day
-or more after the order recorded a cash-on-delivery confirmation. Which path
-cancelled them? The repository has four paths that can (see the evaluation
-notes): the scheduled COD reminder / auto-cancel sweep
-(core.automation_emitters.scan_cod_confirmations: status cancelled, metadata
-cod_auto_cancelled_at / cod_auto_cancel_reason, system event
-order.cod.auto_cancelled, no store call); a customer cancel over WhatsApp
-(services.cod_confirmation.handle_cod_reply: store call first, then
-cod_cancelled_at and system event order.cod.cancelled); a store-side status
-synced in (webhook or poller: status overwritten with the store's slug, no
-cancel metadata); and the dashboard cancel (WhatsApp-origin orders only).
+COD auto-cancel consistency (platform-wide). The scheduled COD sweep
+(core.automation_emitters.scan_cod_confirmations) selects orders by status
+alone; ``under_review`` - the status a customer's COD confirmation writes - is
+in its set, so confirmed orders were cancelled for "no customer response",
+locally only. For every order the sweep auto-cancelled, and for every order it
+would act on now, this reads:
 
-For every tenant-1 order that carries a COD confirmation and is now cancelled:
-an alias (never the id, number, total, name or phone), the COD timeline from
-its metadata (timestamps and reasons only), its system events, the store
-webhooks that name it (event type, time, processing status, the status slug
-they carried), its lifecycle ledger rows, and whether any message in its
-conversation window mentions cancelling (a flag, never the text). Plus the
-tenant's cod_confirmation automation: enabled and its timing settings.
+* an alias (tenant + running index; never the order id, number, external id,
+  total, name or phone);
+* the order's local status now, source, and payment-method class;
+* the trusted COD state: whether Nahla asked for confirmation (send stamp), the
+  customer's recorded decision (metadata keys and order.cod.* system events),
+  and when, relative to creation and to the first auto-cancel;
+* reminders the sweep sent after the customer had confirmed;
+* the store's side: the latest store webhook that names the order (event type,
+  time, status slug), and whether any store webhook carried a cancelled status;
+* how many times the sweep cancelled it, and whether the local status has
+  since been restored by sync.
 
-Platform-wide, counts only: orders with a COD confirmation that the sweep
-later auto-cancelled, and tenants with the automation enabled.
-
-Question 2: which model the production commerce runtime turns are served by
-(ai_usage_events, reason commerce_runtime_pilot, last 14 days): model name and
-counts only.
+Then a classification for a remediation plan, and the orders the live sweep
+would cancel or remind next although the customer confirmed (at risk now).
 
 Session: default_transaction_read_only=on, statement_timeout 15s, refuses any
 host other than the production database it names. Writes are impossible.
@@ -36,6 +31,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -46,16 +42,14 @@ for _entry in (str(APP_ROOT), str(APP_ROOT / "backend"), str(APP_ROOT / "databas
 from sqlalchemy import create_engine, text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
 
-CONFIRMATION = "READ_ONLY_COD_CANCEL_TRACE_V1"
-TENANT = 1
+CONFIRMATION = "READ_ONLY_COD_CONSISTENCY_V1"
 DIGITS = re.compile(r"\d{4,}")
-CANCEL_WORDS = ("إلغاء", "الغاء", "الغي", "ألغي", "cancel")
-COD_KEYS = ("created_at", "nahla_cod_confirmation_sent", "nahla_cod_confirmation_sent_at",
-            "cod_confirm_requested_at", "cod_confirmed_at", "cod_previous_status",
-            "cod_auto_cancelled_at", "cod_auto_cancel_reason", "cod_cancelled_at",
-            "cod_cancel_store_update_failed_at", "cancelled_at", "cancel_reason", "payment_method",
-            "lifecycle")
-TIMING_KEYS = ("cancel_after_minutes", "steps", "reminder_minutes", "delays", "delay_minutes")
+COD_METHODS = {"cod", "cash_on_delivery", "cod_payment", "cash"}
+CONFIRM_KEYS = ("cod_confirmed_at", "cod_pushed_external_id", "cod_confirm_requested_at")
+SWEEP_SLUGS = {"pending_confirmation", "awaiting_confirmation", "under_review", "in_review"}
+SWEEP_ARABIC = {"بانتظار التأكيد", "بإنتظار التأكيد", "قيد المراجعة", "بانتظار المراجعة",
+                "بإنتظار المراجعة", "بانتظار تأكيد العميل"}
+CANCELLED = {"cancelled", "canceled", "canceled_by_admin", "cancelled_by_admin"}
 
 
 def emit(kind, value):
@@ -63,128 +57,167 @@ def emit(kind, value):
           flush=True)
 
 
-def mask(value, limit=200):
+def mask(value, limit=40):
     return DIGITS.sub("[digits]", str(value or ""))[:limit]
 
 
-def _small(value):
-    """A metadata value safe to print: timestamps, slugs, flags, small numbers."""
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, (int, float)):
-        return value if abs(value) < 100000 else "[number]"
-    if isinstance(value, (list, tuple)):
-        return f"[list:{len(value)}]"
-    if isinstance(value, dict):
-        return {str(k): _small(v) for k, v in list(value.items())[:8]}
-    text_value = str(value)
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}[T ][\d:.+\-Z]*", text_value):
-        return text_value[:40]
-    return mask(text_value, 60)
+def ts(value):
+    if isinstance(value, datetime):
+        out = value
+    elif value:
+        try:
+            out = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00").replace(" ", "T", 1))
+        except ValueError:
+            return None
+    else:
+        return None
+    if out.tzinfo is not None:
+        out = out.astimezone(timezone.utc).replace(tzinfo=None)
+    return out
 
 
-def automation(conn):
+def minutes(a, b):
+    return None if a is None or b is None else int((b - a).total_seconds() // 60)
+
+
+def in_sweep(status):
+    raw = str(status or "").strip()
+    return raw.lower() in SWEEP_SLUGS or raw in SWEEP_ARABIC
+
+
+def payment_class(meta):
+    method = str(meta.get("payment_method") or "").strip().lower()
+    if not method:
+        return "missing"
+    return "cod" if method in COD_METHODS else "other:" + mask(method, 24)
+
+
+def events_for(conn, tenant, order_id):
     rows = conn.execute(text(
-        "SELECT enabled, config, created_at, updated_at FROM smart_automations "
-        "WHERE tenant_id = :t AND automation_type = 'cod_confirmation' ORDER BY id"), {"t": TENANT}).all()
-    for enabled, config, created_at, updated_at in rows:
-        config = config or {}
-        emit("cod_automation", {"enabled": enabled, "created_at": created_at, "updated_at": updated_at,
-                                "timing": {k: _small(config.get(k)) for k in TIMING_KEYS if k in config},
-                                "config_keys": sorted(config)[:20]})
-    if not rows:
-        emit("cod_automation", {"rows": 0})
+        "SELECT event_type, count(*), min(created_at), max(created_at) FROM system_events "
+        "WHERE tenant_id = :t AND reference_id = :r AND event_type LIKE 'order.cod.%' "
+        "GROUP BY event_type"), {"t": tenant, "r": str(order_id)}).all()
+    return {event_type: (count, ts(first), ts(last)) for event_type, count, first, last in rows}
 
 
-def orders(conn):
+def store_side(conn, tenant, external_id):
+    if not external_id:
+        return {"webhooks": 0}
     rows = conn.execute(text(
-        "SELECT id, external_id, status, source, customer_id, customer_info, metadata FROM orders "
-        "WHERE tenant_id = :t AND metadata ? 'cod_confirmed_at' "
-        "AND lower(status) IN ('cancelled', 'canceled') ORDER BY id"), {"t": TENANT}).all()
-    emit("orders_found", {"count": len(rows)})
-    for index, (order_id, external_id, status, source, customer_id, info, meta) in enumerate(rows, 1):
-        alias = f"order_{chr(64 + index)}"
+        "SELECT event_type, received_at, parsed_payload FROM webhook_events "
+        "WHERE provider = 'salla' AND (tenant_id = :t OR tenant_id IS NULL) "
+        "AND received_at > now() - interval '45 days' AND parsed_payload::text LIKE :x "
+        "ORDER BY received_at"), {"t": tenant, "x": f"%{external_id}%"}).all()
+    slugs = []
+    for event_type, received_at, parsed in rows:
+        data = (parsed or {}).get("data") if isinstance(parsed, dict) else None
+        slug = None
+        if isinstance(data, dict):
+            raw = data.get("status")
+            slug = (raw.get("slug") or raw.get("name")) if isinstance(raw, dict) else raw
+        slugs.append((event_type, ts(received_at), str(slug or "").strip().lower()))
+    if not slugs:
+        return {"webhooks": 0}
+    last = slugs[-1]
+    with_status = [s for s in slugs if s[2]]
+    last_status = with_status[-1] if with_status else None
+    return {"webhooks": len(slugs), "last_event": last[0], "last_at": last[1],
+            "last_status": mask(last_status[2]) if last_status else None,
+            "last_status_at": last_status[1] if last_status else None,
+            "store_cancelled": any(s[2] in CANCELLED for s in slugs)}
+
+
+def classify(confirmed, requested, local_status, store):
+    store_status = store.get("last_status")
+    if store.get("store_cancelled") and store_status in CANCELLED:
+        return "store_also_cancelled"
+    if confirmed:
+        return "confirmed_cancelled_by_sweep" if local_status in CANCELLED else "confirmed_restored_by_sync"
+    if requested:
+        return "unconfirmed_cod_cancelled_locally" if local_status in CANCELLED else "unconfirmed_restored_by_sync"
+    return "never_asked_cancelled_by_sweep" if local_status in CANCELLED else "never_asked_restored_by_sync"
+
+
+def affected(conn):
+    rows = conn.execute(text(
+        "SELECT o.id, o.tenant_id, o.external_id, o.status, o.source, o.metadata, "
+        "e.cnt, e.first_at, e.last_at FROM orders o JOIN ("
+        "  SELECT tenant_id, reference_id, count(*) AS cnt, min(created_at) AS first_at, "
+        "  max(created_at) AS last_at FROM system_events "
+        "  WHERE event_type = 'order.cod.auto_cancelled' GROUP BY tenant_id, reference_id) e "
+        "ON e.tenant_id = o.tenant_id AND e.reference_id = o.id::text "
+        "ORDER BY o.tenant_id, o.id")).all()
+    emit("affected_found", {"orders": len(rows)})
+    classes = {}
+    index = {}
+    for order_id, tenant, external_id, status, source, meta, count, first_at, last_at in rows:
         meta = meta or {}
-        phone = str((info or {}).get("phone") or (info or {}).get("mobile") or "")
-        emit("order", {"alias": alias, "status": status, "source": source,
-                       "linked_by": "customer_id" if customer_id else "phone_only",
-                       "cod": {k: _small(meta.get(k)) for k in COD_KEYS if k in meta},
-                       "cod_reminders": _small(meta.get("cod_reminders"))})
-        events = conn.execute(text(
-            "SELECT event_type, count(*), min(created_at), max(created_at), "
-            "min((payload->>'elapsed_minutes')::int), max((payload->>'elapsed_minutes')::int), "
-            "max((payload->>'cancel_after_minutes')::int) FROM system_events "
-            "WHERE tenant_id = :t AND reference_id = :r GROUP BY event_type ORDER BY min(created_at)"),
-            {"t": TENANT, "r": str(order_id)}).all()
-        for event_type, count, first, last, min_elapsed, max_elapsed, cancel_after in events:
-            emit("system_events", {"alias": alias, "event_type": event_type, "count": count,
-                                   "first": first, "last": last, "elapsed_minutes": [min_elapsed, max_elapsed],
-                                   "cancel_after_minutes": cancel_after})
-        if external_id:
-            hooks = conn.execute(text(
-                "SELECT event_type, received_at, status, parsed_payload FROM webhook_events "
-                "WHERE provider = 'salla' AND (tenant_id = :t OR tenant_id IS NULL) "
-                "AND received_at > now() - interval '21 days' "
-                "AND parsed_payload::text LIKE :x ORDER BY received_at"),
-                {"t": TENANT, "x": f"%{external_id}%"}).all()
-            for event_type, received_at, hook_status, parsed in hooks:
-                data = (parsed or {}).get("data") if isinstance(parsed, dict) else None
-                slug = None
-                if isinstance(data, dict):
-                    raw = data.get("status")
-                    slug = (raw.get("slug") or raw.get("name")) if isinstance(raw, dict) else raw
-                emit("store_webhook", {"alias": alias, "event_type": event_type,
-                                       "received_at": received_at, "processing": hook_status,
-                                       "status_slug": mask(slug, 40)})
-        ledger = conn.execute(text(
-            "SELECT business_intent, channel, created_at FROM commerce_lifecycle_notification_ledger "
-            "WHERE tenant_id = :t AND order_id = :o ORDER BY created_at"),
-            {"t": TENANT, "o": int(order_id)}).all()
-        for intent, channel, created_at in ledger:
-            emit("lifecycle_ledger", {"alias": alias, "business_intent": intent, "channel": channel,
-                                      "created_at": created_at})
-        if phone:
-            digits = re.sub(r"\D", "", phone)[-9:]
-            messages = conn.execute(text(
-                "SELECT direction, event_type, created_at, body FROM message_events "
-                "WHERE tenant_id = :t AND created_at > now() - interval '21 days' "
-                "AND (metadata->>'customer_phone' LIKE :p OR metadata->>'phone' LIKE :p) "
-                "ORDER BY created_at"), {"t": TENANT, "p": f"%{digits}"}).all()
-            cancelling = [(d, e, c) for d, e, c, b in messages
-                          if any(w in str(b or "").lower() for w in CANCEL_WORDS)]
-            emit("messages", {"alias": alias, "in_window": len(messages),
-                              "mentioning_cancel": [{"direction": d, "event_type": e, "created_at": c}
-                                                    for d, e, c in cancelling][:12]})
+        index[tenant] = index.get(tenant, 0) + 1
+        alias = f"t{tenant}_a{index[tenant]}"
+        events = events_for(conn, tenant, order_id)
+        created = ts(meta.get("created_at"))
+        confirmed_at = ts(meta.get("cod_confirmed_at")) or (events.get("order.cod.confirmed") or (0, None))[1]
+        confirm_keys = [k for k in CONFIRM_KEYS if meta.get(k)]
+        confirmed = bool(confirm_keys) or "order.cod.confirmed" in events
+        requested = bool(meta.get("nahla_cod_confirmation_sent")) or confirmed
+        reminders = list(meta.get("cod_reminders") or [])
+        after_confirm = [r for r in reminders if isinstance(r, dict) and confirmed_at
+                         and ts(r.get("emitted_at")) and ts(r.get("emitted_at")) > confirmed_at]
+        store = store_side(conn, tenant, external_id)
+        local = str(status or "").strip().lower()
+        label = classify(confirmed, requested, local, store)
+        classes[label] = classes.get(label, 0) + 1
+        emit("affected", {
+            "alias": alias, "local_status": mask(local), "source": mask(source, 20),
+            "payment": payment_class(meta), "cod_requested": requested,
+            "confirmation_evidence": confirm_keys + (["event:order.cod.confirmed"]
+                                                      if "order.cod.confirmed" in events else []),
+            "customer_cancel_event": "order.cod.cancelled" in events,
+            "confirmed_after_created_min": minutes(created, confirmed_at),
+            "first_auto_cancel_after_confirmed_min": minutes(confirmed_at, ts(first_at)),
+            "first_auto_cancel_after_created_min": minutes(created, ts(first_at)),
+            "auto_cancels": count, "first_auto_cancel": ts(first_at), "last_auto_cancel": ts(last_at),
+            "reminders": len(reminders), "reminders_after_confirmation": len(after_confirm),
+            "store": store, "class": label,
+        })
+    emit("affected_summary", {"by_class": classes})
 
 
-def platform(conn):
-    confirmed_then_swept = conn.execute(text(
-        "SELECT count(DISTINCT o.id), count(DISTINCT o.tenant_id) FROM orders o "
-        "JOIN system_events e ON e.tenant_id = o.tenant_id AND e.reference_id = o.id::text "
-        "AND e.event_type = 'order.cod.auto_cancelled' "
-        "WHERE o.metadata ? 'cod_confirmed_at' "
-        "AND e.created_at > (o.metadata->>'cod_confirmed_at')::timestamptz")).one()
-    sweeps = conn.execute(text(
-        "SELECT count(*) FROM system_events WHERE event_type = 'order.cod.auto_cancelled' "
-        "AND created_at > now() - interval '30 days'")).scalar()
-    enabled = conn.execute(text(
-        "SELECT count(DISTINCT tenant_id) FROM smart_automations "
-        "WHERE automation_type = 'cod_confirmation' AND enabled")).scalar()
-    emit("platform", {"confirmed_orders_auto_cancelled_after_confirmation": confirmed_then_swept[0],
-                      "tenants_affected": confirmed_then_swept[1],
-                      "auto_cancel_events_last_30d": sweeps,
-                      "tenants_with_cod_automation_enabled": enabled})
-
-
-def runtime_model(conn):
-    rows = conn.execute(text(
-        "SELECT model, count(*), min(created_at), max(created_at) FROM ai_usage_events "
-        "WHERE reason = 'commerce_runtime_pilot' AND created_at > now() - interval '14 days' "
-        "GROUP BY model ORDER BY max(created_at) DESC")).all()
-    for model, count, first, last in rows:
-        emit("runtime_model", {"model": model, "calls": count, "first": first, "last": last})
-    if not rows:
-        emit("runtime_model", {"rows": 0})
+def at_risk(conn):
+    autos = conn.execute(text(
+        "SELECT tenant_id, config FROM smart_automations "
+        "WHERE automation_type = 'cod_confirmation' AND enabled")).all()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for tenant, config in autos:
+        config = config or {}
+        try:
+            cancel_after = int(config.get("cancel_after_minutes") or 1440)
+        except (TypeError, ValueError):
+            cancel_after = 1440
+        rows = conn.execute(text(
+            "SELECT id, status, metadata FROM orders WHERE tenant_id = :t "
+            "AND is_abandoned IS NOT TRUE"), {"t": tenant}).all()
+        selected = [(i, s, m or {}) for i, s, m in rows if in_sweep(s)]
+        confirmed_now, never_asked, unconfirmed = [], 0, 0
+        for order_id, status, meta in selected:
+            events = events_for(conn, tenant, order_id)
+            confirmed = any(meta.get(k) for k in CONFIRM_KEYS) or "order.cod.confirmed" in events
+            created = ts(meta.get("created_at"))
+            age = minutes(created, now)
+            if confirmed:
+                confirmed_now.append({
+                    "local_status": mask(str(status or "").lower()), "age_min": age,
+                    "minutes_to_auto_cancel": None if age is None else cancel_after - age,
+                    "already_auto_cancelled_before": bool(meta.get("cod_auto_cancelled_at")),
+                    "reminders": len(list(meta.get("cod_reminders") or []))})
+            elif meta.get("nahla_cod_confirmation_sent"):
+                unconfirmed += 1
+            else:
+                never_asked += 1
+        emit("at_risk", {"tenant": tenant, "cancel_after_minutes": cancel_after,
+                         "selected_by_sweep": len(selected), "confirmed": len(confirmed_now),
+                         "unconfirmed_cod_requested": unconfirmed, "never_asked": never_asked,
+                         "confirmed_orders": confirmed_now[:30]})
 
 
 def main():
@@ -204,8 +237,7 @@ def main():
             if conn.execute(text("SHOW default_transaction_read_only")).scalar() != "on":
                 emit("status", {"status": "not_read_only"})
                 return 1
-            for part, fn in (("runtime_model", runtime_model), ("cod_automation", automation),
-                             ("orders", orders), ("platform", platform)):
+            for part, fn in (("affected", affected), ("at_risk", at_risk)):
                 try:
                     fn(conn)
                 except Exception as exc:  # noqa: BLE001 - one part failing does not hide the others
