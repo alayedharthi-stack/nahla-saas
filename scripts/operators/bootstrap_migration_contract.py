@@ -30,6 +30,8 @@ SHIPMENT_ALEMBIC_HEAD = "0112"
 NAVIGATION_ALEMBIC_HEAD = "0113"
 # AI accounting deduplication extends navigation without changing bootstrap.
 AI_USAGE_ALEMBIC_HEAD = "0114"
+# Payments remain a sibling off 0112 and never activate during normal bootstrap.
+PAYMENTS_ALEMBIC_HEAD = "0115"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -40,8 +42,9 @@ SHIPMENT_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
 NAVIGATION_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
-REPOSITORY_ALEMBIC_HEADS = frozenset(
+AI_USAGE_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, AI_USAGE_ALEMBIC_HEAD})
+REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -49,6 +52,7 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     # topology, so both are accepted rather than one replacing the other.
     SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
     NAVIGATION_REPOSITORY_ALEMBIC_HEADS,
+    AI_USAGE_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -58,7 +62,9 @@ def repository_heads_expected(heads) -> bool:
 
     Accepted source checkouts are exactly ``{0092, 0111}``, the intermediate
     address checkout ``{0092, 0110, 0111}``, and the current shipment checkout
-    ``{0092, 0111, 0112}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0112}``, navigation ``{0092, 0111, 0113}``,
+    AI usage ``{0092, 0111, 0114}``, and payments
+    ``{0092, 0111, 0114, 0115}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS
