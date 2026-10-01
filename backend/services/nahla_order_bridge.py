@@ -143,6 +143,23 @@ def nahla_wa_external_id(tenant_id: int, conversation_id: int) -> str:
     return f"{_NAHL_WA_EXT_PREFIX}{tenant_id}-{conversation_id}"
 
 
+def is_conversation_wa_external_id(external_id: Any, tenant_id: int, conversation_id: int) -> bool:
+    """True only for this conversation's own WhatsApp order ids: the base id, or
+    the base followed by ``-msg-`` (``nahla_wa_catalog_external_id``). A bare
+    prefix test would also take conversation 10's orders for conversation 1."""
+    base = nahla_wa_external_id(tenant_id, conversation_id)
+    value = str(external_id or "")
+    return value == base or value.startswith(f"{base}-msg-")
+
+
+def conversation_wa_external_id_clause(column: Any, tenant_id: int, conversation_id: int) -> Any:
+    """SQL form of ``is_conversation_wa_external_id`` for an ``external_id`` column."""
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    base = nahla_wa_external_id(tenant_id, conversation_id)
+    return or_(column == base, column.like(f"{base}-msg-%"))
+
+
 def nahla_wa_catalog_external_id(
     tenant_id: int,
     conversation_id: int,

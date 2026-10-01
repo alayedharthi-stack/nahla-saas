@@ -359,17 +359,18 @@ def _find_active_whatsapp_draft(
     try:
         from models import Order  # noqa: PLC0415
         from services.nahla_order_bridge import (  # noqa: PLC0415
+            conversation_wa_external_id_clause,
             is_open_wa_draft_order,
-            nahla_wa_external_id,
         )
 
-        prefix = nahla_wa_external_id(int(tenant_id), int(conversation_id))
         candidates = (
             db.query(Order)
             .filter(
                 Order.tenant_id == int(tenant_id),
                 Order.source == "whatsapp",
-                Order.external_id.like(f"{prefix}%"),
+                # This conversation's own ids only: the base, or the base + "-msg-"
+                # (a bare prefix would also match conversation 10's orders for 1).
+                conversation_wa_external_id_clause(Order.external_id, int(tenant_id), int(conversation_id)),
             )
             .order_by(Order.id.desc())
             .limit(20)
