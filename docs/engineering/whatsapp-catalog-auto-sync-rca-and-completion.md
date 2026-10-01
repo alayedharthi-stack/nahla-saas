@@ -117,7 +117,7 @@ CUSTOMER_REGEX_CHANGED=NO
 | `test_whatsapp_catalog_sync_status_honesty.py` | منشور بلا دليل ربط ≠ published، دليل الربط والقياس الزمني، تجاهل دليل كتالوج آخر، رموز الإجراء، تصنيف 190/10/429، **رمز منتهٍ يحجب بلا استهلاك محاولات**، إعادة النشر بعد السحب ترسل `visibility=published`، إعادة الطابور بعد تغيّر الاتصال |
 
 التشغيل المحلي: 491 اختبارًا في مجموعة الكتالوج/سلة/الدستور (`test_constitution_compliance.py` ضمنها) ناجحة، + 115 في الملفات الجديدة والمعدّلة. `scripts/lint_no_silent_except.py` نظيف. `tsc --noEmit` للوحة نظيف.
-**فشل سابق على `main` غير متعلق بهذا العمل:** `test_meta_catalog_readiness.py::test_fatal_missing_image_and_url` يفشل على `origin/main` أيضًا (يتوقع `missing_url` ولا يحصل عليه؛ يبدو معتمدًا على بيئة الرابط العام). لم ألمسه.
+**فشل سابق على `main` غير متعلق بهذا العمل:** `test_meta_catalog_readiness.py::test_fatal_missing_image_and_url` و3 اختبارات في `test_availability_browse_variant_conflict.py` تفشل على `origin/main` أيضًا (تحقق بتشغيلها على worktree من main). لم ألمسها.
 اختبارات أقفال PostgreSQL (`whatsapp-catalog-sync-postgres`) تُنفَّذ في CI؛ لم تتغير ملفاتها.
 
 ما لا تثبته الاختبارات: ظهور المنتج في واجهة واتساب، وصحة أصول المستأجر 1 الحيّة.
