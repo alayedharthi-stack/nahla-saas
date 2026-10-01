@@ -32,6 +32,8 @@ NAVIGATION_ALEMBIC_HEAD = "0113"
 AI_USAGE_ALEMBIC_HEAD = "0114"
 # Payments remain a sibling off 0112 and never activate during normal bootstrap.
 PAYMENTS_ALEMBIC_HEAD = "0115"
+# OTO merchant credentials remain a separate dormant sibling of 0112.
+OTO_ALEMBIC_HEAD = "0116"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -44,7 +46,8 @@ NAVIGATION_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
 AI_USAGE_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, AI_USAGE_ALEMBIC_HEAD})
-REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
+PAYMENTS_REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
+REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {OTO_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -53,6 +56,7 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
     NAVIGATION_REPOSITORY_ALEMBIC_HEADS,
     AI_USAGE_REPOSITORY_ALEMBIC_HEADS,
+    PAYMENTS_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -64,7 +68,8 @@ def repository_heads_expected(heads) -> bool:
     address checkout ``{0092, 0110, 0111}``, and the current shipment checkout
     ``{0092, 0111, 0112}``, navigation ``{0092, 0111, 0113}``,
     AI usage ``{0092, 0111, 0114}``, and payments
-    ``{0092, 0111, 0114, 0115}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115}``, and dormant OTO
+    ``{0092, 0111, 0114, 0115, 0116}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS

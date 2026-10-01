@@ -178,6 +178,7 @@ export interface OrderShipmentInfo {
   status: string
   status_label_ar?: string
   tracking_number?: string | null
+  tracking?: { tracking_link?: string | null } | null
   label_url?: string | null
   label_pdf_path?: string | null
   recipient_name?: string | null
