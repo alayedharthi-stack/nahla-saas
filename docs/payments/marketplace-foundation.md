@@ -30,7 +30,7 @@ be confirmed directly with Moyasar before activating an adapter.
   here. The new event key/digest table is dormant, with no raw card data.
 - Startup calls the application `Base.metadata.create_all`. Payments use a
   separate `PaymentBase`, so a code deployment cannot silently create these
-  relations. Revision `0114` is an explicit sibling of dormant `0113`, both
+  relations. Revision `0115` is an explicit sibling of dormant `0113`, both
   descending from `0112`; the repository has multiple historical heads. The
   closed migration topology contract accepts this explicit fourth head while
   normal bootstrap remains pinned to `0093`.
@@ -57,6 +57,19 @@ reads. An implementation must reject a response whose merchant reference does
 not match the tenant's approved profile. Onboarding, checkout creation,
 settlement reconciliation, refunds, fee/tax treatment and dashboard summaries
 remain separate reviewable phases.
+
+The dormant `observe_payment` service now performs one provider read outside
+its write transaction, checks the approved tenant/provider/mode profile before
+and after that read, and refuses merchant/reference/amount mismatches. It
+records the observed provider status and an effective tenant-specific fee
+policy snapshot atomically. Repeating an observation preserves the original
+amount and fee quote; a provider outage writes nothing. This is a provisional
+record even when the provider reports a paid status: the service does not mark
+an order paid, calculate a net settlement, or expose a merchant balance.
+The caller must supply an authenticated tenant scope; the service has no route.
+Concurrent insert races are stopped by the database unique constraints; a
+caller may retry after a conflict. Provider status updates, refund transitions
+and chargebacks require a separate reconciler with documented state rules.
 
 ## Public Moyasar documentation verified 2026-09-29
 
@@ -98,5 +111,5 @@ remain separate reviewable phases.
    as `(tenant_id, id)`; no speculative order relation is added here.
 
 Before any migration, inspect the target's Alembic revision and actual schema;
-apply `0114` explicitly only after approval. No `upgrade head`, startup change,
+apply `0115` explicitly only after approval. No `upgrade head`, startup change,
 or production migration is part of this PR.

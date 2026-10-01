@@ -1,6 +1,6 @@
 """Dormant tenant-bound marketplace payment references.
 
-Revision ID: 0114
+Revision ID: 0115
 Revises: 0112
 
 This is an explicit sibling of the dormant 0113 runtime branch. Apply only
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from backend.payments.models import PAYMENT_TABLES, PaymentBase
 
 
-revision = "0114"
+revision = "0115"
 down_revision = "0112"
 branch_labels = None
 depends_on = None
@@ -33,7 +33,7 @@ def upgrade() -> None:
     overlap = existing.intersection(table.name for table in PAYMENT_TABLES)
     if overlap:
         raise RuntimeError(
-            "Merchant payment schema already exists; inspect it before applying 0114: "
+            "Merchant payment schema already exists; inspect it before applying 0115: "
             + ", ".join(sorted(overlap))
         )
     PaymentBase.metadata.create_all(bind, tables=list(PAYMENT_TABLES), checkfirst=False)

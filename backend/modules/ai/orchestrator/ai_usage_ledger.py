@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from sqlalchemy.exc import IntegrityError
+
 from modules.ai.orchestrator.ai_usage_pricing import compute_usage_cost_usd
 from modules.ai.orchestrator.llm_cost_audit import approx_tokens_from_chars
 
@@ -293,19 +295,18 @@ def record_ai_usage_event(
             cache_cost_usd=costs["cache_cost_usd"],
             total_cost_usd=costs["total_cost_usd"],
             pricing_version=costs["pricing_version"],
-            request_id=request_id,
+            request_id=request_id or None,
         )
 
         if db is not None:
-            db.add(row)
-            db.flush()
+            _insert_usage_row(db, row)
             return
 
         from database.session import SessionLocal  # noqa: PLC0415
 
         session = SessionLocal()
         try:
-            session.add(row)
+            _insert_usage_row(session, row)
             session.commit()
         except Exception:
             session.rollback()
@@ -320,6 +321,31 @@ def record_ai_usage_event(
             reason,
             type(exc).__name__,
         )
+
+
+def _insert_usage_row(db: Any, row: Any) -> None:
+    """A duplicate provider response must not charge twice or poison its caller.
+
+    The unique database index also covers concurrent writers. The savepoint
+    isolates a rejected ledger insert from the caller's business transaction.
+    No request IDs, credentials or conversation content are logged.
+    """
+    from database.models import AIUsageEvent  # noqa: PLC0415
+
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError:
+        existing = None
+        if row.request_id:
+            existing = db.query(AIUsageEvent).filter_by(
+                provider=row.provider, request_id=row.request_id,
+            ).first()
+        if existing is None:
+            raise
+        if existing.tenant_id != row.tenant_id or existing.model != row.model:
+            _log.error("[AI_USAGE_LEDGER_DUPLICATE_CONFLICT] provider=%s", row.provider)
 
 
 def record_ai_usage_from_anthropic(
@@ -393,8 +419,8 @@ def record_ai_usage_from_anthropic(
         )
 
 
-def ledger_period_start(period: str) -> Optional[datetime]:
-    now = datetime.now(timezone.utc)
+def ledger_period_start(period: str, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    now = now or datetime.now(timezone.utc)
     key = (period or "7d").strip().lower()
     if key in {"24h", "1d"}:
         return now - timedelta(hours=24)
@@ -430,9 +456,15 @@ def _aggregate_events(events: List[Any]) -> Dict[str, Any]:
     providers: Dict[str, int] = {}
     reasons: Dict[str, int] = {}
     calls_total = 0
+    unpriced_calls = 0
+    pricing_versions: Dict[str, int] = {}
 
     for event in events:
         calls_total += 1
+        if event.total_cost_usd is None:
+            unpriced_calls += 1
+        version = getattr(event, "pricing_version", None) or "unknown"
+        pricing_versions[version] = pricing_versions.get(version, 0) + 1
         cost = Decimal(str(event.total_cost_usd or 0))
         models[event.model] = models.get(event.model, 0) + 1
         providers[event.provider] = providers.get(event.provider, 0) + 1
@@ -452,7 +484,13 @@ def _aggregate_events(events: List[Any]) -> Dict[str, Any]:
             )
 
     return {
+        # 'actual' below describes measured tokens, never a provider invoice.
+        # Existing API fields stay compatible; expose the financial provenance.
+        "cost_basis": "tokens_x_versioned_rates",
+        "provider_reported_total_cost_usd": None,
+        "pricing_versions": pricing_versions,
         "calls_total": calls_total,
+        "unpriced_calls": unpriced_calls,
         "actual_total_cost_usd": _round_display_usd(actual_cost),
         "estimated_total_cost_usd": _round_display_usd(estimated_cost),
         "unattributed_total_cost_usd": _round_display_usd(unattributed_cost),
@@ -478,17 +516,24 @@ def aggregate_tenant_ledger(
     tenant_id: int,
     *,
     period: str = "7d",
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     from database.models import AIUsageEvent  # noqa: PLC0415
 
-    since = ledger_period_start(period)
-    query = db.query(AIUsageEvent).filter(AIUsageEvent.tenant_id == tenant_id)
+    as_of = as_of or datetime.now(timezone.utc)
+    since = ledger_period_start(period, now=as_of)
+    query = db.query(AIUsageEvent).filter(
+        AIUsageEvent.tenant_id == tenant_id, AIUsageEvent.created_at <= as_of,
+    )
     if since is not None:
         query = query.filter(AIUsageEvent.created_at >= since)
     events = query.all()
     payload = _aggregate_events(events)
     payload["tenant_id"] = tenant_id
     payload["period"] = period
+    payload["period_start"] = since.isoformat() if since else None
+    payload["period_end"] = as_of.isoformat()
+    payload["period_timezone"] = "UTC"
     return payload
 
 
@@ -496,14 +541,19 @@ def aggregate_platform_ledger(
     db: Any,
     *,
     period: str = "7d",
+    as_of: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     from database.models import AIUsageEvent  # noqa: PLC0415
 
-    since = ledger_period_start(period)
-    query = db.query(AIUsageEvent)
+    as_of = as_of or datetime.now(timezone.utc)
+    since = ledger_period_start(period, now=as_of)
+    query = db.query(AIUsageEvent).filter(AIUsageEvent.created_at <= as_of)
     if since is not None:
         query = query.filter(AIUsageEvent.created_at >= since)
     events = query.all()
     payload = _aggregate_events(events)
     payload["period"] = period
+    payload["period_start"] = since.isoformat() if since else None
+    payload["period_end"] = as_of.isoformat()
+    payload["period_timezone"] = "UTC"
     return payload

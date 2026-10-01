@@ -171,7 +171,7 @@ def test_allocation_and_event_invariants_are_database_enforced(database):
 
 def test_migration_creates_only_payment_tables_and_refuses_unknown_schema(monkeypatch):
     migration_path = (Path(__file__).resolve().parents[1] / "database/migrations/versions"
-                      / "0114_merchant_payments_foundation.py")
+                      / "0115_merchant_payments_foundation.py")
     spec = importlib.util.spec_from_file_location("merchant_payments_migration", migration_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

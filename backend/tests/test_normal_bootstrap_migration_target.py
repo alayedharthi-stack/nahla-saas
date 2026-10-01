@@ -26,17 +26,18 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
 
 def test_repository_accepts_only_known_parallel_head_topologies() -> None:
-    # 0114 is a sibling of dormant 0113; both revise 0112. Neither changes the
-    # 0092 validation or 0111 application branches or the pinned 0093 bootstrap.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0113", "0114"})
+    # Payments 0115 branches from 0112, independently of the existing 0114
+    # AI usage branch. Both preserve normal bootstrap pinned to 0093.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115"})
+    assert repository_heads_expected({"0092", "0111", "0114"})
+    assert repository_heads_expected({"0092", "0111", "0113"})
+    assert not repository_heads_expected({"0092", "0111", "0113", "0114"})
     assert repository_heads_expected({"0092", "0111"})
     assert repository_heads_expected({"0092", "0110", "0111"})
     assert repository_heads_expected(REPOSITORY_ALEMBIC_HEADS)
-    assert repository_heads_expected({"0092", "0111", "0113"})
     assert not repository_heads_expected({"0092", "0110"})
     assert not repository_heads_expected({"0092", "0110", "0111", "0112"})
     assert not repository_heads_expected({"0092", "0111", "0112", "0113"})
-    assert not repository_heads_expected({"0092", "0111", "0112", "0113", "0114"})
 
 
 def test_migration_0094_extends_integration_branch_from_0093() -> None:

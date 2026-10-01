@@ -204,7 +204,17 @@ export interface AdminSubscription {
   auto_renew: boolean
 }
 
-export interface AdminAIUsageTenant {
+export interface AICostProvenance {
+  unpriced_calls: number
+  period_start: string | null
+  period_end: string
+  period_timezone: 'UTC'
+  cost_basis: 'tokens_x_versioned_rates'
+  provider_reported_total_cost_usd: number | null
+  pricing_versions: Record<string, number>
+}
+
+export interface AdminAIUsageTenant extends AICostProvenance {
   tenant_id: number
   tenant_name?: string
   period?: string
@@ -223,7 +233,7 @@ export interface AdminAIUsageTenant {
   reasons: Array<{ reason: string; count: number }>
 }
 
-export interface AdminAICostsSummary {
+export interface AdminAICostsSummary extends AICostProvenance {
   period: string
   actual_total_cost_usd: number
   estimated_total_cost_usd: number
@@ -244,6 +254,7 @@ export interface AdminAICostsSummary {
     actual_total_tokens: number
     estimated_total_tokens: number
     calls_total: number
+    unpriced_calls: number
   }>
 }
 
