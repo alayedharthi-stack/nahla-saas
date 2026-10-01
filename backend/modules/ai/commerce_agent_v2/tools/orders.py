@@ -161,12 +161,12 @@ def _load_tenant_order(context: CommerceAgentContext, order_id: int) -> Any:
 
 
 def _is_current_conversation_draft(context: CommerceAgentContext, order: Any) -> bool:
-    from services.nahla_order_bridge import nahla_wa_external_id
+    from services.nahla_order_bridge import is_conversation_wa_external_id
 
     if str(getattr(order, "source", "") or "").strip().lower() != "whatsapp":
         return False
-    prefix = nahla_wa_external_id(context.tenant_id, context.conversation_id)
-    return str(getattr(order, "external_id", "") or "").startswith(prefix)
+    return is_conversation_wa_external_id(getattr(order, "external_id", ""), context.tenant_id,
+                                          context.conversation_id)
 
 
 def _assert_discovered_order_is_customer_scoped(

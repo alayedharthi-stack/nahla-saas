@@ -373,11 +373,13 @@ def _find_active_whatsapp_draft(
             nahla_wa_external_id,
         )
 
-        prefix = nahla_wa_external_id(int(tenant_id), int(conversation_id))
+        # This conversation's own ids only: the base, or the base + "-msg-"
+        # (a bare prefix would also match conversation 10's orders for 1).
+        base = nahla_wa_external_id(int(tenant_id), int(conversation_id))
         query = db.query(Order).filter(
             Order.tenant_id == int(tenant_id),
             Order.source == "whatsapp",
-            Order.external_id.like(f"{prefix}%"),
+            or_(Order.external_id == base, Order.external_id.like(f"{base}-msg-%")),
         )
         if exclude_carts:
             query = _carts_excluded(query, Order)
@@ -571,6 +573,10 @@ def resolve_customer_order_context(
     if lifecycle_aware:
         from core.order_lifecycle_reading import order_stage  # noqa: PLC0415
 
+        # The conversation's draft is picked first only while it is under way:
+        # a delivered or cancelled conversation order is history, not a draft.
+        if draft_row is not None and order_stage(draft_row.status, draft_row.source) != "ongoing":
+            draft_row = None
         if is_customer_order is not None:
             # Only the orders the lookup picks by itself: an order named by
             # number still reaches the caller's scope check, which refuses it.

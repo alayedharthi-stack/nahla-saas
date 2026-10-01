@@ -474,6 +474,73 @@ def test_a_conversation_draft_kept_as_a_cart_is_not_the_active_draft():
     assert lookup.order.order_reference == mine.external_order_number
 
 
+def _conversation_order(store: Store, conversation_id: int, *, status: str = "draft", suffix: str = "",
+                        customer_id: Any = None, phone: str = "") -> Order:
+    from services.nahla_order_bridge import nahla_wa_external_id
+
+    row = Order(tenant_id=store.tenant.id, customer_id=customer_id, source="whatsapp", status=status,
+                external_id=nahla_wa_external_id(store.tenant.id, conversation_id) + suffix,
+                external_order_number=f"WA-{conversation_id}{suffix}", extra_metadata={"lifecycle": "whatsapp_draft"},
+                customer_info={"phone": phone} if phone else {}, line_items=[])
+    store.db.add(row)
+    store.db.flush()
+    return row
+
+
+def test_another_conversations_draft_is_never_taken_for_this_ones():
+    """Conversation 1's prefix also begins conversation 10's ids. An unlinked
+    draft of conversation 10 — another customer, another phone — is neither
+    picked for conversation 1 nor readable by its customer."""
+    store = Store()
+    mine = store.order("processing")
+    other = Conversation(id=int(f"{store.conversation.id}0"), tenant_id=store.tenant.id,
+                         customer_id=store.neighbour.id, status="active")
+    store.db.add(other)
+    store.db.flush()
+    foreign = _conversation_order(store, other.id, phone=OTHER_PHONE)
+    context = store.context()
+    lookup = resolve(context)
+    assert lookup.order.order_reference == mine.external_order_number
+    assert lookup.order.order_reference != foreign.external_order_number
+    row = orders_module._load_tenant_order(context, foreign.id)
+    with pytest.raises(TenantIsolationViolation):
+        orders_module._assert_discovered_order_is_customer_scoped(context, row)
+
+
+def test_the_resolver_itself_never_finds_another_conversations_draft():
+    """Every caller of the draft finder, not only the agent's lookup."""
+    store = Store()
+    other = Conversation(id=int(f"{store.conversation.id}0"), tenant_id=store.tenant.id,
+                         customer_id=store.neighbour.id, status="active")
+    store.db.add(other)
+    store.db.flush()
+    _conversation_order(store, other.id, phone=OTHER_PHONE)
+    store.db.commit()
+    ctx = resolve_customer_order_context(store.db, tenant_id=store.tenant.id, conversation_id=store.conversation.id,
+                                         customer_id=store.customer.id, phone=PHONE)
+    assert ctx.active_whatsapp_draft is None and ctx.selected_order is None
+
+
+def test_this_conversations_own_draft_is_still_found_with_its_message_suffix():
+    store = Store()
+    store.order("processing")
+    draft = _conversation_order(store, store.conversation.id, suffix="-msg-7")
+    lookup = resolve(store.context())
+    assert lookup.selection_reason == "active_whatsapp_draft"
+    assert lookup.order.order_reference == draft.external_order_number
+
+
+def test_a_finished_conversation_order_is_not_picked_as_the_draft():
+    """No open draft: the conversation's delivered order is history, and the
+    lookup picks the history's newest ongoing order instead."""
+    store = Store()
+    _conversation_order(store, store.conversation.id, status="delivered")
+    mine = store.order("processing")
+    lookup, listed = _lookup_and_history(store)
+    assert lookup.selection_reason == "latest_open_order"
+    assert lookup.order.order_reference == mine.external_order_number == listed.ongoing.orders[0].order_reference
+
+
 def test_the_resolvers_priority_list_puts_ongoing_orders_first_when_lifecycle_aware():
     store = Store()
     fulfilled = store.order("completed")           # Salla: still under way
