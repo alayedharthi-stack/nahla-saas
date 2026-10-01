@@ -109,11 +109,12 @@ def _as_int(value: Any) -> Optional[int]:
 def _proven_customer_order(order: Any, *, customer_id: Optional[int], phones: Sequence[str]) -> bool:
     """The order is this customer's: it is linked to this customer, or it is
     linked to no customer and carries one of the customer's phones. An order
-    linked to another customer is never this customer's, whatever its phone
-    says. Nothing else proves ownership."""
+    linked to a customer is proven only by that customer's identity — never by
+    a phone alone, also when the sender's customer is unknown. Nothing else
+    proves ownership."""
     linked = _as_int(getattr(order, "customer_id", None))
-    if customer_id is not None and linked is not None:
-        return linked == customer_id
+    if linked is not None:
+        return customer_id is not None and linked == customer_id
     return bool(phones) and _phone_matches(order, phones)
 
 

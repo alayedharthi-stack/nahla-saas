@@ -393,3 +393,31 @@ def test_an_unlinked_order_in_another_store_with_the_same_phone_is_never_linked(
     conversation = SimpleNamespace(id=1, customer=store.customer, customer_id=store.customer.id)
     assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation,
                                   phone_candidates=(PHONE,)) is None
+
+
+def test_a_phone_alone_never_links_an_order_linked_to_a_customer_when_the_customer_is_unknown():
+    """No customer id on the conversation, the sender's phone matches an order
+    that is linked to a customer: the phone alone does not prove that customer
+    is the sender, so the order is never linked."""
+    store = Store()
+    neighbours = _pending_payment(store, 10, phone=PHONE, customer_id=store.neighbour.id)
+    unknown = SimpleNamespace(id=1, customer=None, customer_id=None)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=unknown,
+                                  phone_candidates=(PHONE,)) is None
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id,
+                                  phone_candidates=(PHONE,)) is None
+    # Even an order linked to the sender's own customer record needs that
+    # customer's identity, not the phone alone.
+    store.db.delete(neighbours)
+    _pending_payment(store, 12, phone=PHONE, customer_id=store.customer.id)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=unknown,
+                                  phone_candidates=(PHONE,)) is None
+
+
+def test_with_the_customer_unknown_a_phone_still_proves_an_unlinked_order():
+    store = Store()
+    _pending_payment(store, 10, phone=NEIGHBOUR_PHONE)
+    unlinked = _pending_payment(store, 12, phone=PHONE)
+    unknown = SimpleNamespace(id=1, customer=None, customer_id=None)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=unknown,
+                                  phone_candidates=(PHONE,)) is unlinked
