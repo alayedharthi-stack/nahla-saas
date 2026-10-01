@@ -569,18 +569,15 @@ def enqueue_channel_retirement_ledger(
     added = 0
     for item in items:
         rid = _strip(item.get("retailer_id"))
-        cid = _strip(item.get("catalog_id")) or default_catalog
-        if not cid:
-            raise RuntimeError("channel_retirement_catalog_id_missing")
-        existing = (
-            db.query(model)
-            .filter(
-                model.tenant_id == int(tenant_id),
-                model.catalog_id == cid,
-                model.retailer_id == rid,
-            )
-            .first()
+        cid = _strip(item.get("catalog_id")) or default_catalog or None
+        # A tenant without a stamped catalog still gets the record (catalog
+        # resolved at drain time); the delete is never refused for it.
+        query = db.query(model).filter(
+            model.tenant_id == int(tenant_id),
+            model.retailer_id == rid,
         )
+        query = query.filter(model.catalog_id == cid) if cid else query.filter(model.catalog_id.is_(None))
+        existing = query.first()
         if existing is not None:
             existing.reason = str(reason)
             existing.status = LEDGER_STATUS_PENDING
@@ -700,6 +697,7 @@ def drain_channel_retirement_ledger(
     )
     default_catalog = _strip(getattr(conn, "meta_catalog_id", None))
     outcomes: Dict[int, Dict[str, Any]] = {}
+    observed: Dict[int, tuple] = {}
     for row in rows:
         if not _ledger_row_due(row, now):
             continue
@@ -709,26 +707,37 @@ def drain_channel_retirement_ledger(
         if out["processed"] >= int(limit):
             break
         out["processed"] += 1
-        try:
-            res = retire_meta_catalog_item(
-                conn,
-                row.catalog_id or default_catalog,
-                row.retailer_id,
-                row.meta_item_id,
-                client=client,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception(
-                "[WA_CATALOG_RETIRE] ledger graph call failed tenant=%s rid=%s",
-                tenant_id,
-                row.retailer_id,
-            )
-            res = {"ok": False, "error": type(exc).__name__}
+        observed[int(row.id)] = (int(row.attempts or 0), row.updated_at, row.reason)
+        catalog_for_row = _strip(row.catalog_id) or default_catalog
+        if not catalog_for_row:
+            res = {"ok": False, "error": "catalog_id_missing"}
+        else:
+            try:
+                res = retire_meta_catalog_item(
+                    conn,
+                    catalog_for_row,
+                    row.retailer_id,
+                    row.meta_item_id,
+                    client=client,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "[WA_CATALOG_RETIRE] ledger graph call failed tenant=%s rid=%s",
+                    tenant_id,
+                    row.retailer_id,
+                )
+                res = {"ok": False, "error": type(exc).__name__}
         outcomes[int(row.id)] = res
 
+    db.expire_all()
     for row_id, res in outcomes.items():
         row = db.query(model).filter(model.id == int(row_id), model.tenant_id == int(tenant_id)).first()
         if row is None:
+            continue
+        if (int(row.attempts or 0), row.updated_at, row.reason) != observed.get(int(row_id)):
+            # Re-opened (product re-created and re-deleted) while Graph ran:
+            # the new request stands; this outcome belongs to the old one.
+            out["reopened"] = int(out.get("reopened") or 0) + 1
             continue
         row.updated_at = now
         if res.get("ok"):

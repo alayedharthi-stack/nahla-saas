@@ -450,7 +450,9 @@ class CatalogChannelRetirement(Base):
     __tablename__ = "catalog_channel_retirements"
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
-    catalog_id = Column(String(64), nullable=False)
+    # NULL when the tenant had no stamped catalog at delete time; the drain
+    # resolves it from the connection, so a delete is never refused for it.
+    catalog_id = Column(String(64), nullable=True)
     retailer_id = Column(String(255), nullable=False)
     meta_item_id = Column(String(128), nullable=True)
     product_id = Column(Integer, nullable=True)

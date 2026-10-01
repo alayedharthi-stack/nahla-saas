@@ -682,3 +682,61 @@ def test_rehide_after_exhausted_or_restore_starts_a_fresh_retirement_budget():
         assert product.sync_status == "pending"
     finally:
         session.close(); engine.dispose()
+
+
+def test_delete_without_a_stamped_catalog_is_still_recorded_and_drained_later():
+    """A tenant whose catalog id was cleared can still delete products; the
+    retirement row keeps catalog NULL and the drain resolves it later."""
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        product = _salla_product(session, t_a, ext="830100")
+        conn = _conn(session, t_a)
+        conn.meta_catalog_id = None
+        session.commit()
+        ids = channel_identities_for_product(session, product)
+        for i in ids:
+            i["catalog_id"] = None
+        assert enqueue_channel_retirement_ledger(session, t_a, ids, reason=REASON_SOURCE_DELETED) == 1
+        session.delete(product); session.commit()
+        row = _ledger_rows(session, t_a)[0]
+        assert row.catalog_id is None and row.status == LEDGER_STATUS_PENDING
+        # without a catalog the drain records the reason and backs off (no Graph call)
+        graph = FakeGraph({})
+        out = drain_channel_retirement_ledger(session, t_a, client=graph)
+        assert out["failed"] == 1 and graph.posts == [] and graph.gets == []
+        assert _ledger_rows(session, t_a)[0].last_error == "catalog_id_missing"
+        # catalog stamped again → the request completes
+        conn = _conn(session, t_a); conn.meta_catalog_id = "CAT-GENERIC-001"
+        row = _ledger_rows(session, t_a)[0]; row.next_attempt_at = None
+        session.commit()
+        graph = FakeGraph({"830100-591001": {"id": "META-830100-591001", "availability": "in stock"}})
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            out = drain_channel_retirement_ledger(session, t_a, client=graph)
+        assert out["retired"] == 1
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_ledger_row_reopened_during_graph_io_is_not_marked_done_by_the_old_outcome():
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        product = _salla_product(session, t_a, ext="840100")
+        ids = channel_identities_for_product(session, product)
+        enqueue_channel_retirement_ledger(session, t_a, ids, reason=REASON_SOURCE_DELETED)
+        session.commit()
+
+        class ReopeningGraph(FakeGraph):
+            def post(self, url, data=None, headers=None):
+                # the product was re-created and re-deleted while we were talking to Graph
+                enqueue_channel_retirement_ledger(session, t_a, ids, reason="manual_deleted")
+                session.commit()
+                return super().post(url, data=data, headers=headers)
+
+        graph = ReopeningGraph({"840100-591001": {"id": "META-840100-591001", "availability": "in stock"}})
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            out = drain_channel_retirement_ledger(session, t_a, client=graph)
+        assert out.get("reopened") == 1
+        row = _ledger_rows(session, t_a)[0]
+        assert row.status == LEDGER_STATUS_PENDING and row.reason == "manual_deleted"
+    finally:
+        session.close(); engine.dispose()

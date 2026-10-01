@@ -197,13 +197,11 @@ def source_event_time(payload: Any, envelope_created_at: Any = None) -> Optional
     return None
 
 
-def stored_source_event_time(product: Any) -> Optional[datetime]:
-    meta = getattr(product, "extra_metadata", None) or {}
-    if not isinstance(meta, dict):
-        return None
-    raw = meta.get(SOURCE_EVENT_AT_KEY)
+def _parse_stamp(raw: Any) -> Optional[datetime]:
     if not raw:
         return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
     try:
         text = str(raw).strip()
         if text.endswith("Z"):
@@ -212,6 +210,13 @@ def stored_source_event_time(product: Any) -> Optional[datetime]:
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def stored_source_event_time(product: Any) -> Optional[datetime]:
+    meta = getattr(product, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return None
+    return _parse_stamp(meta.get(SOURCE_EVENT_AT_KEY))
 
 
 def _normalise_product(raw: Any) -> Dict:
@@ -1996,6 +2001,7 @@ class StoreSyncService:
         """
         ext_id = normalised["external_id"]
         normalised.setdefault(SOURCE_EVENT_AT_KEY, datetime.now(timezone.utc).isoformat())
+        incoming_at = _parse_stamp(normalised.get(SOURCE_EVENT_AT_KEY))
         new_qty = _coerce_int(normalised.get("stock_qty"))
         new_in_stock = bool(normalised.get("in_stock", True))
         new_available = new_in_stock and (new_qty is None or new_qty > 0)
@@ -2010,6 +2016,11 @@ class StoreSyncService:
         previous_fp = None
         if existing:
             existing = _lock_product_row_for_catalog_write(self.db, existing)
+            stored_at = stored_source_event_time(existing)
+            if incoming_at is not None and stored_at is not None and stored_at > incoming_at:
+                # A webhook newer than this read landed while the read was in
+                # flight: the read is the older state and must not win.
+                return {"action": "skipped_stale", "product_id": existing.id, "restocked": None}
             try:
                 from services.whatsapp_catalog_sync import (  # noqa: PLC0415
                     channel_content_fingerprint,
@@ -2166,6 +2177,7 @@ class StoreSyncService:
         resolved_nahla_id = (db_before or {}).get("nahla_product_id") or nahla_product_id
 
         try:
+            fetched_at = datetime.now(timezone.utc)
             raw = await adapter.get_product(ext_id)
         except Exception as exc:  # noqa: BLE001
             return {
@@ -2186,6 +2198,7 @@ class StoreSyncService:
             }
 
         normalised = _normalise_product(raw)
+        normalised[SOURCE_EVENT_AT_KEY] = fetched_at.isoformat()
         await self._enrich_normalised_variants_from_adapter(adapter, normalised)
         salla_live = _salla_live_summary(normalised)
         diff = _compute_one_product_sync_diff(db_before, normalised)
@@ -2229,6 +2242,7 @@ class StoreSyncService:
         if incremental:
             updated_since = self._commerce_reconcile_since("products", incremental=True)
 
+        fetched_at = datetime.now(timezone.utc)
         try:
             raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
@@ -2268,6 +2282,7 @@ class StoreSyncService:
         for raw in raw_list:
             try:
                 normalised = _normalise_product(raw)
+                normalised[SOURCE_EVENT_AT_KEY] = fetched_at.isoformat()
                 await self._enrich_normalised_variants_from_adapter(adapter, normalised)
                 apply_result = self._apply_normalised_product(normalised, adapter_source)
             except Exception as exc:  # noqa: BLE001
@@ -4091,11 +4106,18 @@ class StoreSyncService:
 
     # ── Incremental product update (called by webhook) ─────────────────────────
 
-    async def _fetch_product_truth(self, product_id: str, *, event_type: str | None) -> Dict[str, Any]:
-        """Current product state from the store adapter; raises so the event is retried."""
+    async def _fetch_product_truth(
+        self, product_id: str, *, event_type: str | None, allow_missing: bool = False,
+    ) -> tuple[Optional[Dict[str, Any]], datetime]:
+        """Current product state from the store adapter plus the instant the read started.
+
+        Raises so the event is retried on transport failure. With
+        ``allow_missing`` a product the store no longer has returns ``None``.
+        """
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_product"):
             raise RuntimeError("product_hydration_failed")
+        fetched_at = datetime.now(timezone.utc)
         try:
             fetched = await adapter.get_product(product_id)
         except Exception as exc:
@@ -4108,12 +4130,17 @@ class StoreSyncService:
             )
             raise RuntimeError("product_hydration_failed") from exc
         if fetched is None:
+            if allow_missing:
+                return None, fetched_at
             raise RuntimeError("product_hydration_failed")
         if hasattr(fetched, "dict"):
             fetched = fetched.dict()
         elif not isinstance(fetched, dict):
             fetched = dict(fetched)
-        return fetched
+        truth = dict(fetched)
+        if not truth.get("id") and not truth.get("external_id"):
+            truth["id"] = product_id
+        return truth, fetched_at
 
     async def handle_product_webhook(
         self,
@@ -4140,7 +4167,9 @@ class StoreSyncService:
         )
         event_at = source_event_time(payload, envelope_created_at)
         truth_read_at: Optional[datetime] = None
-        if product_id and not needs_hydration:
+        adapter_probe = self._get_adapter()
+        can_read_truth = adapter_probe is not None and hasattr(adapter_probe, "get_product")
+        if product_id:
             existing_stamp_row = (
                 self.db.query(Product)
                 .filter_by(tenant_id=self.tenant_id, external_id=product_id)
@@ -4157,45 +4186,44 @@ class StoreSyncService:
                     stored_at.isoformat(),
                 )
                 return
+            read_truth = needs_hydration
             if event_at is None and stored_at is not None:
-                # The row has a newer-or-equal known state and this event's
-                # order cannot be proven: never trust the body; read the
-                # current truth from the store instead (retried if it fails).
-                truth = await self._fetch_product_truth(product_id, event_type=webhook_event_type)
-                merged = dict(payload)
-                merged.update(truth)
-                payload = merged
-                truth_read_at = datetime.now(timezone.utc)
-            # A row without any stamp (never written through a stamped path)
-            # has no known-newer state to protect; the body applies and the
-            # first stamped write (hourly sync or a timed event) starts the guard.
-        if needs_hydration:
-            adapter = self._get_adapter()
-            if not adapter or not hasattr(adapter, "get_product"):
-                raise RuntimeError("product_hydration_failed")
-            try:
-                fetched = await adapter.get_product(product_id)
-            except Exception as exc:
-                logger.warning(
-                    "tenant=%s partial product webhook fetch failed product_hash=%s event=%s error_code=%s",
-                    self.tenant_id,
-                    hash(product_id) % 10_000_000,
-                    webhook_event_type,
-                    type(exc).__name__,
+                # The row has a known state and this event's order cannot be
+                # proven: never trust the body; read the current truth instead.
+                read_truth = True
+            if (
+                existing_stamp_row is None
+                and webhook_event_type != "product.created"
+                and not needs_hydration
+                and can_read_truth
+            ):
+                # No local row for a full-body non-create event: a late update
+                # after a delete must not resurrect the product. Ask the store;
+                # partial events keep the hydration contract below (retry when
+                # the read returns nothing).
+                truth, fetched_at = await self._fetch_product_truth(
+                    product_id, event_type=webhook_event_type, allow_missing=True,
                 )
-                raise RuntimeError("product_hydration_failed") from exc
-            if fetched is None:
-                raise RuntimeError("product_hydration_failed")
-            if hasattr(fetched, "dict"):
-                fetched = fetched.dict()
-            elif not isinstance(fetched, dict):
-                fetched = dict(fetched)
-            # The fetched product is the current truth; the partial event body
-            # only fills what the read did not return (never overrides it).
-            merged = dict(payload)
-            merged.update(fetched)
-            payload = merged
-            truth_read_at = datetime.now(timezone.utc)
+                if truth is None:
+                    logger.info(
+                        "tenant=%s product event dropped: store no longer has product_hash=%s event=%s",
+                        self.tenant_id,
+                        hash(product_id) % 10_000_000,
+                        webhook_event_type,
+                    )
+                    return
+                payload = truth
+                truth_read_at = fetched_at
+                read_truth = False
+            if read_truth:
+                # The store read is the whole state; the event body is not
+                # merged over it (its keys may describe an older state).
+                truth, fetched_at = await self._fetch_product_truth(product_id, event_type=webhook_event_type)
+                payload = truth
+                truth_read_at = fetched_at
+            # A row without any stamp (never written through a stamped path)
+            # has no known-newer state to protect; a timed body applies and
+            # the first stamped write starts the guard.
         normalised = _normalise_product(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
@@ -4219,6 +4247,12 @@ class StoreSyncService:
         previous_fp = None
         if existing:
             existing = _lock_product_row_for_catalog_write(self.db, existing)
+            incoming_at = _parse_stamp(normalised.get(SOURCE_EVENT_AT_KEY))
+            locked_at = stored_source_event_time(existing)
+            if incoming_at is not None and locked_at is not None and incoming_at < locked_at:
+                # Another worker applied a newer event between the unlocked
+                # check and this lock: this body is now the older state.
+                return
             try:
                 from services.whatsapp_catalog_sync import (  # noqa: PLC0415
                     channel_content_fingerprint,
