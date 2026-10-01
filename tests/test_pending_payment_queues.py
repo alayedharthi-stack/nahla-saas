@@ -796,22 +796,28 @@ def test_emitter_treats_null_is_abandoned_as_not_abandoned() -> None:
         db.close(); engine.dispose()
 
 
-def test_cod_emitter_accepts_under_review_and_arabic() -> None:
+def test_cod_emitter_accepts_under_review_and_arabic_only_when_nahla_asked() -> None:
     """
-    ``scan_cod_confirmations`` used to be hard-pinned to
-    ``status == "pending_confirmation"``. Salla also exposes
-    ``under_review`` / ``بإنتظار المراجعة`` for the same lifecycle stage
-    — the sweeper now handles both.
+    ``under_review`` / ``بإنتظار المراجعة`` is a merchant-review status: a
+    store order Nahla asked to confirm can sit in it (the confirmation send is
+    stamped on the order), and the sweeper reminds it. The same status on an
+    order Nahla never asked — a bank transfer under review — is no question to
+    the customer: no reminder (tenant 1 production, September 2026).
     """
     for status in ("under_review", "بإنتظار المراجعة"):
-        db, engine = _make_db()
-        try:
-            t = _tenant(db)
-            _customer(db, t.id)
-            _cod_automation(db, t.id)
-            _order(db, tenant_id=t.id, status=status, age=timedelta(hours=7))
+        for asked, expected in ((True, 1), (False, 0)):
+            db, engine = _make_db()
+            try:
+                t = _tenant(db)
+                _customer(db, t.id)
+                _cod_automation(db, t.id)
+                o = _order(db, tenant_id=t.id, status=status, age=timedelta(hours=7))
+                if asked:
+                    o.extra_metadata = {**o.extra_metadata, "payment_method": "cod",
+                                        "nahla_cod_confirmation_sent": True}
+                    db.commit()
 
-            emitted = automation_emitters.scan_cod_confirmations(db, t.id)
-            assert emitted == 1, f"COD sweeper missed status={status!r}"
-        finally:
-            db.close(); engine.dispose()
+                emitted = automation_emitters.scan_cod_confirmations(db, t.id)
+                assert emitted == expected, f"status={status!r} asked={asked}"
+            finally:
+                db.close(); engine.dispose()

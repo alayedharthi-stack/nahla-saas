@@ -307,6 +307,16 @@ def _customer_order_identity_clauses(
     return clauses
 
 
+def _carts_excluded(query: Any, order_model: Any) -> Any:
+    """The customer ledger's abandoned rule, in the query (before any limit)."""
+    from sqlalchemy import func  # noqa: PLC0415
+
+    return query.filter(
+        order_model.is_abandoned.isnot(True),
+        func.lower(func.coalesce(order_model.status, "")) != "abandoned",
+    )
+
+
 def _fetch_explicit_tenant_order_for_customer(
     db: Any,
     *,
@@ -314,6 +324,7 @@ def _fetch_explicit_tenant_order_for_customer(
     phone: str,
     customer_id: Optional[int],
     order_number: Optional[str],
+    exclude_carts: bool = False,
 ) -> Optional[Any]:
     """Find an exact customer-scoped reference without a recent-order window."""
     needle = str(order_number or "").strip().lstrip("#")
@@ -336,16 +347,14 @@ def _fetch_explicit_tenant_order_for_customer(
     ]
     if needle.isdigit():
         references.append(Order.id == int(needle))
-    return (
-        db.query(Order)
-        .filter(
-            Order.tenant_id == int(tenant_id),
-            or_(*identity_clauses),
-            or_(*references),
-        )
-        .order_by(Order.id.desc())
-        .first()
+    query = db.query(Order).filter(
+        Order.tenant_id == int(tenant_id),
+        or_(*identity_clauses),
+        or_(*references),
     )
+    if exclude_carts:
+        query = _carts_excluded(query, Order)
+    return query.order_by(Order.id.desc()).first()
 
 
 def _find_active_whatsapp_draft(
@@ -353,28 +362,27 @@ def _find_active_whatsapp_draft(
     *,
     tenant_id: int,
     conversation_id: Optional[int],
+    exclude_carts: bool = False,
 ) -> Optional[Any]:
     if db is None or not conversation_id:
         return None
     try:
         from models import Order  # noqa: PLC0415
         from services.nahla_order_bridge import (  # noqa: PLC0415
+            conversation_wa_external_id_clause,
             is_open_wa_draft_order,
-            nahla_wa_external_id,
         )
 
-        prefix = nahla_wa_external_id(int(tenant_id), int(conversation_id))
-        candidates = (
-            db.query(Order)
-            .filter(
-                Order.tenant_id == int(tenant_id),
-                Order.source == "whatsapp",
-                Order.external_id.like(f"{prefix}%"),
-            )
-            .order_by(Order.id.desc())
-            .limit(20)
-            .all()
+        query = db.query(Order).filter(
+            Order.tenant_id == int(tenant_id),
+            Order.source == "whatsapp",
+            # This conversation's own ids only: the base, or the base + "-msg-"
+            # (a bare prefix would also match conversation 10's orders for 1).
+            conversation_wa_external_id_clause(Order.external_id, int(tenant_id), int(conversation_id)),
         )
+        if exclude_carts:
+            query = _carts_excluded(query, Order)
+        candidates = query.order_by(Order.id.desc()).limit(20).all()
         if not candidates:
             return None
 
@@ -503,6 +511,7 @@ def resolve_customer_order_context(
     intent: Optional[str] = None,
     order_number: Optional[str] = None,
     lifecycle_aware: bool = False,
+    is_customer_order: Optional[Any] = None,
 ) -> CustomerOrderContext:
     """
     Resolve customer order context from local ``orders`` only.
@@ -522,12 +531,19 @@ def resolve_customer_order_context(
         is not, and one whose status the platform cannot read is never called
         open. Off by default: the other readers of this context keep their
         status list.
+    is_customer_order:
+        With ``lifecycle_aware``, the caller's own customer-scope check: a row
+        it refuses (another customer's order on a shared phone, one whose link
+        cannot be proven) is never picked — the history leaves the same rows
+        out. An order named by number is not filtered here: it reaches the
+        caller's check, which refuses it outright.
     """
     resolved_phone = _resolve_phone(
         db, tenant_id=int(tenant_id), customer_id=customer_id, phone=phone,
     )
     draft_row = _find_active_whatsapp_draft(
         db, tenant_id=int(tenant_id), conversation_id=conversation_id,
+        exclude_carts=lifecycle_aware,
     )
     if lifecycle_aware and db is not None:
         # The very rows the history holds: carts left out before the limit.
@@ -550,15 +566,23 @@ def resolve_customer_order_context(
         phone=resolved_phone,
         customer_id=customer_id,
         order_number=order_number,
+        exclude_carts=lifecycle_aware,
     )
     is_open = lambda snap: snap.is_open  # noqa: E731
     if lifecycle_aware:
-        from core.order_lifecycle_reading import is_abandoned_cart, order_stage  # noqa: PLC0415
+        from core.order_lifecycle_reading import order_stage  # noqa: PLC0415
 
-        if draft_row is not None and is_abandoned_cart(draft_row):
+        # A finished conversation order (delivered, cancelled, …) is history,
+        # not the conversation's draft; one whose status the platform cannot
+        # read is left as the resolver found it.
+        if draft_row is not None and order_stage(draft_row.status, draft_row.source) == "finished":
             draft_row = None
-        if explicit_direct_row is not None and is_abandoned_cart(explicit_direct_row):
-            explicit_direct_row = None
+        if is_customer_order is not None:
+            # Only the orders the lookup picks by itself: an order named by
+            # number still reaches the caller's scope check, which refuses it.
+            if draft_row is not None and not is_customer_order(draft_row):
+                draft_row = None
+            customer_rows = [row for row in customer_rows if is_customer_order(row)]
         is_open = lambda snap: order_stage(snap.status, snap.source) == "ongoing"  # noqa: E731
 
     # Merge draft row into customer set (conversation may be only link).

@@ -161,12 +161,12 @@ def _load_tenant_order(context: CommerceAgentContext, order_id: int) -> Any:
 
 
 def _is_current_conversation_draft(context: CommerceAgentContext, order: Any) -> bool:
-    from services.nahla_order_bridge import nahla_wa_external_id
+    from services.nahla_order_bridge import is_conversation_wa_external_id
 
     if str(getattr(order, "source", "") or "").strip().lower() != "whatsapp":
         return False
-    prefix = nahla_wa_external_id(context.tenant_id, context.conversation_id)
-    return str(getattr(order, "external_id", "") or "").startswith(prefix)
+    return is_conversation_wa_external_id(getattr(order, "external_id", ""), context.tenant_id,
+                                          context.conversation_id)
 
 
 def _assert_discovered_order_is_customer_scoped(
@@ -188,6 +188,14 @@ def _assert_discovered_order_is_customer_scoped(
     if linked_customer_id is None and _is_current_conversation_draft(context, order):
         return
     raise TenantIsolationViolation("order_not_in_trusted_customer_scope")
+
+
+def _in_customer_scope(context: CommerceAgentContext, order: Any) -> bool:
+    try:
+        _assert_discovered_order_is_customer_scoped(context, order)
+    except TenantIsolationViolation:
+        return False
+    return True
 
 
 def _load_authorized_order(context: CommerceAgentContext, order_id: int) -> Any:
@@ -297,10 +305,12 @@ async def resolve_customer_order_impl(
         phone=context.normalized_customer_phone,
         intent="track_order" if purpose == "shipment" else None,
         order_number=requested_number or None,
-        # Pick by the reading the history groups by: the order it calls the
-        # latest open one is the history's newest ongoing order, and a cart is
-        # never picked as an order.
+        # Pick by the reading the history groups by, from the rows it holds:
+        # the order it calls the latest open one is the history's newest
+        # ongoing order; a cart, or a row outside this customer's scope, is
+        # never picked.
         lifecycle_aware=True,
+        is_customer_order=lambda row: _in_customer_scope(context, row),
     )
     selected = resolved.selected_order
     if selected is None:
