@@ -810,6 +810,15 @@ def scan_cod_confirmations(
     Returns the number of mutations performed (events emitted +
     orders cancelled).
 
+    Only an order whose confirmation question is still open with the customer
+    is reminded or cancelled (``services.cod_confirmation.
+    cod_awaits_customer_decision``): Nahla asked, and no decision is recorded on
+    the order or in its ``order.cod.*`` events. A status alone is not that
+    state — ``under_review`` is what the confirmation flow writes once the
+    customer confirms, and a bank transfer under merchant review was never
+    asked — so a confirmed order is never cancelled for "no customer response",
+    however often the sweep runs.
+
     Per-order progress is stored on `Order.extra_metadata` under
     `cod_reminders: [{step_idx, emitted_at}]` and `cod_auto_cancelled_at`.
     """
@@ -892,10 +901,26 @@ def scan_cod_confirmations(
         )
         .all()
     )
-    pending_orders = [
+    from services.cod_confirmation import (  # noqa: PLC0415
+        cod_awaits_customer_decision,
+        cod_decided_order_refs,
+    )
+
+    in_confirmation_status = [
         o for o in candidate_orders
         if is_pending_confirmation_status(o.status)
     ]
+    decided_refs = cod_decided_order_refs(db, tenant_id) if in_confirmation_status else set()
+    pending_orders = [
+        o for o in in_confirmation_status
+        if cod_awaits_customer_decision(o, decided_refs=decided_refs)
+    ]
+    if len(pending_orders) != len(in_confirmation_status):
+        logger.info(
+            "[Emitter:cod] tenant=%s left %d order(s) in a confirmation status alone — "
+            "customer already decided, or never asked",
+            tenant_id, len(in_confirmation_status) - len(pending_orders),
+        )
     from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
     pending_orders = [o for o in pending_orders if not is_internal_e2e_order(o)]
     if not pending_orders:
