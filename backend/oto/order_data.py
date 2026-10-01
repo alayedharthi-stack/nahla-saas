@@ -37,6 +37,7 @@ def build_order_payload(order: Any, *, tenant_id: int, pickup_code: str,
     customer = order.customer_info if isinstance(order.customer_info, dict) else {}
     meta = order.extra_metadata if isinstance(order.extra_metadata, dict) else {}
     address = (customer.get("address") or customer.get("address_text") or
+               customer.get("street") or
                meta.get("address_line") or meta.get("delivery_address_text") or
                customer.get("short_address_code") or meta.get("short_address_code"))
     city = customer.get("city") or meta.get("city") or meta.get("delivery_city")
@@ -78,11 +79,18 @@ def build_order_payload(order: Any, *, tenant_id: int, pickup_code: str,
         value = customer.get(key) or meta.get(key)
         if value:
             recipient["shortAddressCode" if key == "short_address_code" else key] = str(value)
+    if not recipient.get("postcode"):
+        postal_code = customer.get("postal_code") or meta.get("postal_code")
+        if postal_code:
+            recipient["postcode"] = str(postal_code)
+    street = customer.get("street") or meta.get("street")
+    if street:
+        recipient["street"] = str(street)
     for source, dest in (("latitude", "lat"), ("longitude", "lon")):
         value = customer.get(source) or meta.get(source)
         if value is not None:
             recipient[dest] = str(value)
-    return {
+    payload = {
         "orderId": oto_order_id(tenant_id, order.id),
         "pickupLocationCode": pickup_code,
         "createShipment": False,
@@ -98,3 +106,7 @@ def build_order_payload(order: Any, *, tenant_id: int, pickup_code: str,
         "customer": recipient,
         "items": items,
     }
+    shipping_notes = customer.get("delivery_notes") or meta.get("delivery_notes")
+    if shipping_notes:
+        payload["shippingNotes"] = str(shipping_notes)
+    return payload

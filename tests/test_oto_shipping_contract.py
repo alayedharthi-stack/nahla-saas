@@ -91,6 +91,7 @@ def test_confirmed_cod_order_maps_to_oto_without_salla():
     order = SimpleNamespace(id=9, status="cod_pending", customer_info={
         "name": "Buyer", "mobile": "966500000000", "city": "Riyadh",
         "short_address_code": "ABCD1234", "country": "SA",
+        "street": "King Road", "postal_code": "12345",
     }, extra_metadata={"short_address_code": "ABCD1234", "amount_value": 125,
                        "payment_method": "cash_on_delivery"}, customer_name="Buyer",
         line_items=[{"name": "Product", "unit_price": 125, "quantity": 1, "sku": "SKU1"}])
@@ -100,6 +101,8 @@ def test_confirmed_cod_order_maps_to_oto_without_salla():
     assert payload["createShipment"] is False
     assert payload["amount_due"] == 125
     assert payload["customer"]["shortAddressCode"] == "ABCD1234"
+    assert payload["customer"]["postcode"] == "12345"
+    assert payload["customer"]["street"] == "King Road"
     assert payload["items"][0]["sku"] == "SKU1"
 
 
