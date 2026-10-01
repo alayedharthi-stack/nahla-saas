@@ -1685,8 +1685,8 @@ async def merchant_hide_catalog_product(
             from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
 
             schedule_whatsapp_catalog_drain(int(tenant_id))
-        except Exception:  # noqa: BLE001
-            logger.debug("[catalog] retire drain schedule skipped tenant=%s", tenant_id)
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] retire drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_product_hide",
         tenant_id=tenant_id,
@@ -1739,8 +1739,8 @@ async def merchant_restore_catalog_product(
             from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
 
             schedule_whatsapp_catalog_drain(int(tenant_id))
-        except Exception:  # noqa: BLE001
-            logger.debug("[catalog] restore drain schedule skipped tenant=%s", tenant_id)
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] restore drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_product_restore",
         tenant_id=tenant_id,
@@ -2588,8 +2588,8 @@ async def merchant_catalog_delete_manual_product(
             from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
 
             schedule_whatsapp_catalog_drain(int(tenant_id))
-        except Exception:  # noqa: BLE001
-            logger.debug("[catalog] delete drain schedule skipped tenant=%s", tenant_id)
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] delete drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_delete_manual_product",
         tenant_id=tenant_id, product_id=int(product_id),

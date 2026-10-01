@@ -653,8 +653,8 @@ def build_sync_stages(
                 latest = max(stamps)
                 source["last_sync_at"] = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
             source["product_count"] = getattr(snap, "product_count", None)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("[WA_CATALOG_SYNC] source stage read skipped tenant=%s err=%s", tenant_id, type(exc).__name__)
+    except Exception:  # noqa: silent-ok — the source stage is informational; the status must still render without it
+        logger.warning("[WA_CATALOG_SYNC] source stage read skipped tenant=%s", tenant_id, exc_info=True)
 
     nahla = {
         "state": "ok" if (counts.get("eligible") or counts.get("skipped_ineligible")) else "unknown",

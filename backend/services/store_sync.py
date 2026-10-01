@@ -5248,9 +5248,10 @@ class StoreSyncService:
                     schedule_whatsapp_catalog_drain,
                 )
                 schedule_whatsapp_catalog_drain(int(self.tenant_id))
-            except Exception:  # noqa: BLE001
-                logger.debug(
+            except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the ledger
+                logger.warning(
                     "[StoreSync] retirement drain schedule skipped tenant=%s", self.tenant_id,
+                    exc_info=True,
                 )
         if deleted:
             snap = (
