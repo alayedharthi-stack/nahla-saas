@@ -1257,6 +1257,11 @@ def attempt_native_meta_sync(
     allow_synced_retry: bool = False,
 ) -> Dict[str, Any]:
     """Run one Meta sync attempt. Caller must not pass request-scoped ORM objects."""
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, product_in_sync_scope  # noqa: PLC0415
+
+    if not product_in_sync_scope(int(tenant_id), int(product_id)):
+        # Outside the trial scope: no lease, no Graph call, no state change.
+        return {"ok": False, "skipped": True, "error_code": SCOPE_BLOCKER_CODE}
     if allow_synced_retry:
         parent = _load_product(db, tenant_id, product_id)
         if parent is None:

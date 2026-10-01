@@ -284,10 +284,7 @@ def reconcile_tenant_channel_catalog(
             out["waba_link_error"] = type(exc).__name__
 
     out["ok"] = True
-    from services.whatsapp_catalog_retirement import load_connection_for_metadata_write  # noqa: PLC0415
-
-    fresh = load_connection_for_metadata_write(db, tenant_id)
-    out["ledger_reset"] = reset_exhausted_ledger_entries(fresh) if fresh is not None else 0
+    out["ledger_reset"] = reset_exhausted_ledger_entries(db, int(tenant_id))
     _persist_snapshot(db, tenant_id, out)
     _safe_commit(db)
     logger.info(
@@ -329,9 +326,13 @@ def reconcile_due_tenants(db: Any, *, max_tenants: int = 1, client: Any = None) 
         .filter(WhatsAppConnection.catalog_enabled.is_(True))
         .all()
     )
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
     now = _now()
     due: List[Any] = []
     for conn in conns:
+        if not tenant_in_sync_scope(int(getattr(conn, "tenant_id", 0) or 0)):
+            continue
         if reconcile_is_due(conn, now):
             due.append(conn)
     due.sort(key=lambda c: _parse_iso_dt(reconcile_snapshot(c).get("at")) or datetime.min.replace(tzinfo=timezone.utc))

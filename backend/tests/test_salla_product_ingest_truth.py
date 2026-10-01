@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
@@ -54,6 +56,10 @@ def _make_db():
     )
     session.commit()
     return session, tenant.id, engine
+
+
+def _stamp(hour, minute):
+    return {"date": f"2026-10-01 {hour:02d}:{minute:02d}:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"}
 
 
 def _raw_webhook_product(**overrides):
@@ -158,7 +164,7 @@ def test_created_then_duplicate_event_marks_pending_once():
     try:
         svc = _svc(session, tid)
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
-            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(), webhook_event_type="product.created"))
+            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(updated_at=_stamp(8, 0)), webhook_event_type="product.created"))
         row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
         assert row.price == "199.0"
         assert row.in_stock is False
@@ -169,7 +175,7 @@ def test_created_then_duplicate_event_marks_pending_once():
         assert variants[0].retailer_id == "900100-77001"
         # same event delivered twice (Salla retries): no new generation
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
-            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(), webhook_event_type="product.created"))
+            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(updated_at=_stamp(8, 0)), webhook_event_type="product.created"))
         session.refresh(row)
         assert row.extra_metadata["sync_meta"]["content_generation"] == gen1
     finally:
@@ -181,12 +187,12 @@ def test_price_image_and_stock_updates_bump_generation_and_hidden_requests_retir
     try:
         svc = _svc(session, tid)
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
-            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(quantity=3), webhook_event_type="product.created"))
+            asyncio.run(svc.handle_product_webhook(_raw_webhook_product(quantity=3, updated_at=_stamp(8, 0)), webhook_event_type="product.created"))
             row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
             gen = row.extra_metadata["sync_meta"]["content_generation"]
             # price change
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=3, price={"amount": 179.0, "currency": "SAR"}),
+                _raw_webhook_product(quantity=3, price={"amount": 179.0, "currency": "SAR"}, updated_at=_stamp(8, 1)),
                 webhook_event_type="product.price.updated",
             ))
             session.refresh(row)
@@ -194,7 +200,7 @@ def test_price_image_and_stock_updates_bump_generation_and_hidden_requests_retir
             assert row.extra_metadata["sync_meta"]["content_generation"] == gen + 1
             # image change
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=3, price={"amount": 179.0, "currency": "SAR"},
+                _raw_webhook_product(quantity=3, price={"amount": 179.0, "currency": "SAR"}, updated_at=_stamp(8, 2),
                                      images=[{"url": "https://cdn.example/rose-2.jpg", "main": True}]),
                 webhook_event_type="product.image.updated",
             ))
@@ -202,7 +208,7 @@ def test_price_image_and_stock_updates_bump_generation_and_hidden_requests_retir
             assert row.extra_metadata["sync_meta"]["content_generation"] == gen + 2
             # stock to zero
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=0, price={"amount": 179.0, "currency": "SAR"},
+                _raw_webhook_product(quantity=0, price={"amount": 179.0, "currency": "SAR"}, updated_at=_stamp(8, 3),
                                      images=[{"url": "https://cdn.example/rose-2.jpg", "main": True}]),
                 webhook_event_type="product.quantity.low",
             ))
@@ -215,7 +221,7 @@ def test_price_image_and_stock_updates_bump_generation_and_hidden_requests_retir
             row.last_synced_at = datetime.now(timezone.utc)
             session.commit()
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=0, status="hidden", price={"amount": 179.0, "currency": "SAR"},
+                _raw_webhook_product(quantity=0, status="hidden", price={"amount": 179.0, "currency": "SAR"}, updated_at=_stamp(8, 4),
                                      images=[{"url": "https://cdn.example/rose-2.jpg", "main": True}]),
                 webhook_event_type="product.status.updated",
             ))
@@ -228,37 +234,128 @@ def test_price_image_and_stock_updates_bump_generation_and_hidden_requests_retir
         session.close(); engine.dispose()
 
 
-def test_late_stale_event_is_corrected_by_the_next_store_sync():
-    """A delayed webhook may overwrite with stale data; the hourly full sync
-    (same upsert path, fresh Salla read) re-marks the row with the truth."""
+def _at(hour, minute):
+    return {"date": f"2026-10-01 {hour:02d}:{minute:02d}:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"}
+
+
+def test_stale_event_never_replaces_the_newer_state_price_stock_or_hidden():
+    """Events carry Salla's ``updated_at``; one older than the stored stamp
+    is ignored for every field and never re-queues old content for Meta."""
     session, tid, engine = _make_db()
     try:
         svc = _svc(session, tid)
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}),
+                _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}, updated_at=_at(10, 5)),
                 webhook_event_type="product.created",
             ))
             row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
-            # late event carrying the old price arrives after the new one
+            gen = row.extra_metadata["sync_meta"]["content_generation"]
+            assert row.extra_metadata["source_event_at"]
+            # delayed events describing an OLDER state: price 120, stock 0, hidden
+            for stale in (
+                dict(quantity=3, price={"amount": 120.0, "currency": "SAR"}, updated_at=_at(10, 0)),
+                dict(quantity=0, price={"amount": 150.0, "currency": "SAR"}, updated_at=_at(10, 1)),
+                dict(quantity=3, status="hidden", price={"amount": 150.0, "currency": "SAR"}, updated_at=_at(10, 2)),
+            ):
+                asyncio.run(svc.handle_product_webhook(_raw_webhook_product(**stale), webhook_event_type="product.updated"))
+                session.refresh(row)
+                assert row.price == "150.0"
+                assert row.in_stock is True and row.stock_quantity == 3
+                assert row.extra_metadata["status"] == "active"
+                assert row.extra_metadata["sync_meta"]["content_generation"] == gen
+                assert not row.extra_metadata["sync_meta"].get("retire_pending")
+            # a genuinely newer event applies
             asyncio.run(svc.handle_product_webhook(
-                _raw_webhook_product(quantity=3, price={"amount": 120.0, "currency": "SAR"}),
+                _raw_webhook_product(quantity=3, price={"amount": 130.0, "currency": "SAR"}, updated_at=_at(10, 9)),
                 webhook_event_type="product.price.updated",
             ))
             session.refresh(row)
-            assert row.price == "120.0"
-            gen_after_stale = row.extra_metadata["sync_meta"]["content_generation"]
-            # periodic store sync applies Salla's current truth through the shared upsert
-            from services.store_sync import _normalise_product as norm
+            assert row.price == "130.0"
+            assert row.extra_metadata["sync_meta"]["content_generation"] == gen + 1
+            # a late event behind the newest one is ignored again (envelope time only)
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 120.0, "currency": "SAR"}),
+                webhook_event_type="product.updated",
+                envelope_created_at="Thu Oct 01 2026 10:07:00 GMT+0300",
+            ))
+            session.refresh(row)
+            assert row.price == "130.0"
+            assert row.extra_metadata["sync_meta"]["content_generation"] == gen + 1
+    finally:
+        session.close(); engine.dispose()
 
+
+def test_event_with_unprovable_order_reads_current_truth_from_salla():
+    """No ``updated_at`` and no envelope time: the body is not trusted; the
+    product is re-read from Salla and that state is stored."""
+    session, tid, engine = _make_db()
+    try:
+        svc = _svc(session, tid)
+        svc._adapter.get_product = AsyncMock(return_value=_raw_webhook_product(
+            quantity=5, price={"amount": 175.0, "currency": "SAR"}, updated_at=_at(11, 0)))
+        with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}, updated_at=_at(10, 5)),
+                webhook_event_type="product.created",
+            ))
+            row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=0, price={"amount": 120.0, "currency": "SAR"}),
+                webhook_event_type="product.updated",
+            ))
+            session.refresh(row)
+            svc._adapter.get_product.assert_awaited_once_with("900100")
+            assert row.price == "175.0" and row.stock_quantity == 5 and row.in_stock is True
+            # the store-side read is the freshest state, so it stamps after the created event
+            assert row.extra_metadata["source_event_at"] > "2026-10-01T07:05:00"
+            # when the read fails, the event is retried instead of applying the unordered body
+            svc._adapter.get_product = AsyncMock(side_effect=RuntimeError("salla down"))
+            with pytest.raises(RuntimeError, match="product_hydration_failed"):
+                asyncio.run(svc.handle_product_webhook(
+                    _raw_webhook_product(quantity=0, price={"amount": 120.0, "currency": "SAR"}),
+                    webhook_event_type="product.updated",
+                ))
+            session.rollback(); session.refresh(row)
+            assert row.price == "175.0"
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_partial_event_hydration_prefers_the_store_read_over_the_event_body():
+    session, tid, engine = _make_db()
+    try:
+        svc = _svc(session, tid)
+        svc._adapter.get_product = AsyncMock(return_value=_raw_webhook_product(
+            quantity=2, price={"amount": 199.0, "currency": "SAR"}, updated_at=_at(12, 0)))
+        with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
+            asyncio.run(svc.handle_product_webhook({"id": 900100, "price": {"amount": 90.0, "currency": "SAR"}},
+                                                   webhook_event_type="product.price.updated"))
+        row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
+        assert row.price == "199.0" and row.stock_quantity == 2
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_periodic_store_sync_stamps_fetch_time_so_older_webhooks_are_ignored():
+    session, tid, engine = _make_db()
+    try:
+        svc = _svc(session, tid)
+        from services.store_sync import _normalise_product as norm
+
+        with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
             result = svc._apply_normalised_product(
                 norm(_raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"})), "salla",
             )
             session.commit()
+            assert result["action"] == "created"
+            row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
+            assert row.extra_metadata["source_event_at"]
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 120.0, "currency": "SAR"}, updated_at=_at(9, 0)),
+                webhook_event_type="product.updated",
+            ))
             session.refresh(row)
-            assert result["action"] == "updated"
             assert row.price == "150.0"
-            assert row.extra_metadata["sync_meta"]["content_generation"] == gen_after_stale + 1
-            assert row.sync_status == "pending"
     finally:
         session.close(); engine.dispose()

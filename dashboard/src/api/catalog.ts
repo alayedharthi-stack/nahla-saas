@@ -414,6 +414,14 @@ export interface WhatsappCatalogSyncStatus {
   failures: WhatsappCatalogSyncFailure[]
   auto_sync_enabled?: boolean
   auto_sync_flag?: string
+  // Limited-trial write scope: when active, only the listed tenants/products reach Meta.
+  sync_scope?: {
+    active: boolean
+    tenant_ids: number[]
+    product_ids: Record<string, number[]>
+    tenant_env?: string
+    product_env?: string
+  }
   verification?: {
     lookup_fields: string[]
     identity_fields?: string[]

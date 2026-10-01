@@ -462,6 +462,14 @@ def push_one_meta_catalog_item(
         result["fatal_warnings"] = list(preview.get("warnings") or [])
         return result
 
+    if confirm:
+        from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, product_in_sync_scope  # noqa: PLC0415
+
+        if not product_in_sync_scope(int(tenant_id), getattr(parent, "id", None)):
+            result["action"] = "scope_excluded"
+            result["error"] = SCOPE_BLOCKER_CODE
+            return result
+
     conn = _resolve_connection(db, tenant_id)
     catalog_id, token = _resolve_catalog_and_token(
         conn, require_catalog_readable=bool(confirm),
@@ -615,6 +623,12 @@ def retire_meta_catalog_item(
         return result
     if not cid:
         result["error"] = "catalog_id_missing"
+        return result
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(int(getattr(conn, "tenant_id", 0) or 0)):
+        result["action"] = "scope_excluded"
+        result["error"] = SCOPE_BLOCKER_CODE
         return result
     try:
         _cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)

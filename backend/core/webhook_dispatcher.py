@@ -195,6 +195,7 @@ async def _dispatch_salla(db: Session, event) -> None:
         await svc.handle_product_webhook(
             data,
             webhook_event_type=event_type,
+            envelope_created_at=payload.get("created_at"),
         )
         return
 

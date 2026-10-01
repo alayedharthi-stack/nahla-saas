@@ -101,6 +101,10 @@ _BLOCKERS_AR = {
         "صلاحيات Meta غير مكتملة أو منتهية.",
         "أعد ربط واتساب لتجديد صلاحيات الكتالوج.",
     ),
+    "sync_scope_excluded": (
+        "مزامنة الكتالوج تعمل حاليًا ضمن تجربة محدودة لا تشمل هذا المتجر.",
+        "لا إجراء مطلوب؛ تُفعَّل المزامنة لهذا المتجر بعد اكتمال التجربة.",
+    ),
 }
 
 
@@ -131,6 +135,10 @@ def _load_connection(db: Any, tenant_id: int) -> Any:
 
 def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[str, Any]:
     """Local readiness for enqueue. Does not call Graph."""
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(tenant_id):
+        return _blocker("sync_scope_excluded")
     try:
         ent = get_entitlements(db, int(tenant_id), strict_lookup=True)
         if not ent.has_feature("meta_catalog_sync"):
@@ -403,6 +411,7 @@ def _empty_sync_counts() -> Dict[str, int]:
 
 _FAILURE_ACTIONS = {
     "access_token_missing": "reconnect_whatsapp",
+    "sync_scope_excluded": "none",
     "access_token_invalid": "reconnect_whatsapp",
     "connection_not_found": "connect_whatsapp",
     "catalog_permission_denied": "grant_catalog_permission",
@@ -524,12 +533,18 @@ def catalog_link_evidence(
 
 # ── Retirement snapshot ──────────────────────────────────────────────────
 
-def _retirement_snapshot(conn: Any, counts: Dict[str, int]) -> Dict[str, Any]:
+def _retirement_snapshot(db: Any, tenant_id: int, counts: Dict[str, int]) -> Dict[str, Any]:
     from services.whatsapp_catalog_retirement import ledger_snapshot  # noqa: PLC0415
 
-    ledger = ledger_snapshot(conn) if conn is not None else {
-        "pending": 0, "exhausted": 0, "done_total": 0, "last_done_at": None, "last_error": None,
-    }
+    try:
+        ledger = ledger_snapshot(db, int(tenant_id))
+    except (SQLAlchemyError, AttributeError, TypeError) as exc:
+        logger.warning(
+            "[WA_CATALOG_SYNC] retirement ledger read skipped tenant=%s err=%s",
+            int(tenant_id),
+            type(exc).__name__,
+        )
+        ledger = {"pending": 0, "exhausted": 0, "done_total": 0, "last_done_at": None, "last_error": None}
     product_pending = int(counts.get("retire_pending") or 0)
     product_exhausted = int(counts.get("retire_exhausted") or 0)
     return {
@@ -724,6 +739,16 @@ def build_sync_stages(
     }
 
 
+def _scope_description_safe() -> Dict[str, Any]:
+    try:
+        from services.whatsapp_catalog_sync_scope import scope_description  # noqa: PLC0415
+
+        return scope_description()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WA_CATALOG_SYNC] scope description failed err=%s", type(exc).__name__)
+        return {"active": False, "tenant_ids": [], "product_ids": {}}
+
+
 def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any]:
     readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
     counts = _empty_sync_counts()
@@ -835,7 +860,7 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
 
     auto_on = whatsapp_catalog_auto_sync_enabled()
     link = catalog_link_evidence(db, tenant_id, conn=conn, product_evidence=product_link_evidence)
-    retirement = _retirement_snapshot(conn, counts)
+    retirement = _retirement_snapshot(db, int(tenant_id), counts)
     if readiness.get("ready"):
         status_phase = phase
     elif readiness.get("blocker_code") == "entitlement_unavailable":
@@ -882,6 +907,7 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         "failures": failures,
         "auto_sync_enabled": auto_on,
         "auto_sync_flag": _AUTO_SYNC_ENV,
+        "sync_scope": _scope_description_safe(),
         "verification": {
             "lookup_fields": list(IDENTITY_LOOKUP_FIELDS) + list(CONTENT_LOOKUP_FIELDS),
             "identity_fields": list(IDENTITY_LOOKUP_FIELDS),
@@ -991,8 +1017,13 @@ def drain_whatsapp_catalog_sync(
     candidates: List[Any] = []
     retire_candidates: List[int] = []
     current_conn_fp = str(readiness.get("connection_fp") or "")
+    from services.whatsapp_catalog_sync_scope import product_in_sync_scope  # noqa: PLC0415
+
     for row in iter_tenant_products(db, tenant_id):
         if not _belongs_to_tenant(row, tenant_id):
+            continue
+        if not product_in_sync_scope(tenant_id, getattr(row, "id", None)):
+            out["skipped_scope"] = int(out.get("skipped_scope") or 0) + 1
             continue
         if not is_whatsapp_channel_publish_eligible(row):
             if retirement_is_due(row, now) and len(retire_candidates) < int(limit):
@@ -1467,6 +1498,11 @@ def schedule_whatsapp_catalog_drain(
 ) -> None:
     if int(tenant_id) <= 0:
         return
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(tenant_id):
+        logger.info("[WA_CATALOG_SYNC] auto drain skipped tenant=%s (outside sync scope)", tenant_id)
+        return
     if not allow_without_auto_flag and not whatsapp_catalog_auto_sync_enabled():
         logger.info(
             "[WA_CATALOG_SYNC] auto drain skipped tenant=%s (%s!=1)",
@@ -1492,6 +1528,8 @@ def drain_ready_tenants(db: Any, *, limit_per_tenant: int = DRAIN_BATCH_SIZE) ->
         .filter(WhatsAppConnection.catalog_enabled.is_(True))
         .all()
     )
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
     tenants: List[int] = []
     seen = set()
     for conn in conns:
@@ -1499,6 +1537,8 @@ def drain_ready_tenants(db: Any, *, limit_per_tenant: int = DRAIN_BATCH_SIZE) ->
         if tid <= 0 or tid in seen:
             continue
         seen.add(tid)
+        if not tenant_in_sync_scope(tid):
+            continue
         tenants.append(tid)
 
     summary = {"tenants": 0, "processed": 0, "synced": 0, "failed": 0}

@@ -26,6 +26,7 @@ for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 
 from database.models import (  # noqa: E402
     Base,
+    CatalogChannelRetirement,
     MetaCatalogMembership,
     Product,
     ProductVariant,
@@ -44,9 +45,11 @@ from services.meta_catalog_push import (  # noqa: E402
     retire_meta_catalog_item,
 )
 from services.whatsapp_catalog_retirement import (  # noqa: E402
+    LEDGER_STATUS_DONE,
+    LEDGER_STATUS_EXHAUSTED,
+    LEDGER_STATUS_PENDING,
     REASON_MERCHANT_HIDDEN,
     REASON_SOURCE_DELETED,
-    RETIRE_LEDGER_KEY,
     RETIRE_MAX_ATTEMPTS,
     SYNC_STATUS_RETIRED,
     attempt_product_channel_retirement,
@@ -235,6 +238,13 @@ def _conn(session, tenant_id):
     return session.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == tenant_id).first()
 
 
+def _ledger_rows(session, tenant_id, status=None):
+    q = session.query(CatalogChannelRetirement).filter(CatalogChannelRetirement.tenant_id == tenant_id)
+    if status:
+        q = q.filter(CatalogChannelRetirement.status == status)
+    return q.order_by(CatalogChannelRetirement.id.asc()).all()
+
+
 _READY = patch(
     "services.whatsapp_catalog_sync.get_entitlements",
     lambda *a, **k: SimpleNamespace(has_feature=lambda key: key == "meta_catalog_sync"),
@@ -406,7 +416,7 @@ def test_restored_before_drain_is_handed_back_to_publish():
         session.close(); engine.dispose()
 
 
-# ── Ledger for deleted rows ───────────────────────────────────────────────
+# ── Durable ledger for deleted rows (table, no cap, survives other writers) ──
 
 def test_delete_ledger_survives_row_delete_and_is_drained():
     session, t_a, _t_b, engine = _make_db()
@@ -419,18 +429,109 @@ def test_delete_ledger_survives_row_delete_and_is_drained():
         assert added == 1
         session.delete(product)
         session.commit()
-        conn = _conn(session, t_a)
-        assert len(conn.extra_metadata[RETIRE_LEDGER_KEY]) == 1
-        # duplicate enqueue merges
+        rows = _ledger_rows(session, t_a)
+        assert len(rows) == 1 and rows[0].status == LEDGER_STATUS_PENDING
+        assert rows[0].product_id == identities[0]["product_id"]
+        # duplicate enqueue merges (re-opens the same row)
         assert enqueue_channel_retirement_ledger(session, t_a, identities, reason=REASON_SOURCE_DELETED) == 0
+        session.commit()
+        assert len(_ledger_rows(session, t_a)) == 1
         graph = FakeGraph({"700800-591001": {"id": "META-700800-591001", "availability": "in stock"}})
         with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
             out = drain_channel_retirement_ledger(session, t_a, client=graph)
         assert out["retired"] == 1 and out["remaining"] == 0
         assert graph.items["700800-591001"]["availability"] == "out of stock"
+        rows = _ledger_rows(session, t_a)
+        assert rows[0].status == LEDGER_STATUS_DONE and rows[0].done_at is not None
+        assert ledger_snapshot(session, t_a)["done_total"] == 1
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_ledger_has_no_cap_every_identity_of_a_deleted_product_is_recorded():
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        identities = [
+            {"retailer_id": f"9{i:05d}-1", "meta_item_id": f"META-{i}", "catalog_id": "CAT-GENERIC-001", "product_id": 1000 + i}
+            for i in range(620)
+        ]
+        added = enqueue_channel_retirement_ledger(session, t_a, identities, reason=REASON_SOURCE_DELETED)
+        session.commit()
+        assert added == 620
+        assert len(_ledger_rows(session, t_a, LEDGER_STATUS_PENDING)) == 620
+        assert ledger_snapshot(session, t_a)["pending"] == 620
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_ledger_outage_backs_off_exhausts_and_is_retried_after_reconcile_reset():
+    from services.whatsapp_catalog_retirement import reset_exhausted_ledger_entries
+
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        product = _salla_product(session, t_a, ext="700850")
+        enqueue_channel_retirement_ledger(session, t_a, channel_identities_for_product(session, product),
+                                          reason=REASON_SOURCE_DELETED)
+        session.delete(product); session.commit()
+        down = FakeGraph({"700850-591001": {"id": "META-700850-591001", "availability": "in stock"}}, post_status=503)
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            for _ in range(RETIRE_MAX_ATTEMPTS):
+                row = _ledger_rows(session, t_a)[0]
+                row.next_attempt_at = None  # force due
+                session.commit()
+                out = drain_channel_retirement_ledger(session, t_a, client=down)
+                assert out["failed"] == 1
+        row = _ledger_rows(session, t_a)[0]
+        assert row.status == LEDGER_STATUS_EXHAUSTED and row.attempts == RETIRE_MAX_ATTEMPTS
+        assert row.last_error == "meta_http_error"
+        # nothing is processed while exhausted
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            assert drain_channel_retirement_ledger(session, t_a, client=down)["processed"] == 0
+        # reconciliation gives it a fresh budget; Meta is back → retired
+        assert reset_exhausted_ledger_entries(session, t_a) == 1
+        session.commit()
+        up = FakeGraph({"700850-591001": {"id": "META-700850-591001", "availability": "in stock"}})
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            out = drain_channel_retirement_ledger(session, t_a, client=up)
+        assert out["retired"] == 1
+        assert _ledger_rows(session, t_a)[0].status == LEDGER_STATUS_DONE
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_ledger_survives_reconnect_bind_token_refresh_reconcile_and_drain_writers():
+    """Writers of whatsapp_connections.extra_metadata (reconnect bind result,
+    onboarding ensure, token refresh context, reconcile snapshot) cannot touch
+    the ledger: it lives in its own table."""
+    from services.meta_catalog_onboarding import _persist_ensure
+    from services.meta_catalog_reconnect import _persist_bind_result
+    from services.whatsapp_catalog_reconcile import _persist_snapshot
+
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        product = _salla_product(session, t_a, ext="700870")
+        stale_conn = _conn(session, t_a)  # a row loaded before the delete, as a reconnect worker would hold
+        enqueue_channel_retirement_ledger(session, t_a, channel_identities_for_product(session, product),
+                                          reason=REASON_SOURCE_DELETED)
+        session.delete(product); session.commit()
+        # reconnect bind + onboarding ensure rewrite the whole JSON column from the stale object
+        _persist_bind_result(stale_conn, {"ok": True, "link_status": "linked", "at": datetime.now(timezone.utc).isoformat()})
+        _persist_ensure(stale_conn, {"ok": True, "at": datetime.now(timezone.utc).isoformat()})
+        session.commit()
+        # token refresh style writer: replaces extra_metadata wholesale
         conn = _conn(session, t_a)
-        assert conn.extra_metadata[RETIRE_LEDGER_KEY] == []
-        assert ledger_snapshot(conn)["done_total"] == 1
+        conn.extra_metadata = {"token_status": "ok", "oauth_debug": {"is_valid": True}}
+        session.commit()
+        # reconcile snapshot writer
+        _persist_snapshot(session, t_a, {"at": datetime.now(timezone.utc).isoformat(), "ok": True})
+        session.commit()
+        rows = _ledger_rows(session, t_a)
+        assert len(rows) == 1 and rows[0].status == LEDGER_STATUS_PENDING
+        graph = FakeGraph({"700870-591001": {"id": "META-700870-591001", "availability": "in stock"}})
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            out = drain_channel_retirement_ledger(session, t_a, client=graph)
+        assert out["retired"] == 1
+        assert graph.items["700870-591001"]["availability"] == "out of stock"
     finally:
         session.close(); engine.dispose()
 
@@ -445,17 +546,34 @@ def test_store_sync_delete_writes_ledger_before_deleting_row():
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain") as sched:
             asyncio.run(svc.handle_product_deleted("700900"))
         assert session.query(Product).filter_by(tenant_id=t_a, external_id="700900").count() == 0
-        conn = _conn(session, t_a)
-        entries = conn.extra_metadata[RETIRE_LEDGER_KEY]
-        assert [e["retailer_id"] for e in entries] == ["700900-591001"]
-        assert entries[0]["reason"] == REASON_SOURCE_DELETED
+        rows = _ledger_rows(session, t_a)
+        assert [r.retailer_id for r in rows] == ["700900-591001"]
+        assert rows[0].reason == REASON_SOURCE_DELETED
         sched.assert_called_once_with(t_a)
         # a product that was never published leaves no ledger entry
         session.expire_all()
         never = _salla_product(session, t_a, ext="701000", synced=False, svid="591002")
         asyncio.run(svc.handle_product_deleted("701000"))
-        conn = _conn(session, t_a)
-        assert len(conn.extra_metadata[RETIRE_LEDGER_KEY]) == 1
+        assert len(_ledger_rows(session, t_a)) == 1
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_store_sync_delete_is_refused_when_the_ledger_cannot_be_written():
+    """No delete without a durable retirement record: the event is retried."""
+    from services.store_sync import StoreSyncService
+
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        _salla_product(session, t_a, ext="700950")
+        svc = StoreSyncService(session, t_a)
+        with patch("services.whatsapp_catalog_retirement.enqueue_channel_retirement_ledger",
+                   side_effect=RuntimeError("db_down")):
+            with pytest.raises(RuntimeError):
+                asyncio.run(svc.handle_product_deleted("700950"))
+        session.rollback()
+        assert session.query(Product).filter_by(tenant_id=t_a, external_id="700950").count() == 1
+        assert _ledger_rows(session, t_a) == []
     finally:
         session.close(); engine.dispose()
 
@@ -470,7 +588,7 @@ def test_ledger_and_identities_are_tenant_isolated():
         assert ids_a[0]["product_id"] == prod_a.id and ids_b[0]["product_id"] == prod_b.id
         enqueue_channel_retirement_ledger(session, t_a, ids_a, reason=REASON_SOURCE_DELETED)
         session.commit()
-        assert _conn(session, t_b).extra_metadata.get(RETIRE_LEDGER_KEY) in (None, [])
+        assert _ledger_rows(session, t_b) == []
         graph_b = FakeGraph({"800100-591001": {"id": "META-800100-591001", "availability": "in stock"}})
         with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-OTHER-002", "tok")):
             out_b = drain_channel_retirement_ledger(session, t_b, client=graph_b)
@@ -511,7 +629,7 @@ def test_native_identities_use_product_meta_item():
 
 def test_ledger_entry_added_during_graph_io_survives_the_drain_merge():
     """A product.deleted webhook landing while the drain is talking to Graph
-    must not be overwritten when the drain writes its results back."""
+    is a new row the drain never touches (updates are by primary key)."""
     session, t_a, _t_b, engine = _make_db()
     try:
         first = _salla_product(session, t_a, ext="810100")
@@ -523,7 +641,6 @@ def test_ledger_entry_added_during_graph_io_survives_the_drain_merge():
 
         class RacingGraph(FakeGraph):
             def post(self, url, data=None, headers=None):
-                # another request appends to the ledger mid-flight
                 enqueue_channel_retirement_ledger(session, t_a, later_ids, reason=REASON_SOURCE_DELETED)
                 session.commit()
                 return super().post(url, data=data, headers=headers)
@@ -532,7 +649,7 @@ def test_ledger_entry_added_during_graph_io_survives_the_drain_merge():
         with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
             out = drain_channel_retirement_ledger(session, t_a, client=graph)
         assert out["retired"] == 1
-        remaining = [e["retailer_id"] for e in _conn(session, t_a).extra_metadata[RETIRE_LEDGER_KEY]]
+        remaining = [r.retailer_id for r in _ledger_rows(session, t_a, LEDGER_STATUS_PENDING)]
         assert remaining == ["810200-591009"]
     finally:
         session.close(); engine.dispose()

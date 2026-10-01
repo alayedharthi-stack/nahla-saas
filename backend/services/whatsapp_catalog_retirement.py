@@ -42,9 +42,6 @@ from core.catalog import (
 
 logger = logging.getLogger("nahla.wa_catalog_retirement")
 
-RETIRE_LEDGER_KEY = "wa_catalog_retirements"
-RETIRE_STATS_KEY = "wa_catalog_retirement_stats"
-RETIRE_LEDGER_MAX = 500
 RETIRE_MAX_ATTEMPTS = 5
 RETIRE_BACKOFF_SECONDS = (60, 300, 900, 1800, 3600)
 
@@ -388,6 +385,13 @@ def attempt_product_channel_retirement(
         "skipped": False,
         "error_code": None,
     }
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, product_in_sync_scope  # noqa: PLC0415
+
+    if not product_in_sync_scope(tenant_id, product_id):
+        # Outside the trial scope: leave the request pending, touch nothing.
+        out["skipped"] = True
+        out["error_code"] = SCOPE_BLOCKER_CODE
+        return out
     product = (
         db.query(Product)
         .filter(Product.id == int(product_id), Product.tenant_id == int(tenant_id))
@@ -517,26 +521,24 @@ def _stamp_retire_failure(
     return out
 
 
-# ── Tenant ledger (for rows that are deleted) ─────────────────────────────
+# ── Durable retirement ledger (rows that are deleted) ─────────────────────
+#
+# ``catalog_channel_retirements`` rows are written in the same transaction
+# as the product delete. They have no FK to ``products`` and live outside
+# ``whatsapp_connections.extra_metadata``, so neither the delete nor any
+# concurrent JSON writer (reconnect bind, onboarding ensure, token refresh,
+# reconcile snapshot) can erase them. There is no cap: every identity of a
+# deleted product is recorded or the delete does not happen.
 
-def _ledger(conn: Any) -> List[Dict[str, Any]]:
-    meta = getattr(conn, "extra_metadata", None) or {}
-    if not isinstance(meta, dict):
-        return []
-    raw = meta.get(RETIRE_LEDGER_KEY)
-    return [dict(x) for x in raw if isinstance(x, dict)] if isinstance(raw, list) else []
+LEDGER_STATUS_PENDING = "pending"
+LEDGER_STATUS_DONE = "done"
+LEDGER_STATUS_EXHAUSTED = "exhausted"
 
 
-def _write_ledger(conn: Any, entries: List[Dict[str, Any]], stats_update: Optional[Dict[str, Any]] = None) -> None:
-    meta = dict(getattr(conn, "extra_metadata", None) or {})
-    meta[RETIRE_LEDGER_KEY] = entries[:RETIRE_LEDGER_MAX]
-    if stats_update:
-        stats = dict(meta.get(RETIRE_STATS_KEY) or {})
-        stats.update(stats_update)
-        meta[RETIRE_STATS_KEY] = stats
-    conn.extra_metadata = meta
-    if getattr(conn, "_sa_instance_state", None) is not None:
-        flag_modified(conn, "extra_metadata")
+def _ledger_model():
+    from models import CatalogChannelRetirement  # noqa: PLC0415
+
+    return CatalogChannelRetirement
 
 
 def enqueue_channel_retirement_ledger(
@@ -545,89 +547,123 @@ def enqueue_channel_retirement_ledger(
     identities: Iterable[Dict[str, Any]],
     *,
     reason: str,
+    catalog_id: Optional[str] = None,
 ) -> int:
     """Record identities whose product row is about to disappear.
 
     Must be called in the same transaction as the delete so a crash never
     leaves a deleted row with a live channel copy and no record. Returns
-    the number of new ledger entries (duplicates by retailer_id are merged).
+    the number of new ledger rows; an existing row for the same retailer_id
+    is re-opened as ``pending`` with a fresh budget (duplicates merge).
+    Raises when a row cannot be written, so the caller's delete rolls back.
     """
+    model = _ledger_model()
     items = [dict(i) for i in identities if _strip((i or {}).get("retailer_id"))]
     if not items:
         return 0
-    conn = _load_connection(db, tenant_id, for_update=True)
-    if conn is None:
-        logger.warning(
-            "[WA_CATALOG_RETIRE] ledger skipped tenant=%s: no WhatsApp connection", tenant_id,
-        )
-        return 0
-    entries = _ledger(conn)
-    by_rid = {e.get("retailer_id"): e for e in entries}
+    default_catalog = _strip(catalog_id)
+    if not default_catalog:
+        conn = _load_connection(db, tenant_id)
+        default_catalog = _strip(getattr(conn, "meta_catalog_id", None)) if conn is not None else ""
+    now = _now()
     added = 0
-    now = _now().isoformat()
     for item in items:
         rid = _strip(item.get("retailer_id"))
-        if rid in by_rid:
-            existing = by_rid[rid]
-            existing["reason"] = reason
-            if not existing.get("meta_item_id") and item.get("meta_item_id"):
-                existing["meta_item_id"] = item.get("meta_item_id")
-            continue
-        if len(entries) >= RETIRE_LEDGER_MAX:
-            logger.warning(
-                "[WA_CATALOG_RETIRE] ledger full tenant=%s; retailer_id=%s left to reconciliation",
-                tenant_id,
-                rid,
+        cid = _strip(item.get("catalog_id")) or default_catalog
+        if not cid:
+            raise RuntimeError("channel_retirement_catalog_id_missing")
+        existing = (
+            db.query(model)
+            .filter(
+                model.tenant_id == int(tenant_id),
+                model.catalog_id == cid,
+                model.retailer_id == rid,
             )
+            .first()
+        )
+        if existing is not None:
+            existing.reason = str(reason)
+            existing.status = LEDGER_STATUS_PENDING
+            existing.attempts = 0
+            existing.next_attempt_at = None
+            existing.last_error = None
+            existing.updated_at = now
+            existing.done_at = None
+            if not _strip(existing.meta_item_id) and _strip(item.get("meta_item_id")):
+                existing.meta_item_id = _strip(item.get("meta_item_id"))
+            if existing.product_id is None and item.get("product_id") is not None:
+                existing.product_id = int(item["product_id"])
             continue
-        entry = {
-            "retailer_id": rid,
-            "meta_item_id": _strip(item.get("meta_item_id")) or None,
-            "catalog_id": _strip(item.get("catalog_id")) or None,
-            "product_id": item.get("product_id"),
-            "reason": reason,
-            "created_at": now,
-            "attempts": 0,
-            "next_attempt_at": None,
-            "last_error": None,
-            "exhausted": False,
-        }
-        entries.append(entry)
-        by_rid[rid] = entry
+        db.add(
+            model(
+                tenant_id=int(tenant_id),
+                catalog_id=cid,
+                retailer_id=rid,
+                meta_item_id=_strip(item.get("meta_item_id")) or None,
+                product_id=int(item["product_id"]) if item.get("product_id") is not None else None,
+                reason=str(reason),
+                status=LEDGER_STATUS_PENDING,
+                attempts=0,
+                next_attempt_at=None,
+                last_error=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
         added += 1
-    _write_ledger(conn, entries)
     db.flush()
     return added
 
 
-def ledger_snapshot(conn: Any) -> Dict[str, Any]:
-    entries = _ledger(conn)
-    meta = getattr(conn, "extra_metadata", None) or {}
-    stats = meta.get(RETIRE_STATS_KEY) if isinstance(meta, dict) else {}
-    pending = [e for e in entries if not e.get("exhausted")]
-    exhausted = [e for e in entries if e.get("exhausted")]
+def ledger_snapshot(db: Any, tenant_id: int) -> Dict[str, Any]:
+    model = _ledger_model()
+    rows = db.query(model).filter(model.tenant_id == int(tenant_id)).all()
+    pending = [r for r in rows if r.status == LEDGER_STATUS_PENDING]
+    exhausted = [r for r in rows if r.status == LEDGER_STATUS_EXHAUSTED]
+    done = [r for r in rows if r.status == LEDGER_STATUS_DONE]
+    last_done = max((r.done_at for r in done if r.done_at is not None), default=None)
+    last_error = None
+    errored = [r for r in rows if r.last_error and r.status != LEDGER_STATUS_DONE]
+    if errored:
+        errored.sort(key=lambda r: r.updated_at or r.created_at)
+        last_error = errored[-1].last_error
     return {
         "pending": len(pending),
         "exhausted": len(exhausted),
-        "done_total": int((stats or {}).get("done_total") or 0),
-        "last_done_at": (stats or {}).get("last_done_at"),
-        "last_error": (stats or {}).get("last_error"),
+        "done_total": len(done),
+        "last_done_at": last_done.isoformat() if last_done is not None else None,
+        "last_error": last_error,
     }
 
 
-def reset_exhausted_ledger_entries(conn: Any) -> int:
-    """Give exhausted ledger entries a fresh budget (used by reconciliation)."""
-    entries = _ledger(conn)
-    reset = 0
-    for e in entries:
-        if e.get("exhausted"):
-            e["exhausted"] = False
-            e["attempts"] = 0
-            e["next_attempt_at"] = None
-            reset += 1
-    if reset:
-        _write_ledger(conn, entries)
-    return reset
+def reset_exhausted_ledger_entries(db: Any, tenant_id: int) -> int:
+    """Give exhausted ledger rows a fresh budget (used by reconciliation)."""
+    model = _ledger_model()
+    rows = (
+        db.query(model)
+        .filter(model.tenant_id == int(tenant_id), model.status == LEDGER_STATUS_EXHAUSTED)
+        .all()
+    )
+    now = _now()
+    for row in rows:
+        row.status = LEDGER_STATUS_PENDING
+        row.attempts = 0
+        row.next_attempt_at = None
+        row.updated_at = now
+    if rows:
+        db.flush()
+    return len(rows)
+
+
+def _ledger_row_due(row: Any, now: datetime) -> bool:
+    if row.status != LEDGER_STATUS_PENDING:
+        return False
+    nxt = row.next_attempt_at
+    if nxt is None:
+        return True
+    if nxt.tzinfo is None:
+        nxt = nxt.replace(tzinfo=timezone.utc)
+    return now >= nxt
 
 
 def drain_channel_retirement_ledger(
@@ -637,104 +673,99 @@ def drain_channel_retirement_ledger(
     limit: int = 25,
     client: Any = None,
 ) -> Dict[str, Any]:
-    """Process due ledger entries for one tenant.
+    """Process due ledger rows for one tenant.
 
-    Graph calls run against an unlocked snapshot; the row is locked and
-    re-read only for the final merge, so a concurrent delete webhook that
-    appends an entry during the Graph round-trips is never overwritten.
+    Graph calls run first against a plain read; each row is then updated by
+    primary key, so rows inserted by a concurrent delete are never touched.
+    Out-of-scope tenants and product-limited trials are refused here as
+    well as in the Graph helper itself.
     """
     from services.meta_catalog_push import retire_meta_catalog_item  # noqa: PLC0415
+    from services.whatsapp_catalog_sync_scope import product_in_sync_scope, tenant_in_sync_scope  # noqa: PLC0415
 
-    out: Dict[str, Any] = {"processed": 0, "retired": 0, "absent": 0, "failed": 0, "remaining": 0}
+    out: Dict[str, Any] = {"processed": 0, "retired": 0, "absent": 0, "failed": 0, "remaining": 0, "skipped_scope": 0}
+    if not tenant_in_sync_scope(tenant_id):
+        out["skipped_scope"] = 1
+        return out
+    model = _ledger_model()
     conn = _load_connection(db, tenant_id)
     if conn is None:
         return out
-    snapshot = _ledger(conn)
-    if not snapshot:
-        return out
     now = _now()
+    rows = (
+        db.query(model)
+        .filter(model.tenant_id == int(tenant_id), model.status == LEDGER_STATUS_PENDING)
+        .order_by(model.id.asc())
+        .all()
+    )
     default_catalog = _strip(getattr(conn, "meta_catalog_id", None))
-    outcomes: Dict[str, Dict[str, Any]] = {}
-    for entry in snapshot:
-        due = (
-            not entry.get("exhausted")
-            and (
-                _parse_iso_dt(entry.get("next_attempt_at")) is None
-                or now >= _parse_iso_dt(entry.get("next_attempt_at"))
-            )
-        )
-        if not due or out["processed"] >= int(limit):
+    outcomes: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        if not _ledger_row_due(row, now):
             continue
+        if not product_in_sync_scope(tenant_id, row.product_id):
+            out["skipped_scope"] += 1
+            continue
+        if out["processed"] >= int(limit):
+            break
         out["processed"] += 1
         try:
             res = retire_meta_catalog_item(
                 conn,
-                entry.get("catalog_id") or default_catalog,
-                entry.get("retailer_id"),
-                entry.get("meta_item_id"),
+                row.catalog_id or default_catalog,
+                row.retailer_id,
+                row.meta_item_id,
                 client=client,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
                 "[WA_CATALOG_RETIRE] ledger graph call failed tenant=%s rid=%s",
                 tenant_id,
-                entry.get("retailer_id"),
+                row.retailer_id,
             )
             res = {"ok": False, "error": type(exc).__name__}
-        outcomes[_strip(entry.get("retailer_id"))] = res
-    if not outcomes:
-        out["remaining"] = len(snapshot)
-        return out
+        outcomes[int(row.id)] = res
 
-    # Merge on the committed row under lock; entries added meanwhile survive.
-    locked = _load_connection(db, tenant_id, for_update=True)
-    if locked is None:
-        return out
-    entries = _ledger(locked)
-    keep: List[Dict[str, Any]] = []
-    done = 0
-    last_error: Optional[str] = None
-    for entry in entries:
-        res = outcomes.get(_strip(entry.get("retailer_id")))
-        if res is None:
-            keep.append(entry)
+    for row_id, res in outcomes.items():
+        row = db.query(model).filter(model.id == int(row_id), model.tenant_id == int(tenant_id)).first()
+        if row is None:
             continue
+        row.updated_at = now
         if res.get("ok"):
-            done += 1
+            row.status = LEDGER_STATUS_DONE
+            row.done_at = now
+            row.last_error = None
             if res.get("action") == "absent":
                 out["absent"] += 1
             else:
                 out["retired"] += 1
             continue
-        attempts = int(entry.get("attempts") or 0) + 1
-        entry["attempts"] = attempts
-        entry["last_error"] = str(res.get("error") or "retire_failed")[:200]
-        entry["next_attempt_at"] = _backoff(attempts)
-        entry["exhausted"] = entry["next_attempt_at"] is None
-        last_error = entry["last_error"]
+        attempts = int(row.attempts or 0) + 1
+        row.attempts = attempts
+        row.last_error = str(res.get("error") or "retire_failed")[:255]
+        next_at = _backoff(attempts)
+        row.next_attempt_at = _parse_iso_dt(next_at) if next_at else None
+        row.status = LEDGER_STATUS_EXHAUSTED if next_at is None else LEDGER_STATUS_PENDING
         out["failed"] += 1
-        keep.append(entry)
-    out["remaining"] = len(keep)
-    stats_update: Dict[str, Any] = {}
-    if done:
-        meta = getattr(locked, "extra_metadata", None) or {}
-        stats = meta.get(RETIRE_STATS_KEY) if isinstance(meta, dict) else {}
-        stats_update["done_total"] = int((stats or {}).get("done_total") or 0) + done
-        stats_update["last_done_at"] = now.isoformat()
-    if last_error is not None:
-        stats_update["last_error"] = last_error
-    _write_ledger(locked, keep, stats_update or None)
-    db.commit()
+    if outcomes:
+        db.commit()
+    out["remaining"] = (
+        db.query(model)
+        .filter(model.tenant_id == int(tenant_id), model.status == LEDGER_STATUS_PENDING)
+        .count()
+    )
     return out
 
 
 __all__ = [
+    "LEDGER_STATUS_DONE",
+    "LEDGER_STATUS_EXHAUSTED",
+    "LEDGER_STATUS_PENDING",
     "REASON_CATALOG_INACTIVE",
     "REASON_MANUAL_DELETED",
     "REASON_MERCHANT_HIDDEN",
     "REASON_SOURCE_DELETED",
     "REASON_SOURCE_HIDDEN",
-    "RETIRE_LEDGER_KEY",
     "RETIRE_MAX_ATTEMPTS",
     "SYNC_STATUS_RETIRED",
     "attempt_product_channel_retirement",

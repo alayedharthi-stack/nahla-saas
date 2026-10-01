@@ -169,6 +169,51 @@ def _lifecycle_status(source_status: str) -> str:
     return text
 
 
+SOURCE_EVENT_AT_KEY = "source_event_at"
+
+
+def source_event_time(payload: Any, envelope_created_at: Any = None) -> Optional[datetime]:
+    """Instant the source says this product state belongs to, or None.
+
+    Order of trust: the product's own ``updated_at`` (Salla sends it as a
+    string or a ``{date, timezone}`` object), then the webhook envelope's
+    ``created_at``. ``None`` means the order of this event cannot be proven.
+    """
+    from services.salla_datetime import (  # noqa: PLC0415
+        parse_salla_datetime_to_utc,
+        parse_salla_js_envelope_datetime,
+    )
+
+    if isinstance(payload, dict):
+        stamp = parse_salla_datetime_to_utc(payload.get("updated_at"))
+        if stamp is not None:
+            return stamp
+    if envelope_created_at:
+        stamp = parse_salla_js_envelope_datetime(envelope_created_at)
+        if stamp is None:
+            stamp = parse_salla_datetime_to_utc(envelope_created_at)
+        if stamp is not None:
+            return stamp
+    return None
+
+
+def stored_source_event_time(product: Any) -> Optional[datetime]:
+    meta = getattr(product, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get(SOURCE_EVENT_AT_KEY)
+    if not raw:
+        return None
+    try:
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
@@ -1943,8 +1988,14 @@ class StoreSyncService:
         normalised: Dict[str, Any],
         adapter_source: str,
     ) -> Dict[str, Any]:
-        """Upsert one normalised product row (+ variants). Shared by bulk and one-product sync."""
+        """Upsert one normalised product row (+ variants). Shared by bulk and one-product sync.
+
+        Rows written here come from a direct Salla read, so their state is
+        current as of now: the ``source_event_at`` stamp lets a delayed
+        webhook describing an older change be recognised and ignored.
+        """
         ext_id = normalised["external_id"]
+        normalised.setdefault(SOURCE_EVENT_AT_KEY, datetime.now(timezone.utc).isoformat())
         new_qty = _coerce_int(normalised.get("stock_qty"))
         new_in_stock = bool(normalised.get("in_stock", True))
         new_available = new_in_stock and (new_qty is None or new_qty > 0)
@@ -4040,13 +4091,45 @@ class StoreSyncService:
 
     # ── Incremental product update (called by webhook) ─────────────────────────
 
+    async def _fetch_product_truth(self, product_id: str, *, event_type: str | None) -> Dict[str, Any]:
+        """Current product state from the store adapter; raises so the event is retried."""
+        adapter = self._get_adapter()
+        if not adapter or not hasattr(adapter, "get_product"):
+            raise RuntimeError("product_hydration_failed")
+        try:
+            fetched = await adapter.get_product(product_id)
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s product truth fetch failed product_hash=%s event=%s error_code=%s",
+                self.tenant_id,
+                hash(product_id) % 10_000_000,
+                event_type,
+                type(exc).__name__,
+            )
+            raise RuntimeError("product_hydration_failed") from exc
+        if fetched is None:
+            raise RuntimeError("product_hydration_failed")
+        if hasattr(fetched, "dict"):
+            fetched = fetched.dict()
+        elif not isinstance(fetched, dict):
+            fetched = dict(fetched)
+        return fetched
+
     async def handle_product_webhook(
         self,
         payload: Dict,
         *,
         webhook_event_type: str | None = None,
+        envelope_created_at: Any = None,
     ) -> None:
-        """Process a single product update from a platform webhook."""
+        """Process a single product update from a platform webhook.
+
+        Ordering guard: a delayed event must never replace a newer local
+        state. Each row carries ``source_event_at`` (the instant its state
+        belongs to). An event older than that stamp is ignored; an event
+        whose time cannot be proven is replaced by a fresh read of the
+        product from Salla (current truth) before anything is written.
+        """
         full_payload_events = {"product.created", "product.updated"}
         product_id = str(payload.get("id") or payload.get("external_id") or "").strip()
         needs_hydration = (
@@ -4055,6 +4138,37 @@ class StoreSyncService:
             and product_id
             and not (payload.get("title") or payload.get("name"))
         )
+        event_at = source_event_time(payload, envelope_created_at)
+        truth_read_at: Optional[datetime] = None
+        if product_id and not needs_hydration:
+            existing_stamp_row = (
+                self.db.query(Product)
+                .filter_by(tenant_id=self.tenant_id, external_id=product_id)
+                .first()
+            )
+            stored_at = stored_source_event_time(existing_stamp_row) if existing_stamp_row is not None else None
+            if event_at is not None and stored_at is not None and event_at < stored_at:
+                logger.info(
+                    "tenant=%s stale product event ignored product_hash=%s event=%s event_at=%s stored_at=%s",
+                    self.tenant_id,
+                    hash(product_id) % 10_000_000,
+                    webhook_event_type,
+                    event_at.isoformat(),
+                    stored_at.isoformat(),
+                )
+                return
+            if event_at is None and stored_at is not None:
+                # The row has a newer-or-equal known state and this event's
+                # order cannot be proven: never trust the body; read the
+                # current truth from the store instead (retried if it fails).
+                truth = await self._fetch_product_truth(product_id, event_type=webhook_event_type)
+                merged = dict(payload)
+                merged.update(truth)
+                payload = merged
+                truth_read_at = datetime.now(timezone.utc)
+            # A row without any stamp (never written through a stamped path)
+            # has no known-newer state to protect; the body applies and the
+            # first stamped write (hourly sync or a timed event) starts the guard.
         if needs_hydration:
             adapter = self._get_adapter()
             if not adapter or not hasattr(adapter, "get_product"):
@@ -4076,13 +4190,20 @@ class StoreSyncService:
                 fetched = fetched.dict()
             elif not isinstance(fetched, dict):
                 fetched = dict(fetched)
-            merged = dict(fetched)
-            merged.update(payload)
+            # The fetched product is the current truth; the partial event body
+            # only fills what the read did not return (never overrides it).
+            merged = dict(payload)
+            merged.update(fetched)
             payload = merged
+            truth_read_at = datetime.now(timezone.utc)
         normalised = _normalise_product(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
             return
+        if truth_read_at is not None:
+            normalised[SOURCE_EVENT_AT_KEY] = truth_read_at.isoformat()
+        elif event_at is not None:
+            normalised[SOURCE_EVENT_AT_KEY] = event_at.isoformat()
 
         adapter = self._get_adapter()
         if adapter:
@@ -4111,6 +4232,10 @@ class StoreSyncService:
             existing.sku           = normalised.get("sku", existing.sku)
             existing.in_stock      = bool(normalised.get("in_stock", True))
             existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
+            if SOURCE_EVENT_AT_KEY not in normalised:
+                prior_stamp = (getattr(existing, "extra_metadata", None) or {}).get(SOURCE_EVENT_AT_KEY)
+                if prior_stamp:
+                    normalised[SOURCE_EVENT_AT_KEY] = prior_stamp
             apply_salla_source_metadata(existing, normalised)
             if (existing.source or "").lower() != "manual":
                 existing.source = row_source
