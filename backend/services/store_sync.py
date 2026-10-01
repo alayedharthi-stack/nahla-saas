@@ -110,10 +110,54 @@ def _extract_order_datetime(raw: Any) -> Optional[datetime]:
     return intelligence_extract_order_datetime(raw)
 
 
+def _salla_money(value: Any) -> tuple[str, Optional[str]]:
+    """Return ``(amount_text, currency)`` for a Salla money field.
+
+    Salla sends money either as a scalar (``149`` / ``"149"``) or as an
+    object ``{"amount": 149, "currency": "SAR"}`` (raw webhook payloads).
+    The stored ``price`` column must never hold a dict repr.
+    """
+    if isinstance(value, dict):
+        amount = value.get("amount")
+        currency = str(value.get("currency") or "").strip() or None
+        if amount is None or amount == "":
+            return "", currency
+        return str(amount), currency
+    if value is None:
+        return "", None
+    return str(value), None
+
+
+def _source_in_stock(raw: Dict[str, Any]) -> bool:
+    """Availability truth for one source payload.
+
+    Adapter-normalised products carry ``in_stock``. Raw webhook payloads
+    carry ``quantity`` / ``unlimited_quantity`` only; a missing key must not
+    be read as "in stock".
+    """
+    explicit = raw.get("in_stock")
+    if isinstance(explicit, bool):
+        return explicit
+    if explicit is not None:
+        return bool(explicit)
+    if raw.get("unlimited_quantity") is True:
+        return True
+    qty = raw.get("quantity", raw.get("stock_quantity", None))
+    if qty is None or qty == "":
+        return True
+    try:
+        return int(float(qty)) > 0
+    except (TypeError, ValueError):
+        return True
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    price_text, price_currency = _salla_money(raw.get("price", raw.get("regular_price", "")))
+    sale_price_text, _ = _salla_money(raw.get("sale_price", raw.get("promo_price", "")))
+    regular_price_text, _ = _salla_money(raw.get("regular_price", ""))
     image_url = extract_sync_product_image(raw)
     additional_images = extract_sync_additional_images(raw, primary=image_url)
     variants_raw = raw.get("variants") or []
@@ -134,17 +178,17 @@ def _normalise_product(raw: Any) -> Dict:
         "sku":           raw.get("sku", ""),
         "title":         raw.get("title", raw.get("name", "")),
         "description":   raw.get("description", ""),
-        "price":         str(raw.get("price", raw.get("regular_price", ""))),
-        "sale_price":    str(raw.get("sale_price", raw.get("promo_price", "")) or ""),
-        "regular_price": str(raw.get("regular_price", "") or ""),
+        "price":         price_text,
+        "sale_price":    sale_price_text,
+        "regular_price": regular_price_text,
         "status":        _extract_status_string(raw.get("status"), fallback="active"),
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
         "image_url":     image_url,
         "additional_images": additional_images,
         "product_url":   (raw.get("product_url") or raw.get("url") or "").strip(),
-        "currency":      raw.get("currency", "SAR"),
-        "in_stock":      raw.get("in_stock", True),
+        "currency":      raw.get("currency") or price_currency or "SAR",
+        "in_stock":      _source_in_stock(raw),
         "stock_qty":     raw.get("quantity", raw.get("stock_quantity", None)),
         "tags":          raw.get("tags", []),
         "variants":      variants_out,
@@ -5156,16 +5200,59 @@ class StoreSyncService:
     # ── Product deletion (called by webhook) ──────────────────────────────
 
     async def handle_product_deleted(self, external_id: str) -> None:
-        """Remove a product that was deleted in the store."""
+        """Remove a product that was deleted in the store.
+
+        Channel copies published for the row are recorded in the tenant
+        retirement ledger inside the same transaction, so the Meta item is
+        withdrawn by the drain even though the local row is gone.
+        """
         if not external_id:
             return
+        ledgered = 0
+        try:
+            from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+                REASON_SOURCE_DELETED,
+                channel_identities_for_product,
+                enqueue_channel_retirement_ledger,
+            )
+
+            rows = (
+                self.db.query(Product)
+                .filter_by(tenant_id=self.tenant_id, external_id=external_id)
+                .all()
+            )
+            identities: List[Dict[str, Any]] = []
+            for row in rows:
+                identities.extend(channel_identities_for_product(self.db, row))
+            if identities:
+                ledgered = enqueue_channel_retirement_ledger(
+                    self.db, self.tenant_id, identities, reason=REASON_SOURCE_DELETED,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "tenant=%s product delete: channel retirement ledger failed external_id=%s",
+                self.tenant_id, external_id,
+            )
+            self.db.rollback()
+            raise
         deleted = (
             self.db.query(Product)
             .filter_by(tenant_id=self.tenant_id, external_id=external_id)
             .delete()
         )
-        if deleted:
+        if deleted or ledgered:
             self.db.commit()
+        if ledgered:
+            try:
+                from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                    schedule_whatsapp_catalog_drain,
+                )
+                schedule_whatsapp_catalog_drain(int(self.tenant_id))
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "[StoreSync] retirement drain schedule skipped tenant=%s", self.tenant_id,
+                )
+        if deleted:
             snap = (
                 self.db.query(StoreKnowledgeSnapshot)
                 .filter_by(tenant_id=self.tenant_id)

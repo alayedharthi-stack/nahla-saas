@@ -385,6 +385,36 @@ def _post_catalog_item(
         return _run(owned)
 
 
+RETIRED_AVAILABILITY = "out of stock"
+RETIRED_VISIBILITY = "staging"
+PUBLISHED_VISIBILITY = "published"
+RETIRE_LOOKUP_FIELDS = GRAPH_FIELDS + ",visibility"
+
+
+def graph_error_code(response: Any) -> Tuple[Optional[int], Optional[int], str]:
+    """``(code, error_subcode, message)`` from a Graph error body (or text)."""
+    body = response
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            return None, None, body[:240]
+    if not isinstance(body, dict):
+        return None, None, ""
+    err = body.get("error") if isinstance(body.get("error"), dict) else body
+    if not isinstance(err, dict):
+        return None, None, ""
+    try:
+        code = int(err.get("code")) if err.get("code") is not None else None
+    except (TypeError, ValueError):
+        code = None
+    try:
+        sub = int(err.get("error_subcode")) if err.get("error_subcode") is not None else None
+    except (TypeError, ValueError):
+        sub = None
+    return code, sub, str(err.get("message") or "")[:240]
+
+
 def push_one_meta_catalog_item(
     db: Any,
     tenant_id: int,
@@ -392,12 +422,22 @@ def push_one_meta_catalog_item(
     *,
     confirm: bool = False,
     client: Optional[httpx.Client] = None,
+    payload_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Push one catalog item to Meta (dry-run unless ``confirm=True``)."""
+    """Push one catalog item to Meta (dry-run unless ``confirm=True``).
+
+    ``payload_overrides`` adds channel-state fields (for example
+    ``visibility=published`` when re-publishing a retired item). It never
+    overrides identity or verified content fields.
+    """
     rid = (retailer_id or "").strip()
     parent, variant = load_variant_for_push(db, tenant_id, retailer_id=rid)
     preview = preview_meta_variant_payload(parent, variant)
     payload = dict(preview.get("payload") or {})
+    for key, value in dict(payload_overrides or {}).items():
+        if key in {"retailer_id", "price", "currency", "availability"}:
+            continue
+        payload[key] = value
 
     result: Dict[str, Any] = {
         "action": "dry_run",
@@ -538,6 +578,124 @@ def push_one_meta_catalog_item(
         catalog_id,
         result.get("meta_product_id"),
         status_code,
+    )
+    return result
+
+
+def retire_meta_catalog_item(
+    conn: Any,
+    catalog_id: str,
+    retailer_id: str,
+    meta_item_id: Optional[str] = None,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Dict[str, Any]:
+    """Withdraw one live catalog item from the channel without deleting it.
+
+    Sets ``availability=out of stock`` and ``visibility=staging`` on the
+    existing Graph item, then re-reads it. Never issues a Graph DELETE and
+    never touches an item whose retailer_id is not in this catalog.
+    Returns ``action=absent`` when the item does not exist in Graph.
+    """
+    rid = str(retailer_id or "").strip()
+    cid = str(catalog_id or "").strip() or str(getattr(conn, "meta_catalog_id", "") or "").strip()
+    result: Dict[str, Any] = {
+        "ok": False,
+        "action": None,
+        "catalog_id": cid or None,
+        "retailer_id": rid,
+        "meta_product_id": str(meta_item_id or "").strip() or None,
+        "visibility_applied": None,
+        "verified": False,
+        "meta": {"http_status": None, "response": None},
+        "error": None,
+    }
+    if not rid:
+        result["error"] = "retailer_id_missing"
+        return result
+    if not cid:
+        result["error"] = "catalog_id_missing"
+        return result
+    try:
+        _cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
+    except MetaCatalogPushError as exc:
+        result["error"] = exc.code
+        return result
+
+    def _lookup(fields: str) -> Tuple[Optional[str], Dict[str, Any]]:
+        return find_meta_catalog_item_by_retailer_id(conn, cid, rid, client=client, fields=fields)
+
+    meta_id, lookup = _lookup(RETIRE_LOOKUP_FIELDS)
+    if lookup.get("error") and lookup.get("http_status") == 400:
+        # ``visibility`` not readable on this Graph version: fall back to the
+        # verified field set and record that visibility was not provable.
+        meta_id, lookup = _lookup(GRAPH_FIELDS)
+    if lookup.get("error"):
+        result["error"] = "lookup_failed"
+        result["lookup"] = lookup
+        return result
+    if not meta_id:
+        result["ok"] = True
+        result["action"] = "absent"
+        result["verified"] = True
+        return result
+    stored = str(meta_item_id or "").strip()
+    if stored and stored != str(meta_id):
+        result["error"] = "meta_item_id_mismatch"
+        result["meta_product_id"] = str(meta_id)
+        return result
+    result["meta_product_id"] = str(meta_id)
+
+    body: Dict[str, Any] = {
+        "availability": RETIRED_AVAILABILITY,
+        "visibility": RETIRED_VISIBILITY,
+    }
+    status_code, response = _post_catalog_item(_graph_product_url(str(meta_id)), token, body, client=client)
+    result["meta"]["http_status"] = status_code
+    result["meta"]["response"] = response
+    visibility_applied = True
+    if status_code >= 400 or (isinstance(response, dict) and response.get("error")):
+        code, _sub, message = graph_error_code(response)
+        if code == 100 and "visibility" in message.lower():
+            visibility_applied = False
+            body = {"availability": RETIRED_AVAILABILITY}
+            status_code, response = _post_catalog_item(
+                _graph_product_url(str(meta_id)), token, body, client=client,
+            )
+            result["meta"]["http_status"] = status_code
+            result["meta"]["response"] = response
+        if status_code >= 400 or (isinstance(response, dict) and response.get("error")):
+            result["error"] = "meta_http_error"
+            return result
+    result["action"] = "retire_update"
+    result["visibility_applied"] = visibility_applied
+
+    _verify_id, verify = _lookup(RETIRE_LOOKUP_FIELDS if visibility_applied else GRAPH_FIELDS)
+    item = verify.get("item") if isinstance(verify.get("item"), dict) else {}
+    live_av = str(item.get("availability") or "").strip().lower().replace("_", " ")
+    if verify.get("error") or not verify.get("matched"):
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    if live_av != RETIRED_AVAILABILITY:
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    live_vis = str(item.get("visibility") or "").strip().lower()
+    if visibility_applied and live_vis and live_vis != RETIRED_VISIBILITY:
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    result["ok"] = True
+    result["verified"] = True
+    result["lookup"] = verify
+    logger.info(
+        "[META_CATALOG_RETIRE] tenant=%s retailer_id=%s catalog=%s meta_id=%s visibility=%s",
+        getattr(conn, "tenant_id", None),
+        rid,
+        cid,
+        meta_id,
+        RETIRED_VISIBILITY if visibility_applied else "unchanged",
     )
     return result
 
@@ -759,6 +917,11 @@ def push_ready_meta_catalog_batch(
 
 __all__ = [
     "MetaCatalogPushError",
+    "graph_error_code",
+    "retire_meta_catalog_item",
+    "RETIRED_AVAILABILITY",
+    "RETIRED_VISIBILITY",
+    "PUBLISHED_VISIBILITY",
     "existing_identity_retailer_id",
     "find_meta_catalog_item_by_retailer_id",
     "load_variant_for_push",

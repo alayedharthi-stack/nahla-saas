@@ -81,10 +81,18 @@ READINESS_BLOCK_CODES = frozenset({
     "catalog_disabled",
     "catalog_id_missing",
     "access_token_missing",
+    "access_token_invalid",
     "connection_not_found",
     "feature_locked",
     "catalog_permission_denied",
 })
+# Graph error codes that mean the stored token is no longer usable (expired,
+# revoked, password changed). They block the tenant until the connection
+# changes; they never consume a product's retry budget.
+GRAPH_TOKEN_INVALID_CODES = frozenset({190, 102})
+# Graph error codes that mean the token lacks the catalog permission.
+GRAPH_PERMISSION_ERROR_CODES = frozenset({10, 200, 294, 803})
+GRAPH_PERMISSION_ERROR_SUBCODES = frozenset({2388100})
 PERMANENT_BLOCK_CODES = frozenset({
     "product_already_meta_managed",
     "product_not_channel_publish_eligible",
@@ -353,6 +361,33 @@ def _payload_for_verify(
         if isinstance(stored, dict) and stored:
             return _content_payload_snapshot(stored)
     return {}
+
+
+def classify_graph_push_failure(push_result: Dict[str, Any], default: str) -> str:
+    """Map a failed Graph push/lookup to a sync error code.
+
+    Token and permission failures are tenant-level readiness blocks, not
+    product failures: retrying the product cannot fix them, reconnecting can.
+    """
+    from services.meta_catalog_push import graph_error_code  # noqa: PLC0415
+
+    meta_block = push_result.get("meta") if isinstance(push_result.get("meta"), dict) else {}
+    response = meta_block.get("response")
+    lookup = push_result.get("lookup") if isinstance(push_result.get("lookup"), dict) else {}
+    http_status = meta_block.get("http_status") or lookup.get("http_status")
+    code, subcode, _message = graph_error_code(response if response is not None else lookup.get("error"))
+    if code in GRAPH_TOKEN_INVALID_CODES:
+        return "access_token_invalid"
+    if code in GRAPH_PERMISSION_ERROR_CODES or subcode in GRAPH_PERMISSION_ERROR_SUBCODES:
+        return "catalog_permission_denied"
+    try:
+        if int(http_status or 0) == 429 or code == 4 or code == 17 or code == 32 or code == 613:
+            return "meta_rate_limited"
+    except (TypeError, ValueError):
+        pass
+    if http_status in (401,) and code is None:
+        return "access_token_invalid"
+    return default
 
 
 def classify_block_code(code: Optional[str]) -> str:
@@ -1405,6 +1440,16 @@ def _attempt_acquired_body(
     content_ok = True
     skipped_push = lookup_only
     content_generation = _generation(_read_sync_meta(parent), "content_generation")
+    # A row that was withdrawn from the channel (hidden, then restored) was
+    # left in Graph as ``visibility=staging``; the re-publish must flip it
+    # back explicitly, otherwise price/availability match while the item
+    # stays invisible in WhatsApp.
+    republished_after_retirement = bool(_read_sync_meta(parent).get("channel_retired_at"))
+    republish_overrides: Optional[Dict[str, Any]] = None
+    if republished_after_retirement and not lookup_only:
+        from services.meta_catalog_push import PUBLISHED_VISIBILITY  # noqa: PLC0415
+
+        republish_overrides = {"visibility": PUBLISHED_VISIBILITY}
 
     for retailer_id in retailer_ids:
         salla_ident = None
@@ -1447,6 +1492,7 @@ def _attempt_acquired_body(
                     str(retailer_id),
                     confirm=True,
                     client=client,
+                    payload_overrides=republish_overrides,
                 )
             except MetaCatalogPushError as exc:
                 return fail(exc.code, exc.code, retailer_id=retailer_id)
@@ -1558,6 +1604,8 @@ def _attempt_acquired_body(
             code = str(push_result.get("error") or "meta_push_failed")
             if http_status == 429:
                 code = "meta_rate_limited"
+            if code in ("meta_http_error", "lookup_failed", "meta_push_failed"):
+                code = classify_graph_push_failure(push_result, code)
             return fail(code, err_msg, retailer_id=retailer_id)
 
         try:
@@ -1572,6 +1620,10 @@ def _attempt_acquired_body(
             return fail(exc.code, exc.code, retailer_id=retailer_id)
 
         last_lookup = lookup or {}
+        if last_lookup.get("error") and not last_lookup.get("matched"):
+            classified = classify_graph_push_failure({"lookup": last_lookup}, "lookup_failed")
+            if classified != "lookup_failed":
+                return fail(classified, f"{classified}: lookup rejected"[:200], retailer_id=retailer_id)
         if not meta_item_id or not last_lookup.get("matched"):
             return fail(
                 "verification_failed",
@@ -1670,6 +1722,14 @@ def _attempt_acquired_body(
         }
         if pushed_payload:
             updates["last_pushed_payload"] = pushed_payload
+        if not skipped_push:
+            updates["last_push_at"] = _now().isoformat()
+            updates["last_push_action"] = str(last_push.get("action") or "")
+        if republished_after_retirement and not skipped_push:
+            updates["channel_retired_at"] = None
+            updates["republished_at"] = _now().isoformat()
+            updates["retire_pending"] = False
+            updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)
 
@@ -1694,6 +1754,14 @@ def _attempt_acquired_body(
         }
         if pushed_payload:
             updates["last_pushed_payload"] = pushed_payload
+        if not skipped_push:
+            updates["last_push_at"] = _now().isoformat()
+            updates["last_push_action"] = str(last_push.get("action") or "")
+        if republished_after_retirement and not skipped_push:
+            updates["channel_retired_at"] = None
+            updates["republished_at"] = _now().isoformat()
+            updates["retire_pending"] = False
+            updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)
 
@@ -1807,6 +1875,7 @@ def schedule_native_meta_sync(background_tasks: Any, tenant_id: int, product_id:
 __all__ = [
     "META_RELEVANT_PATCH_KEYS",
     "attempt_native_meta_sync",
+    "classify_graph_push_failure",
     "build_sync_response_fields",
     "mark_native_meta_sync_pending",
     "meta_relevant_patch_keys",
