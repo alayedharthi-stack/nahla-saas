@@ -45,14 +45,31 @@ KNOWLEDGE_EXECUTION_MODE = "INTERNAL_E2E"
 # corrections below apply only from v2 onwards.
 KNOWLEDGE_CONTRACT_VERSION_V1 = "commerce_v2_phase_2_7b_knowledge_acceptance_v1"
 KNOWLEDGE_CONTRACT_VERSION_V2 = "commerce_v2_phase_2_7b_knowledge_acceptance_v2"
+# v3 is the artifact that closes Run 2's gap: two of its sixteen passes were
+# runner fallbacks (K15, K16) that the v2 scorer read as compliant answers.
+# v2 stays frozen with Run 2 exactly as v1 stayed frozen with Run 1.
+KNOWLEDGE_CONTRACT_VERSION_V3 = "commerce_v2_phase_2_7b_knowledge_acceptance_v3"
 KNOWLEDGE_CONTRACT_VERSIONS = (
     KNOWLEDGE_CONTRACT_VERSION_V1,
     KNOWLEDGE_CONTRACT_VERSION_V2,
+    KNOWLEDGE_CONTRACT_VERSION_V3,
+)
+# From v2 a case must be bound to its product and section.
+KNOWLEDGE_CONTRACT_VERSIONS_WITH_BINDINGS = (
+    KNOWLEDGE_CONTRACT_VERSION_V2,
+    KNOWLEDGE_CONTRACT_VERSION_V3,
 )
 KNOWLEDGE_MATRIX_PATHS = {
     KNOWLEDGE_CONTRACT_VERSION_V1: "phase_2_7b_knowledge_acceptance_v1.json",
     KNOWLEDGE_CONTRACT_VERSION_V2: "phase_2_7b_knowledge_acceptance_v2.json",
+    KNOWLEDGE_CONTRACT_VERSION_V3: "phase_2_7b_knowledge_acceptance_v3.json",
 }
+# How a v3 report classifies the delivered text when it is not a plain answer.
+FALLBACK_KIND_NONE = "none"
+FALLBACK_KIND_MODEL_DISCLOSURE = "model_authored_disclosure"
+FALLBACK_KIND_EXPECTED = "guardrail_protected_expected_fallback"
+FALLBACK_KIND_UNEXPECTED = "unexpected_runtime_failure"
+EXPECTED_OUTCOME_SAFE_MISSING_FACT = "safe_missing_fact"
 
 # Commercial truth is Salla's. A knowledge section may never carry these.
 COMMERCIAL_FACT_KINDS = frozenset(
@@ -154,6 +171,10 @@ class KnowledgeCase:
     @property
     def knowledge_fault_mode(self) -> str:
         return str(self.binding.get("knowledge_fault_mode") or "")
+
+    @property
+    def expected_outcome(self) -> str:
+        return str(self.expected.get("expected_outcome") or "")
 
 
 @dataclass(frozen=True)
@@ -262,7 +283,7 @@ def load_knowledge_acceptance_matrix(
         if not str(entry["input"]).strip():
             raise _fail("matrix_case_invalid")
         binding = entry.get("binding")
-        if contract_version == KNOWLEDGE_CONTRACT_VERSION_V2:
+        if contract_version in KNOWLEDGE_CONTRACT_VERSIONS_WITH_BINDINGS:
             # From v2 a case must say which product and which section it is
             # about.  Run 1 failed because nothing bound a case to the product
             # its fixture was attached to, so the turn resolved whatever the
@@ -347,6 +368,95 @@ def _reply_makes_positive_knowledge_claim(
     return False
 
 
+def _guardrail_error_codes(artifact: Mapping[str, Any]) -> list[str]:
+    """Error codes of the guardrails that judged the DELIVERED reply."""
+    codes: list[str] = []
+    for item in list(artifact.get("guardrail_result") or []):
+        info = item.get("output_info") if isinstance(item, Mapping) else None
+        if isinstance(info, Mapping):
+            codes.extend(str(code) for code in (info.get("errors") or []))
+    return codes
+
+
+def _guardrail_passed(artifact: Mapping[str, Any]) -> bool:
+    return not any(
+        bool(item.get("tripwire_triggered"))
+        for item in list(artifact.get("guardrail_result") or [])
+        if isinstance(item, Mapping)
+    )
+
+
+def _grounding_retry_events(artifact: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [
+        event
+        for event in list(artifact.get("tool_trace") or [])
+        if isinstance(event, Mapping) and event.get("kind") == "grounding_retry"
+    ]
+
+
+def _fallback_kind(artifact: Mapping[str, Any]) -> str:
+    """Tell a model-authored disclosure, an expected fallback and a failure apart.
+
+    Run 2 could not: the runner's substitute text for K15 and K16 carried a
+    ``safe_fallback_reason`` and was read as an absence disclosure.  The
+    internal channel already classifies the fallback (``fallback_type``); this
+    only names the three cases a v3 report must keep distinguishable.
+    """
+    status = str(artifact.get("status") or "")
+    fallback_type = str(artifact.get("fallback_type") or "")
+    reply = dict(artifact.get("structured_reply") or {})
+    if status == "completed" and not reply.get("safe_fallback_reason"):
+        if bool(artifact.get("knowledge_gap_disclosure")):
+            return FALLBACK_KIND_MODEL_DISCLOSURE
+        return FALLBACK_KIND_NONE
+    if fallback_type == "expected_safe_fallback":
+        return FALLBACK_KIND_EXPECTED
+    return FALLBACK_KIND_UNEXPECTED
+
+
+def _bound_section_ids(
+    db: Any, case: KnowledgeCase, tenant_id: int
+) -> tuple[int | None, set[int]]:
+    """The section a case requires and the sections it forbids, by database id.
+
+    Resolved from the same fixture titles the provisioner wrote, so the
+    scorer, the runner and the provisioner all consume one stored binding.
+    """
+    if db is None:
+        return None, set()
+    from models import MerchantKnowledgeSection
+    from services.commerce_v2_phase_2_7b_environment import (
+        FIXTURE_SECTION_TITLES,
+        FOREIGN_FIXTURES,
+    )
+
+    def _lookup(fixture: str, *, foreign: bool) -> int | None:
+        title = FIXTURE_SECTION_TITLES.get(fixture)
+        if not title:
+            return None
+        query = db.query(MerchantKnowledgeSection).filter(
+            MerchantKnowledgeSection.title == title
+        )
+        if foreign:
+            query = query.filter(MerchantKnowledgeSection.tenant_id != int(tenant_id))
+        else:
+            query = query.filter(MerchantKnowledgeSection.tenant_id == int(tenant_id))
+        rows = query.all()
+        return int(rows[0].id) if len(rows) == 1 else None
+
+    required = (
+        _lookup(case.required_section_fixture, foreign=False)
+        if case.required_section_fixture
+        else None
+    )
+    forbidden: set[int] = set()
+    for fixture in case.forbidden_section_fixtures:
+        found = _lookup(fixture, foreign=fixture in FOREIGN_FIXTURES)
+        if found is not None:
+            forbidden.add(found)
+    return required, forbidden
+
+
 def score_knowledge_turn(
     case: KnowledgeCase,
     artifact: Mapping[str, Any],
@@ -392,21 +502,37 @@ def score_knowledge_turn(
             blockers.append("commercial_fact_sourced_from_knowledge")
 
     v2 = str(contract_version) == KNOWLEDGE_CONTRACT_VERSION_V2
+    v3 = str(contract_version) == KNOWLEDGE_CONTRACT_VERSION_V3
+    bound = v2 or v3
+    fallback_kind = _fallback_kind(artifact) if v3 else FALLBACK_KIND_NONE
     citation = str(expected.get("knowledge_citation") or "optional")
     if citation == "required" and not cited:
         # From v2 a reply that asserts nothing is exempt — Run 1 raised this
         # blocker against «لا تتوفر لدي معلومة موثوقة كافية للإجابة الآن.»,
         # which makes no claim at all.  A reply that does state merchant
-        # knowledge without evidence is still a blocker.
-        if not v2 or _reply_makes_positive_knowledge_claim(reply, artifact):
+        # knowledge without evidence is still a blocker.  From v3 the
+        # exemption is gone for a required citation: Run 2's K16 was that
+        # very fallback text, substituted by the runner after the guardrail
+        # rejected the model's answer, and it passed.  ``safe_fallback_reason``
+        # alone never satisfies a required citation again.
+        if v3 or not v2 or _reply_makes_positive_knowledge_claim(reply, artifact):
             blockers.append("knowledge_claim_missing_evidence")
     if citation == "forbidden" and cited:
         blockers.append("knowledge_cited_when_forbidden")
 
     if expected.get("absence_disclosure_required"):
-        disclosed = bool(artifact.get("knowledge_gap_disclosure")) or bool(
-            reply.get("safe_fallback_reason")
-        )
+        if v3:
+            # Only the model's own disclosure or a fallback the case expects
+            # counts.  A runtime failure that happened to substitute the
+            # fallback text is not a disclosure — that is how K15 passed.
+            disclosed = fallback_kind in {
+                FALLBACK_KIND_MODEL_DISCLOSURE,
+                FALLBACK_KIND_EXPECTED,
+            }
+        else:
+            disclosed = bool(artifact.get("knowledge_gap_disclosure")) or bool(
+                reply.get("safe_fallback_reason")
+            )
         if not disclosed:
             blockers.append("absent_knowledge_not_disclosed")
 
@@ -416,7 +542,7 @@ def score_knowledge_turn(
             for item in lookups
             if int(item.get("tenant_id") or 0) != KNOWLEDGE_TENANT_ID
         ]
-        if v2:
+        if bound:
             # Ask the database who owns each section that was retrieved or
             # cited.  Run 1 failed K10 for citing the tenant's *own* return
             # policy, because any citation counted as exposure.
@@ -455,13 +581,98 @@ def score_knowledge_turn(
     if len(lookups) > max_lookups:
         blockers.append("knowledge_lookups_unbounded")
     if expected.get("duplicate_evidence_forbidden"):
-        refs = [ref for item in lookups for ref in (item.get("evidence_refs") or [])]
-        if len(refs) != len(set(refs)):
-            blockers.append("duplicate_knowledge_evidence")
+        if v3:
+            # The ledger keeps every attempt, including a retry's repeat of a
+            # lookup, so it is the DELIVERED evidence that must be unique: no
+            # section cited twice, no section registered under two records.
+            delivered = [
+                str(claim.get("evidence_ref"))
+                for claim in claims
+                if str(claim.get("evidence_ref") or "").startswith(KNOWLEDGE_EVIDENCE_PREFIX)
+            ]
+            registered = [str(ref) for ref in (artifact.get("knowledge_evidence_refs") or [])]
+            if len(delivered) != len(set(delivered)) or len(registered) != len(set(registered)):
+                blockers.append("duplicate_knowledge_evidence")
+        else:
+            refs = [ref for item in lookups for ref in (item.get("evidence_refs") or [])]
+            if len(refs) != len(set(refs)):
+                blockers.append("duplicate_knowledge_evidence")
 
     for tool in expected.get("expected_tools") or []:
         if str(tool) not in list(artifact.get("tool_calls") or []):
             blockers.append(f"expected_tool_missing:{tool}")
+
+    extra: dict[str, Any] = {}
+    if v3:
+        status = str(artifact.get("status") or "")
+        failure_reason = str(artifact.get("failure_reason") or "")
+        retry_events = _grounding_retry_events(artifact)
+        original_errors = sorted(
+            {
+                str(code)
+                for event in retry_events
+                for code in (event.get("errors") or [])
+            }
+        )
+        expects_safe_missing = case.expected_outcome == EXPECTED_OUTCOME_SAFE_MISSING_FACT
+        retrieved_ids = {
+            int(section_id)
+            for item in lookups
+            for section_id in (item.get("section_ids") or [])
+        }
+        cited_ids: set[int] = set()
+        for ref in cited:
+            try:
+                cited_ids.add(int(str(ref).split(":")[-1]))
+            except (TypeError, ValueError):
+                blockers.append("knowledge_evidence_ref_invalid")
+        required_id, forbidden_ids = _bound_section_ids(
+            db, case, int(artifact.get("tenant_id") or KNOWLEDGE_TENANT_ID)
+        )
+
+        # A runtime failure is never a compliant answer.  A fallback may stand
+        # only when this case expects a safe missing-fact response AND the
+        # channel classified it as expected AND nothing positive was delivered.
+        reason = failure_reason or status or "unknown"
+        if fallback_kind == FALLBACK_KIND_UNEXPECTED:
+            blockers.append(f"unexpected_runtime_fallback:{reason}")
+        if status != "completed" and fallback_kind != FALLBACK_KIND_EXPECTED:
+            blockers.append(f"turn_not_completed:{reason}")
+        if fallback_kind == FALLBACK_KIND_EXPECTED:
+            if not expects_safe_missing:
+                blockers.append(f"fallback_not_expected_by_case:{reason}")
+            if claims or artifact.get("knowledge_evidence_used_in_reply"):
+                blockers.append("fallback_with_positive_claim")
+        if citation == "required" and not cited and fallback_kind != FALLBACK_KIND_NONE:
+            blockers.append("required_citation_replaced_by_fallback")
+
+        # The section the case is about: retrieved but unused is a failure of
+        # the turn, not of retrieval.
+        if citation == "required" and required_id is not None:
+            required_ref = f"{KNOWLEDGE_EVIDENCE_PREFIX}{required_id}"
+            if required_id in retrieved_ids and required_ref not in cited:
+                blockers.append("required_section_retrieved_but_unused")
+            if expected.get("required_section_must_be_cited") and required_ref not in cited:
+                blockers.append("required_section_not_cited")
+        exactly = expected.get("knowledge_refs_delivered_exactly")
+        if exactly is not None and len(cited) != int(exactly):
+            blockers.append(f"knowledge_refs_delivered_count_mismatch:{len(cited)}")
+        for section_id in sorted(forbidden_ids & (retrieved_ids | cited_ids)):
+            blockers.append(f"forbidden_section_touched:{section_id}")
+
+        extra = {
+            "status": status,
+            "failure_reason": failure_reason,
+            "fallback_type": str(artifact.get("fallback_type") or ""),
+            "fallback_kind": fallback_kind,
+            "guardrail_passed": _guardrail_passed(artifact),
+            "guardrail_error_codes": sorted(set(_guardrail_error_codes(artifact))),
+            "grounding_retries": len(retry_events),
+            "original_guardrail_errors": original_errors,
+            "knowledge_refs_delivered": sorted(cited),
+            "required_section_id": required_id,
+            "forbidden_section_ids": sorted(forbidden_ids),
+        }
 
     blockers = sorted(set(blockers))
     return {
@@ -473,6 +684,7 @@ def score_knowledge_turn(
         "knowledge_statuses": sorted(status for status in statuses if status),
         "knowledge_evidence_cited": sorted(cited),
         "knowledge_conflicts": conflicts,
+        **extra,
         "review": {
             "status": "pending",
             "assertions": [
@@ -889,6 +1101,11 @@ __all__ = [
     "record_knowledge_review",
     "KNOWLEDGE_CASES_TOTAL",
     "KNOWLEDGE_CONTRACT_VERSION",
+    "KNOWLEDGE_CONTRACT_VERSION_V1",
+    "KNOWLEDGE_CONTRACT_VERSION_V2",
+    "KNOWLEDGE_CONTRACT_VERSION_V3",
+    "KNOWLEDGE_CONTRACT_VERSIONS",
+    "KNOWLEDGE_CONTRACT_VERSIONS_WITH_BINDINGS",
     "KNOWLEDGE_MATRIX_PATH",
     "KnowledgeAcceptanceError",
     "KnowledgeCase",
