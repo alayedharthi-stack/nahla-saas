@@ -21,7 +21,8 @@ from core.local_order_resolver import (
 from core.order_shipment_service import (
     get_order_shipment as get_persisted_order_shipment,
 )
-from core.order_status_label import ORDER_STATUS_LABELS_AR, order_status_label_ar
+from core.order_lifecycle_reading import order_reading
+from core.order_status_label import order_status_label_ar
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
@@ -199,61 +200,6 @@ def _load_authorized_order(context: CommerceAgentContext, order_id: int) -> Any:
     return row
 
 
-# Store states that mean an order is finished.
-_FINISHED_ORDER_STATES = frozenset({
-    "cancelled", "canceled", "abandoned", "delivered", "completed", "complete",
-    "refunded", "returned", "failed",
-})
-# The platform's lifecycle states an order is still under way in: the states a
-# store's lifecycle adapter reads a status into
-# (store_integration.lifecycle_normalization), before shipment is complete.
-_ONGOING_ORDER_STATES = frozenset({
-    "payment_pending", "paid", "confirmed", "preparing", "ready", "shipped", "out_for_delivery",
-})
-# The label for a store's finished-sounding word that its adapter reads as still
-# under way. An order the adapter reads as "ready" is fulfilled and not yet
-# shipped (store_adapters/salla_lifecycle), which the map labels ``fulfilled``.
-_STATE_LABEL_SLUG = {"ready": "fulfilled"}
-
-
-def _status_slug(value: Any) -> str:
-    return str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
-
-
-def _order_reading(status: Any, source: Any) -> tuple[str, str]:
-    """Where an order stands and the label that says so, as its store means it.
-
-    The store's word is read through that store's lifecycle adapter first
-    (``resolve_customer_relevant_state``, the platform's provider-neutral
-    projection): the same word can mean different stages on different
-    platforms. On Salla ``completed`` is the merchant's «تنفيذ» — fulfilled, not
-    yet shipped — so it is ongoing, and it is labelled as the fulfilled,
-    not-yet-shipped order it is: the plain label of a finished word would claim
-    what the order has not reached. Any other word keeps its plain label: the
-    adapter's reading places the order, but it may be coarser than the word
-    (``ready_for_pickup`` reads as ready, which is no shipment). A status the
-    platform cannot read stays unknown. When the adapter cannot be consulted,
-    the word's plain reading is used, as before this existed.
-    """
-    slug = _status_slug(status)
-    try:
-        from store_integration.lifecycle_normalization import resolve_customer_relevant_state
-
-        state = _status_slug(resolve_customer_relevant_state(provider=str(source or ""), raw_status=slug))
-    except Exception as exc:  # noqa: BLE001 - the plain reading stands in; the order read is not lost
-        logger.warning("[COMMERCE_V2_ORDERS] lifecycle adapter unavailable error=%s", type(exc).__name__)
-        state = slug
-    if state in _FINISHED_ORDER_STATES:
-        stage = "finished"
-    elif state in _ONGOING_ORDER_STATES or slug in ORDER_STATUS_LABELS_AR:
-        stage = "ongoing"
-    else:
-        stage = "unknown"
-    if slug in _FINISHED_ORDER_STATES and stage != "finished":
-        return stage, order_status_label_ar(_STATE_LABEL_SLUG.get(state, state))
-    return stage, order_status_label_ar(str(status or "").strip())
-
-
 def _customer_reference(snapshot: Any) -> str | None:
     """The store's customer-facing order number, and nothing in its place.
 
@@ -272,7 +218,7 @@ def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]
     status = str(snapshot.status or "").strip()
     # Where the order stands is the history's grouping; the lookup carries the
     # label only, in the fields it always had.
-    _, status_label = _order_reading(status, snapshot.source)
+    _, status_label = order_reading(status, snapshot.source)
     evidence_ref = f"order:summary:{order_id}"
     facts: list[CanonicalEvidenceFact] = []
     if reference:
@@ -351,6 +297,10 @@ async def resolve_customer_order_impl(
         phone=context.normalized_customer_phone,
         intent="track_order" if purpose == "shipment" else None,
         order_number=requested_number or None,
+        # Pick by the reading the history groups by: the order it calls the
+        # latest open one is the history's newest ongoing order, and a cart is
+        # never picked as an order.
+        lifecycle_aware=True,
     )
     selected = resolved.selected_order
     if selected is None:
@@ -399,7 +349,7 @@ def _history_evidence(context: CommerceAgentContext, order: Any) -> tuple[str, O
     """
     snapshot = _snapshot_from_order(order)
     reference = _customer_reference(snapshot)
-    stage, status_label = _order_reading(snapshot.status, snapshot.source)
+    stage, status_label = order_reading(snapshot.status, snapshot.source)
     token = hashlib.sha256(
         f"order-history:{context.tenant_id}:{snapshot.order_id}".encode("utf-8")).hexdigest()[:12]
     evidence_ref = f"order:history:h{token}"

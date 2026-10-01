@@ -11,6 +11,8 @@ here, on the database it runs on:
 * an abandoned cart, kept by store sync as an order row, is not counted;
 * a read at its limit gives no total, only a lower bound;
 * a Salla ``completed`` order is ongoing (fulfilled, not yet shipped);
+* the one-order lookup picks the order the history calls the newest ongoing
+  one, and never a cart;
 * listing an order does not authorize reading it;
 * a history read that fails inside the database leaves the session's
   transaction usable: on PostgreSQL a failed statement aborts the transaction,
@@ -158,6 +160,20 @@ def test_a_salla_completed_order_is_ongoing(store) -> None:
     order = store.order("completed")
     result = history(store.context())
     assert refs(result.ongoing) == [order.external_order_number] and result.finished.count == 0
+
+
+def test_the_lookup_picks_the_newest_order_the_history_calls_ongoing(store) -> None:
+    store.order("in_progress")
+    fulfilled = store.order("completed")              # Salla: fulfilled, not handed over
+    store.order("refunded")                           # finished
+    store.order("pending", cart=True)                 # a cart, newest of all
+    context = store.context()
+    listed = history(context)
+    resolved = asyncio.run(tool.resolve_customer_order_impl(context))
+    assert resolved.selection_reason == "latest_open_order"
+    assert resolved.order.order_reference == fulfilled.external_order_number
+    assert listed.ongoing.orders[0].order_reference == fulfilled.external_order_number
+    assert resolved.order.status_label == listed.ongoing.orders[0].status_label
 
 
 def test_a_listed_order_is_not_authorized_for_the_details_read(store) -> None:
