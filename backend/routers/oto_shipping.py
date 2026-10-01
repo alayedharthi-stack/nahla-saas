@@ -322,13 +322,14 @@ async def send_shipping_whatsapp(order_id: int, request: Request, db: Session = 
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_notice_requires_merchant")
-    order = _order(db, tenant_id, order_id)
+    order = _order(db, tenant_id, order_id, lock=True)
     shipment = _shipment(db, tenant_id, order.id)
     if not shipment.label_url or not safe_url(shipment.label_url):
         raise HTTPException(409, "oto_label_not_available")
     if not shipment.tracking_number and not shipment.tracking_url:
         raise HTTPException(409, "oto_tracking_not_available")
-    if shipment.status.lower() in {"returned", "cancelled", "canceled", "oto_cancellation_requested"}:
+    if shipment.status.lower() in {"returned", "cancelled", "canceled", "oto_cancellation_requested",
+                                   "oto_cancellation_needs_reconciliation"}:
         raise HTTPException(409, "oto_shipment_not_deliverable")
     info = order.customer_info if isinstance(order.customer_info, dict) else {}
     recipient = _normalize_phone(str(info.get("mobile") or info.get("phone") or ""))
@@ -372,8 +373,13 @@ async def cancel_shipment(order_id: int, request: Request, db: Session = Depends
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_cancellation_requires_merchant")
-    order = _order(db, tenant_id, order_id)
+    order = _order(db, tenant_id, order_id, lock=True)
     shipment = _shipment(db, tenant_id, order.id)
+    if (shipment.extra_metadata or {}).get("cancellation_attempted"):
+        raise HTTPException(409, "oto_cancellation_already_attempted")
+    if shipment.status.lower() in {"oto_cancellation_requested", "oto_cancellation_needs_reconciliation",
+                                   "cancelled", "canceled"}:
+        raise HTTPException(409, "oto_cancellation_already_attempted")
     if shipment.status.lower() in {"pickedup", "outfordelivery", "delivered", "returned"}:
         raise HTTPException(409, "oto_cancellation_too_late")
     if not shipment.external_shipment_id:
@@ -381,6 +387,11 @@ async def cancel_shipment(order_id: int, request: Request, db: Session = Depends
     environment = (shipment.extra_metadata or {}).get("environment")
     _egress_allowed(environment, tenant_id)
     conn = _connection(db, tenant_id, environment)
+    meta = dict(shipment.extra_metadata or {})
+    meta["cancellation_attempted"] = True
+    shipment.extra_metadata = meta
+    shipment.status = "oto_cancellation_needs_reconciliation"
+    db.commit()  # A timeout may mean OTO accepted cancellation; block automatic retries.
     try:
         await _client(conn).cancel_shipment(oto_order_id(tenant_id, order.id), shipment.external_shipment_id)
     except OtoApiError as exc:
