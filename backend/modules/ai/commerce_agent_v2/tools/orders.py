@@ -1,6 +1,8 @@
 """Trusted customer-scoped, read-only order and shipment tools."""
 from __future__ import annotations
 
+import hashlib
+import logging
 from decimal import Decimal, InvalidOperation
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -13,17 +15,22 @@ from core.local_order_resolver import (
     _phone_lookup_keys,
     _snapshot_from_order,
     local_order_to_track_payload,
+    read_customer_order_history,
     resolve_customer_order_context,
 )
 from core.order_shipment_service import (
     get_order_shipment as get_persisted_order_shipment,
 )
+from core.order_lifecycle_reading import order_reading
 from core.order_status_label import order_status_label_ar
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tool_runtime import commerce_read_tool
 from modules.ai.commerce_agent_v2.output import (
     CanonicalEvidenceFact,
+    CustomerOrderHistoryResult,
     EvidenceRecord,
+    OrderHistoryEntry,
+    OrderHistoryGroup,
     OrderDetailsResult,
     OrderDetailsSnapshot,
     OrderLineItemSnapshot,
@@ -38,6 +45,7 @@ from modules.ai.security.tenant_isolation import (
 )
 from modules.ai.commerce_agent_v2.tools.catalog import _catalog_search_enabled
 
+logger = logging.getLogger("nahla.commerce_agent_v2.orders")
 
 _SHIPMENT_ORDER_STATUSES = frozenset(
     {
@@ -182,6 +190,14 @@ def _assert_discovered_order_is_customer_scoped(
     raise TenantIsolationViolation("order_not_in_trusted_customer_scope")
 
 
+def _in_customer_scope(context: CommerceAgentContext, order: Any) -> bool:
+    try:
+        _assert_discovered_order_is_customer_scoped(context, order)
+    except TenantIsolationViolation:
+        return False
+    return True
+
+
 def _load_authorized_order(context: CommerceAgentContext, order_id: int) -> Any:
     context.assert_scope()
     context.require_authorized_order(order_id)
@@ -192,12 +208,25 @@ def _load_authorized_order(context: CommerceAgentContext, order_id: int) -> Any:
     return row
 
 
+def _customer_reference(snapshot: Any) -> str | None:
+    """The store's customer-facing order number, and nothing in its place.
+
+    ``external_order_number`` is the number the store shows its customer (sync
+    fills it from the platform's own reference, or its id where the platform has
+    no other). An order without one gets no reference: the platform's internal
+    identifiers are never offered as an order number the customer could use.
+    """
+    return str(getattr(snapshot, "external_order_number", "") or "").strip() or None
+
+
 def _summary_evidence(order: Any) -> tuple[OrderSummarySnapshot, EvidenceRecord]:
     snapshot = _snapshot_from_order(order)
     order_id = snapshot.order_id
-    reference = snapshot.display_reference or None
+    reference = _customer_reference(snapshot)
     status = str(snapshot.status or "").strip()
-    status_label = order_status_label_ar(status, source=snapshot.source)
+    # Where the order stands is the history's grouping; the lookup carries the
+    # label only, in the fields it always had.
+    _, status_label = order_reading(status, snapshot.source)
     evidence_ref = f"order:summary:{order_id}"
     facts: list[CanonicalEvidenceFact] = []
     if reference:
@@ -276,6 +305,12 @@ async def resolve_customer_order_impl(
         phone=context.normalized_customer_phone,
         intent="track_order" if purpose == "shipment" else None,
         order_number=requested_number or None,
+        # Pick by the reading the history groups by, from the rows it holds:
+        # the order it calls the latest open one is the history's newest
+        # ongoing order; a cart, or a row outside this customer's scope, is
+        # never picked.
+        lifecycle_aware=True,
+        is_customer_order=lambda row: _in_customer_scope(context, row),
     )
     selected = resolved.selected_order
     if selected is None:
@@ -305,6 +340,137 @@ async def resolve_customer_order_impl(
         order=summary,
         selection_reason=resolved.selected_reason,
         evidence=[evidence],
+    )
+
+
+# How many orders of each stage one history read lists; the counts are not bounded.
+MAX_LISTED_ONGOING_ORDERS = 5
+MAX_LISTED_FINISHED_ORDERS = 5
+MAX_LISTED_UNKNOWN_ORDERS = 3
+_HISTORY_GROUP_LIMITS = {"ongoing": MAX_LISTED_ONGOING_ORDERS, "finished": MAX_LISTED_FINISHED_ORDERS,
+                         "unknown": MAX_LISTED_UNKNOWN_ORDERS}
+
+
+def _history_evidence(context: CommerceAgentContext, order: Any) -> tuple[str, OrderHistoryEntry, EvidenceRecord]:
+    """One history entry and the evidence it may be cited by.
+
+    The evidence reference is an opaque token for this order in this store: it
+    names no internal id, so nothing in the entry can be read as an order number.
+    """
+    snapshot = _snapshot_from_order(order)
+    reference = _customer_reference(snapshot)
+    stage, status_label = order_reading(snapshot.status, snapshot.source)
+    token = hashlib.sha256(
+        f"order-history:{context.tenant_id}:{snapshot.order_id}".encode("utf-8")).hexdigest()[:12]
+    evidence_ref = f"order:history:h{token}"
+    facts: list[CanonicalEvidenceFact] = []
+    if reference:
+        facts.append(CanonicalEvidenceFact(kind="order_reference", value=reference))
+    facts.append(CanonicalEvidenceFact(kind="order_status_label", value=status_label))
+    evidence = EvidenceRecord(
+        ref=evidence_ref,
+        source="order_summary",
+        source_id=f"h{token}",
+        facts=facts,
+        fields={"order_reference": reference, "status_label": status_label},
+        provenance={
+            "service": "core.local_order_resolver.read_customer_order_history",
+            "record": "orders",
+            "source": str(snapshot.source or "local"),
+        },
+    )
+    entry = OrderHistoryEntry(order_reference=reference, status_label=status_label,
+                              evidence_ref=evidence_ref)
+    return stage, entry, evidence
+
+
+def _linked_to_another_customer(context: CommerceAgentContext, order: Any) -> bool:
+    linked = getattr(order, "customer_id", None)
+    return context.customer_id is not None and linked is not None and int(linked) != int(context.customer_id)
+
+
+async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOrderHistoryResult:
+    """The customer's order history in this store: counted, grouped, bounded.
+
+    Read only when asked for, apart from the one-order lookup, so a question
+    about one order is never answered from a history it did not need.
+
+    * Scope: the read is filtered by tenant and matched by the trusted customer
+      identity, and every order in it is held to the same customer-scope check
+      as a resolved order. One linked to another customer is left out; one whose
+      link to this customer cannot be proven is left out too, and then no total
+      is given, because it may be theirs.
+    * Completeness: a total and group counts only when the read held every
+      order (fewer than its limit) and every order was proven theirs.
+    * Authorization: listing an order opens nothing; the details and shipment
+      reads stay limited to orders resolved in this run.
+    * Failure: the read runs inside a savepoint, so a failed read leaves the
+      session's transaction usable for the tools after it; the history is then
+      reported unavailable, never as an empty one, and none of its evidence is
+      registered — evidence is registered all or nothing, after the read.
+    """
+    context.assert_scope()
+    if not context.capabilities.read_orders:
+        return CustomerOrderHistoryResult(status="unavailable", failure_reason="order_reads_disabled")
+    if context.db is None:
+        return CustomerOrderHistoryResult(status="unavailable", failure_reason="history_unreadable")
+    try:
+        with context.db.begin_nested():
+            rows, complete = read_customer_order_history(
+                context.db, tenant_id=context.tenant_id, customer_id=context.customer_id,
+                phone=context.normalized_customer_phone)
+            reasons: list[str] = [] if complete else ["read_limit_reached"]
+            grouped: dict[str, list[tuple[OrderHistoryEntry, EvidenceRecord]]] = {
+                "ongoing": [], "finished": [], "unknown": []}
+            left_out = 0
+            for row in rows:
+                try:
+                    _assert_discovered_order_is_customer_scoped(context, row)
+                except TenantIsolationViolation:
+                    left_out += 1
+                    if not _linked_to_another_customer(context, row) and "order_scope_unverified" not in reasons:
+                        reasons.append("order_scope_unverified")
+                    continue
+                stage, entry, evidence = _history_evidence(context, row)
+                grouped[stage].append((entry, evidence))
+        if left_out:
+            logger.info("[COMMERCE_V2_ORDERS] order history left out %s order(s) outside the customer "
+                        "scope tenant=%s", left_out, context.tenant_id)
+        listed = {name: items[:_HISTORY_GROUP_LIMITS[name]] for name, items in grouped.items()}
+        records = [evidence for name in ("ongoing", "finished", "unknown") for _, evidence in listed[name]]
+        known = context.evidence
+        if any(record.ref in known and known[record.ref] != record for record in records):
+            raise TenantIsolationViolation("evidence_ref_collision")
+        context.register_evidence(records)
+    except Exception as exc:  # noqa: BLE001 - reported unavailable, never as a customer without orders
+        logger.warning("[COMMERCE_V2_ORDERS] order history unavailable tenant=%s error=%s",
+                       context.tenant_id, type(exc).__name__)
+        return CustomerOrderHistoryResult(status="unavailable", failure_reason="history_unreadable")
+    read_complete = not reasons
+
+    def group(name: str) -> OrderHistoryGroup:
+        by_status: dict[str, int] = {}
+        for entry, _ in grouped[name]:
+            by_status[entry.status_label] = by_status.get(entry.status_label, 0) + 1
+        return OrderHistoryGroup(
+            count=len(grouped[name]) if read_complete else None,
+            count_at_least=None if read_complete else len(grouped[name]),
+            listed=len(listed[name]),
+            orders=[entry for entry, _ in listed[name]],
+            by_status=by_status if read_complete else None,
+        )
+
+    proven = sum(len(items) for items in grouped.values())
+    return CustomerOrderHistoryResult(
+        status="ok",
+        read_complete=read_complete,
+        incomplete_reasons=reasons,
+        total_orders=proven if read_complete else None,
+        total_orders_at_least=None if read_complete else proven,
+        ongoing=group("ongoing"),
+        finished=group("finished"),
+        unknown=group("unknown"),
+        evidence=records,
     )
 
 
@@ -345,7 +511,7 @@ async def get_order_details_impl(
         return OrderDetailsResult(status="not_found", failure_reason="authorized_order_missing")
 
     snapshot = _snapshot_from_order(order)
-    reference = snapshot.display_reference or None
+    reference = _customer_reference(snapshot)
     total = _canonical_money(snapshot.total)
     currency = _persisted_order_currency(order)
     items = _line_item_snapshots(order)
@@ -498,7 +664,7 @@ def _shipment_snapshot(
         # label_url. Relative internal label routes are deliberately rejected.
         tracking_url = _absolute_http_url(getattr(shipment, "label_url", ""))
     tracking_url = tracking_url or order_meta_facts["tracking_url"] or ""
-    reference = snapshot.display_reference or None
+    reference = _customer_reference(snapshot)
     # The carrier's own last scan. Read from the shipment row only: an order's
     # metadata never carries a verified carrier event.
     latest_event = getattr(shipment, "latest_event", None) if shipment is not None else None

@@ -241,6 +241,67 @@ class OrderSummarySnapshot(BaseModel):
     evidence_ref: str
 
 
+class OrderHistoryEntry(BaseModel):
+    """One of the customer's orders as the history lists it.
+
+    A listing, not an authorization: no order id to act on, and an evidence
+    reference that is an opaque citation — it carries no internal number that
+    could pass for an order number. The reference, when present, is the
+    store's customer-facing order number and nothing else.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_reference: str | None = None
+    status_label: str
+    evidence_ref: str
+
+
+class OrderHistoryGroup(BaseModel):
+    """The customer's orders at one stage: how many, and the newest few.
+
+    ``listed`` is how many ``orders`` holds. ``count`` and ``by_status`` are
+    given only when the read held every order of the customer; otherwise
+    ``count_at_least`` is how many of this stage's orders the read proved — a
+    bound, never the count, and never the number listed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int | None = Field(default=None, ge=0)
+    count_at_least: int | None = Field(default=None, ge=0)
+    listed: int = Field(default=0, ge=0)
+    orders: list[OrderHistoryEntry] = Field(default_factory=list)
+    by_status: dict[str, int] | None = None
+
+
+class CustomerOrderHistoryResult(BaseModel):
+    """The customer's order history in this store, read on request.
+
+    ``status`` is ``unavailable`` when the history could not be read: that says
+    nothing about how many orders the customer has, and nothing is listed.
+    ``read_complete`` is true only when the read held every one of the
+    customer's orders and each was proven to be theirs; only then are
+    ``total_orders`` and the group counts given. Otherwise
+    ``total_orders_at_least`` is how many of the customer's orders the read
+    proved: the customer has at least that many, and how many more is not
+    known — there may be more than are listed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok", "unavailable"]
+    read_complete: bool = False
+    incomplete_reasons: list[str] = Field(default_factory=list)
+    total_orders: int | None = Field(default=None, ge=0)
+    total_orders_at_least: int | None = Field(default=None, ge=0)
+    ongoing: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    finished: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    unknown: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
+    evidence: list[EvidenceRecord] = Field(default_factory=list)
+    failure_reason: str | None = None
+
+
 class OrderResolveResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

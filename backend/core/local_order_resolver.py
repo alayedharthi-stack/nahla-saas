@@ -307,6 +307,16 @@ def _customer_order_identity_clauses(
     return clauses
 
 
+def _carts_excluded(query: Any, order_model: Any) -> Any:
+    """The customer ledger's abandoned rule, in the query (before any limit)."""
+    from sqlalchemy import func  # noqa: PLC0415
+
+    return query.filter(
+        order_model.is_abandoned.isnot(True),
+        func.lower(func.coalesce(order_model.status, "")) != "abandoned",
+    )
+
+
 def _fetch_explicit_tenant_order_for_customer(
     db: Any,
     *,
@@ -314,6 +324,7 @@ def _fetch_explicit_tenant_order_for_customer(
     phone: str,
     customer_id: Optional[int],
     order_number: Optional[str],
+    exclude_carts: bool = False,
 ) -> Optional[Any]:
     """Find an exact customer-scoped reference without a recent-order window."""
     needle = str(order_number or "").strip().lstrip("#")
@@ -336,16 +347,14 @@ def _fetch_explicit_tenant_order_for_customer(
     ]
     if needle.isdigit():
         references.append(Order.id == int(needle))
-    return (
-        db.query(Order)
-        .filter(
-            Order.tenant_id == int(tenant_id),
-            or_(*identity_clauses),
-            or_(*references),
-        )
-        .order_by(Order.id.desc())
-        .first()
+    query = db.query(Order).filter(
+        Order.tenant_id == int(tenant_id),
+        or_(*identity_clauses),
+        or_(*references),
     )
+    if exclude_carts:
+        query = _carts_excluded(query, Order)
+    return query.order_by(Order.id.desc()).first()
 
 
 def _find_active_whatsapp_draft(
@@ -353,6 +362,7 @@ def _find_active_whatsapp_draft(
     *,
     tenant_id: int,
     conversation_id: Optional[int],
+    exclude_carts: bool = False,
 ) -> Optional[Any]:
     if db is None or not conversation_id:
         return None
@@ -363,19 +373,16 @@ def _find_active_whatsapp_draft(
             is_open_wa_draft_order,
         )
 
-        candidates = (
-            db.query(Order)
-            .filter(
-                Order.tenant_id == int(tenant_id),
-                Order.source == "whatsapp",
-                # This conversation's own ids only: the base, or the base + "-msg-"
-                # (a bare prefix would also match conversation 10's orders for 1).
-                conversation_wa_external_id_clause(Order.external_id, int(tenant_id), int(conversation_id)),
-            )
-            .order_by(Order.id.desc())
-            .limit(20)
-            .all()
+        query = db.query(Order).filter(
+            Order.tenant_id == int(tenant_id),
+            Order.source == "whatsapp",
+            # This conversation's own ids only: the base, or the base + "-msg-"
+            # (a bare prefix would also match conversation 10's orders for 1).
+            conversation_wa_external_id_clause(Order.external_id, int(tenant_id), int(conversation_id)),
         )
+        if exclude_carts:
+            query = _carts_excluded(query, Order)
+        candidates = query.order_by(Order.id.desc()).limit(20).all()
         if not candidates:
             return None
 
@@ -438,6 +445,7 @@ def _build_priority_list(
     snapshots: Sequence[LocalOrderSnapshot],
     *,
     active_draft: Optional[LocalOrderSnapshot],
+    is_open=lambda snap: snap.is_open,
 ) -> List[LocalOrderSnapshot]:
     seen: Set[int] = set()
     ordered: List[LocalOrderSnapshot] = []
@@ -450,7 +458,7 @@ def _build_priority_list(
 
     _add(active_draft)
     for snap in snapshots:
-        if snap.is_open:
+        if is_open(snap):
             _add(snap)
     for snap in snapshots:
         _add(snap)
@@ -502,6 +510,8 @@ def resolve_customer_order_context(
     phone: Optional[str] = None,
     intent: Optional[str] = None,
     order_number: Optional[str] = None,
+    lifecycle_aware: bool = False,
+    is_customer_order: Optional[Any] = None,
 ) -> CustomerOrderContext:
     """
     Resolve customer order context from local ``orders`` only.
@@ -512,26 +522,68 @@ def resolve_customer_order_context(
         ``order_number`` | ``track_order`` | None
     order_number:
         Optional explicit reference from slots / customer message.
+    lifecycle_aware:
+        Read orders the way the customer's order history does
+        (``core.order_lifecycle_reading``): an abandoned cart is not an order
+        and is never picked, and an order is open only while its store's
+        lifecycle adapter reads it as under way — so a Salla ``completed``
+        order (fulfilled, not handed over) is open, a refunded or returned one
+        is not, and one whose status the platform cannot read is never called
+        open. Off by default: the other readers of this context keep their
+        status list.
+    is_customer_order:
+        With ``lifecycle_aware``, the caller's own customer-scope check: a row
+        it refuses (another customer's order on a shared phone, one whose link
+        cannot be proven) is never picked — the history leaves the same rows
+        out. An order named by number is not filtered here: it reaches the
+        caller's check, which refuses it outright.
     """
     resolved_phone = _resolve_phone(
         db, tenant_id=int(tenant_id), customer_id=customer_id, phone=phone,
     )
     draft_row = _find_active_whatsapp_draft(
         db, tenant_id=int(tenant_id), conversation_id=conversation_id,
+        exclude_carts=lifecycle_aware,
     )
-    customer_rows = _fetch_tenant_orders_for_customer(
-        db,
-        tenant_id=int(tenant_id),
-        phone=resolved_phone,
-        customer_id=customer_id,
-    )
+    if lifecycle_aware and db is not None:
+        # The very rows the history holds: carts left out before the limit.
+        try:
+            customer_rows, _ = read_customer_order_history(
+                db, tenant_id=int(tenant_id), customer_id=customer_id, phone=resolved_phone,
+            )
+        except ValueError:  # no identity to match by: no customer orders
+            customer_rows = []
+    else:
+        customer_rows = _fetch_tenant_orders_for_customer(
+            db,
+            tenant_id=int(tenant_id),
+            phone=resolved_phone,
+            customer_id=customer_id,
+        )
     explicit_direct_row = _fetch_explicit_tenant_order_for_customer(
         db,
         tenant_id=int(tenant_id),
         phone=resolved_phone,
         customer_id=customer_id,
         order_number=order_number,
+        exclude_carts=lifecycle_aware,
     )
+    is_open = lambda snap: snap.is_open  # noqa: E731
+    if lifecycle_aware:
+        from core.order_lifecycle_reading import order_stage  # noqa: PLC0415
+
+        # A finished conversation order (delivered, cancelled, …) is history,
+        # not the conversation's draft; one whose status the platform cannot
+        # read is left as the resolver found it.
+        if draft_row is not None and order_stage(draft_row.status, draft_row.source) == "finished":
+            draft_row = None
+        if is_customer_order is not None:
+            # Only the orders the lookup picks by itself: an order named by
+            # number still reaches the caller's scope check, which refuses it.
+            if draft_row is not None and not is_customer_order(draft_row):
+                draft_row = None
+            customer_rows = [row for row in customer_rows if is_customer_order(row)]
+        is_open = lambda snap: order_stage(snap.status, snap.source) == "ongoing"  # noqa: E731
 
     # Merge draft row into customer set (conversation may be only link).
     merged_rows: List[Any] = []
@@ -572,10 +624,10 @@ def resolve_customer_order_context(
         else None
     )
 
-    latest_open = _pick_latest(snapshots, predicate=lambda s: s.is_open)
+    latest_open = _pick_latest(snapshots, predicate=is_open)
     latest_paid = _pick_latest(snapshots, predicate=lambda s: s.is_paid)
     latest_shipped = _pick_latest(snapshots, predicate=lambda s: s.is_shipped)
-    priority_list = _build_priority_list(snapshots, active_draft=active_draft)
+    priority_list = _build_priority_list(snapshots, active_draft=active_draft, is_open=is_open)
 
     explicit_supplied = _order_number_explicitly_supplied(order_number)
     selected, selected_reason = _select_order(
@@ -657,10 +709,56 @@ def has_local_orders(ctx: CustomerOrderContext) -> bool:
     )
 
 
+# The most orders one history read holds. A read that comes back this full may
+# have stopped short of the customer's oldest orders, so it is never reported
+# as the customer's whole order history.
+CUSTOMER_ORDER_HISTORY_LIMIT = 50
+
+
+def read_customer_order_history(
+    db: Any,
+    *,
+    tenant_id: int,
+    customer_id: Optional[int],
+    phone: str,
+    limit: int = CUSTOMER_ORDER_HISTORY_LIMIT,
+) -> tuple:
+    """This customer's orders in this tenant, newest first, and whether the read
+    held every one of them.
+
+    The same identity clauses the resolver matches by (customer id, or a phone
+    key in ``customer_info``), filtered by tenant before the limit. An abandoned
+    cart is not an order: store sync keeps carts as order rows, so rows the
+    platform's customer ledger counts as abandoned (``is_abandoned``, or the
+    ``abandoned`` status) are left out before the limit too. Unlike the
+    resolver's lookups this read swallows nothing: a history that could not be
+    read must never read as a customer with no orders, so a failure is raised to
+    the caller, and so is a read with no identity to match by.
+    """
+    from models import Order  # noqa: PLC0415
+    from sqlalchemy import func  # noqa: PLC0415
+
+    clauses = _customer_order_identity_clauses(Order, phone=phone, customer_id=customer_id)
+    if not clauses:
+        raise ValueError("customer_identity_missing")
+    rows = (
+        db.query(Order)
+        .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
+        .filter(Order.is_abandoned.isnot(True),
+                func.lower(func.coalesce(Order.status, "")) != "abandoned")
+        .order_by(Order.id.desc())
+        .limit(int(limit))
+        .all()
+    )
+    return rows, len(rows) < int(limit)
+
+
 __all__ = [
+    "CUSTOMER_ORDER_HISTORY_LIMIT",
     "CustomerOrderContext",
     "LocalOrderSnapshot",
     "has_local_orders",
     "local_order_to_track_payload",
+    "read_customer_order_history",
     "resolve_customer_order_context",
 ]

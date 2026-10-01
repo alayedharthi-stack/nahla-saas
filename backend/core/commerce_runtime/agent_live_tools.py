@@ -52,7 +52,8 @@ MAX_PROMOTIONS = 8
 # Read tools the registry declares beyond the names the merchant instructions
 # use. The model discovers them from their declarations; the instructions are
 # not edited. Each one is an owner decision recorded in the pilot runbook.
-PILOT_ONLY_TOOL_NAMES: Tuple[str, ...] = ("get_customer_addresses",
+PILOT_ONLY_TOOL_NAMES: Tuple[str, ...] = ("list_customer_orders",
+                                          "get_customer_addresses",
                                           "list_shareable_promotions")
 
 _ORDER_PURPOSES = ("status", "shipment")
@@ -324,6 +325,19 @@ def _order_view(summary: Any) -> Dict[str, Any]:
         "order_reference": getattr(summary, "order_reference", None),
         "status": getattr(summary, "status", None),
         "status_label": getattr(summary, "status_label", None),
+    }
+
+
+def _history_group_view(group: Any) -> Dict[str, Any]:
+    return {
+        "count": getattr(group, "count", None),
+        "count_at_least": getattr(group, "count_at_least", None),
+        "listed": getattr(group, "listed", 0),
+        "orders": [{"order_reference": getattr(entry, "order_reference", None),
+                    "status_label": getattr(entry, "status_label", None),
+                    "evidence_ref": getattr(entry, "evidence_ref", None)}
+                   for entry in list(getattr(group, "orders", None) or ())],
+        "by_status": getattr(group, "by_status", None),
     }
 
 
@@ -630,6 +644,31 @@ def _order_lookup(binding: LiveToolBinding) -> at.ToolFunction:
         return at.ToolResult(
             result={"status": "ok", "found": True, "order": _order_view(getattr(result, "order", None)),
                     "selection_reason": getattr(result, "selection_reason", None)},
+            evidence_refs=_refs(getattr(result, "evidence", None) or ()),
+        )
+
+    return _guarded(binding, body)
+
+
+def _order_history(binding: LiveToolBinding) -> at.ToolFunction:
+    from modules.ai.commerce_agent_v2.tools.orders import list_customer_orders_impl
+
+    def body(arguments: Mapping[str, Any]) -> at.ToolResult:
+        result = _run(list_customer_orders_impl(binding.context))
+        if getattr(result, "status", "") != "ok":
+            # Unreadable says only that: never a customer without orders.
+            return at.ToolResult(result={"status": "unavailable", "read_complete": False,
+                                         "reason": getattr(result, "failure_reason", None)},
+                                 evidence_refs=())
+        return at.ToolResult(
+            result={"status": "ok",
+                    "read_complete": bool(getattr(result, "read_complete", False)),
+                    "incomplete_reasons": list(getattr(result, "incomplete_reasons", None) or ()),
+                    "total_orders": getattr(result, "total_orders", None),
+                    "total_orders_at_least": getattr(result, "total_orders_at_least", None),
+                    "ongoing": _history_group_view(getattr(result, "ongoing", None)),
+                    "finished": _history_group_view(getattr(result, "finished", None)),
+                    "unknown": _history_group_view(getattr(result, "unknown", None))},
             evidence_refs=_refs(getattr(result, "evidence", None) or ()),
         )
 
@@ -960,6 +999,21 @@ _DECLARATIONS: Tuple[Tuple[str, str, Dict[str, Any], str, Callable[[LiveToolBind
         {"type": "object", "properties": {"order_id": _ID}, "required": ["order_id"]},
         "shipment",
         _shipment_lookup,
+    ),
+    (
+        "list_customer_orders",
+        "This customer's orders in this store, newest first, read on request: how many there "
+        "are and a short list, grouped as ongoing, finished, or of a status the platform "
+        "cannot read. Each group lists at most a few orders; listed says how many it shows. "
+        "Counts and total_orders are given only when read_complete is true; otherwise the "
+        "total is not known: total_orders_at_least and each group's count_at_least are how "
+        "many orders there are at least, and there may be more than are listed. An "
+        "unavailable result means the "
+        "history could not be read, not that there are no orders. Abandoned carts are not "
+        "orders and are not included. Listing an order does not open its details or shipment.",
+        {"type": "object", "properties": {}, "required": []},
+        "order_history",
+        _order_history,
     ),
     (
         "get_customer_addresses",

@@ -962,6 +962,32 @@ as well as through the ledger.
   tappable product selector (see below). No template message, and never two
   messages, except the one bounded text recovery after a list the provider
   definitively refused.
+* It **reads** a customer's order history only when the agent asks for it, through
+  `list_customer_orders` (owner decision, 30 September 2026: a read the registry declares
+  beyond the tools the instructions name, like the two below; its declaration is text the
+  model sees and is recorded as a declaration change). The one-order lookup,
+  `resolve_customer_order`, still returns one order, in the same fields on every path, and
+  nothing about a history. It reads orders the way the history does
+  (`core.order_lifecycle_reading`): the order it calls the latest open one is the history's
+  newest ongoing order (a Salla `completed` order is open, a refunded, returned or
+  unreadable one never is), and it never picks an abandoned cart; the resolver's other
+  callers keep their status list. Its status label is the history's: a Salla `completed`
+  order is labelled by the platform's "ready" state — fulfilled, not yet handed over,
+  claiming neither shipment nor collection, since no order row records whether it ships or
+  is collected from a branch — and any other status keeps its own label. In every order tool
+  the order reference is the store's customer-facing number or none, never the store's
+  internal id in its place. The history
+  is this customer's orders in this store, matched by the same trusted identity and held to
+  the same customer-scope check as a resolved order; abandoned carts, which store sync keeps
+  as order rows, are not orders and are left out. It is counted, grouped as ongoing,
+  finished or of a status the platform cannot read — each store's status read through its
+  lifecycle adapter, so a Salla `completed` order (fulfilled, not yet shipped) is ongoing —
+  and listed a few per group. A total is given only when the read held every order and each
+  was proven the customer's; otherwise only lower bounds (`total_orders_at_least`, and each
+  group's `count_at_least`). A
+  failed read is reported unavailable, never as no orders, and runs in a savepoint so the
+  tools after it are unaffected. Listing opens nothing: the details and shipment reads stay
+  limited to orders resolved in the turn, and an entry carries no internal number.
 * It performs **no** commerce write: no order, payment, cancellation or coupon.
   It **reads** the merchant's currently valid, shareable coupons and offers through
   `list_shareable_promotions` (the platform's promotion-truth resolver: campaign-only,

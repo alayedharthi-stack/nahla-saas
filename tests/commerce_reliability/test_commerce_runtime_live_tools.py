@@ -92,21 +92,23 @@ def run(binding: alt.LiveToolBinding, tool: str, arguments: Dict[str, Any], *,
 # ── The allowlist ────────────────────────────────────────────────────────────
 
 
-def test_the_registry_exposes_exactly_the_eight_read_tools(binding):
+def test_the_registry_exposes_exactly_the_nine_read_tools(binding):
     registry = alt.build_live_registry(binding)
     assert tuple(d.name for d in registry.definitions) == alt.LIVE_TOOL_NAMES
     assert alt.LIVE_TOOL_NAMES == ("search_products", "get_product_details", "search_merchant_knowledge",
                                    "resolve_customer_order", "get_order_details", "get_order_shipment",
-                                   "get_customer_addresses", "list_shareable_promotions")
+                                   "list_customer_orders", "get_customer_addresses",
+                                   "list_shareable_promotions")
 
 
 def test_every_tool_the_instructions_name_is_declared_by_the_registry(binding):
     """The instructions refer to six tools by name; the registry declares those
-    six plus two owner-approved reads — shareable promotions and the customer's
-    saved addresses — which the instructions never mention and the model
-    discovers from their declarations. Keeping them out of the instructions is
-    deliberate: when to read an address, and whether to mention one, stays the
-    model's call rather than a step the prompt orders."""
+    six plus three owner-approved reads — the customer's order history,
+    shareable promotions and the customer's saved addresses — which the
+    instructions never mention and the model discovers from their declarations.
+    Keeping them out of the instructions is deliberate: when to read a history
+    or an address, and whether to mention one, stays the model's call rather
+    than a step the prompt orders."""
     from modules.ai.commerce_agent_v2.pilot_instructions import INSTRUCTION_TOOL_NAMES
 
     declared = tuple(d.name for d in alt.build_live_registry(binding).definitions)
@@ -490,6 +492,80 @@ def test_an_order_read_the_merchant_disabled_is_a_denial_not_an_absence(binding,
     body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
     assert body["status"] == "denied" and body["found"] is False
     assert body["reason"] == "order_reads_disabled"
+
+
+def _history_group(count: Any, orders: List[Any], by_status: Any = None, at_least: Any = None) -> Snapshot:
+    return Snapshot(count=count, count_at_least=at_least, listed=len(orders), orders=orders,
+                    by_status=by_status)
+
+
+def test_the_order_history_reaches_the_model_counted_grouped_and_without_ids(binding, monkeypatch):
+    """Tenant 1 turn 112. The history is its own read: counts per stage, the
+    newest few per stage, how many each lists, and a citation per entry — no
+    order id, so listing opens neither details nor shipment."""
+    ongoing = [Snapshot(order_reference="A-31", status_label="قيد التنفيذ", evidence_ref="order:history:h1a")]
+    finished = [Snapshot(order_reference="A-12", status_label="ملغي", evidence_ref="order:history:h2b"),
+                Snapshot(order_reference=None, status_label="تم التسليم", evidence_ref="order:history:h3c")]
+    patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
+        "ok", read_complete=True, incomplete_reasons=[], total_orders=9, total_orders_at_least=None,
+        ongoing=_history_group(1, ongoing, {"قيد التنفيذ": 1}),
+        finished=_history_group(8, finished, {"ملغي": 6, "تم التسليم": 2}),
+        unknown=_history_group(0, []),
+        evidence=[Record("order:history:h1a"), Record("order:history:h2b"), Record("order:history:h3c")])))
+    observation = run(binding, "list_customer_orders", {})
+    body = observation.result
+    assert (body["status"], body["read_complete"], body["total_orders"]) == ("ok", True, 9)
+    assert (body["finished"]["count"], body["finished"]["listed"]) == (8, 2)
+    assert body["finished"]["by_status"] == {"ملغي": 6, "تم التسليم": 2}
+    assert [o["order_reference"] for o in body["finished"]["orders"]] == ["A-12", None]
+    for group in ("ongoing", "finished", "unknown"):
+        for entry in body[group]["orders"]:
+            assert set(entry) == {"order_reference", "status_label", "evidence_ref"}
+    assert set(observation.evidence_refs) == {"order:history:h1a", "order:history:h2b", "order:history:h3c"}
+
+
+def test_an_incomplete_history_reaches_the_model_without_a_total(binding, monkeypatch):
+    listed = [Snapshot(order_reference="A-31", status_label="قيد التنفيذ", evidence_ref="order:history:h1a")]
+    patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
+        "ok", read_complete=False, incomplete_reasons=["read_limit_reached"], total_orders=None,
+        total_orders_at_least=50,
+        ongoing=_history_group(None, listed, at_least=2), finished=_history_group(None, [], at_least=48),
+        unknown=_history_group(None, [], at_least=0), evidence=[Record("order:history:h1a")])))
+    body = run(binding, "list_customer_orders", {}).result
+    assert (body["read_complete"], body["total_orders"], body["total_orders_at_least"]) == (False, None, 50)
+    assert body["incomplete_reasons"] == ["read_limit_reached"]
+    assert body["ongoing"]["count"] is None and body["ongoing"]["listed"] == 1
+    assert (body["ongoing"]["count_at_least"], body["finished"]["count_at_least"]) == (2, 48)
+
+
+def test_an_unreadable_history_says_so_and_never_reads_as_no_orders(binding, monkeypatch):
+    patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
+        "unavailable", read_complete=False, total_orders=None, evidence=[],
+        failure_reason="history_unreadable")))
+    observation = run(binding, "list_customer_orders", {})
+    assert observation.result == {"status": "unavailable", "read_complete": False,
+                                  "reason": "history_unreadable"}
+    assert observation.evidence_refs == ()
+
+
+def test_the_one_order_lookup_keeps_its_shape_and_carries_no_history(binding, monkeypatch):
+    """The lookup's view is what it was: one order, its store status and the
+    label the platform reads it by. The history is not attached to it."""
+    summary = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
+                       status="completed", status_label="تم تجهيز الطلب", stage="ongoing")
+    patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
+               async_returning(result("ok", order=summary, selection_reason="latest_open_order",
+                                      evidence=[Record("order:summary:31")])))
+    body = run(binding, "resolve_customer_order", {"purpose": "status"}).result
+    assert set(body) == {"status", "found", "order", "selection_reason"}
+    assert set(body["order"]) == {"order_id", "evidence_ref", "order_reference", "status", "status_label"}
+
+
+def test_the_history_declaration_takes_no_arguments_and_is_read_only(binding):
+    definition = next(d for d in alt.build_live_registry(binding).definitions
+                      if d.name == "list_customer_orders")
+    assert definition.input_schema == {"type": "object", "properties": {}, "required": []}
+    assert definition.read_only is True and definition.result_kind == "order_history"
 
 
 def test_with_several_orders_the_observation_says_which_one_and_why(binding, monkeypatch):
