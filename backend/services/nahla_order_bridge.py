@@ -152,6 +152,14 @@ def is_conversation_wa_external_id(external_id: Any, tenant_id: int, conversatio
     return value == base or value.startswith(f"{base}-msg-")
 
 
+def conversation_wa_external_id_clause(column: Any, tenant_id: int, conversation_id: int) -> Any:
+    """SQL form of ``is_conversation_wa_external_id`` for an ``external_id`` column."""
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    base = nahla_wa_external_id(tenant_id, conversation_id)
+    return or_(column == base, column.like(f"{base}-msg-%"))
+
+
 def nahla_wa_catalog_external_id(
     tenant_id: int,
     conversation_id: int,
