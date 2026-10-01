@@ -552,7 +552,7 @@ def test_the_one_order_lookup_keeps_its_shape_and_carries_no_history(binding, mo
     """The lookup's view is what it was: one order, its store status and the
     label the platform reads it by. The history is not attached to it."""
     summary = Snapshot(order_id=31, evidence_ref="order:summary:31", order_reference="A-31",
-                       status="completed", status_label="تم التجهيز للشحن", stage="ongoing")
+                       status="completed", status_label="تم تجهيز الطلب", stage="ongoing")
     patch_impl(monkeypatch, "orders", "resolve_customer_order_impl",
                async_returning(result("ok", order=summary, selection_reason="latest_open_order",
                                       evidence=[Record("order:summary:31")])))

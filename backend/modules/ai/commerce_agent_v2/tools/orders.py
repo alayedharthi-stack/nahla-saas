@@ -190,6 +190,14 @@ def _assert_discovered_order_is_customer_scoped(
     raise TenantIsolationViolation("order_not_in_trusted_customer_scope")
 
 
+def _in_customer_scope(context: CommerceAgentContext, order: Any) -> bool:
+    try:
+        _assert_discovered_order_is_customer_scoped(context, order)
+    except TenantIsolationViolation:
+        return False
+    return True
+
+
 def _load_authorized_order(context: CommerceAgentContext, order_id: int) -> Any:
     context.assert_scope()
     context.require_authorized_order(order_id)
@@ -297,10 +305,12 @@ async def resolve_customer_order_impl(
         phone=context.normalized_customer_phone,
         intent="track_order" if purpose == "shipment" else None,
         order_number=requested_number or None,
-        # Pick by the reading the history groups by: the order it calls the
-        # latest open one is the history's newest ongoing order, and a cart is
-        # never picked as an order.
+        # Pick by the reading the history groups by, from the rows it holds:
+        # the order it calls the latest open one is the history's newest
+        # ongoing order; a cart, or a row outside this customer's scope, is
+        # never picked.
         lifecycle_aware=True,
+        is_customer_order=lambda row: _in_customer_scope(context, row),
     )
     selected = resolved.selected_order
     if selected is None:

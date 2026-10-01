@@ -15,15 +15,16 @@ stages on different platforms — on Salla ``completed`` is the merchant's
 * ``ongoing`` — a state the order is still under way in;
 * ``unknown`` — a status the platform cannot read: claimed neither way.
 
-An abandoned cart, which store sync keeps as an order row, is not an order:
-the platform's customer ledger counts a row as abandoned when it carries the
-``is_abandoned`` flag or the ``abandoned`` status.
+The statuses the platform writes on its own orders are read as it defines
+them; a status no store adapter and no platform module defines stays unknown.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from core import order_payment_policy as _payment_policy
+from core import wa_order_lifecycle as _wa_lifecycle
 from core.order_status_label import (
     LIFECYCLE_STATE_LABELS_AR,
     ORDER_STATUS_LABELS_AR,
@@ -42,6 +43,28 @@ FINISHED_ORDER_STATES = frozenset({
 # (store_integration.lifecycle_normalization), before shipment is complete.
 ONGOING_ORDER_STATES = frozenset({
     "payment_pending", "paid", "confirmed", "preparing", "ready", "shipped", "out_for_delivery",
+})
+
+
+# The statuses the platform writes on its own orders while they are still under
+# way, taken from where it defines them: the WhatsApp order lifecycle, the
+# payment/fulfilment policy, and the COD confirmation flow's waiting states
+# (services/cod_confirmation: STATUS_PENDING_CUSTOMER, STATUS_PENDING_MERCHANT).
+PLATFORM_ONGOING_STATUSES = frozenset({
+    _wa_lifecycle.STATUS_DRAFT,
+    _wa_lifecycle.STATUS_PENDING_CUSTOMER_INFO,
+    _wa_lifecycle.STATUS_PENDING_PAYMENT,
+    _wa_lifecycle.STATUS_PAYMENT_SUBMITTED,
+    _wa_lifecycle.STATUS_PAID,
+    _wa_lifecycle.STATUS_PROCESSING,
+    _payment_policy.ORDER_STATUS_PAYMENT_SUBMITTED,
+    _payment_policy.ORDER_STATUS_COD_PENDING,
+    _payment_policy.ORDER_STATUS_READY_TO_PROCESS,
+    _payment_policy.ORDER_STATUS_READY_TO_SHIP,
+    _payment_policy.ORDER_STATUS_SHIPMENT_CREATED,
+    _payment_policy.ORDER_STATUS_LABEL_GENERATED,
+    "pending_confirmation",
+    "under_review",
 })
 
 
@@ -73,7 +96,8 @@ def order_reading(status: Any, source: Any) -> tuple[str, str]:
     state = _lifecycle_state(slug, source)
     if state in FINISHED_ORDER_STATES:
         stage = "finished"
-    elif state in ONGOING_ORDER_STATES or slug in ORDER_STATUS_LABELS_AR:
+    elif (state in ONGOING_ORDER_STATES or slug in PLATFORM_ONGOING_STATUSES
+          or slug in ORDER_STATUS_LABELS_AR):
         stage = "ongoing"
     else:
         stage = "unknown"
@@ -87,16 +111,10 @@ def order_stage(status: Any, source: Any) -> str:
     return order_reading(status, source)[0]
 
 
-def is_abandoned_cart(order: Any) -> bool:
-    """The customer ledger's abandoned rule, for one row (``_ledger_abandoned_sql``)."""
-    return (getattr(order, "is_abandoned", None) is True
-            or str(getattr(order, "status", "") or "").lower() == "abandoned")
-
-
 __all__ = [
     "FINISHED_ORDER_STATES",
     "ONGOING_ORDER_STATES",
-    "is_abandoned_cart",
+    "PLATFORM_ONGOING_STATUSES",
     "order_reading",
     "order_stage",
 ]
