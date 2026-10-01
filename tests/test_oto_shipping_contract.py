@@ -12,6 +12,7 @@ from oto.crypto import decrypt_secret, encrypt_secret
 from oto.order_data import build_order_payload, oto_order_id, parse_oto_order_id
 from oto.security import verify_webhook
 from oto.state import apply_oto_status
+from core.middleware import is_jwt_public_path
 
 
 def test_client_uses_v2_path_and_bearer_without_exposing_token():
@@ -100,3 +101,9 @@ def test_confirmed_cod_order_maps_to_oto_without_salla():
     assert payload["amount_due"] == 125
     assert payload["customer"]["shortAddressCode"] == "ABCD1234"
     assert payload["items"][0]["sku"] == "SKU1"
+
+
+def test_only_signed_callback_path_skips_jwt():
+    assert is_jwt_public_path("/oto/webhooks/staging/orderStatus")
+    assert not is_jwt_public_path("/oto/connection")
+    assert not is_jwt_public_path("/oto/orders/1/shipments")
