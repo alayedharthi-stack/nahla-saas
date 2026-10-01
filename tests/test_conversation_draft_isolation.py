@@ -353,3 +353,43 @@ def test_another_stores_order_is_never_linked():
     assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation,
                                   phone_candidates=(PHONE,)) is None
     assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id) is None
+
+
+def test_the_conversations_own_msg_order_links_without_identity_and_a_neighbours_never_does():
+    store = Store()
+    _pending_payment(store, 10, phone=NEIGHBOUR_PHONE)
+    tenth_msg = store.draft(10, phone=NEIGHBOUR_PHONE, suffix="-msg-3", status="pending_payment")
+    store.db.commit()
+    anonymous = SimpleNamespace(id=1, customer=None, customer_id=None)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=anonymous) is None
+
+    own_msg = store.draft(1, phone="", suffix="-msg-7", status="pending_payment")
+    store.db.commit()
+    found = find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=anonymous)
+    assert found is own_msg and found is not tenth_msg
+
+
+def test_a_customer_link_proves_ownership_whatever_the_phone_format():
+    store = Store()
+    mine = _pending_payment(store, 12, phone="0500000001", customer_id=store.customer.id)
+    conversation = SimpleNamespace(id=1, customer=store.customer, customer_id=store.customer.id)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation,
+                                  phone_candidates=(PHONE,)) is mine
+
+
+def test_the_conversations_customer_id_is_identity_when_no_customer_is_loaded():
+    store = Store()
+    _pending_payment(store, 10, phone=NEIGHBOUR_PHONE, customer_id=store.neighbour.id)
+    conversation = SimpleNamespace(id=1, customer=None, customer_id=store.customer.id)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation) is None
+
+    mine = _pending_payment(store, 12, phone="", customer_id=store.customer.id)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation) is mine
+
+
+def test_an_unlinked_order_in_another_store_with_the_same_phone_is_never_linked():
+    store = Store()
+    _pending_payment(store, 5, phone=PHONE, tenant_id=store.other_tenant.id)
+    conversation = SimpleNamespace(id=1, customer=store.customer, customer_id=store.customer.id)
+    assert find_linkable_wa_order(store.db, tenant_id=store.tenant.id, conversation=conversation,
+                                  phone_candidates=(PHONE,)) is None

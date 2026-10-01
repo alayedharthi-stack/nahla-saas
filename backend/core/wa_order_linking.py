@@ -9,9 +9,10 @@ Lookup priority (PR-2):
   3. Latest WhatsApp order in linkable statuses for that customer.
 
 Steps 2 and 3 link only an order proven to be this customer's
-(``_proven_customer_order``). With no customer identity at all — no phone and no
-customer — only the conversation's own order (step 1) can be linked; the
-tenant's other customers' orders are never a fallback.
+(``_proven_customer_order``) or one of this conversation's own orders (its base
+id or its ``-msg-`` drafts). With no customer identity at all — no phone and no
+customer — only the conversation's own orders can be linked; the tenant's other
+customers' orders are never a fallback.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from core.wa_order_lifecycle import (
     STATUS_PROCESSING,
     STATUS_DRAFT,
 )
-from services.nahla_order_bridge import nahla_wa_external_id
+from services.nahla_order_bridge import is_conversation_wa_external_id, nahla_wa_external_id
 
 logger = logging.getLogger("nahla.wa_order_linking")
 
@@ -106,15 +107,14 @@ def _as_int(value: Any) -> Optional[int]:
 
 
 def _proven_customer_order(order: Any, *, customer_id: Optional[int], phones: Sequence[str]) -> bool:
-    """The order is this customer's: it carries one of the customer's phones and
-    is not linked to another customer, or — with no phone to match — it is
-    linked to this customer. Nothing else proves ownership."""
+    """The order is this customer's: it is linked to this customer, or it is
+    linked to no customer and carries one of the customer's phones. An order
+    linked to another customer is never this customer's, whatever its phone
+    says. Nothing else proves ownership."""
     linked = _as_int(getattr(order, "customer_id", None))
-    if customer_id is not None and linked is not None and linked != customer_id:
-        return False
-    if phones:
-        return _phone_matches(order, phones)
-    return customer_id is not None and linked == customer_id
+    if customer_id is not None and linked is not None:
+        return linked == customer_id
+    return bool(phones) and _phone_matches(order, phones)
 
 
 def _conversation_id_from_order(order: Any) -> Optional[int]:
@@ -167,7 +167,7 @@ def find_linkable_wa_order(
         customer_id = _as_int(getattr(cust, "id", None)) if cust is not None else None
         if customer_id is None and conversation is not None:
             customer_id = _as_int(getattr(conversation, "customer_id", None))
-        if not phones and customer_id is None:
+        if not phones and customer_id is None and conv_id is None:
             # No identity to prove ownership with: never fall back to another
             # customer's order in the tenant.
             return None
@@ -188,7 +188,10 @@ def find_linkable_wa_order(
                 continue
             if is_terminal_wa_order_status(row.status):
                 continue
-            if not _proven_customer_order(row, customer_id=customer_id, phones=phones):
+            own_conversation = conv_id is not None and is_conversation_wa_external_id(
+                getattr(row, "external_id", ""), tid, int(conv_id))
+            if not own_conversation and not _proven_customer_order(
+                    row, customer_id=customer_id, phones=phones):
                 continue
             if _norm_status(row.status) == STATUS_PENDING_PAYMENT:
                 pending_payment.append(row)
