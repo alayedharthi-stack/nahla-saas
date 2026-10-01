@@ -91,7 +91,7 @@ READINESS_BLOCK_CODES = frozenset({
 # changes; they never consume a product's retry budget.
 GRAPH_TOKEN_INVALID_CODES = frozenset({190, 102})
 # Graph error codes that mean the token lacks the catalog permission.
-GRAPH_PERMISSION_ERROR_CODES = frozenset({10, 200, 294, 803})
+GRAPH_PERMISSION_ERROR_CODES = frozenset({10, 200, 294})
 GRAPH_PERMISSION_ERROR_SUBCODES = frozenset({2388100})
 PERMANENT_BLOCK_CODES = frozenset({
     "product_already_meta_managed",
@@ -130,6 +130,7 @@ _ACQUIRABLE_STATUSES = frozenset({
     "blocked",
     "sync_failed",
     "pending_verification",
+    "retired",
     "",
 })
 
@@ -920,6 +921,12 @@ def mark_native_meta_sync_pending(db: Any, product: Any, *, bump_content: bool =
         verify_retry_count=0,
         next_verify_at=None,
         verify_exhausted=False,
+        # An eligible row re-entering the publish queue no longer owes a
+        # withdrawal; a later hide starts a fresh retirement budget.
+        retire_pending=False,
+        retire_exhausted=False,
+        retire_attempts=0,
+        next_retire_at=None,
     )
     if row is not product:
         product.sync_status = row.sync_status
@@ -1725,10 +1732,13 @@ def _attempt_acquired_body(
         if not skipped_push:
             updates["last_push_at"] = _now().isoformat()
             updates["last_push_action"] = str(last_push.get("action") or "")
+            updates["retire_pending"] = False
+            updates["retire_exhausted"] = False
+            updates["retire_attempts"] = 0
+            updates["next_retire_at"] = None
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()
-            updates["retire_pending"] = False
             updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)
@@ -1757,10 +1767,13 @@ def _attempt_acquired_body(
         if not skipped_push:
             updates["last_push_at"] = _now().isoformat()
             updates["last_push_action"] = str(last_push.get("action") or "")
+            updates["retire_pending"] = False
+            updates["retire_exhausted"] = False
+            updates["retire_attempts"] = 0
+            updates["next_retire_at"] = None
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()
-            updates["retire_pending"] = False
             updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)

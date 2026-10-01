@@ -107,14 +107,27 @@ def _is_postgres(db: Any) -> bool:
 
 
 def _load_connection(db: Any, tenant_id: int, *, for_update: bool = False) -> Any:
+    """Load the tenant connection with committed column values.
+
+    ``populate_existing`` refreshes an identity the session already holds,
+    so a JSON merge never starts from a stale ``extra_metadata`` snapshot.
+    ``for_update`` adds a row lock on PostgreSQL for read-modify-write.
+    """
     from models import WhatsAppConnection  # noqa: PLC0415
 
-    query = db.query(WhatsAppConnection).filter(
-        WhatsAppConnection.tenant_id == int(tenant_id)
+    query = (
+        db.query(WhatsAppConnection)
+        .filter(WhatsAppConnection.tenant_id == int(tenant_id))
+        .populate_existing()
     )
     if for_update and _is_postgres(db):
         query = query.with_for_update()
     return query.first()
+
+
+def load_connection_for_metadata_write(db: Any, tenant_id: int) -> Any:
+    """Locked, refreshed connection row for any ``extra_metadata`` merge."""
+    return _load_connection(db, tenant_id, for_update=True)
 
 
 # ── Ownership ─────────────────────────────────────────────────────────────
@@ -301,7 +314,11 @@ def mark_product_channel_retire_pending(
         return False
     sync_meta = _read_sync_meta(product)
     why = reason or retirement_reason_for(product) or REASON_CATALOG_INACTIVE
-    if sync_meta.get("retire_pending") and sync_meta.get("retire_reason") == why:
+    if (
+        sync_meta.get("retire_pending")
+        and sync_meta.get("retire_reason") == why
+        and not sync_meta.get("retire_exhausted")
+    ):
         return True
     now = _now().isoformat()
     _write_sync_meta(
@@ -620,22 +637,25 @@ def drain_channel_retirement_ledger(
     limit: int = 25,
     client: Any = None,
 ) -> Dict[str, Any]:
-    """Process due ledger entries for one tenant."""
+    """Process due ledger entries for one tenant.
+
+    Graph calls run against an unlocked snapshot; the row is locked and
+    re-read only for the final merge, so a concurrent delete webhook that
+    appends an entry during the Graph round-trips is never overwritten.
+    """
     from services.meta_catalog_push import retire_meta_catalog_item  # noqa: PLC0415
 
     out: Dict[str, Any] = {"processed": 0, "retired": 0, "absent": 0, "failed": 0, "remaining": 0}
-    conn = _load_connection(db, tenant_id, for_update=True)
+    conn = _load_connection(db, tenant_id)
     if conn is None:
         return out
-    entries = _ledger(conn)
-    if not entries:
+    snapshot = _ledger(conn)
+    if not snapshot:
         return out
     now = _now()
     default_catalog = _strip(getattr(conn, "meta_catalog_id", None))
-    keep: List[Dict[str, Any]] = []
-    done = 0
-    last_error: Optional[str] = None
-    for entry in entries:
+    outcomes: Dict[str, Dict[str, Any]] = {}
+    for entry in snapshot:
         due = (
             not entry.get("exhausted")
             and (
@@ -644,7 +664,6 @@ def drain_channel_retirement_ledger(
             )
         )
         if not due or out["processed"] >= int(limit):
-            keep.append(entry)
             continue
         out["processed"] += 1
         try:
@@ -662,6 +681,24 @@ def drain_channel_retirement_ledger(
                 entry.get("retailer_id"),
             )
             res = {"ok": False, "error": type(exc).__name__}
+        outcomes[_strip(entry.get("retailer_id"))] = res
+    if not outcomes:
+        out["remaining"] = len(snapshot)
+        return out
+
+    # Merge on the committed row under lock; entries added meanwhile survive.
+    locked = _load_connection(db, tenant_id, for_update=True)
+    if locked is None:
+        return out
+    entries = _ledger(locked)
+    keep: List[Dict[str, Any]] = []
+    done = 0
+    last_error: Optional[str] = None
+    for entry in entries:
+        res = outcomes.get(_strip(entry.get("retailer_id")))
+        if res is None:
+            keep.append(entry)
+            continue
         if res.get("ok"):
             done += 1
             if res.get("action") == "absent":
@@ -680,13 +717,13 @@ def drain_channel_retirement_ledger(
     out["remaining"] = len(keep)
     stats_update: Dict[str, Any] = {}
     if done:
-        meta = getattr(conn, "extra_metadata", None) or {}
+        meta = getattr(locked, "extra_metadata", None) or {}
         stats = meta.get(RETIRE_STATS_KEY) if isinstance(meta, dict) else {}
         stats_update["done_total"] = int((stats or {}).get("done_total") or 0) + done
         stats_update["last_done_at"] = now.isoformat()
     if last_error is not None:
         stats_update["last_error"] = last_error
-    _write_ledger(conn, keep, stats_update or None)
+    _write_ledger(locked, keep, stats_update or None)
     db.commit()
     return out
 
@@ -706,6 +743,7 @@ __all__ = [
     "enqueue_channel_retirement_ledger",
     "is_channel_copy_owned_by_publish_path",
     "ledger_snapshot",
+    "load_connection_for_metadata_write",
     "mark_product_channel_retire_pending",
     "product_has_channel_copy",
     "reset_exhausted_ledger_entries",

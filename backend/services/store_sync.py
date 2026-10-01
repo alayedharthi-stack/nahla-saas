@@ -151,10 +151,29 @@ def _source_in_stock(raw: Dict[str, Any]) -> bool:
         return True
 
 
+# Source-platform statuses that still describe a sellable listing. Salla uses
+# ``sale`` (live) and ``out`` (live, no stock); AI orderability consumers read
+# ``extra_metadata.status == "active"`` and take stock from ``in_stock``.
+_SOURCE_STATUS_ACTIVE = frozenset({"active", "sale", "out", "published", "available"})
+
+
+def _lifecycle_status(source_status: str) -> str:
+    """Map a raw source status to the lifecycle value the platform reads.
+
+    ``hidden`` / ``deleted`` pass through (not sellable); live listings
+    become ``active``. The raw value is kept separately in ``source_status``.
+    """
+    text = str(source_status or "").strip().lower()
+    if not text or text in _SOURCE_STATUS_ACTIVE:
+        return "active"
+    return text
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    source_status = _extract_status_string(raw.get("status"), fallback="").strip().lower()
     price_text, price_currency = _salla_money(raw.get("price", raw.get("regular_price", "")))
     sale_price_text, _ = _salla_money(raw.get("sale_price", raw.get("promo_price", "")))
     regular_price_text, _ = _salla_money(raw.get("regular_price", ""))
@@ -181,7 +200,8 @@ def _normalise_product(raw: Any) -> Dict:
         "price":         price_text,
         "sale_price":    sale_price_text,
         "regular_price": regular_price_text,
-        "status":        _extract_status_string(raw.get("status"), fallback="active"),
+        "status":        _lifecycle_status(source_status),
+        "source_status": source_status or None,
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
         "image_url":     image_url,

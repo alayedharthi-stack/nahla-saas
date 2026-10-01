@@ -71,7 +71,18 @@ def _sync_meta(product: Any) -> Dict[str, Any]:
     return dict(sm) if isinstance(sm, dict) else {}
 
 
-def _persist_snapshot(conn: Any, payload: Dict[str, Any]) -> None:
+def _persist_snapshot(db: Any, tenant_id: int, payload: Dict[str, Any]) -> None:
+    """Write the reconcile snapshot on a freshly loaded, locked connection row.
+
+    The reconcile runs long Graph reads; merging into a row loaded before
+    them would overwrite entries other writers (the retirement ledger)
+    committed in the meantime.
+    """
+    from services.whatsapp_catalog_retirement import load_connection_for_metadata_write  # noqa: PLC0415
+
+    conn = load_connection_for_metadata_write(db, tenant_id)
+    if conn is None:
+        return
     meta = dict(getattr(conn, "extra_metadata", None) or {})
     meta[RECONCILE_META_KEY] = payload
     conn.extra_metadata = meta
@@ -152,11 +163,6 @@ def reconcile_tenant_channel_catalog(
         "waba_link_state": None,
         "error": None,
     }
-    readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
-    if not readiness.get("ready"):
-        out["skipped"] = True
-        out["blocker_code"] = readiness.get("blocker_code")
-        return out
     conn = (
         db.query(WhatsAppConnection)
         .filter(WhatsAppConnection.tenant_id == int(tenant_id))
@@ -165,6 +171,15 @@ def reconcile_tenant_channel_catalog(
     if conn is None:
         out["skipped"] = True
         out["blocker_code"] = "connection_not_found"
+        return out
+    readiness = evaluate_whatsapp_catalog_sync_readiness(db, tenant_id)
+    if not readiness.get("ready"):
+        # Persist the skip so a blocked tenant does not stay "most due" and
+        # starve every other tenant's turn until its blocker clears.
+        out["skipped"] = True
+        out["blocker_code"] = readiness.get("blocker_code")
+        _persist_snapshot(db, tenant_id, out)
+        _safe_commit(db)
         return out
     catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
     out["catalog_id"] = catalog_id or None
@@ -177,7 +192,7 @@ def reconcile_tenant_channel_catalog(
     if info.get("error") or not info.get("complete"):
         # An incomplete read must never be mistaken for "items missing".
         out["error"] = str(info.get("error") or "live_read_incomplete")[:240]
-        _persist_snapshot(conn, out)
+        _persist_snapshot(db, tenant_id, out)
         _safe_commit(db)
         return out
 
@@ -252,7 +267,6 @@ def reconcile_tenant_channel_catalog(
                     out["retire_requeued"] += 1
 
     out["checked_products"] = checked_products
-    out["ledger_reset"] = reset_exhausted_ledger_entries(conn)
 
     if refresh_link:
         try:
@@ -270,7 +284,11 @@ def reconcile_tenant_channel_catalog(
             out["waba_link_error"] = type(exc).__name__
 
     out["ok"] = True
-    _persist_snapshot(conn, out)
+    from services.whatsapp_catalog_retirement import load_connection_for_metadata_write  # noqa: PLC0415
+
+    fresh = load_connection_for_metadata_write(db, tenant_id)
+    out["ledger_reset"] = reset_exhausted_ledger_entries(fresh) if fresh is not None else 0
+    _persist_snapshot(db, tenant_id, out)
     _safe_commit(db)
     logger.info(
         "[WA_CATALOG_RECONCILE] tenant=%s live=%s checked=%s missing=%s drifted=%s requeued=%s retire_requeued=%s link=%s",

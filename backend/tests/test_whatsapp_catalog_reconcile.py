@@ -206,3 +206,45 @@ def test_due_tenants_respect_flag_and_interval(monkeypatch):
         assert summary["tenants"] == 1 and rec.called
     finally:
         session.close(); engine.dispose()
+
+
+def test_blocked_tenant_persists_skip_and_does_not_starve_others(monkeypatch):
+    """A tenant whose readiness is blocked records the skip, so the next tick
+    moves on to the tenant that is actually due."""
+    session, tid, engine = _make_db()
+    try:
+        monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
+        blocked = Tenant(name="متجر محجوب", is_active=True)
+        session.add(blocked); session.commit()
+        session.add(WhatsAppConnection(tenant_id=blocked.id, whatsapp_business_account_id="WABA-2", phone_number_id="PN-2",
+                                       access_token="", meta_catalog_id="CAT-X", catalog_enabled=True, extra_metadata={}))
+        session.commit()
+        calls = []
+        real = __import__("services.whatsapp_catalog_reconcile", fromlist=["x"]).reconcile_tenant_channel_catalog
+
+        def _fake_ready(db, tenant_id):
+            if int(tenant_id) == blocked.id:
+                return {"ready": False, "blocker_code": "access_token_missing"}
+            return {"ready": True, "blocker_code": None, "connection_fp": "fp"}
+
+        def _spy(db, tenant_id, **kw):
+            calls.append(int(tenant_id))
+            if int(tenant_id) == blocked.id:
+                with patch("services.whatsapp_catalog_sync.evaluate_whatsapp_catalog_sync_readiness", _fake_ready):
+                    return real(db, tenant_id, **kw)
+            # a healthy tenant records its own snapshot (as the real function does)
+            conn = db.query(WhatsAppConnection).filter_by(tenant_id=int(tenant_id)).first()
+            conn.extra_metadata = {RECONCILE_META_KEY: {"at": datetime.now(timezone.utc).isoformat()}}
+            db.commit()
+            return {"requeued": 0, "retire_requeued": 0}
+
+        with patch("services.whatsapp_catalog_reconcile.reconcile_tenant_channel_catalog", _spy):
+            for _ in range(3):
+                reconcile_due_tenants(session)
+        assert blocked.id in calls and tid in calls
+        assert calls.count(blocked.id) == 1
+        conn_b = session.query(WhatsAppConnection).filter_by(tenant_id=blocked.id).first()
+        assert conn_b.extra_metadata[RECONCILE_META_KEY]["skipped"] is True
+        assert conn_b.extra_metadata[RECONCILE_META_KEY]["blocker_code"] == "access_token_missing"
+    finally:
+        session.close(); engine.dispose()

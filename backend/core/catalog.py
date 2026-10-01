@@ -464,12 +464,20 @@ SOURCE_HIDDEN_STATUSES = frozenset({"hidden", "deleted"})
 
 
 def source_platform_status(product: Any) -> str:
-    """Lowercase status the source platform reported (``extra_metadata.status``)."""
+    """Lowercase status the source platform reported.
+
+    ``extra_metadata.source_status`` holds the raw store value (Salla:
+    ``sale`` / ``out`` / ``hidden``); ``extra_metadata.status`` holds the
+    lifecycle value the platform reads (``active`` / ``hidden`` / ...).
+    """
     if product is None:
         return ""
     meta = product.get("extra_metadata") if isinstance(product, dict) else getattr(product, "extra_metadata", None)
     if not isinstance(meta, dict):
         return ""
+    raw = str(meta.get("source_status") or "").strip().lower()
+    if raw:
+        return raw
     return str(meta.get("status") or "").strip().lower()
 
 

@@ -630,13 +630,18 @@ def build_sync_stages(
     try:
         from models import Integration, StoreKnowledgeSnapshot  # noqa: PLC0415
 
+        from core.catalog import EXTERNAL_PLATFORM_SOURCES  # noqa: PLC0415
+
         integ = (
             db.query(Integration)
-            .filter(Integration.tenant_id == int(tenant_id), Integration.provider == "salla")
+            .filter(
+                Integration.tenant_id == int(tenant_id),
+                Integration.provider.in_(sorted(EXTERNAL_PLATFORM_SOURCES)),
+            )
             .first()
         )
         if integ is not None:
-            source["provider"] = "salla"
+            source["provider"] = str(getattr(integ, "provider", "") or "") or None
             source["state"] = "ok" if bool(getattr(integ, "enabled", True)) else "attention"
         snap = (
             db.query(StoreKnowledgeSnapshot)

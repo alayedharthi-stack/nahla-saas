@@ -507,3 +507,61 @@ def test_native_identities_use_product_meta_item():
         assert ids[0]["meta_item_id"] == "META-NATIVE-1"
     finally:
         session.close(); engine.dispose()
+
+
+def test_ledger_entry_added_during_graph_io_survives_the_drain_merge():
+    """A product.deleted webhook landing while the drain is talking to Graph
+    must not be overwritten when the drain writes its results back."""
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        first = _salla_product(session, t_a, ext="810100")
+        enqueue_channel_retirement_ledger(session, t_a, channel_identities_for_product(session, first),
+                                          reason=REASON_SOURCE_DELETED)
+        session.commit()
+        later = _salla_product(session, t_a, ext="810200", svid="591009")
+        later_ids = channel_identities_for_product(session, later)
+
+        class RacingGraph(FakeGraph):
+            def post(self, url, data=None, headers=None):
+                # another request appends to the ledger mid-flight
+                enqueue_channel_retirement_ledger(session, t_a, later_ids, reason=REASON_SOURCE_DELETED)
+                session.commit()
+                return super().post(url, data=data, headers=headers)
+
+        graph = RacingGraph({"810100-591001": {"id": "META-810100-591001", "availability": "in stock"}})
+        with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
+            out = drain_channel_retirement_ledger(session, t_a, client=graph)
+        assert out["retired"] == 1
+        remaining = [e["retailer_id"] for e in _conn(session, t_a).extra_metadata[RETIRE_LEDGER_KEY]]
+        assert remaining == ["810200-591009"]
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_rehide_after_exhausted_or_restore_starts_a_fresh_retirement_budget():
+    from services.native_meta_sync_orchestrator import mark_native_meta_sync_pending
+
+    session, t_a, _t_b, engine = _make_db()
+    try:
+        product = _salla_product(session, t_a, ext="820100")
+        product.catalog_status = "merchant_hidden"
+        product.merchant_hidden_at = datetime.now(timezone.utc)
+        mark_product_channel_retire_pending(session, product)
+        sm = dict(product.extra_metadata["sync_meta"]); sm.update({"retire_exhausted": True, "retire_attempts": RETIRE_MAX_ATTEMPTS})
+        product.extra_metadata = {**product.extra_metadata, "sync_meta": sm}
+        session.commit()
+        assert retirement_is_due(product) is False
+        # re-hide (same reason) after exhaustion → budget resets
+        assert mark_product_channel_retire_pending(session, product) is True
+        assert product.extra_metadata["sync_meta"]["retire_exhausted"] is False
+        assert retirement_is_due(product) is True
+        # restore → publish queue clears the withdrawal request entirely
+        product.catalog_status = "active"
+        product.merchant_hidden_at = None
+        assert mark_native_meta_sync_pending(session, product) is True
+        session.commit()
+        sm = product.extra_metadata["sync_meta"]
+        assert sm["retire_pending"] is False and sm["retire_exhausted"] is False and sm["retire_attempts"] == 0
+        assert product.sync_status == "pending"
+    finally:
+        session.close(); engine.dispose()

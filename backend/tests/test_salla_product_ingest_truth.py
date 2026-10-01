@@ -92,6 +92,29 @@ def test_webhook_quantity_zero_is_out_of_stock_and_unlimited_is_in_stock():
     assert _normalise_product({"id": "1", "title": "x", "price": "5", "in_stock": False, "quantity": 9})["in_stock"] is False
 
 
+def test_live_salla_statuses_stay_orderable_for_the_ai_and_hidden_is_not():
+    """``sale``/``out`` are live listings: the platform lifecycle status must stay
+    ``active`` (AI orderability reads it), while the raw value is kept apart."""
+    from modules.ai.brain.postprocess.availability_context_builder import _can_checkout_from_row
+
+    for raw_status in ("sale", "out", {"slug": "sale"}):
+        norm = _normalise_product(_raw_webhook_product(status=raw_status, quantity=4))
+        assert norm["status"] == "active"
+        assert norm["source_status"] in ("sale", "out")
+        row = Product(tenant_id=1, external_id="900100", title="عطر ورد 100ml", price="199", source="salla",
+                      in_stock=True, stock_quantity=4, catalog_status="active", extra_metadata=norm)
+        assert _can_checkout_from_row(row, variants_ok=True) is True
+        assert is_whatsapp_channel_publish_eligible(row) is True
+    hidden_norm = _normalise_product(_raw_webhook_product(status="hidden", quantity=4))
+    assert hidden_norm["status"] == "hidden" and hidden_norm["source_status"] == "hidden"
+    hidden_row = Product(tenant_id=1, external_id="900100", title="x", price="199", source="salla",
+                         in_stock=True, stock_quantity=4, catalog_status="active", extra_metadata=hidden_norm)
+    assert _can_checkout_from_row(hidden_row, variants_ok=True) is False
+    assert is_whatsapp_channel_publish_eligible(hidden_row) is False
+    # adapter-normalised products (no status) keep the historical default
+    assert _normalise_product({"id": "1", "title": "x", "price": "5"})["status"] == "active"
+
+
 def test_source_status_carried_and_hidden_blocks_channel_publish():
     hidden = _normalise_product(_raw_webhook_product(status="hidden"))
     assert hidden["status"] == "hidden"
