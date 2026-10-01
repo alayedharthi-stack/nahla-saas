@@ -465,7 +465,7 @@ def test_a_conversation_draft_kept_as_a_cart_is_not_the_active_draft():
     store = Store()
     mine = store.order("in_progress")
     store.db.add(Order(tenant_id=store.tenant.id, customer_id=None, source="whatsapp", status="draft",
-                       external_id=nahla_wa_external_id(store.tenant.id, store.conversation.id) + "-1",
+                       external_id=nahla_wa_external_id(store.tenant.id, store.conversation.id) + "-msg-1",
                        is_abandoned=True, extra_metadata={"lifecycle": "whatsapp_draft"},
                        customer_info={}, line_items=[]))
     store.db.flush()
@@ -525,6 +525,17 @@ def test_this_conversations_own_draft_is_still_found_with_its_message_suffix():
     store = Store()
     store.order("processing")
     draft = _conversation_order(store, store.conversation.id, suffix="-msg-7")
+    lookup = resolve(store.context())
+    assert lookup.selection_reason == "active_whatsapp_draft"
+    assert lookup.order.order_reference == draft.external_order_number
+
+
+def test_a_conversation_draft_whose_status_the_platform_cannot_read_is_still_the_draft():
+    """Only a finished conversation order is dropped as the draft: one the
+    platform cannot place (a failed payment) stays the conversation's draft."""
+    store = Store()
+    store.order("processing")
+    draft = _conversation_order(store, store.conversation.id, status="payment_failed")
     lookup = resolve(store.context())
     assert lookup.selection_reason == "active_whatsapp_draft"
     assert lookup.order.order_reference == draft.external_order_number

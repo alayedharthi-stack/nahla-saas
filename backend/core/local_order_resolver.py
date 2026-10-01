@@ -573,9 +573,10 @@ def resolve_customer_order_context(
     if lifecycle_aware:
         from core.order_lifecycle_reading import order_stage  # noqa: PLC0415
 
-        # The conversation's draft is picked first only while it is under way:
-        # a delivered or cancelled conversation order is history, not a draft.
-        if draft_row is not None and order_stage(draft_row.status, draft_row.source) != "ongoing":
+        # A finished conversation order (delivered, cancelled, …) is history,
+        # not the conversation's draft; one whose status the platform cannot
+        # read is left as the resolver found it.
+        if draft_row is not None and order_stage(draft_row.status, draft_row.source) == "finished":
             draft_row = None
         if is_customer_order is not None:
             # Only the orders the lookup picks by itself: an order named by
