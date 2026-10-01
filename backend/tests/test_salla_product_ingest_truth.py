@@ -62,7 +62,17 @@ def _stamp(hour, minute):
     return {"date": f"2026-10-01 {hour:02d}:{minute:02d}:00.000000", "timezone_type": 3, "timezone": "Asia/Riyadh"}
 
 
+_SEEN_BODIES: list = []
+
+
 def _raw_webhook_product(**overrides):
+    body = _build_raw_webhook_product(**overrides)
+    _TRUTH_OVERRIDES[str(body.get("id"))] = body
+    _SEEN_BODIES.append(body)
+    return body
+
+
+def _build_raw_webhook_product(**overrides):
     body = {
         "id": 900100,
         "name": "عطر ورد 100ml",
@@ -155,8 +165,50 @@ def _svc(session, tenant_id):
     ])
     real = SallaAdapter.__new__(SallaAdapter)
     adapter._normalize_variant = lambda raw, opts=None: SallaAdapter._normalize_variant(real, raw, opts)
+    # A product.created with no local row is verified against the store before
+    # the row is created; by default the store agrees with the event body.
+    adapter.get_product = AsyncMock(side_effect=lambda pid: _adapter_truth_for(pid))
     svc._adapter = adapter
     return svc
+
+
+_TRUTH_OVERRIDES: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_read_clock(monkeypatch):
+    """Store reads in these tests happen in the synthetic timeline of the
+    fixtures: a read is stamped from the ``updated_at`` of the last body the
+    store would return (minus the skew margin), not from the wall clock.
+    An explicit ``now`` still goes through the real stamp function."""
+    from services import store_sync as ss
+    from services.salla_datetime import parse_salla_datetime_to_utc
+
+    real = ss.source_read_stamp
+
+    def _fake(now=None):
+        if now is not None:
+            return real(now)
+        stamps = [
+            parse_salla_datetime_to_utc(b.get("updated_at"))
+            for b in _SEEN_BODIES
+            if b.get("updated_at") is not None
+        ]
+        stamps = [x for x in stamps if x is not None]
+        # a monotonic synthetic clock: the store is at least as fresh as the newest body seen
+        return real(max(stamps)) if stamps else real()
+
+    monkeypatch.setattr(ss, "source_read_stamp", _fake)
+    _TRUTH_OVERRIDES.clear(); _SEEN_BODIES.clear()
+    yield
+    _TRUTH_OVERRIDES.clear(); _SEEN_BODIES.clear()
+
+
+def _adapter_truth_for(product_id):
+    """Store read used by the default test adapter: the last body seen for this id."""
+    body = _TRUTH_OVERRIDES.get(str(product_id)) or _raw_webhook_product()
+    adapter = SallaAdapter.__new__(SallaAdapter)
+    return SallaAdapter._normalize_product(adapter, body).dict()
 
 
 def test_created_then_duplicate_event_marks_pending_once():
@@ -292,14 +344,14 @@ def test_event_with_unprovable_order_reads_current_truth_from_salla():
     session, tid, engine = _make_db()
     try:
         svc = _svc(session, tid)
-        svc._adapter.get_product = AsyncMock(return_value=_raw_webhook_product(
-            quantity=5, price={"amount": 175.0, "currency": "SAR"}, updated_at=_at(11, 0)))
         with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
             asyncio.run(svc.handle_product_webhook(
                 _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}, updated_at=_at(10, 5)),
                 webhook_event_type="product.created",
             ))
             row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
+            svc._adapter.get_product = AsyncMock(return_value=_raw_webhook_product(
+                quantity=5, price={"amount": 175.0, "currency": "SAR"}, updated_at=_at(11, 0)))
             asyncio.run(svc.handle_product_webhook(
                 _raw_webhook_product(quantity=0, price={"amount": 120.0, "currency": "SAR"}),
                 webhook_event_type="product.updated",
@@ -467,5 +519,69 @@ def test_late_update_after_delete_does_not_resurrect_the_product():
             ))
         row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
         assert row.stock_quantity == 4 and row.price == "199.0"
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_change_made_in_the_same_second_as_the_read_start_is_not_lost():
+    """Review N1: Salla's updated_at is second-precision; a read stamped a
+    few hundred ms into the same second must not shadow a change made then."""
+    from services.store_sync import SOURCE_EVENT_AT_KEY, source_read_stamp, _normalise_product as norm
+    from services.salla_datetime import parse_salla_datetime_to_utc
+
+    session, tid, engine = _make_db()
+    try:
+        svc = _svc(session, tid)
+        base = parse_salla_datetime_to_utc(_stamp(10, 15))  # 10:15:00 Riyadh
+        read_started = base.replace(microsecond=500_000)
+        read = norm(_raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}))
+        read[SOURCE_EVENT_AT_KEY] = source_read_stamp(read_started).isoformat()
+        with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
+            assert svc._apply_normalised_product(read, "salla")["action"] == "created"
+            session.commit()
+            row = session.query(Product).filter_by(tenant_id=tid, external_id="900100").one()
+            # merchant changed the price at 10:15:00.9 → Salla says updated_at 10:15:00
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 130.0, "currency": "SAR"}, updated_at=_stamp(10, 15)),
+                webhook_event_type="product.price.updated",
+            ))
+            session.refresh(row)
+            assert row.price == "130.0"
+            # but a change from well before the read is still ignored
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 120.0, "currency": "SAR"}, updated_at=_stamp(10, 10)),
+                webhook_event_type="product.price.updated",
+            ))
+            session.refresh(row)
+            assert row.price == "130.0"
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_redelivered_product_created_after_delete_does_not_resurrect():
+    """Review N2: a product.created redelivered after product.deleted asks the
+    store; a product that is gone is dropped, one that exists is created from
+    the store read."""
+    from services.store_sync import StoreSyncService
+
+    session, tid, engine = _make_db()
+    try:
+        svc = _svc(session, tid)
+        svc._adapter.get_product = AsyncMock(return_value=_adapter_truth(quantity=3, updated_at=_stamp(9, 0)))
+        with patch("services.whatsapp_catalog_sync.schedule_whatsapp_catalog_drain"):
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}, updated_at=_stamp(9, 0)),
+                webhook_event_type="product.created",
+            ))
+            assert session.query(Product).filter_by(tenant_id=tid, external_id="900100").count() == 1
+            asyncio.run(StoreSyncService(session, tid).handle_product_deleted("900100"))
+            assert session.query(Product).filter_by(tenant_id=tid, external_id="900100").count() == 0
+            svc._adapter.get_product = AsyncMock(return_value=None)
+            asyncio.run(svc.handle_product_webhook(
+                _raw_webhook_product(quantity=3, price={"amount": 150.0, "currency": "SAR"}, updated_at=_stamp(9, 0)),
+                webhook_event_type="product.created",
+            ))
+        assert session.query(Product).filter_by(tenant_id=tid, external_id="900100").count() == 0
+        svc._adapter.get_product.assert_awaited_once_with("900100")
     finally:
         session.close(); engine.dispose()

@@ -731,7 +731,10 @@ def drain_channel_retirement_ledger(
 
     db.expire_all()
     for row_id, res in outcomes.items():
-        row = db.query(model).filter(model.id == int(row_id), model.tenant_id == int(tenant_id)).first()
+        query = db.query(model).filter(model.id == int(row_id), model.tenant_id == int(tenant_id))
+        if _is_postgres(db):
+            query = query.with_for_update()
+        row = query.first()
         if row is None:
             continue
         if (int(row.attempts or 0), row.updated_at, row.reason) != observed.get(int(row_id)):

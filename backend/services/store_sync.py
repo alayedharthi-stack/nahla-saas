@@ -170,6 +170,17 @@ def _lifecycle_status(source_status: str) -> str:
 
 
 SOURCE_EVENT_AT_KEY = "source_event_at"
+# Salla stamps ``updated_at`` at second precision and its clock is not ours:
+# a read is stamped at whole-second precision minus a small margin, so a
+# change the merchant made in the same second as (or just before) our read
+# started still counts as newer and is applied.
+SOURCE_READ_STAMP_SKEW = timedelta(seconds=2)
+
+
+def source_read_stamp(now: Optional[datetime] = None) -> datetime:
+    """Stamp for a state read from the store: read-start time at Salla precision minus skew."""
+    base = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    return base - SOURCE_READ_STAMP_SKEW
 
 
 def source_event_time(payload: Any, envelope_created_at: Any = None) -> Optional[datetime]:
@@ -2000,7 +2011,7 @@ class StoreSyncService:
         webhook describing an older change be recognised and ignored.
         """
         ext_id = normalised["external_id"]
-        normalised.setdefault(SOURCE_EVENT_AT_KEY, datetime.now(timezone.utc).isoformat())
+        normalised.setdefault(SOURCE_EVENT_AT_KEY, source_read_stamp().isoformat())
         incoming_at = _parse_stamp(normalised.get(SOURCE_EVENT_AT_KEY))
         new_qty = _coerce_int(normalised.get("stock_qty"))
         new_in_stock = bool(normalised.get("in_stock", True))
@@ -2177,7 +2188,7 @@ class StoreSyncService:
         resolved_nahla_id = (db_before or {}).get("nahla_product_id") or nahla_product_id
 
         try:
-            fetched_at = datetime.now(timezone.utc)
+            fetched_at = source_read_stamp()
             raw = await adapter.get_product(ext_id)
         except Exception as exc:  # noqa: BLE001
             return {
@@ -2242,7 +2253,7 @@ class StoreSyncService:
         if incremental:
             updated_since = self._commerce_reconcile_since("products", incremental=True)
 
-        fetched_at = datetime.now(timezone.utc)
+        fetched_at = source_read_stamp()
         try:
             raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
@@ -4117,7 +4128,7 @@ class StoreSyncService:
         adapter = self._get_adapter()
         if not adapter or not hasattr(adapter, "get_product"):
             raise RuntimeError("product_hydration_failed")
-        fetched_at = datetime.now(timezone.utc)
+        fetched_at = source_read_stamp()
         try:
             fetched = await adapter.get_product(product_id)
         except Exception as exc:
@@ -4191,16 +4202,14 @@ class StoreSyncService:
                 # The row has a known state and this event's order cannot be
                 # proven: never trust the body; read the current truth instead.
                 read_truth = True
-            if (
-                existing_stamp_row is None
-                and webhook_event_type != "product.created"
-                and not needs_hydration
-                and can_read_truth
-            ):
-                # No local row for a full-body non-create event: a late update
-                # after a delete must not resurrect the product. Ask the store;
-                # partial events keep the hydration contract below (retry when
-                # the read returns nothing).
+            if existing_stamp_row is None and not needs_hydration and can_read_truth:
+                # No local row for a full-body event, product.created included:
+                # a late update, or a redelivered create, after a delete must
+                # not resurrect the product (its next drain would re-create the
+                # Graph item). Ask the store; a product it no longer has is
+                # dropped. Partial events keep the hydration contract below
+                # (retry when the read returns nothing). One extra Salla read
+                # per genuine creation is the price.
                 truth, fetched_at = await self._fetch_product_truth(
                     product_id, event_type=webhook_event_type, allow_missing=True,
                 )

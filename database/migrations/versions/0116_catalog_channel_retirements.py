@@ -25,7 +25,14 @@ TABLE = "catalog_channel_retirements"
 
 def upgrade() -> None:
     bind = op.get_bind()
-    if TABLE in set(sa.inspect(bind).get_table_names()):
+    inspector = sa.inspect(bind)
+    if TABLE in set(inspector.get_table_names()):
+        # A database that built the table from an earlier head's create_all may
+        # still carry NOT NULL on catalog_id; relax it so a tenant without a
+        # stamped catalog can record a retirement (the drain resolves it).
+        for column in inspector.get_columns(TABLE):
+            if column["name"] == "catalog_id" and not column.get("nullable", True):
+                op.alter_column(TABLE, "catalog_id", existing_type=sa.String(length=64), nullable=True)
         return
     op.create_table(
         TABLE,
