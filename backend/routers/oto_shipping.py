@@ -326,6 +326,10 @@ async def send_shipping_whatsapp(order_id: int, request: Request, db: Session = 
     shipment = _shipment(db, tenant_id, order.id)
     if not shipment.label_url or not safe_url(shipment.label_url):
         raise HTTPException(409, "oto_label_not_available")
+    if not shipment.tracking_number and not shipment.tracking_url:
+        raise HTTPException(409, "oto_tracking_not_available")
+    if shipment.status.lower() in {"returned", "cancelled", "canceled", "oto_cancellation_requested"}:
+        raise HTTPException(409, "oto_shipment_not_deliverable")
     info = order.customer_info if isinstance(order.customer_info, dict) else {}
     recipient = _normalize_phone(str(info.get("mobile") or info.get("phone") or ""))
     if not recipient or not has_open_service_window(db, tenant_id, recipient):

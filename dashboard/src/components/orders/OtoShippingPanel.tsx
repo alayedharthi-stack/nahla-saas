@@ -117,7 +117,7 @@ export default function OtoShippingPanel({ order, reload }: { order: OrderDetail
           <button className={button} disabled={busy} onClick={() => void run(() => apiCall(`${orderPath}/sync`, { method: 'POST' }), 'تحدّثت حالة الشحنة.')}>تحديث الحالة</button>
           <button className={button} disabled={busy} onClick={() => void run(() => apiCall(`${orderPath}/label`, { method: 'POST' }), 'استُرجعت البوليصة.')}>استرجاع البوليصة</button>
           {shipment.label_url && <a className={button} href={shipment.label_url} target="_blank" rel="noreferrer">طباعة البوليصة</a>}
-          <button className={button} disabled={busy || !shipment.label_url} onClick={() => void run(() => apiCall(`${orderPath}/send-whatsapp`, { method: 'POST' }), 'قبل واتساب طلب الإرسال. تابع حالة التسليم في المحادثة.')}>إرسال البوليصة والتتبع للعميل</button>
+          <button className={button} disabled={busy || !shipment.label_url || !shipment.tracking_number} onClick={() => void run(() => apiCall(`${orderPath}/send-whatsapp`, { method: 'POST' }), 'قبل واتساب طلب الإرسال. تابع حالة التسليم في المحادثة.')}>إرسال البوليصة والتتبع للعميل</button>
           <button className={button} disabled={busy} onClick={() => void run(() => apiCall(`${orderPath}/cancel`, { method: 'POST' }), 'أُرسل طلب الإلغاء إلى OTO. ننتظر تأكيده.')}>طلب إلغاء الشحنة</button>
         </div>
       </div>}
