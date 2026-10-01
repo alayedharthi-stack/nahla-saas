@@ -832,6 +832,62 @@ def nahla_owns_cod_customer_confirmation(order: Any) -> bool:
     )
 
 
+# A customer's decision as this flow records it on the order (handle_cod_reply:
+# confirm requested, confirmed and pushed, cancelled), or a confirmation that
+# was bypassed and the order pushed without asking.
+_COD_DECISION_KEYS = (
+    "cod_confirm_requested_at",
+    "cod_confirmed_at",
+    "cod_pushed_external_id",
+    "cod_cancelled_at",
+    "cod_confirmation_bypassed",
+)
+# The same decisions as the flow logs them; older rows can carry the event
+# after a store snapshot dropped the metadata key.
+COD_DECISION_EVENTS = ("order.cod.confirmed", "order.cod.cancelled")
+
+
+def cod_decided_order_refs(db, tenant_id: int, order_ids: Any) -> set:
+    """Of these orders of this tenant, those (as ``system_events.reference_id``)
+    whose customer decision the flow logged as an event."""
+    from models import SystemEvent  # noqa: PLC0415
+
+    refs = sorted({str(order_id) for order_id in order_ids or () if order_id is not None})
+    if not refs:
+        return set()
+    rows = (
+        db.query(SystemEvent.reference_id)
+        .filter(
+            SystemEvent.tenant_id == int(tenant_id),
+            SystemEvent.event_type.in_(COD_DECISION_EVENTS),
+            SystemEvent.reference_id.in_(refs),
+        )
+        .all()
+    )
+    return {str(ref) for (ref,) in rows}
+
+
+def cod_awaits_customer_decision(order: Any, *, decided_refs: Any = frozenset()) -> bool:
+    """True only while this flow's question is still open with the customer.
+
+    Nahla asked — the order is in this flow's own waiting state
+    (``pending_confirmation``, written only by the COD checkout), or the
+    confirmation send was stamped on it — and no decision is recorded, on the
+    order or in its events. A store's merchant-review status is not, by itself,
+    a question to the customer: ``under_review`` is what this flow writes once
+    the customer confirms, and a bank transfer under review was never asked.
+    """
+    meta = getattr(order, "extra_metadata", None)
+    if not isinstance(meta, dict):
+        meta = {}
+    if any(meta.get(key) for key in _COD_DECISION_KEYS):
+        return False
+    if str(getattr(order, "id", "") or "") in decided_refs:
+        return False
+    status = str(getattr(order, "status", "") or "").strip().lower()
+    return status == STATUS_PENDING_CUSTOMER or bool(meta.get("nahla_cod_confirmation_sent"))
+
+
 def _stamp_cod_confirmation_sent(order: Any, *, template: Any, send_method: str) -> None:
     meta = dict(getattr(order, "extra_metadata", None) or {})
     meta["nahla_cod_confirmation_sent"] = True

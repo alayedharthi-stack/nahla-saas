@@ -44,8 +44,8 @@ class TestPricingV2:
             output_tokens=0,
         )
         assert sonnet["total_cost_usd"] == Decimal("3")
-        assert haiku["total_cost_usd"] == Decimal("0.80")
-        assert opus["total_cost_usd"] == Decimal("15")
+        assert haiku["total_cost_usd"] == Decimal("1")
+        assert opus["total_cost_usd"] == Decimal("5")
         assert sonnet["total_cost_usd"] > haiku["total_cost_usd"]
         assert opus["total_cost_usd"] > sonnet["total_cost_usd"]
 
@@ -264,7 +264,9 @@ class TestAnthropicProviderIntegration:
         mock_sdk.APIConnectionError = _ConnError
 
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=False):
-            with patch.object(anthropic_provider, "_SDK_AVAILABLE", True):
+            with patch.object(anthropic_provider, "_SDK_AVAILABLE", True), patch.object(
+                anthropic_provider, "_API_KEY", "test-key",
+            ):
                 with patch.object(anthropic_provider, "_anthropic_sdk", mock_sdk):
                     with patch(
                         "modules.ai.orchestrator.ai_usage_ledger.record_ai_usage_event",
@@ -279,4 +281,4 @@ def test_pricing_tier_labels():
     assert pricing_tier_for_model("claude-opus-4-6") == "opus"
     assert pricing_tier_for_model("claude-sonnet-4-6") == "sonnet"
     assert pricing_tier_for_model("claude-haiku-4-5") == "haiku"
-    assert lookup_model_pricing_v2("anthropic", "claude-opus-4-6").input_per_1m == Decimal("15")
+    assert lookup_model_pricing_v2("anthropic", "claude-opus-4-6").input_per_1m == Decimal("5")

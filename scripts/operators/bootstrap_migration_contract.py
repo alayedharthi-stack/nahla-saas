@@ -28,6 +28,8 @@ SHIPMENT_ALEMBIC_HEAD = "0112"
 # and 0111 application siblings are untouched, so bootstrap stays pinned to 0093
 # and bare ``head`` stays ambiguous — which is the point of naming every target.
 NAVIGATION_ALEMBIC_HEAD = "0113"
+# AI accounting deduplication extends navigation without changing bootstrap.
+AI_USAGE_ALEMBIC_HEAD = "0114"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -36,14 +38,17 @@ BASE_REPOSITORY_ALEMBIC_HEADS = frozenset({"0092", APPLICATION_ALEMBIC_HEAD})
 ADDRESS_REPOSITORY_ALEMBIC_HEADS = BASE_REPOSITORY_ALEMBIC_HEADS | {ADDRESS_ALEMBIC_HEAD}
 SHIPMENT_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, SHIPMENT_ALEMBIC_HEAD})
-REPOSITORY_ALEMBIC_HEADS = frozenset(
+NAVIGATION_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
+REPOSITORY_ALEMBIC_HEADS = frozenset(
+    {"0092", APPLICATION_ALEMBIC_HEAD, AI_USAGE_ALEMBIC_HEAD})
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
     # A checkout that predates the navigation snapshot is still a supported
     # topology, so both are accepted rather than one replacing the other.
     SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
+    NAVIGATION_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 

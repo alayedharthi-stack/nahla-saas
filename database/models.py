@@ -2923,6 +2923,12 @@ class AiQualityEvent(Base):
 class AIUsageEvent(Base):
     """One row per LLM call — token counts and USD cost, no message content."""
     __tablename__ = "ai_usage_events"
+    __table_args__ = (
+        # Provider response IDs identify calls, independent of tenant attribution.
+        # NULL means no stable provider ID exists; never deduplicate by turn ID
+        # because one turn can contain several separately billable model calls.
+        Index("uq_ai_usage_provider_request", "provider", "request_id", unique=True),
+    )
 
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
