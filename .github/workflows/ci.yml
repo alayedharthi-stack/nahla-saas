@@ -9,7 +9,7 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-    # Full unit + strict PostgreSQL + boundary suites take 16-21 minutes on
+    # Full unit + strict PostgreSQL + boundary suites take about 16-25 minutes on
     # standard runners; retain every proof and allow them to finish.
     timeout-minutes: 40
 
