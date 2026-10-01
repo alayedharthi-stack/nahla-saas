@@ -202,6 +202,36 @@ def test_a_customer_cancellation_stays_as_the_flow_wrote_it():
     assert store.state(order) == ("cancelled", *UNTOUCHED)
 
 
+@pytest.mark.parametrize("record", ["metadata", "event_only"])
+def test_a_customer_cancellation_is_kept_after_sync_restores_a_review_status(record: str):
+    """The customer cancelled; a later store snapshot put the order back under
+    review. The recorded decision still ends the question."""
+    store = Store()
+    meta = {**ASKED, **({"cod_cancelled_at": NOW.isoformat()} if record == "metadata" else {})}
+    order = store.order("under_review", meta=meta)
+    if record == "event_only":
+        store.event(order, "order.cod.cancelled")
+    for hours in (7, 25, 49):
+        assert store.sweep(hours=hours) == 0
+    assert store.state(order) == ("under_review", *UNTOUCHED)
+
+
+def test_an_order_is_timed_out_once_even_when_sync_restores_the_store_status():
+    """Asked, never answered, cancelled at the timeout; store sync then put the
+    store's status back. The sweep does not cancel or remind it again (in
+    production the loop ran up to ~190 times on one order)."""
+    store = Store()
+    order = store.order("under_review", meta=ASKED)
+    assert store.sweep(hours=7) == 2
+    assert store.sweep(hours=25) == 1
+    order.status = "under_review"                     # what store sync wrote back
+    store.db.commit()
+    for hours in (25.1, 26, 30, 48):
+        assert store.sweep(hours=hours) == 0
+    status, auto_cancelled, reminders, cancels, reminder_events = store.state(order)
+    assert (status, auto_cancelled, reminders, cancels, reminder_events) == ("under_review", True, 2, 1, 2)
+
+
 def test_a_cancellation_the_store_did_not_take_still_times_out_as_before():
     """The customer asked to cancel and the store update failed: no decision
     is recorded on the order, so the timeout cancels it, as it did before."""

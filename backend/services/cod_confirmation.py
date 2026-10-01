@@ -847,16 +847,20 @@ _COD_DECISION_KEYS = (
 COD_DECISION_EVENTS = ("order.cod.confirmed", "order.cod.cancelled")
 
 
-def cod_decided_order_refs(db, tenant_id: int) -> set:
-    """This tenant's orders (as ``system_events.reference_id``) with a logged decision."""
+def cod_decided_order_refs(db, tenant_id: int, order_ids: Any) -> set:
+    """Of these orders of this tenant, those (as ``system_events.reference_id``)
+    whose customer decision the flow logged as an event."""
     from models import SystemEvent  # noqa: PLC0415
 
+    refs = sorted({str(order_id) for order_id in order_ids or () if order_id is not None})
+    if not refs:
+        return set()
     rows = (
         db.query(SystemEvent.reference_id)
         .filter(
             SystemEvent.tenant_id == int(tenant_id),
             SystemEvent.event_type.in_(COD_DECISION_EVENTS),
-            SystemEvent.reference_id.isnot(None),
+            SystemEvent.reference_id.in_(refs),
         )
         .all()
     )

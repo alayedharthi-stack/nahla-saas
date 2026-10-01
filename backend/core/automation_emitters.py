@@ -817,7 +817,8 @@ def scan_cod_confirmations(
     state — ``under_review`` is what the confirmation flow writes once the
     customer confirms, and a bank transfer under merchant review was never
     asked — so a confirmed order is never cancelled for "no customer response",
-    however often the sweep runs.
+    however often the sweep runs. An order is timed out once: after sync
+    restores a store order the sweep cancelled, it is not cancelled again.
 
     Per-order progress is stored on `Order.extra_metadata` under
     `cod_reminders: [{step_idx, emitted_at}]` and `cod_auto_cancelled_at`.
@@ -910,15 +911,19 @@ def scan_cod_confirmations(
         o for o in candidate_orders
         if is_pending_confirmation_status(o.status)
     ]
-    decided_refs = cod_decided_order_refs(db, tenant_id) if in_confirmation_status else set()
+    decided_refs = cod_decided_order_refs(db, tenant_id, [o.id for o in in_confirmation_status])
+    # An order this sweep already cancelled had its one timeout: when store
+    # sync later restores the store's status, the store is answering, and the
+    # sweep does not cancel (or remind) it again.
     pending_orders = [
         o for o in in_confirmation_status
         if cod_awaits_customer_decision(o, decided_refs=decided_refs)
+        and not (o.extra_metadata or {}).get("cod_auto_cancelled_at")
     ]
     if len(pending_orders) != len(in_confirmation_status):
-        logger.info(
+        logger.debug(
             "[Emitter:cod] tenant=%s left %d order(s) in a confirmation status alone — "
-            "customer already decided, or never asked",
+            "customer already decided, never asked, or already timed out once",
             tenant_id, len(in_confirmation_status) - len(pending_orders),
         )
     from core.internal_e2e_safety import is_internal_e2e_order  # noqa: PLC0415
