@@ -28,7 +28,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
 from core.local_order_resolver import CUSTOMER_ORDER_HISTORY_LIMIT
-from core.order_status_label import ORDER_STATUS_LABELS_AR, order_status_label_ar
+from core.local_order_resolver import resolve_customer_order_context
+from core.order_status_label import LIFECYCLE_STATE_LABELS_AR, ORDER_STATUS_LABELS_AR, order_status_label_ar
 from models import Base, Conversation, Customer, Order, Tenant, WhatsAppConnection
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.output import OrderResolveResult
@@ -295,19 +296,27 @@ def test_a_status_the_platform_cannot_read_stays_unknown():
     assert result.unknown.listed <= MAX_LISTED_UNKNOWN_ORDERS
 
 
-def test_a_salla_completed_order_is_fulfilled_not_finished_in_both_reads():
-    """On Salla ``completed`` is the merchant's «تنفيذ»: fulfilled, not yet
-    shipped (store_adapters/salla_lifecycle). It is ongoing, labelled as the
-    fulfilled order it is — never with the plain label of a finished order —
-    and the one-order lookup and the history say the same."""
+# Labels that claim a handover the status does not prove: shipment, transit,
+# delivery, completion — or "prepared for shipping", untrue of a pickup order.
+_HANDOVER_LABELS = {ORDER_STATUS_LABELS_AR[k] for k in (
+    "fulfilled", "shipped", "in_transit", "on_the_way", "out_for_delivery", "delivering", "delivered",
+    "completed")}
+
+
+def test_a_salla_completed_order_is_ongoing_and_labelled_without_assuming_shipment():
+    """On Salla ``completed`` is the merchant's «تنفيذ»: fulfilled and not yet
+    handed over (store_adapters/salla_lifecycle), so it is ongoing. No order
+    row carries whether it is a shipping or a pickup order, so its label is the
+    platform's "ready" state, true of both: never «مكتمل», never delivered,
+    never "prepared for shipping". The lookup and the history say the same."""
     store = Store()
     order = store.order("completed")
     context = store.context()
     listed = history(context)
     assert refs(listed.ongoing) == [order.external_order_number] and listed.finished.count == 0
     entry = listed.ongoing.orders[0]
-    assert entry.status_label == ORDER_STATUS_LABELS_AR["fulfilled"]
-    assert entry.status_label != ORDER_STATUS_LABELS_AR["completed"]
+    assert entry.status_label == LIFECYCLE_STATE_LABELS_AR["ready"]
+    assert entry.status_label not in _HANDOVER_LABELS
     resolved = resolve(context)
     assert resolved.order.status_label == entry.status_label
 
@@ -323,7 +332,7 @@ def test_statuses_the_salla_adapter_reads_as_under_way_are_ongoing_and_keep_thei
     assert refs(result.ongoing) == [order.external_order_number]
     label = result.ongoing.orders[0].status_label
     assert label == order_status_label_ar(status)
-    assert label not in {ORDER_STATUS_LABELS_AR[k] for k in ("fulfilled", "confirmed", "shipped", "delivered")}
+    assert label not in _HANDOVER_LABELS | {ORDER_STATUS_LABELS_AR["confirmed"]}
 
 
 def test_a_completed_order_from_a_store_without_that_meaning_is_finished():
@@ -341,6 +350,82 @@ def test_shipment_and_delivery_stages_follow_the_store():
     result = history(store.context())
     assert refs(result.ongoing) == [shipped.external_order_number]
     assert refs(result.finished) == [delivered.external_order_number]
+
+
+# ── The lookup picks by the history's reading ────────────────────────────────
+
+
+def _lookup_and_history(store: Store) -> tuple:
+    context = store.context()
+    return resolve(context), history(context)
+
+
+@pytest.mark.parametrize("older,newer,picked", [
+    ("in_progress", "completed", "newer"),        # Salla completed: still under way, and newer
+    ("in_progress", "refunded", "older"),         # refunded is finished, never the open order
+    ("in_progress", "returned", "older"),
+    ("in_progress", "merchant_custom_stage", "older"),   # unknown is never called open
+    ("processing", "shipped", "newer"),
+])
+def test_the_order_the_lookup_calls_open_is_the_newest_the_history_calls_ongoing(older: str, newer: str,
+                                                                                   picked: str):
+    store = Store()
+    first = store.order(older)
+    second = store.order(newer)
+    lookup, listed = _lookup_and_history(store)
+    expected = (second if picked == "newer" else first).external_order_number
+    assert lookup.selection_reason == "latest_open_order"
+    assert lookup.order.order_reference == expected == listed.ongoing.orders[0].order_reference
+
+
+def test_with_nothing_ongoing_the_lookup_never_calls_an_order_open():
+    """Unknown and finished only: the history has nothing ongoing, and the
+    lookup does not name any order the latest open one."""
+    store = Store()
+    store.order("delivered")
+    store.order("merchant_custom_stage")
+    lookup, listed = _lookup_and_history(store)
+    assert listed.ongoing.count == 0
+    assert lookup.status == "ok" and lookup.selection_reason != "latest_open_order"
+
+
+def test_a_cart_is_never_the_order_the_lookup_picks():
+    """A newer cart (flag only, or status only) is not an order to the history
+    and is not picked by the lookup."""
+    store = Store()
+    real = store.order("delivered")
+    store.order("pending", cart=True)
+    store.order("abandoned")
+    lookup, listed = _lookup_and_history(store)
+    assert listed.total_orders == 1
+    assert lookup.order.order_reference == real.external_order_number
+
+
+def test_the_lookup_and_the_history_agree_on_every_order_they_both_name():
+    store = Store()
+    for status in ("delivered", "completed", "refunded", "in_progress", "merchant_custom_stage", "shipped"):
+        store.order(status)
+    context = store.context()
+    listed = history(context)
+    labels = {entry.order_reference: entry.status_label
+              for group in (listed.ongoing, listed.finished, listed.unknown) for entry in group.orders}
+    resolved = resolve(context)
+    assert resolved.order.order_reference == listed.ongoing.orders[0].order_reference
+    assert resolved.order.status_label == labels[resolved.order.order_reference]
+
+
+def test_other_readers_of_the_resolver_keep_their_status_list():
+    """The lifecycle reading is the agent lookup's: the resolver's other
+    callers (default arguments) still read Salla ``completed`` as closed."""
+    store = Store()
+    store.order("completed")
+    store.db.commit()
+    default = resolve_customer_order_context(store.db, tenant_id=store.tenant.id, customer_id=store.customer.id,
+                                             phone=PHONE)
+    aware = resolve_customer_order_context(store.db, tenant_id=store.tenant.id, customer_id=store.customer.id,
+                                           phone=PHONE, lifecycle_aware=True)
+    assert default.latest_open_order is None
+    assert aware.latest_open_order is not None and aware.selected_reason == "latest_open_order"
 
 
 # ── Orders that are not this customer's ──────────────────────────────────────

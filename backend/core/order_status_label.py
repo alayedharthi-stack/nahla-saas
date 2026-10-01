@@ -45,6 +45,16 @@ ORDER_STATUS_LABELS_AR: dict[str, str] = {
 }
 
 
+# Labels for a platform lifecycle state that no store word above names
+# truthfully, read by the order lookup and history only (the map above, and
+# every reader of it, are unchanged). ``ready`` is fulfilled and not yet handed
+# over (store_adapters/salla_lifecycle): true of a shipping order and of a
+# pickup order alike, so it claims neither shipment nor collection.
+LIFECYCLE_STATE_LABELS_AR: dict[str, str] = {
+    "ready": "تم تجهيز الطلب",
+}
+
+
 def _normalize_status_slug(status: str) -> str:
     return str(status or "").strip().lower().replace(" ", "_").replace("-", "_")
 
@@ -68,6 +78,7 @@ def order_status_label_ar(status: str, source: Optional[str] = None) -> str:
 
 
 __all__ = [
+    "LIFECYCLE_STATE_LABELS_AR",
     "ORDER_STATUS_LABELS_AR",
     "order_status_label_ar",
 ]
