@@ -423,6 +423,14 @@ def ensure_waba_catalog_for_tenant(
         result["skipped"] = True
         result["error"] = ERROR_ONBOARDING_DISABLED
         return result
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if confirm and not tenant_in_sync_scope(int(tenant_id)):
+        # Limited trial: tenants outside the scope get the read-only dry-run
+        # (no catalog create, no link, no stamp).
+        confirm = False
+        result["dry_run"] = True
+        result["scope_dry_run"] = True
 
     conn = _load_connection(db, tenant_id)
     if conn is None:

@@ -285,3 +285,40 @@ def test_every_write_entry_point_refuses_out_of_scope_tenants(monkeypatch):
         assert row.status == "pending" and row.attempts == 0
     finally:
         session.close(); engine.dispose()
+
+
+def test_reconnect_bind_and_onboarding_are_read_only_for_out_of_scope_tenants(monkeypatch):
+    """WhatsApp reconnect triggers the catalog bind for any tenant; under the
+    trial scope an excluded tenant must not get a share/link POST or a
+    catalog create, only the dry-run read."""
+    from services.meta_catalog_onboarding import ensure_waba_catalog_for_tenant
+    from services.meta_catalog_reconnect import bind_current_waba_to_merchant_catalog
+
+    session, trial, other, imported, engine = _make_db()
+    try:
+        monkeypatch.setenv(TENANT_SCOPE_ENV, str(trial))
+        monkeypatch.setenv("NAHLA_AUTO_CATALOG_ONBOARDING", "1")
+        posts = []
+        with patch("services.meta_catalog_reconnect.select_catalog_graph_token",
+                   lambda conn, cid, client=None: {"token": "tok", "token_source": "merchant", "catalog": {"business_id": "BM-1"}}), \
+             patch("services.meta_catalog_reconnect._select_graph_token", lambda conn: {"token": "tok"}), \
+             patch("services.meta_catalog_reconnect.fetch_waba_owner_business_id", lambda waba, tok, client=None: {"business_id": "BM-1"}), \
+             patch("services.meta_catalog_reconnect.link_waba_to_catalog",
+                   lambda waba, cid, tok, confirm=False, client=None: (posts.append(("link", confirm)) or
+                       {"ok": True, "dry_run": not confirm, "already_linked": False, "link_status": "not_linked", "action": "dry_run"})):
+            res = bind_current_waba_to_merchant_catalog(session, other, confirm=True)
+        assert res["scope_dry_run"] is True and res["dry_run"] is True
+        assert posts == [("link", False)]
+        with patch("services.meta_catalog_onboarding._select_graph_token", lambda conn: {"token": "tok"}), \
+             patch("services.meta_catalog_onboarding.fetch_waba_owner_business_id", lambda waba, tok, client=None: {"business_id": "BM-1"}), \
+             patch("services.meta_catalog_onboarding._fetch_waba_product_catalogs", lambda waba, tok, client=None: ([], 200, None)), \
+             patch("services.meta_catalog_onboarding.probe_catalog_readable", lambda tok, cid, client=None: {"ok": True, "business_id": "BM-1"}), \
+             patch("services.meta_catalog_onboarding.link_waba_to_catalog", side_effect=AssertionError("must not link")), \
+             patch("services.meta_catalog_onboarding._create_owned_catalog", side_effect=AssertionError("must not create")):
+            ens = ensure_waba_catalog_for_tenant(session, other, confirm=True)
+        assert ens["dry_run"] is True and ens["scope_dry_run"] is True
+        assert ens["ok"] is True and ens["created"] is False
+        conn = session.query(WhatsAppConnection).filter_by(tenant_id=other).first()
+        assert conn.meta_catalog_id == "CAT-OTHER"
+    finally:
+        session.close(); engine.dispose()
