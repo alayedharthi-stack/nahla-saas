@@ -285,3 +285,103 @@ def test_cli_entry_refuses_to_run_without_database_url(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["catalog_trial_readout", "--tenant-id", "35"])
     assert module.main() == 1
     assert "DATABASE_URL" in capsys.readouterr().err
+
+
+# ── standalone bundle (runs against the deployed code version) ────────────
+
+def _build_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_ctr_standalone", REPO_ROOT / "scripts" / "operators" / "build_catalog_trial_readout_standalone.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_standalone_bundle_matches_the_service_module():
+    build = _build_module()
+    assert build.TARGET.read_text(encoding="utf-8") == build.build(), (
+        "regenerate with: python scripts/operators/build_catalog_trial_readout_standalone.py"
+    )
+
+
+@_ENT
+@_READY
+def test_readout_falls_back_when_branch_only_modules_are_not_deployed(monkeypatch):
+    """On the deployed code version the scope module and ``source_platform_status``
+    do not exist yet; the readout must still produce the full DB section."""
+    import services.catalog_trial_readout as readout
+
+    monkeypatch.setitem(sys.modules, "services.whatsapp_catalog_sync_scope", None)  # import -> ImportError
+    # the deployed core.catalog has no source_platform_status: force the inline fallback
+    monkeypatch.setattr(readout, "_source_platform_status", readout._source_platform_status_fallback)
+    monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", "35")
+    session, tid, _other, engine = _make_db()
+    try:
+        _salla(session, tid, "500100", variants=1)
+        _salla(session, tid, "500700", variants=1, status="hidden")
+        report = build_catalog_trial_readout(session, tid)
+        _no_token_anywhere(report)
+        assert report["sync_scope"]["source"] == "env_fallback_scope_module_not_deployed"
+        assert report["sync_scope"]["tenant_ids"] == [35] and report["sync_scope"]["tenant_in_scope"] is (tid == 35)
+        ext = {p["external_id"]: p for p in report["products"]}
+        assert ext["500700"]["source_status"] == "hidden" and ext["500100"]["source_status"] == "sale"
+        assert report["product_counts"]["hidden_at_source"] == 1
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_standalone_cli_runs_against_a_sqlite_database_and_prints_the_ssh_command(monkeypatch, tmp_path, capsys):
+    import importlib.util
+    import subprocess
+
+    build = _build_module()
+    # a database file with one generic store, built with the ORM
+    db_file = tmp_path / "readout.sqlite"
+    engine = create_engine(f"sqlite:///{db_file}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    tenant = Tenant(name="متجر تجريبي عام", is_active=True)
+    session.add(tenant); session.commit()
+    session.add(WhatsAppConnection(tenant_id=tenant.id, whatsapp_business_account_id="WABA-1", phone_number_id="PN-1",
+                                   access_token=SECRET, meta_catalog_id=None, catalog_enabled=False, extra_metadata={}))
+    session.commit()
+    _salla(session, tenant.id, "500100", variants=2)
+    tid = tenant.id
+    session.close(); engine.dispose()
+
+    spec = importlib.util.spec_from_file_location("ctr_standalone", build.TARGET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
+    monkeypatch.setattr(sys, "argv", ["ctr", "--tenant-id", str(tid), "--pretty"])
+    with _ENT, _READY:
+        rc = module.main()
+    out, err = capsys.readouterr()
+    assert rc == 0
+    report = json.loads(out)
+    _no_token_anywhere(report)
+    assert report["tenant_id"] == tid and report["product_counts"]["total"] == 1
+    assert report["connection"]["catalog_enabled"] is False and report["connection"]["meta_catalog_id"] is None
+    assert "catalog_enabled" in report["missing_requirements"] and "meta_catalog_id" in report["missing_requirements"]
+    assert "trial-readout tenant=" in err
+
+    # the ssh one-liner carries this very file, base64-encoded, and runs it from /app
+    monkeypatch.setattr(sys, "argv", ["ctr", "--print-ssh-command", "--tenant-id", "35", "--include-graph"])
+    assert module.main() == 0
+    cmd = capsys.readouterr().out.strip()
+    assert cmd.startswith("railway ssh --environment production --service nahla-saas -- bash -lc 'echo ")
+    import base64, re
+    payload = re.search(r"echo ([A-Za-z0-9+/=]+) \| base64 -d", cmd).group(1)
+    assert base64.b64decode(payload) == build.TARGET.read_bytes()
+    assert "cd /app && python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph" in cmd
+    assert "DATABASE_URL" not in cmd and SECRET not in cmd
+    # a missing DATABASE_URL is refused, not guessed
+    monkeypatch.delenv("DATABASE_URL")
+    monkeypatch.setattr(sys, "argv", ["ctr", "--tenant-id", "35"])
+    assert module.main() == 1
+    # the bundle is plain python the production interpreter can compile
+    assert subprocess.run([sys.executable, "-m", "py_compile", str(build.TARGET)], capture_output=True).returncode == 0

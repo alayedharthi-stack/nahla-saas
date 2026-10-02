@@ -221,6 +221,12 @@ def channel_identities_for_product(db: Any, product: Any) -> List[Dict[str, Any]
             _add(rid, None, None, "expected_payload")
 
     product_meta_item = _strip(getattr(product, "meta_item_id", None))
+    if product_meta_item and any(item.get("meta_item_id") == product_meta_item for item in out):
+        # A legacy row that mirrors one variant's Graph item on the product
+        # itself: that item is already covered by its membership identity, so
+        # a second, product-level retailer id would only cost the drain an
+        # extra lookup of a retailer id that never existed on Meta.
+        product_meta_item = ""
     if product_meta_item:
         from core.catalog import canonical_retailer_id  # noqa: PLC0415
 

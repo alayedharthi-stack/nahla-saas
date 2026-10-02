@@ -327,11 +327,9 @@ def test_hide_and_delete_touch_only_local_state_for_the_excluded_store():
             asyncio.run(svc.handle_product_deleted("610100"))
             assert s.query(Product).filter_by(tenant_id=w.review, external_id="610100").count() == 0
             ledger = s.query(CatalogChannelRetirement).filter_by(tenant_id=w.review).all()
-            # the variant identity from the membership row, plus the product-level identity the
-            # legacy row carried in meta_item_id (same Graph item; the drain treats an unknown
-            # retailer id as absent). Both pending, nothing sent.
-            assert {r.retailer_id for r in ledger} >= {"610100-1"} and len(ledger) <= 2
-            assert all(r.meta_item_id == "META-610100-1" and r.status == "pending" for r in ledger)
+            # exactly the variant identity: the legacy product-level meta_item_id mirrors the
+            # same Graph item and must not produce a second, never-existing retailer id
+            assert [(r.retailer_id, r.meta_item_id, r.status) for r in ledger] == [("610100-1", "META-610100-1", "pending")]
             ledger_count = len(ledger)
             drained = drain_channel_retirement_ledger(s, w.review, client=graph)
             assert drained["processed"] == 0 and drained["skipped_scope"] >= 1
