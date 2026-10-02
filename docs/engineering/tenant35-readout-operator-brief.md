@@ -116,10 +116,16 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 **السؤال الذي يحسمه:** لمن عناصر الكتالوج `871742015873294` الـ34 (التاجر)، وما **مصدر نشرها** المقبول، وأي متجر تعود إليه روابط `dev-cgcaqkpx5wgewsyv` مقارنةً بمتجر Tenant 35 الحالي. **ما لا يحسمه:** دعم API مع coexistence، الربط الفعلي، سبب رفض Graph، قبول Meta.
 
-**السكربت المثبَّت:** `scripts/operators/catalog_q5_membership_readout.py` من الفرع `claude/nahla-product-catalog-sync-7nhht0` (PR #1193)، SHA-256:
+**السكربت المثبَّت:** `scripts/operators/catalog_q5_membership_readout.py` من الفرع `claude/nahla-product-catalog-sync-7nhht0` (PR #1193) **عند الالتزام الكامل** `c61ac8c5ef2340dff2fee69ef4613df402a2ed94`؛ SHA-256 للملف:
 
 ```text
 1e4233db5b4516143541ffc2555a197e184a6078ab99af9fd484cbc9c4342545
+```
+
+```bash
+# جلب الملف المثبَّت بعينه (قراءة فقط من المستودع)
+git fetch origin c61ac8c5ef2340dff2fee69ef4613df402a2ed94
+git show c61ac8c5ef2340dff2fee69ef4613df402a2ed94:scripts/operators/catalog_q5_membership_readout.py > catalog_q5_membership_readout.py
 ```
 
 - **قراءة فقط:** جلسة `readonly` + `SET default_transaction_read_only = on` + مهلة 30 ثانية؛ كل عبارة تُفحص أنها تبدأ بـ`SELECT` قبل تنفيذها؛ المعاملة تُرجَع (`rollback`) في النهاية. لا يختار أي عمود رمز/سر ولا أي عمود JSON كاملًا (مفاتيح محددة فقط)، ويرفض الطباعة إن ظهر في الناتج شكل رمز أو DSN. لا Graph ولا سلة ولا شبكة سوى قاعدة البيانات. `DATABASE_URL` من بيئة الحاوية ولا يُطبع.
@@ -137,7 +143,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 #### التنفيذ
 
 ```bash
-# 1) الملف من الفرع (الالتزام المثبَّت في التقرير §7.0-هـ)، وتحقق البصمة قبل أي شيء
+# 1) الملف من الالتزام c61ac8c5ef23 (أعلاه)، وتحقق البصمة قبل أي شيء
 sha256sum catalog_q5_membership_readout.py
 # يجب أن تكون: 1e4233db5b4516143541ffc2555a197e184a6078ab99af9fd484cbc9c4342545
 
