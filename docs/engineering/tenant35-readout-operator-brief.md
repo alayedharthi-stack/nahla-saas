@@ -14,11 +14,11 @@
 | البيئة | `production` (`ede962ce-3042-4dae-94de-623837e83ed9`) |
 | الخدمة | `nahla-saas` (`686b36c5-a926-4e58-912a-5e9d13fbc2e7`) |
 | الصلاحية المطلوبة | `railway ssh` إلى هذه الخدمة فقط؛ لا تحتاج النشر أو تعديل المتغيرات ولا يجوز استخدامهما |
-| **الملف المثبَّت** | `scripts/operators/catalog_trial_readout_standalone.py` من مستودع `alayedharthi-stack/nahla-saas`، فرع `claude/nahla-product-catalog-sync-7nhht0`، **عند الالتزام `bb61ae52ad168f63932a6cd8c0a2f938900db6af` حصرًا** |
-| **SHA-256 الكامل** | `362ec06d9586e3b90c0d0998f71b4e891eb956b003b4c5998e104f9dc849e65d` (الحجم 70607 بايت). إن اختلفت البصمة فلا تشغّل الملف وأبلغ |
+| **الملف المثبَّت** | `scripts/operators/catalog_trial_readout_standalone.py` من مستودع `alayedharthi-stack/nahla-saas`، فرع `claude/nahla-product-catalog-sync-7nhht0`، **عند الالتزام `457b4b33194fc6b80f723b0d13c9fadf0b269409` حصرًا** |
+| **SHA-256 الكامل** | `1ffbeb2128b7846d2e533cf13c8f10c148078f78076cee4e53ee0ed33092031c` (الحجم 73071 بايت). إن اختلفت البصمة فلا تشغّل الملف وأبلغ |
 | على جهازك | Python 3.9+ و Railway CLI مسجّل الدخول (`railway whoami`) |
 
-> إصدارات سابقة من الملف (`18682b12…`، `c90f7d9e…`، `16ab1a5e…`) انتهى دورها؛ لا تستخدمها.
+> إصدارات سابقة من الملف (`18682b12…`، `c90f7d9e…`، `16ab1a5e…`، `362ec06d…`) انتهى دورها؛ لا تستخدمها.
 
 ### أ-2. ممنوعات صريحة
 
@@ -35,7 +35,7 @@ railway status
 
 # تحقق البصمة الكاملة قبل أي شيء
 sha256sum catalog_trial_readout_standalone.py
-# يجب أن تكون: 362ec06d9586e3b90c0d0998f71b4e891eb956b003b4c5998e104f9dc849e65d
+# يجب أن تكون: 1ffbeb2128b7846d2e533cf13c8f10c148078f78076cee4e53ee0ed33092031c
 
 # اطلب من الملف طباعة أمر railway ssh الذي يحمله ويشغّله (نفس خيارات v2)
 python3 catalog_trial_readout_standalone.py --print-ssh-command \
@@ -78,7 +78,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 ## الجزء ب — طلب منفصل: قراءة لوحة تطبيق Meta وWhatsApp Manager **بعد تسجيل دخول المالك** (قراءة فقط، بلا أي تعديل)
 
-في التشغيل الثاني طلبت الصفحة تسجيل الدخول ولم يُقرأ أي بند؛ **كل البنود أدناه ما زالت «غير معروفة»**. المالك يسجّل الدخول بحسابه ثم ينفّذ المشغّل القراءة أمامه أو ينفّذها المالك بنفسه. لا يمكن قراءة هذه البنود عبر Graph برمز تاجر، وهي حاكمة في تفسير غياب `catalog_management` **وفي حسم ما إذا كان WABA `1682673239554563` يقبل كتالوج API أصلًا**. المطلوب قراءة ونقل فقط؛ **لا تغيّر أي إعداد أو صلاحية أو وضع تطبيق، ولا تقدّم طلب مراجعة، ولا تربط أو تنشئ كتالوجًا، ولا تلمس اتصال واتساب أو وضع coexistence.**
+في التشغيل الثاني طلبت الصفحة تسجيل الدخول ولم يُقرأ أي بند؛ **كل البنود أدناه ما زالت «غير معروفة»**. المالك يسجّل الدخول بحسابه ثم ينفّذ المشغّل القراءة أمامه أو ينفّذها المالك بنفسه. لا يمكن قراءة هذه البنود عبر Graph برمز تاجر، وهي حاكمة في تفسير غياب `catalog_management` **وفي حسم ما إذا كان WABA `1682673239554563` يقبل كتالوج API أصلًا** (خطأ «SMB business type» يثبت رفض العملية الحالية فقط، لا السبب النهائي ولا كل المسارات). المطلوب قراءة ونقل فقط؛ **لا تغيّر أي إعداد أو صلاحية أو وضع تطبيق، ولا تقدّم طلب مراجعة، ولا تربط أو تنشئ كتالوجًا، ولا تلمس اتصال واتساب أو وضع coexistence.**
 
 ### ب-1. لوحة التطبيق (developers.facebook.com → التطبيق)
 
@@ -94,9 +94,9 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 7. **المحفظة `2138142656950660`:** Business settings → Data sources → Catalogs: هل يوجد كتالوج مملوك لها؟ اسمه ومعرّفه وعدد عناصره، وهل هو مربوط بحساب واتساب (أي حساب)؟ (قراءة فقط.)
 8. **كتالوج التطبيق:** إن كان رقم Tenant 35 على تطبيق WhatsApp Business: هل يوجد كتالوج داخل التطبيق؟ عدد عناصره فقط (قراءة من هاتف التاجر بإذنه، دون تعديل).
 
-### ب-3. نص الوثائق الرسمية (للتحقق من مقتطفات البحث)
+### ب-3. نص الوثائق الرسمية (للتحقق من مقتطفات البحث — نقل حرفي، لا تلخيص)
 
-9. افتح صفحة Meta الرسمية «Onboard WhatsApp Business app users» (Embedded Signup → coexistence) وانقل **نص قسم Limitations حرفيًا** كما هو اليوم، خاصةً الجملة التي تذكر «business tools such as the catalog».
-10. افتح دليل «Sell products and services» (Cloud API) وانقل الفقرة التي تحدد شروط ربط الكتالوج بالـ WABA والصلاحيات المطلوبة.
+9. افتح صفحة Meta الرسمية «Onboard WhatsApp Business app users» (Embedded Signup → coexistence). انقل **جدول مقارنة الميزات حرفيًا بأعمدته** (المتوقع حسب مقتطف البحث: *Feature* / *Changes to the WhatsApp Business app feature after onboarding to Cloud API* / *WhatsApp Business app feature supported on Cloud API?* — انقل الأعمدة كما هي حتى لو اختلفت) **وكل صفوفه**، وخاصةً صف *Business tools (catalog, orders, status)* بقيمتَي عموديه. ثم انقل **قسم Limitations** حرفيًا إن وُجد، وبيّن **هل** الجملة «…business tools such as the catalog are not supported once a number is running Coexistence» موجودة فيه نصًا أم لا (لا تُنسب إليه قبل التحقق).
+10. افتح دليل «Sell products and services» (Cloud API) وانقل الفقرة التي تحدد شروط ربط الكتالوج بالـ WABA والصلاحيات المطلوبة، وأي ذكر لنوع محفظة الأعمال أو لـcoexistence.
 
-**الإخراج:** نص أو لقطات شاشة مع إخفاء أي أسرار (App Secret، رموز). يُرفق مع ناتج الجزء أ، **ويُنقل نصًا داخل الرسالة أيضًا**.
+**الإخراج:** نص أو لقطات شاشة مع إخفاء أي أسرار (App Secret، رموز). يُرفق مع ناتج الجزء أ، **ويُنقل نصًا داخل الرسالة أيضًا** (JSON الجزء أ كاملًا، ونص الجزء ب) لتجاوز مشكلة وصول الملفات.

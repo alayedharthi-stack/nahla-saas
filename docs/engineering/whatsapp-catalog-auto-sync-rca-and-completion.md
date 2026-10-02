@@ -300,7 +300,7 @@ python scripts/operators/catalog_trial_readout_standalone.py --print-ssh-command
   --tenant-id 35 --include-graph --include-salla \
   --candidate-ids 185,188,190 --expected-business-id 2138142656950660
 ```
-الملف مثبَّت على الالتزام `bb61ae52ad168f63932a6cd8c0a2f938900db6af`، SHA-256 `362ec06d9586e3b90c0d0998f71b4e891eb956b003b4c5998e104f9dc849e65d` (70607 بايت)؛ التفاصيل في `docs/engineering/tenant35-readout-operator-brief.md`. ما يُحسم به إضافةً إلى v2: `graph.coexistence`، `graph.waba_catalogs.error_class`، `graph.catalog_path_assessment`، `candidate_salla_crosscheck`، و`candidate_payloads.warnings`.
+الملف مثبَّت على الالتزام `457b4b33194fc6b80f723b0d13c9fadf0b269409`، SHA-256 `1ffbeb2128b7846d2e533cf13c8f10c148078f78076cee4e53ee0ed33092031c` (73071 بايت)؛ التفاصيل في `docs/engineering/tenant35-readout-operator-brief.md`. ما يُحسم به إضافةً إلى v2: `graph.coexistence`، `graph.waba_catalogs.error_class`، `graph.catalog_path_assessment`، `candidate_salla_crosscheck`، و`candidate_payloads.warnings`.
 
 **7.0-ج. عائق Meta المستقل: «SMB business type» وكتالوج coexistence — ما ثبت، وما تقوله الوثائق (بنسبتها الصحيحة)، وما يبقى مشروطًا.**
 
