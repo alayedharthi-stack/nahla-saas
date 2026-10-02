@@ -130,7 +130,7 @@ git show c61ac8c5ef2340dff2fee69ef4613df402a2ed94:scripts/operators/catalog_q5_m
 
 - **قراءة فقط:** جلسة `readonly` + `SET default_transaction_read_only = on` + مهلة 30 ثانية؛ كل عبارة تُفحص أنها تبدأ بـ`SELECT` قبل تنفيذها؛ المعاملة تُرجَع (`rollback`) في النهاية. لا يختار أي عمود رمز/سر ولا أي عمود JSON كاملًا (مفاتيح محددة فقط)، ويرفض الطباعة إن ظهر في الناتج شكل رمز أو DSN. لا Graph ولا سلة ولا شبكة سوى قاعدة البيانات. `DATABASE_URL` من بيئة الحاوية ولا يُطبع.
 - **فحص مخطط مسبق (قراءة فقط):** يقرأ `information_schema.columns` و`alembic_version` أولًا. جدول غائب — **`catalog_channel_retirements` قد لا يوجد على الإنتاج قبل 0116** — أو عمود مطلوب غائب ⇒ يُتخطّى ذلك الاستعلام ويُسجَّل تحت `skipped` باسمه، وتستمر بقية القراءة؛ الأعمدة الاختيارية الغائبة تُسجَّل تحت `schema_preflight.columns_missing`. **لا يُنشئ جدولًا ولا يطبّق هجرة.**
-- **التوافق:** Python 3.11 وpsycopg2 (كلاهما في صورة الإنتاج؛ لا تثبيت حزم)؛ SQL لـPostgreSQL ≥ 9.6؛ جُرّب على PostgreSQL 16 بوجود جدول السحب وبغيابه (اختبارات `backend/tests/test_catalog_q5_membership_readout.py`، وتعمل في CI ضمن `whatsapp-catalog-sync-postgres`).
+- **التوافق:** Python 3.11 وpsycopg2 (كلاهما في صورة الإنتاج؛ لا تثبيت حزم)؛ SQL لـPostgreSQL ≥ 9.6؛ جُرّب على PostgreSQL 16 بوجود جدول السحب وبغيابه (اختبارات `backend/tests/test_catalog_q5_membership_readout.py`؛ حالتا PostgreSQL جُرّبتا محليًا على PostgreSQL 16 وتعملان حيث يتوفر `WA_CATALOG_SYNC_PG_TEST_DATABASE_URL`؛ إدراجهما في مهمة CI تعديل حوكمي على `ci.yml` يُقدَّم منفصلًا).
 - **الروابط:** معرّفات سلة تُستخرج من الصيغتين `/p1207801870` و`/p/1207801870` (ورقم خالص في آخر المسار)؛ روابط نهلة العامة `…/public/catalog/items/nahla_p_<id>` **لا تُعدّ معرّفات سلة** وتُسجَّل هوياتها على حدة (`nahla_public_ids_from_links`).
 
 #### ما تحتاجه
