@@ -97,7 +97,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 ### ق-4 (**منجز** 2026-10-02 — للسجل) — Commerce Manager → الكتالوج `871742015873294` → Items → Export (قراءة فقط)
 
-> **النتيجة (مقارنة المالك بقراءة Tenant 35 الثالثة):** صفر تطابق مع هويات المرشحين العشرين؛ صفر تطابق مع معرّفات منتجات سلة العشرين الحالية؛ 27 عنصرًا بروابط متجر سلة تجريبي `dev-cgcaqkpx5wgewsyv`؛ 7 عناصر `nahla_p_176`–`nahla_p_182` بروابط نهلة العامة. **لا يُصنَّف المرشحون `create` بعد، ولا يُعتمد الكتالوج للتجربة**: ظهور «Nahlah.Ai» و«API» يثبت المصدر المعروض لا التاجر ولا دليل النشر المقبول. التصدير نفسه (Content IDs والروابط، وعمود معرّف Meta إن وُجد) هو **مدخل ق-5**.
+> **النتيجة (مقارنة المالك بقراءة Tenant 35 الثالثة):** صفر تطابق مع هويات المرشحين العشرين؛ صفر تطابق مع معرّفات منتجات سلة العشرين الحالية؛ 27 عنصرًا بروابط متجر سلة تجريبي `dev-cgcaqkpx5wgewsyv`؛ 7 عناصر `nahla_p_176`–`nahla_p_182` بروابط نهلة العامة. **لا يُصنَّف المرشحون `create` بعد، ولا يُعتمد الكتالوج للتجربة**: ظهور `nahla_p_*` مع مصدر «Nahlah.Ai»/«API» **مؤشر** يحتاج ربطًا بقاعدة البيانات (ق-5)، وليس وحده إثباتًا للتاجر ولا لدليل النشر المقبول. التصدير نفسه (Content IDs، الروابط، ومعرّفات عناصر Meta الـ34) هو **مدخل ق-5** بملفاته الثلاثة.
 
 **الغرض: مطابقة فقط.** تصدير العناصر الـ34 لمقارنتها بالهويات العشرين للمنتجات 185/188/190 ومنع التكرار أو الخلط. **التصدير لا يثبت الملكية التشغيلية ولا مصدر النشر؛ وصيغة المعرّف أو نطاق الرابط لا تجيز تعديل أي عنصر.**
 
@@ -119,64 +119,71 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 **السكربت المثبَّت:** `scripts/operators/catalog_q5_membership_readout.py` من الفرع `claude/nahla-product-catalog-sync-7nhht0` (PR #1193)، SHA-256:
 
 ```text
-881326e744feacb0642e24bcc3d141182548a8920ef8f463167e7426b69873b1
+1e4233db5b4516143541ffc2555a197e184a6078ab99af9fd484cbc9c4342545
 ```
 
-يفتح اتصالًا **للقراءة فقط** (`default_transaction_read_only=on` + معاملة `READ ONLY` + مهلة 30 ثانية)، يتحقق أن كل عبارة تبدأ بـ`SELECT` قبل تنفيذها، لا يختار أي عمود رمز/سر ولا أي عمود JSON كاملًا (مفاتيح محددة فقط)، ويرفض الطباعة إن ظهر في الناتج شكل رمز أو DSN. لا Graph ولا سلة ولا شبكة سوى قاعدة البيانات. `DATABASE_URL` يُقرأ من بيئة الحاوية ولا يُطبع.
+- **قراءة فقط:** جلسة `readonly` + `SET default_transaction_read_only = on` + مهلة 30 ثانية؛ كل عبارة تُفحص أنها تبدأ بـ`SELECT` قبل تنفيذها؛ المعاملة تُرجَع (`rollback`) في النهاية. لا يختار أي عمود رمز/سر ولا أي عمود JSON كاملًا (مفاتيح محددة فقط)، ويرفض الطباعة إن ظهر في الناتج شكل رمز أو DSN. لا Graph ولا سلة ولا شبكة سوى قاعدة البيانات. `DATABASE_URL` من بيئة الحاوية ولا يُطبع.
+- **فحص مخطط مسبق (قراءة فقط):** يقرأ `information_schema.columns` و`alembic_version` أولًا. جدول غائب — **`catalog_channel_retirements` قد لا يوجد على الإنتاج قبل 0116** — أو عمود مطلوب غائب ⇒ يُتخطّى ذلك الاستعلام ويُسجَّل تحت `skipped` باسمه، وتستمر بقية القراءة؛ الأعمدة الاختيارية الغائبة تُسجَّل تحت `schema_preflight.columns_missing`. **لا يُنشئ جدولًا ولا يطبّق هجرة.**
+- **التوافق:** Python 3.11 وpsycopg2 (كلاهما في صورة الإنتاج؛ لا تثبيت حزم)؛ SQL لـPostgreSQL ≥ 9.6؛ جُرّب على PostgreSQL 16 بوجود جدول السحب وبغيابه (اختبارات `backend/tests/test_catalog_q5_membership_readout.py`، وتعمل في CI ضمن `whatsapp-catalog-sync-postgres`).
+- **الروابط:** معرّفات سلة تُستخرج من الصيغتين `/p1207801870` و`/p/1207801870` (ورقم خالص في آخر المسار)؛ روابط نهلة العامة `…/public/catalog/items/nahla_p_<id>` **لا تُعدّ معرّفات سلة** وتُسجَّل هوياتها على حدة (`nahla_public_ids_from_links`).
 
 #### ما تحتاجه
 - `railway` مسجّل الدخول على مشروع الإنتاج (كما في الجزء أ)؛ **لا** `DATABASE_URL` ولا أي رمز في المحادثة.
-- من تصدير ق-4 (نصًا): الـ34 **Content ID** (= `retailer_id`) والروابط الـ34، وعمود معرّف عنصر Meta الرقمي **إن وُجد** (منفصل عن Content ID).
+- من تصدير ق-4 (نصًا) **ثلاثة ملفات لازمة كلها**: الـ34 **Content ID** (= `retailer_id`)، الروابط الـ34، و**معرّفات عناصر Meta الـ34** (العمود الرقمي المستقل عن Content ID). `--require-inputs` يرفض التشغيل بغياب أحدها.
 
 #### ممنوعات صريحة
-لا `UPDATE/INSERT/DELETE`، لا `psql` تفاعلي حر، لا تشغيل ثانٍ للسكربت إلا إن فشل الأول قبل أي ناتج، لا تعديل للسكربت، لا Graph ولا سلة، لا ربط ولا إعدادات ولا صلاحيات، لا حذف أو نقل أو تعديل لأي عنصر أو منتج أو عضوية مهما كانت النتيجة.
+لا `UPDATE/INSERT/DELETE/CREATE/ALTER`، لا هجرة، لا `psql` تفاعلي حر، لا تشغيل ثانٍ للسكربت إلا إن فشل الأول قبل أي ناتج، لا تعديل للسكربت، لا Graph ولا سلة، لا ربط ولا إعدادات ولا صلاحيات، لا حذف أو نقل أو تعديل لأي عنصر أو منتج أو عضوية مهما كانت النتيجة.
 
 #### التنفيذ
 
 ```bash
-# 1) الملف من الفرع، وتحقق البصمة قبل أي شيء
+# 1) الملف من الفرع (الالتزام المثبَّت في التقرير §7.0-هـ)، وتحقق البصمة قبل أي شيء
 sha256sum catalog_q5_membership_readout.py
-# يجب أن تكون: 881326e744feacb0642e24bcc3d141182548a8920ef8f463167e7426b69873b1
+# يجب أن تكون: 1e4233db5b4516143541ffc2555a197e184a6078ab99af9fd484cbc9c4342545
 
-# 2) ملفات المدخلات من تصدير ق-4 (نص فقط؛ سطر لكل قيمة؛ بلا رموز)
+# 2) ملفات المدخلات الثلاثة من تصدير ق-4 (نص فقط؛ سطر لكل قيمة؛ بلا رموز)
 #    q4_content_ids.txt   ← عمود id / Content ID كما ورد (34 سطرًا)
-#    q4_links.txt         ← عمود link كما ورد (34 سطرًا)
-#    q4_meta_item_ids.txt ← فقط إن كان في التصدير عمود معرّف عنصر Meta رقمي (وإلا لا تنشئه)
-wc -l q4_content_ids.txt q4_links.txt
+#    q4_links.txt         ← عمود link كما ورد (34 سطرًا؛ روابط سلة وروابط نهلة معًا)
+#    q4_meta_item_ids.txt ← عمود معرّف عنصر Meta الرقمي كما ورد (34 سطرًا)
+wc -l q4_content_ids.txt q4_links.txt q4_meta_item_ids.txt     # 34 34 34
 
-# 3) تحقق محلي بلا قاعدة: يطبع العبارات ويؤكد أن المعرّفات المستخرجة من الروابط ومعرّف المتجر صحيحان
-python3 catalog_q5_membership_readout.py --print-sql --content-ids-file q4_content_ids.txt \
-  --links-file q4_links.txt --store-marker dev-cgcaqkpx5wgewsyv | head -60
+# 3) تحقق محلي بلا قاعدة: يطبع المدخلات المستخرجة (27 معرّف سلة، 7 هويات نهلة، معرّف المتجر) والعبارات
+python3 catalog_q5_membership_readout.py --print-sql --require-inputs \
+  --content-ids-file q4_content_ids.txt --links-file q4_links.txt \
+  --meta-item-ids-file q4_meta_item_ids.txt --store-marker dev-cgcaqkpx5wgewsyv | head -40
+# تحقق: "salla_link_count": 27 و"nahla_public_link_count": 7 و"link_external_ids" فيها 27 رقمًا و"store_marker": "dev-cgcaqkpx5wgewsyv"
 
-# 4) انقل الملفات إلى الحاوية ثم شغّل مرة واحدة
+# 4) انقل الملفات الأربعة إلى الحاوية ثم شغّل مرة واحدة
 railway ssh --environment production --service nahla-saas -- bash -lc 'cat > /tmp/catalog_q5_membership_readout.py' < catalog_q5_membership_readout.py
 railway ssh --environment production --service nahla-saas -- bash -lc 'cat > /tmp/q4_content_ids.txt' < q4_content_ids.txt
 railway ssh --environment production --service nahla-saas -- bash -lc 'cat > /tmp/q4_links.txt' < q4_links.txt
-# (وإن وُجد) railway ssh ... 'cat > /tmp/q4_meta_item_ids.txt' < q4_meta_item_ids.txt
+railway ssh --environment production --service nahla-saas -- bash -lc 'cat > /tmp/q4_meta_item_ids.txt' < q4_meta_item_ids.txt
 
 railway ssh --environment production --service nahla-saas -- bash -lc \
   'sha256sum /tmp/catalog_q5_membership_readout.py && cd /app && python /tmp/catalog_q5_membership_readout.py \
    --catalog-id 871742015873294 --tenant-id 35 --product-ids 176-182 \
    --content-ids-file /tmp/q4_content_ids.txt --links-file /tmp/q4_links.txt \
-   --store-marker dev-cgcaqkpx5wgewsyv --pretty' > q5_readout.json 2> q5_readout.stderr.txt
+   --meta-item-ids-file /tmp/q4_meta_item_ids.txt \
+   --store-marker dev-cgcaqkpx5wgewsyv --require-inputs --pretty' > q5_readout.json 2> q5_readout.stderr.txt
 echo "exit=$?"
 ```
 
-إن رفض `railway ssh` إعادة التوجيه من stdin: جلسة تفاعلية، ثم لصق الملفات الثلاثة عبر heredoc إلى `/tmp/`، ثم `sha256sum` (يجب أن يطابق)، ثم أمر التشغيل نفسه. **أضف `--meta-item-ids-file /tmp/q4_meta_item_ids.txt` فقط إن وُجد العمود.**
+إن رفض `railway ssh` إعادة التوجيه من stdin: جلسة تفاعلية، ثم لصق الملفات الأربعة عبر heredoc إلى `/tmp/`، ثم `sha256sum` (يجب أن يطابق)، ثم أمر التشغيل نفسه.
 
 #### التحقق قبل الإرسال
 - أول سطر في stdout قبل JSON هو بصمة الملف داخل الحاوية وتطابق البصمة أعلاه.
-- JSON صالح يحوي `"read_only": true` و`"secrets_included": false` و16 مفتاحًا تحت `results`.
-- آخر سطر في stderr يبدأ بـ `q5-readout catalog=871742015873294 tenant=35`.
+- JSON صالح يحوي `"read_only": true` و`"secrets_included": false` و`"nothing_created_or_migrated": true`؛ تحت `results` حتى 17 مفتاحًا، وما تخطّاه الفحص المسبق مذكور بالاسم تحت `skipped` (يُتوقع `retirements_for_catalog: table_missing:catalog_channel_retirements` إن لم تُطبَّق 0116 بعد — **هذا ليس خطأً ولا يُعالج**).
+- آخر سطر في stderr يبدأ بـ `q5-readout catalog=871742015873294 tenant=35` ويذكر `executed=` و`skipped=`.
 - ابحث في الناتج عن `EAA` و`postgres://` و`postgresql://` و`access_token` ⇒ لا شيء منها (السكربت يرفض الطباعة أصلًا إن وُجدت).
 
 #### ما تعيده كاملًا (نصًا داخل الرسالة)
-1. `q5_readout.json` كاملًا. 2. `q5_readout.stderr.txt`. 3. ناتج `sha256sum` المحلي وداخل الحاوية. 4. وقت التشغيل UTC. 5. تأكيد صريح بعدم تنفيذ أي ممنوع. **لا تفسير ولا حكم من جهتك؛** الجدول الذي يربط كل عنصر بدليله يُبنى من الناتج في التقرير (§7.0-هـ).
+1. `q5_readout.json` كاملًا. 2. `q5_readout.stderr.txt`. 3. ناتج `sha256sum` المحلي وداخل الحاوية. 4. ناتج الخطوة 3 (`--print-sql`) حتى سطر `statements`. 5. وقت التشغيل UTC. 6. تأكيد صريح بعدم تنفيذ أي ممنوع. **لا تفسير ولا حكم من جهتك؛** الجدول الذي يربط كل عنصر بدليله يُبنى من الناتج في التقرير (§7.0-هـ).
 
 #### ما سيُقرأ من الناتج (للعلم)
-- `memberships_for_catalog` / `memberships_matching_q4_content_ids`: لكل عنصر — المستأجر، `provenance` (`salla_variant_push` = نشر مثبت لذلك المستأجر؛ `meta_graph_reconcile` = وجود فقط؛ غياب = غير مثبت)، `meta_item_id` (يُطابَق بعمود معرّف Meta من التصدير إن وُجد — **لا** بـContent ID).
-- `products_by_id` / `variants_of_products` / `claims_on_nahla_identities`: مستأجر المنتجات 176–182 ومصدرها (`source`, `ownership_mode`, `external_id`, `imported_at`, `archived_at`) وأختامها، وهل تدّعي هوياتها جهة ثانية.
-- `store_identity_*` / `store_marker_hits` / `products_matching_link_external_ids` / `tenants_involved`: أي مستأجر يحمل `dev-cgcaqkpx5wgewsyv` أو معرّفات سلة المضمّنة في الروابط (بما فيها المنتجات المؤرشفة)، مقابل `store_id`/`store_url` الحاليين لـTenant 35.
+- `schema_preflight` / `skipped`: ما وُجد وما غاب من جداول وأعمدة، ونسخة alembic؛ يُسجَّل في التقرير كما هو.
+- `memberships_for_catalog` / `memberships_matching_q4_content_ids` / `memberships_matching_q4_meta_item_ids`: لكل عنصر — المستأجر، `provenance` (`salla_variant_push` = نشر مثبت لذلك المستأجر؛ `meta_graph_reconcile` = وجود فقط؛ غياب = غير مثبت)، ومطابقة `meta_item_id` بمعرّفات Meta من التصدير **منفصلةً** عن مطابقة Content ID.
+- `products_by_id` / `variants_of_products` / `claims_on_nahla_identities`: مستأجر المنتجات 176–182 ومصدرها (`source`, `ownership_mode`, `external_id`, `imported_at`, `archived_at`) وأختامها، وهل تدّعي هوياتها جهة ثانية — **هذا هو الربط الذي يحوّل مؤشر `nahla_p_*` إلى حكم أو يبقيه غير محسوم.**
+- `store_identity_*` / `store_marker_hits` / `products_matching_link_external_ids` / `tenants_involved`: أي مستأجر يحمل `dev-cgcaqkpx5wgewsyv` أو معرّفات سلة الـ27 المضمّنة في الروابط (بما فيها المنتجات المؤرشفة)، مقابل `store_id`/`store_url` الحاليين لـTenant 35.
 - `whatsapp_connection_catalog_stamps` / `retirements_for_catalog` / `product_stamp_indicator_by_tenant`: مؤشرات فقط، ليست دليل نشر.
 
 **إن أظهر الناتج عناصر لمستأجر آخر:** يتوقف اعتماد الكتالوج `871742015873294` للتجربة؛ **لا حذف ولا نقل ولا تعديل** لأي عنصر، ويُعرض الأمر على المالك.
