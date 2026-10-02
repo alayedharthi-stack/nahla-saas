@@ -87,7 +87,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 ### ق-2 (يحكم سبب غياب الصلاحية؛ ضروري لمسار Cloud API عامةً، ولـ Tenant 35 فقط إن كانت ق-1 «ربط متاح») — لوحة التطبيق (developers.facebook.com)
 
-> **محسوم جزئيًا من تحديث المالك (2026-10-02):** مستوى وصول `catalog_management` = **Standard**، وطلب App Review موجود كمسودة غير مرسلة رقم `2077337856315947`. يبقى من ق-2: إعداد `config_id` (البند 3)، ووضع التطبيق وتوثيق المحفظة ودور الحساب (البند 5). **لا تُرسل المسودة ولا تُعدَّل.**
+> **ق-2 لا يُطلب:** نتائج لوحة التطبيق مثبتة في ملف المالك (مستوى وصول `catalog_management` = **Standard**؛ طلب App Review مسودة غير مرسلة رقم `2077337856315947`؛ وبقية البنود في ملفه). **لا تُعاد قراءتها، ولا تُرسل المسودة ولا تُعدَّل.** البنود 3–5 أدناه للسجل فقط. **المتبقي فعلًا: ق-1 (محفظة Tenant 35 وتبويب الكتالوج) بعد تسجيل دخول المالك.**
 
 3. **إعداد Embedded Signup المرتبط بـ `config_id`:** WhatsApp → Embedded Signup → Configurations؛ طابق **آخر 4 أرقام** مع `graph.token_catalog_management.raw.embedded_signup_config.config_id_tail` في ناتج v3. انقل: اسم الإعداد، الصلاحيات/الأصول التي يطلبها (هل يتضمن إدارة الكتالوج/Commerce؟)، نوع التدفق، وهل هو إعداد coexistence. *السبب:* الحوار الذي رآه التاجر يُبنى من هذا الإعداد، ولا يُقرأ عبر Graph.
 4. **مستوى وصول `catalog_management` وحالة App Review** (App Review → Permissions and Features)، ومعه `business_management` و`whatsapp_business_management` و`whatsapp_business_messaging`: Standard/Advanced/غير مضافة، وحالة أي طلب مراجعة بتاريخه. *السبب:* يحدد من يمكن منحه الصلاحية أصلًا.
