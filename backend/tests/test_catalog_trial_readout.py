@@ -58,11 +58,13 @@ class FakeGraph:
     """GET-only Graph double; any POST is a test failure."""
 
     def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None, linked=True,
-                 debug_scopes=None):
+                 debug_scopes=None, catalogs_error=None, phone="PN-900", on_biz_app=None):
         self.waba, self.catalog, self.business, self.perm = waba, catalog, business, perm
         self.live = live or {}
         self.linked = linked
         self.debug_scopes = debug_scopes   # None -> /debug_token answers with an error
+        self.catalogs_error = catalogs_error   # e.g. "smb" -> /{waba}/product_catalogs answers 400 code 10
+        self.phone, self.on_biz_app = phone, on_biz_app
         self.calls = []
 
     def _route(self, method, url, params):
@@ -83,7 +85,16 @@ class FakeGraph:
                 rows.insert(0, {"permission": "catalog_management", "status": self.perm})
             return _Resp(200, {"data": rows})
         if url.endswith(f"/{self.waba}/product_catalogs"):
+            if self.catalogs_error == "smb":
+                return _Resp(400, {"error": {"code": 10, "type": "OAuthException",
+                                             "message": "(#10) This operation can not be performed on SMB business type"}})
+            if self.catalogs_error == "other":
+                return _Resp(500, {"error": {"code": 2, "message": "An unexpected error has occurred"}})
             return _Resp(200, {"data": [{"id": self.catalog, "name": "متجر تجريبي عام"}] if self.linked else []})
+        if url.endswith(f"/{self.phone}"):
+            if self.on_biz_app is None:
+                return _Resp(400, {"error": {"code": 100, "message": "unsupported field"}})
+            return _Resp(200, {"id": self.phone, "is_on_biz_app": self.on_biz_app, "platform_type": "CLOUD_API"})
         if url.endswith(f"/{self.waba}"):
             return _Resp(200, {"id": self.waba, "owner_business_info": {"id": self.business, "name": "BM"}})
         if url.endswith(f"/{self.catalog}/products"):
@@ -444,7 +455,10 @@ def test_parent_in_stock_with_all_variants_out_is_an_anomaly_and_never_a_candida
         assert sel["expected_meta_items"] == 4 + 6 + 10
         # publish payloads for the chosen variants carry the identities the push will use
         payloads = report["candidate_payloads"]
-        assert payloads["pushable"] == 20 and payloads["blocked"] == 0
+        assert payloads["local_payload_checks_passed"] == 20 and payloads["local_payload_checks_blocked"] == 0
+        assert "pushable" not in payloads
+        assert "not Meta's acceptance" in payloads["meaning"] and "not visibility in WhatsApp" in payloads["meaning"]
+        assert payloads["availability_counts"] == {"in stock": 20}
         rids = {i["retailer_id"] for i in payloads["items"]}
         assert "600185-1" in rids and "600190-10" in rids
         assert all(i["item_group_id"] for i in payloads["items"])
@@ -513,7 +527,9 @@ def test_graph_section_reads_waba_catalogs_without_a_stamped_id_and_reports_perm
         assert causes["explicit_oauth_scope_omits_catalog_management"] == "confirmed"   # this repo's connect flow
         assert causes["embedded_signup_config_does_not_include_catalog_management"] == "unknown"
         assert causes["app_lacks_access_level_for_catalog_management"] == "unknown"
-        assert causes["merchant_declined_at_authorization"] == "ruled_out"
+        assert causes["merchant_declined_at_authorization"] == "unknown"   # absent ≠ not declined
+        assert g["coexistence"]["verdict"] == "unproven"                     # phone read not answered here
+        assert g["catalog_path_assessment"]["api_catalog_link_for_this_waba"] == "api_catalog_link_readable_for_this_waba"
         assert perm["raw"]["explicit_oauth_scope_in_deployed_code"]["requests_catalog_management"] is False
         assert "embedded_signup_configuration_permissions" in perm["interpretation"]["needs_manual_reads"]
         # candidates classified against the linked catalog even though nothing is stamped locally
@@ -623,5 +639,130 @@ def test_permission_facts_stay_unknown_when_graph_cannot_answer_and_granted_scop
         assert perm2["interpretation"]["catalog_management_on_token"] == "granted"
         assert "app-secret-not-to-print" not in json.dumps(report2)
         assert not any(m.startswith("token_catalog_management") for m in report2["missing_requirements"])
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_graph_error_on_waba_catalogs_leaves_the_link_unproven_and_names_the_business_type_restriction(monkeypatch):
+    """`GET /{waba}/product_catalogs` → HTTP 400 code 10 "SMB business type": the link is *unproven*
+    (never "none linked"), no create/update split is claimed, the restriction is named apart from a
+    permission, coexistence is read from the phone, and the assessment never says that
+    catalog_management alone would lift the block."""
+    session, tid, _other, engine = _make_db(catalog_enabled=False, catalog_id=None)
+    try:
+        conn = session.query(WhatsAppConnection).filter_by(tenant_id=tid).one()
+        conn.extra_metadata = {"connection_mode": "coexistence"}; session.commit()
+        a = _salla(session, tid, "617350990", variants=2)
+        graph = FakeGraph(perm=None, business="2138142656950660", catalogs_error="smb", on_biz_app=True)
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph):
+            report = build_catalog_trial_readout(session, tid, include_graph=True, client=graph,
+                                                 candidate_ids=[a.id], expected_business_id="2138142656950660")
+        _no_token_anywhere(report)
+        g = report["graph"]
+        wc = g["waba_catalogs"]
+        assert wc["ok"] is False and wc["http_status"] == 400 and wc["count"] is None
+        assert wc["verdict"] == "unproven_graph_error"
+        assert wc["error_class"]["class"] == "business_type_restriction" and wc["error_class"]["meta_code"] == 10
+        assert "not for a missing permission" in wc["error_class"]["note"]
+        # the failed read is not turned into "no catalog": nothing is linked *or* unlinked here
+        li = g["live_items"]
+        assert li["skipped"] == "waba_catalog_link_unproven_graph_error"
+        assert "expected_actions_if_new_catalog" not in li
+        assert li["conditional_actions"]["if_no_catalog_is_linked"] == {"create": 2, "update": 0, "noop": 0}
+        assert li["conditional_actions"]["if_a_catalog_is_linked"] == "per_identity_presence_read_required"
+        # coexistence is a Graph fact, read GET-only from the phone number
+        assert g["coexistence"] == {"local_connection_mode": "coexistence", "is_on_biz_app": True,
+                                    "platform_type": "CLOUD_API", "graph_ok": True,
+                                    "verdict": "coexistence_confirmed_by_graph"}
+        assert "GET /PN-900?fields=is_on_biz_app,platform_type" in g["reads"]
+        pa = g["catalog_path_assessment"]
+        assert pa["api_catalog_link_for_this_waba"] == "blocked_by_business_type_per_graph"
+        assert pa["catalog_exists_for_this_waba"] == "unproven"
+        assert pa["would_catalog_management_alone_lift_the_block"] == "unproven"
+        assert any("not supported once a number is running Coexistence" in d["excerpt"] for d in pa["documentation"])
+        assert all("verify" in d["verification"] for d in pa["documentation"])
+        assert "whatsapp_manager:business_portfolio_that_owns_the_waba_and_its_type" in pa["needs_manual_reads"]
+        missing = report["missing_requirements"]
+        assert "waba_catalog_link:unproven" in missing
+        assert "waba_catalog_link:none_linked" not in missing
+        assert "meta_business_type_restriction:product_catalogs" in missing
+        assert "coexistence:api_catalog_path_unproven" in missing
+        assert all(m == "GET" for m, _ in graph.calls)
+
+        # an unrelated Graph failure is also "unproven", but carries no business-type claim
+        graph2 = FakeGraph(perm=None, catalogs_error="other", on_biz_app=False)
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph2):
+            report2 = build_catalog_trial_readout(session, tid, include_graph=True, client=graph2, candidate_ids=[a.id])
+        g2 = report2["graph"]
+        assert g2["waba_catalogs"]["verdict"] == "unproven_graph_error"
+        assert g2["waba_catalogs"]["error_class"]["class"] == "graph_error"
+        assert g2["live_items"]["skipped"] == "waba_catalog_link_unproven_graph_error"
+        assert g2["coexistence"]["verdict"] == "not_on_business_app_per_graph"
+        assert g2["catalog_path_assessment"]["api_catalog_link_for_this_waba"] == "unproven"
+        assert g2["catalog_path_assessment"]["documentation"] == []
+        assert "meta_business_type_restriction:product_catalogs" not in report2["missing_requirements"]
+        assert "coexistence:api_catalog_path_unproven" not in report2["missing_requirements"]
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_candidate_salla_crosscheck_compares_every_chosen_variant_with_salla(monkeypatch):
+    """With --include-salla the chosen products' variants are compared with Salla's current
+    variants (GET only): price, stock, option label, missing rows on either side."""
+    monkeypatch.delenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", raising=False)
+    session, tid, _other, engine = _make_db()
+    try:
+        dress = _salla(session, tid, "792574531", variants=3, price="250")   # فستان بثلاث مقاسات
+        shoe = _salla(session, tid, "59407425", variants=2, price="180")
+
+        class FakeSalla:
+            calls = []
+
+            async def _get(self, path, params=None):
+                self.calls.append(path)
+                ext = path.split("/")[2]
+                return {"data": {"id": int(ext), "name": "منتج تجريبي", "quantity": 5, "status": {"slug": "sale"}}}
+
+            async def get_raw_variants(self, ext):
+                self.calls.append(f"/products/{ext}/variants")
+                if ext == "792574531":
+                    return [
+                        {"id": 1, "price": {"amount": 250.0, "currency": "SAR"}, "quantity": 3,
+                         "related_option_values": [{"name": "S"}]},
+                        {"id": 2, "price": {"amount": 275.0, "currency": "SAR"}, "quantity": 3,      # price differs locally
+                         "related_option_values": [{"name": "M"}]},
+                        {"id": 3, "price": {"amount": 250.0, "currency": "SAR"}, "quantity": 0,      # stock differs locally
+                         "related_option_values": []},                                              # and no option label
+                        {"id": 4, "price": {"amount": 250.0, "currency": "SAR"}, "quantity": 3},    # not present locally
+                    ]
+                return [{"id": 1, "price": 180, "quantity": 2, "name": "40"},
+                        {"id": 2, "price": "180.00", "quantity": 1, "name": "41"}]
+
+        fake = FakeSalla()
+        report = build_catalog_trial_readout(session, tid, include_salla=True, salla_adapter=fake,
+                                             candidate_ids=[dress.id, shoe.id], candidate_count=2)
+        cc = report["candidate_salla_crosscheck"]
+        by_ext = {p["external_id"]: p for p in cc["products"]}
+        d = by_ext["792574531"]
+        verdicts = {r["salla_variant_id"]: r["verdict"] for r in d["variants"]}
+        assert verdicts["1"] == "matches_salla"
+        assert verdicts["2"] == "price_mismatch"
+        assert verdicts["3"] == "stock_mismatch,salla_variant_has_no_option_label"
+        assert d["salla_variants_missing_locally"] == ["4"] and d["verdict"] == "differences_found"
+        assert {r["salla_option_label"] for r in d["variants"]} == {"S", "M", None}
+        s_ = by_ext["59407425"]
+        assert s_["verdict"] == "consistent_with_salla" and all(r["verdict"] == "matches_salla" for r in s_["variants"])
+        assert cc["variants_checked"] == 5 and cc["variants_matching"] == 3 and cc["mismatches"] == 3
+        assert "not Meta acceptance" in cc["meaning"]
+        assert all(p.startswith("/products/") for p in fake.calls)   # GET only
+        assert report["candidate_payloads"]["local_payload_checks_passed"] == 5
     finally:
         session.close(); engine.dispose()

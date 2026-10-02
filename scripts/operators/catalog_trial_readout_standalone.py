@@ -557,6 +557,9 @@ def build_catalog_trial_readout(
     if include_salla:
         anomalous = [p for p in products if any(a in STOCK_CONSISTENCY_ANOMALIES for a in p["anomalies"])]
         out["salla_check"] = _salla_check(db, tid, anomalous, adapter=salla_adapter)
+        out["candidate_salla_crosscheck"] = _candidate_salla_crosscheck(
+            db, tid, products, chosen_ids, adapter=salla_adapter,
+        )
 
     # ── Graph (GET only, opt-in) ─────────────────────────────────────────
     if include_graph:
@@ -582,16 +585,29 @@ def _count_by(items: List[Dict[str, Any]], key: str) -> Dict[str, int]:
     return out
 
 
+PAYLOAD_CHECK_MEANING = (
+    "local_payload_checks_passed counts variants whose locally built payload passed this "
+    "platform's own validation (identity, price, currency, image, url, availability). It is not "
+    "Meta's acceptance of the item, not a Graph write, and not visibility in WhatsApp; those are "
+    "proven only by the publish response and the owner's visual check."
+)
+
+
 def _candidate_payloads(db: Any, tid: int, chosen_ids: List[int]) -> Dict[str, Any]:
-    """Per-variant publish identity and payload preview for the chosen products (no Graph)."""
+    """Per-variant publish identity and payload preview for the chosen products (no Graph).
+
+    The counts describe *local* payload validation only — see ``PAYLOAD_CHECK_MEANING``.
+    """
+    empty = {"items": [], "local_payload_checks_passed": 0, "local_payload_checks_blocked": 0,
+             "meaning": PAYLOAD_CHECK_MEANING}
     if not chosen_ids:
-        return {"items": [], "pushable": 0, "blocked": 0}
+        return dict(empty)
     try:
         from services.meta_catalog_readiness import build_meta_catalog_readiness_report  # noqa: PLC0415
 
         report = build_meta_catalog_readiness_report(db, tid)
     except Exception as exc:  # noqa: BLE001
-        return {"error": type(exc).__name__, "items": [], "pushable": 0, "blocked": 0}
+        return dict(empty, error=type(exc).__name__)
     wanted = {int(x) for x in chosen_ids}
     items: List[Dict[str, Any]] = []
     for it in report.to_dict().get("items") or []:
@@ -614,35 +630,177 @@ def _candidate_payloads(db: Any, tid: int, chosen_ids: List[int]) -> Dict[str, A
             "url_present": bool(preview.get("url")) or bool(it.get("url_present")),
             "payload_fields": sorted(preview.keys()),
         })
-    pushable = sum(1 for i in items if i["status"] in ("ready", "warn"))
-    return {"items": items, "pushable": pushable, "blocked": len(items) - pushable,
-            "counts_all_products": report.to_dict().get("counts")}
+    passed = sum(1 for i in items if i["status"] in ("ready", "warn"))
+    availability = _count_by(items, "availability")
+    return {
+        "items": items,
+        "local_payload_checks_passed": passed,
+        "local_payload_checks_blocked": len(items) - passed,
+        "meaning": PAYLOAD_CHECK_MEANING,
+        "availability_counts": availability,
+        "warnings": [
+            {"product_id": i["product_id"], "retailer_id": i["retailer_id"], "reasons": i["reasons"]}
+            for i in items if i["status"] == "warn"
+        ],
+        "counts_all_products": report.to_dict().get("counts"),
+    }
 
 
-def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter: Any = None, limit: int = 5) -> Dict[str, Any]:
-    """Re-read anomalous products from Salla (GET only) and say where the inconsistency lives."""
-    import asyncio  # noqa: PLC0415
-
-    out: Dict[str, Any] = {"checked": [], "skipped": [], "reads": []}
-    if not anomalous:
-        return out
+def _resolve_salla_adapter(db: Any, tid: int, adapter: Any) -> tuple[Any, Optional[str]]:
     if adapter is None:
         try:
             from services.store_sync import StoreSyncService  # noqa: PLC0415
 
             adapter = StoreSyncService(db, tid)._get_adapter()
         except Exception as exc:  # noqa: BLE001
-            out["error"] = f"adapter_unavailable:{type(exc).__name__}"
-            return out
+            return None, f"adapter_unavailable:{type(exc).__name__}"
     if adapter is None or not hasattr(adapter, "_get"):
-        out["error"] = "adapter_unavailable"
-        return out
+        return None, "adapter_unavailable"
+    return adapter, None
 
-    async def _read(ext: str):
+
+def _salla_product_read(adapter: Any, ext: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """GET /products/{ext} and its variants through the tenant's own adapter (read only)."""
+    import asyncio  # noqa: PLC0415
+
+    async def _read():
         raw = await adapter._get(f"/products/{ext}")
         data = raw.get("data") if isinstance(raw, dict) else None
         variants = await adapter.get_raw_variants(ext) if hasattr(adapter, "get_raw_variants") else []
-        return (data if isinstance(data, dict) else {}), (variants or [])
+        return (data if isinstance(data, dict) else {}), [v for v in (variants or []) if isinstance(v, dict)]
+
+    return asyncio.run(_read())
+
+
+def _salla_price(raw: Any) -> Optional[float]:
+    if isinstance(raw, dict):
+        raw = raw.get("amount")
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _salla_variant_label(v: Dict[str, Any]) -> Optional[str]:
+    """Human label of a Salla variant from its option values or name (read only)."""
+    opts = v.get("related_option_values") or v.get("option_values") or v.get("options")
+    labels: List[str] = []
+    if isinstance(opts, list):
+        for o in opts:
+            if isinstance(o, dict):
+                lab = o.get("name") or o.get("value") or o.get("label")
+                if isinstance(lab, dict):
+                    lab = lab.get("name") or lab.get("value")
+                if lab:
+                    labels.append(str(lab))
+            elif isinstance(o, str):
+                labels.append(o)
+    if labels:
+        return " / ".join(labels)
+    name = v.get("name")
+    return str(name) if name else None
+
+
+def _candidate_salla_crosscheck(
+    db: Any, tid: int, products: List[Dict[str, Any]], chosen_ids: List[int], *, adapter: Any = None,
+) -> Dict[str, Any]:
+    """Compare every chosen product's local variants with Salla's current variants (GET only).
+
+    Per local variant: found in Salla, price match, stock match, option label present.
+    Per product: Salla variants that have no local row. Nothing is written anywhere.
+    """
+    out: Dict[str, Any] = {"products": [], "reads": [], "variants_checked": 0,
+                           "variants_matching": 0, "mismatches": 0}
+    if not chosen_ids:
+        return out
+    adapter, err = _resolve_salla_adapter(db, tid, adapter)
+    if err:
+        out["error"] = err
+        return out
+    by_id = {p["product_id"]: p for p in products}
+    for pid in chosen_ids:
+        p = by_id.get(pid)
+        if p is None or not p.get("external_id"):
+            out["products"].append({"product_id": pid, "error": "not_found_or_no_external_id"})
+            continue
+        ext = p["external_id"]
+        try:
+            data, variants = _salla_product_read(adapter, ext)
+        except Exception as exc:  # noqa: BLE001
+            out["products"].append({"product_id": pid, "external_id": ext, "error": type(exc).__name__})
+            continue
+        out["reads"].extend([f"GET /products/{ext}", f"GET /products/{ext}/variants"])
+        salla_by_id = {str(v.get("id")): v for v in variants if v.get("id") is not None}
+        rows: List[Dict[str, Any]] = []
+        for lv in p["variants"]:
+            sid = lv.get("salla_variant_id")
+            sv = salla_by_id.get(str(sid)) if sid else None
+            row: Dict[str, Any] = {"variant_id": lv["variant_id"], "salla_variant_id": sid,
+                                   "retailer_id": lv.get("retailer_id"), "local_price": lv.get("price"),
+                                   "local_in_stock": lv.get("in_stock")}
+            if sv is None:
+                row.update({"verdict": "variant_missing_in_salla", "salla_price": None})
+            else:
+                sprice = _salla_price(sv.get("sale_price")) if _salla_price(sv.get("sale_price")) else _salla_price(sv.get("price"))
+                try:
+                    lprice = float(lv.get("price")) if lv.get("price") not in (None, "") else None
+                except (TypeError, ValueError):
+                    lprice = None
+                price_match = (lprice is not None and sprice is not None and abs(lprice - sprice) < 0.005)
+                qty = sv.get("quantity", sv.get("stock_quantity"))
+                avail = sv.get("available")
+                if avail is None and isinstance(qty, (int, float)):
+                    avail = qty > 0
+                stock_match = (avail is None) or (bool(avail) == bool(lv.get("in_stock")))
+                label = _salla_variant_label(sv)
+                problems = []
+                if not price_match:
+                    problems.append("price_mismatch")
+                if not stock_match:
+                    problems.append("stock_mismatch")
+                if not label:
+                    problems.append("salla_variant_has_no_option_label")
+                row.update({
+                    "salla_price": sprice, "salla_available": avail, "salla_quantity": qty,
+                    "salla_option_label": label, "salla_sku": sv.get("sku"),
+                    "verdict": "matches_salla" if not problems else ",".join(problems),
+                })
+            rows.append(row)
+        local_ids = {str(lv.get("salla_variant_id")) for lv in p["variants"] if lv.get("salla_variant_id")}
+        missing_locally = [sid for sid in salla_by_id if sid not in local_ids]
+        matching = sum(1 for r in rows if r["verdict"] == "matches_salla")
+        out["variants_checked"] += len(rows)
+        out["variants_matching"] += matching
+        out["mismatches"] += len(rows) - matching + len(missing_locally)
+        pname = data.get("name")
+        out["products"].append({
+            "product_id": pid, "external_id": ext,
+            "salla_name": pname if isinstance(pname, str) else None,
+            "salla_status": (data.get("status") or {}).get("slug") if isinstance(data.get("status"), dict) else data.get("status"),
+            "salla_variant_count": len(salla_by_id), "local_variant_count": len(rows),
+            "salla_variants_missing_locally": missing_locally,
+            "variants": rows,
+            "verdict": "consistent_with_salla" if (matching == len(rows) and not missing_locally) else "differences_found",
+        })
+    out["meaning"] = ("local copy compared with Salla's current product and variant reads; a match here "
+                      "is a precondition for a truthful payload, not Meta acceptance")
+    return out
+
+
+def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter: Any = None, limit: int = 5) -> Dict[str, Any]:
+    """Re-read anomalous products from Salla (GET only) and say where the inconsistency lives."""
+    out: Dict[str, Any] = {"checked": [], "skipped": [], "reads": []}
+    if not anomalous:
+        return out
+    adapter, err = _resolve_salla_adapter(db, tid, adapter)
+    if err:
+        out["error"] = err
+        return out
+
+    def _read(ext: str):
+        return _salla_product_read(adapter, ext)
 
     for p in anomalous[:limit]:
         ext = p["external_id"]
@@ -650,7 +808,7 @@ def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter:
             out["skipped"].append({"product_id": p["product_id"], "reason": "no_external_id"})
             continue
         try:
-            data, variants = asyncio.run(_read(ext))
+            data, variants = _read(ext)
         except Exception as exc:  # noqa: BLE001
             out["checked"].append({"product_id": p["product_id"], "external_id": ext, "error": type(exc).__name__})
             continue
@@ -834,7 +992,8 @@ def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
             {"cause": "app_lacks_access_level_for_catalog_management",
              "evidence": "unknown", "how_to_verify": "Meta App Dashboard -> App Review -> Permissions and Features -> catalog_management: Standard vs Advanced access, review status"},
             {"cause": "merchant_declined_at_authorization",
-             "evidence": "confirmed" if status == "declined" else ("ruled_out" if status in ("granted", "absent") else "unknown")},
+             "evidence": "confirmed" if status == "declined" else ("ruled_out" if status == "granted" else "unknown"),
+             "note": "an absent /me/permissions row does not distinguish never-asked from declined-and-unlisted; only an explicit declined/granted row settles it"},
             {"cause": "token_type_or_app_mismatch",
              "evidence": ("unknown" if not raw["debug_token"].get("available")
                           else ("suspect" if raw["debug_token"].get("app_id_matches_configured_app") is False else "ruled_out")),
@@ -850,6 +1009,135 @@ def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
                 "embedded_signup_configuration_permissions", "app_access_level_catalog_management", "app_review_status",
             ],
         },
+    }
+
+
+GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION = "business_type_restriction"
+
+# Meta's own words (coexistence onboarding page, "Limitations"); the page could not be
+# fetched from this execution environment (egress blocked), so the sentence is carried as
+# a search-engine excerpt of the official page and must be verified on the page itself.
+COEXISTENCE_DOC_REFERENCES = [
+    {
+        "title": "Onboard WhatsApp Business app users (Embedded Signup → coexistence) — Limitations",
+        "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/",
+        "excerpt": ("Group chats, disappearing messages, view-once messages, live location messages, broadcast lists, "
+                    "voice and video calls, and business tools such as the catalog are not supported once a number is "
+                    "running Coexistence."),
+        "verification": "excerpt_via_search_engine; direct fetch blocked from the readout author's environment; verify on page",
+    },
+    {
+        "title": "Onboard WhatsApp Business app users — detecting coexistence",
+        "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/",
+        "excerpt": "GET /{phone_number_id}?fields=is_on_biz_app,platform_type — is_on_biz_app=true with platform_type=CLOUD_API means the number runs on both.",
+        "verification": "matches this repository's own coexistence verification (services/meta_coexistence.verify_coexistence_phone)",
+    },
+    {
+        "title": "Sell products and services (Cloud API) — catalog must be connected to the WABA in Commerce Manager / via POST /{waba}/product_catalogs with catalog_management",
+        "url": "https://developers.facebook.com/docs/whatsapp/cloud-api/guides/sell-products-and-services/",
+        "excerpt": "not fetched from this environment",
+        "verification": "verify on page",
+    },
+]
+
+
+def _classify_graph_error(err: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Name what a Graph error body says, without inferring more than it says."""
+    if not err:
+        return None
+    code = err.get("meta_code")
+    msg = str(err.get("meta_message") or "")
+    low = msg.lower()
+    if code == 10 and "smb business type" in low:
+        klass = GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION
+        note = ("Graph reused code 10 for a restriction on the WABA's owning business type, not for a missing "
+                "permission; this neither proves nor disproves that a catalog exists, and adding "
+                "catalog_management to the token is not shown to lift it")
+    elif code in (190, 102):
+        klass, note = "access_token_invalid", "token rejected"
+    elif code in (10, 200, 294) or err.get("meta_subcode") == 2388100:
+        klass, note = "permission_or_restriction", "code reused by Graph for permissions and for business restrictions"
+    else:
+        klass, note = "graph_error", "unclassified"
+    return {"class": klass, "meta_code": code, "meta_subcode": err.get("meta_subcode"), "message": msg, "note": note}
+
+
+def _coexistence_facts(conn: Any, token: str, *, client: Any) -> tuple[Dict[str, Any], List[str]]:
+    """Local connection mode + Graph phone facts (GET only): is the number on the Business app?"""
+    reads: List[str] = []
+    out: Dict[str, Any] = {"local_connection_mode": None, "is_on_biz_app": None, "platform_type": None}
+    meta = getattr(conn, "extra_metadata", None) or {}
+    try:
+        from services.meta_coexistence import is_coexistence_mode  # noqa: PLC0415
+
+        out["local_connection_mode"] = "coexistence" if is_coexistence_mode(conn) else (
+            _strip(meta.get("connection_mode")) or "cloud_api_only_or_unset")
+    except Exception:  # noqa: BLE001
+        out["local_connection_mode"] = _strip(meta.get("connection_mode")) or "unknown"
+    phone_id = _strip(getattr(conn, "phone_number_id", None))
+    if phone_id and token:
+        try:
+            from services.meta_catalog_linking import _graph_json  # noqa: PLC0415
+
+            resp = _graph_json("GET", phone_id, token, params={"fields": "is_on_biz_app,platform_type"}, client=client)
+            reads.append(f"GET /{phone_id}?fields=is_on_biz_app,platform_type")
+            body = resp.get("body") or {}
+            if resp.get("ok"):
+                out["is_on_biz_app"] = body.get("is_on_biz_app") if isinstance(body.get("is_on_biz_app"), bool) else None
+                out["platform_type"] = _strip(body.get("platform_type")) or None
+                out["graph_ok"] = True
+            else:
+                e = resp.get("error")
+                out["graph_ok"] = False
+                out["error"] = (e.get("message") if isinstance(e, dict) else e) or resp.get("http_status")
+        except Exception as exc:  # noqa: BLE001
+            out["graph_ok"] = False
+            out["error"] = type(exc).__name__
+    if out.get("is_on_biz_app") is True:
+        out["verdict"] = "coexistence_confirmed_by_graph"
+    elif out.get("is_on_biz_app") is False:
+        out["verdict"] = "not_on_business_app_per_graph"
+    else:
+        out["verdict"] = "unproven"
+    return out, reads
+
+
+def _catalog_path_assessment(section: Dict[str, Any]) -> Dict[str, Any]:
+    """Interpretation of the raw Graph facts: can this WABA take an API-linked catalog?
+
+    Separates what Graph said from what is documented; never asserts that a
+    permission grant would lift a business-type restriction.
+    """
+    wc = section.get("waba_catalogs") or {}
+    ec = (wc.get("error_class") or {}).get("class")
+    coex = section.get("coexistence") or {}
+    facts = {
+        "waba_product_catalogs_read": wc.get("verdict"),
+        "waba_product_catalogs_error_class": ec,
+        "coexistence": coex.get("verdict"),
+        "catalog_management_on_token": ((section.get("token_catalog_management") or {}).get("interpretation") or {}).get(
+            "catalog_management_on_token"),
+    }
+    if wc.get("verdict") in ("catalog_linked_to_waba", "no_catalog_linked_to_waba"):
+        state = "api_catalog_link_readable_for_this_waba"
+    elif ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION:
+        state = "blocked_by_business_type_per_graph"
+    else:
+        state = "unproven"
+    return {
+        "api_catalog_link_for_this_waba": state,
+        "catalog_exists_for_this_waba": ("yes" if wc.get("verdict") == "catalog_linked_to_waba"
+                                         else "no" if wc.get("verdict") == "no_catalog_linked_to_waba" else "unproven"),
+        "would_catalog_management_alone_lift_the_block": "unproven" if ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION else "n/a",
+        "facts": facts,
+        "documentation": COEXISTENCE_DOC_REFERENCES if (coex.get("verdict") == "coexistence_confirmed_by_graph"
+                                                         or ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION) else [],
+        "needs_manual_reads": ([
+            "whatsapp_manager:business_portfolio_that_owns_the_waba_and_its_type",
+            "whatsapp_manager:catalog_tab_for_this_waba (does it offer connecting a Commerce Manager catalog?)",
+            "commerce_manager:catalogs_owned_by_the_expected_business_and_their_whatsapp_connection",
+            "meta_docs:coexistence_limitations_page_current_wording_on_catalog",
+        ] if state != "api_catalog_link_readable_for_this_waba" else []),
     }
 
 
@@ -892,14 +1180,15 @@ def _graph_section(
             "ok": err is None,
             "http_status": http_status,
             "catalogs": catalogs,
-            "count": len(catalogs),
+            "count": len(catalogs) if err is None else None,
             "error": err,
+            "error_class": _classify_graph_error(err),
             "verdict": (
                 "unproven_graph_error" if err is not None
                 else ("no_catalog_linked_to_waba" if not catalogs else "catalog_linked_to_waba")
             ),
             "stamped_catalog_id": expected_catalog or None,
-            "stamped_catalog_is_linked": (expected_catalog in linked_ids) if expected_catalog else None,
+            "stamped_catalog_is_linked": (expected_catalog in linked_ids) if (expected_catalog and err is None) else None,
         }
         owner = fetch_waba_owner_business_id(waba_id, token, client=client)
         section["reads"].append(f"GET /{waba_id}?fields=owner_business_info")
@@ -917,6 +1206,10 @@ def _graph_section(
         }
     except Exception as exc:  # noqa: BLE001
         section["waba_catalogs"] = {"ok": False, "error": type(exc).__name__, "verdict": "unproven_exception"}
+
+    # 1b. coexistence facts: local mode + GET phone?fields=is_on_biz_app,platform_type
+    section["coexistence"], coex_reads = _coexistence_facts(conn, token, client=client)
+    section["reads"].extend(coex_reads)
 
     # 2. token permission (raw status, absent vs declined vs granted)
     section["token_catalog_management"] = _permission_status(token, client=client)
@@ -996,10 +1289,26 @@ def _graph_section(
         section["live_items"] = {"catalog_id": None, "note": "no catalog stamped locally; presence checked against WABA-linked catalogs",
                                  "against_linked_catalogs": presence}
     else:
-        section["live_items"] = {
-            "skipped": "no_catalog_stamped_and_none_linked" if not linked_ids else "no_candidates",
-            "expected_actions_if_new_catalog": {"create": len(candidate_retailer_ids or []), "update": 0, "noop": 0},
-        }
+        link_verdict = (section.get("waba_catalogs") or {}).get("verdict")
+        n = len(candidate_retailer_ids or [])
+        if not candidate_retailer_ids:
+            section["live_items"] = {"skipped": "no_candidates"}
+        elif link_verdict == "no_catalog_linked_to_waba":
+            section["live_items"] = {
+                "skipped": "no_catalog_stamped_and_none_linked",
+                "expected_actions_if_new_catalog": {"create": n, "update": 0, "noop": 0},
+            }
+        else:
+            # the WABA read failed: the link is unproven, so no create/update split can be claimed
+            section["live_items"] = {
+                "skipped": "waba_catalog_link_unproven_graph_error",
+                "note": "GET /{waba}/product_catalogs did not answer; a catalog may or may not be linked",
+                "conditional_actions": {
+                    "if_no_catalog_is_linked": {"create": n, "update": 0, "noop": 0},
+                    "if_a_catalog_is_linked": "per_identity_presence_read_required",
+                },
+            }
+    section["catalog_path_assessment"] = _catalog_path_assessment(section)
     return section
 
 
@@ -1033,6 +1342,11 @@ def _missing_requirements(out: Dict[str, Any]) -> List[str]:
             missing.append("waba_catalog_link:none_linked")
         elif verdict != "catalog_linked_to_waba":
             missing.append("waba_catalog_link:unproven")
+        if (wc.get("error_class") or {}).get("class") == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION:
+            missing.append("meta_business_type_restriction:product_catalogs")
+        coex = graph.get("coexistence") or {}
+        if coex.get("verdict") == "coexistence_confirmed_by_graph" and verdict != "catalog_linked_to_waba":
+            missing.append("coexistence:api_catalog_path_unproven")
         elif conn.get("meta_catalog_id") and wc.get("stamped_catalog_is_linked") is False:
             missing.append("waba_catalog_link:stamped_id_not_linked")
         matches = graph.get("catalog_business_matches_waba_owner") or {}
