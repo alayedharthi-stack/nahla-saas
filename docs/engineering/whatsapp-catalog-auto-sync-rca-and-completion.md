@@ -33,7 +33,7 @@ CUSTOMER_REGEX_CHANGED=NO
 
 **نقطة ثانية مستقلة:** الطبقة 5 — بلا `NAHLA_AUTO_CATALOG_ONBOARDING` لا يُربط الكتالوج تلقائيًا بالتاجر الجديد؛ تاجر جديد يحتاج إدخال `meta_catalog_id` يدويًا أو إعادة ربط واتساب. هذه أيضًا صلاحية/إعداد (تتطلب `catalog_management` على Embedded Signup) لا كودًا.
 
-**ما لم أستطع إثباته من هذه الجلسة (يتطلب صلاحية خارجية):** ملكية الأصول الحيّة للمستأجر 1 (WABA/الكتالوج/محفظة الأعمال/صلاحيات الرمز الفعلي). لا وصول إلى قاعدة بيانات الإنتاج أو Graph من بيئة التنفيذ. آخر إثبات موثق: PR #871 (2026-08-23): WABA `28227017723654684`، كتالوج `4573008916317550` ضمن BM Nahlah AI `942627448527231` (43 عنصرًا)، ثم PR #902 (2026-09-01) يذكر كتالوجًا آخر للمستأجر 1 `871742015873294` (34 عنصرًا). **وجود معرّفين مختلفين للمستأجر نفسه يحتاج تحققًا قبل التفعيل** (انظر خطة التجربة §7).
+**ما لم أستطع إثباته من هذه الجلسة (يتطلب صلاحية خارجية):** ملكية الأصول الحيّة للمستأجر 1 (WABA/الكتالوج/محفظة الأعمال/صلاحيات الرمز الفعلي). لا وصول إلى قاعدة بيانات الإنتاج أو Graph من بيئة التنفيذ. آخر إثبات موثق: PR #871 (2026-08-23): WABA `28227017723654684`، كتالوج `4573008916317550` ضمن BM Nahlah AI `942627448527231` (43 عنصرًا)، ثم PR #902 (2026-09-01) يذكر كتالوجًا آخر للمستأجر 1 `871742015873294` (34 عنصرًا). **وجود معرّفين مختلفين للمستأجر نفسه يحتاج تحققًا قبل التفعيل العام**؛ أما التجربة المحدودة فتجري على **Tenant 35** بقرار المالك، وTenant 1 خارجها (قراءاته في §7.0 و§7.1 تخص Tenant 35).
 
 **ملاحظة شبكة:** مواقع التوثيق الرسمية لسلة وMeta كانت محجوبة من بيئة التنفيذ؛ اعتمدت على الكود الموجود (المبني سابقًا على التوثيق) وعلى ملخصات البحث. ما يحتاج تأكيدًا على التوثيق معلَّم في §6.
 
@@ -122,13 +122,13 @@ CUSTOMER_REGEX_CHANGED=NO
 | `test_whatsapp_catalog_channel_retirement.py` | الكتابة على Graph والتحقق، التراجع عند رفض `visibility`، عنصر غائب بلا كتابة، رفض عدم تطابق `meta_item_id`، الإخفاء ثم التصريف، التراجع والاستنفاد، إعادة الإخفاء بعد الاستنفاد والاستعادة، الاستعادة قبل التصريف، سجل الحذف يبقى بعد حذف الصف ويُصرَّف، **620 هوية تُسجَّل كاملة بلا سقف**، انقطاع Meta → تراجع واستنفاد ثم إعادة بعد المصالحة، **السجل يبقى رغم كتابات إعادة الربط وضمان الكتالوج وتجديد الرمز والمصالحة**، إضافة أثناء نداء Graph لا تُمحى، `handle_product_deleted` يكتب السجل قبل الحذف **ويرفض الحذف إن تعذر السجل**، **عزل متجرين**، منتجات Meta المستوردة لا تُمس |
 | `test_whatsapp_catalog_reconcile.py` | انحراف وغياب → إعادة للطابور بلا كتابة، قراءة ناقصة لا تُعيد شيئًا، مسحوب ما زال متاحًا → إعادة سحب، احترام العلم والفترة |
 | `test_whatsapp_catalog_sync_status_honesty.py` | منشور بلا دليل ربط ≠ published، دليل الربط والقياس الزمني، تجاهل دليل كتالوج آخر، رموز الإجراء، تصنيف 190/10/429، **رمز منتهٍ يحجب بلا استهلاك محاولات**، إعادة النشر بعد السحب ترسل `visibility=published`، إعادة الطابور بعد تغيّر الاتصال |
-| `test_whatsapp_catalog_sync_scope.py` | تحليل النطاق، تاجر التجربة ومنتجاته فقط يصلون إلى Graph (متجران آخران أحدهما مستورد من Meta بلا أي نداء وبلا تغيير حالة)، ورفض كل نقطة كتابة (ثمانية مداخل) للمتاجر خارج النطاق |
+| `test_whatsapp_catalog_sync_scope.py` | تحليل النطاق، تاجر التجربة ومنتجاته فقط يصلون إلى Graph (متجران آخران أحدهما مستورد من Meta بلا أي نداء وبلا تغيير حالة)، ورفض كل نقطة كتابة (ثمانية مداخل) للمتاجر خارج النطاق، و**البيئة المقترحة للتجربة نفسها** (`TENANT_IDS=35` + قائمة `35:<id>`): المستأجرون 1 و33 وأي مستأجر آخر يُرفضون في كل مدخل كتابة وفي جاهزية الحالة، بلا نداء Graph وبلا تغيير في صفوف المنتجات أو صف الاتصال، والتصريف الدوري والمصالحة يختاران 35 فقط، ومنتج غير مُدرج للمستأجر 35 يُرفض |
 
 التشغيل المحلي النهائي (على `cdc3d46d`): مجموعة الكتالوج/سلة/الموزّع/الهجرات/الدستور = **565 ناجحًا، 12 متخطى، 4 إخفاقات كلها سابقة على `main`**. الملفات الجديدة والمعدّلة وحدها: 137 اختبارًا ناجحًا. `scripts/lint_no_silent_except.py` نظيف، `scripts/lint_intelligence_non_interference.py` بلا نتائج، `tsc --noEmit` للوحة نظيف.
 **فشل سابق على `main` غير متعلق بهذا العمل:** `test_meta_catalog_readiness.py::test_fatal_missing_image_and_url` و3 اختبارات في `test_availability_browse_variant_conflict.py` تفشل على `origin/main` أيضًا (تحقق بتشغيلها على worktree من main). لم ألمسها.
 اختبارات أقفال PostgreSQL (`whatsapp-catalog-sync-postgres`) تُنفَّذ في CI؛ لم تتغير ملفاتها.
 
-ما لا تثبته الاختبارات: ظهور المنتج في واجهة واتساب، وصحة أصول المستأجر 1 الحيّة.
+ما لا تثبته الاختبارات: ظهور المنتج في واجهة واتساب، وصحة أصول المستأجر 35 الحيّة (كتالوج، ربط، صلاحيات).
 
 ---
 
@@ -157,7 +157,7 @@ CUSTOMER_REGEX_CHANGED=NO
 | 1 | الحدث القديم كان يستبدل التحديث الأحدث ثم «يُصحَّح لاحقًا» | ختم `source_event_at` لكل صف من `updated_at` سلة أو غلاف الحدث؛ الأقدم يُتجاهل؛ غير المثبت ترتيبه يُستبدل بقراءة الحقيقة من سلة؛ الجزئي تغلبه القراءة؛ المزامنة الدورية تختم وقت القراءة | `test_stale_event_never_replaces_the_newer_state_price_stock_or_hidden`, `test_event_with_unprovable_order_reads_current_truth_from_salla`, `test_partial_event_hydration_prefers_the_store_read_over_the_event_body`, `test_periodic_store_sync_stamps_fetch_time_so_older_webhooks_are_ignored` | انظر PR |
 | 2 | سجل السحب بسقف 500 ثم يستمر الحذف | جدول `catalog_channel_retirements` بلا سقف؛ لا حذف دون تسجيل كل الهويات؛ فشل التسجيل يُرجع الحدث | `test_ledger_has_no_cap_every_identity_of_a_deleted_product_is_recorded`, `test_ledger_outage_backs_off_exhausts_and_is_retried_after_reconcile_reset`, `test_store_sync_delete_is_refused_when_the_ledger_cannot_be_written` | انظر PR |
 | 3 | خطر محو السجل من كتّاب `extra_metadata` | السجل خارج عمود JSON كليًا؛ التصريف يحدّث بالمفتاح الأساسي بعد Graph | `test_ledger_survives_reconnect_bind_token_refresh_reconcile_and_drain_writers`, `test_ledger_entry_added_during_graph_io_survives_the_drain_merge` | انظر PR |
-| 4 | حصر التجربة في Tenant 1 فعليًا | نطاق كتابة صريح بالمتغيرين؛ رفض في كل نقاط الكتابة؛ لا تغيير لإعدادات متاجر أخرى | `test_whatsapp_catalog_sync_scope.py` (ثلاثة اختبارات، 8 مداخل كتابة، متجر مستورد من Meta ومتجر سلة آخر بلا أي نداء) | انظر PR |
+| 4 | حصر التجربة في متجر التجربة فعليًا | نطاق كتابة صريح بالمتغيرين؛ رفض في كل نقاط الكتابة؛ لا تغيير لإعدادات متاجر أخرى؛ متجر التجربة هو **Tenant 35** (قرار المالك)، وTenant 1 مخصص لمراجعة سلة ولا يُمس | `test_whatsapp_catalog_sync_scope.py` (أربعة اختبارات، 8 مداخل كتابة، متجر مستورد من Meta ومتجر سلة آخر بلا أي نداء، واختبار البيئة المقترحة `35` الذي يثبت رفض 1 و33 وغيرهما) | انظر PR |
 
 ### 5.2 المراجعة المستقلة الثانية (على `15131b50`) وما أُصلح
 
@@ -205,47 +205,96 @@ CUSTOMER_REGEX_CHANGED=NO
 |---|---|---|
 | `NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1` في Railway (بعد التجربة) | المالك/Ops | بدونه لا نشر ولا سحب ولا مصالحة |
 | صلاحية `catalog_management` على Embedded Signup (App Review) ثم `NAHLA_AUTO_CATALOG_ONBOARDING=1` | المالك مع Meta | الربط التلقائي للكتالوج لكل تاجر جديد بلا إدخال يدوي |
-| ملكية كتالوج المستأجر 1 داخل محفظة أعمال حساب واتساب نفسها (أو مشاركته) وحسم أي المعرّفين هو الصحيح | المالك | قراءة #871/#902 تُظهر معرّفين |
+| تجهيز متجر التجربة **Tenant 35**: تفعيل الكتالوج على اتصاله (`catalog_enabled`)، كتالوج Meta مملوك لمحفظة الأعمال المالكة لـ WABA `1682673239554563` أو مشارَك معها، ختمه في `meta_catalog_id`، وربطه بالـ WABA | المالك | سجلات الإنتاج تُظهر `native_catalog_entry_fallback tenant=35 reason=catalog_disabled` أي أن الكتالوج غير مفعّل حاليًا؛ لا كتالوج معروف للمستأجر 35 |
+| صلاحية `catalog_management` (و`business_management`) على رمز `merchant_oauth` للمستأجر 35 | المالك مع Meta | السجلات تثبت فقط قراءة قوالب WABA (`whatsapp_business_management`)؛ صلاحية الكتالوج غير مُثبتة |
+| ملكية كتالوج المستأجر 1 (مرجع #871/#902 يُظهر معرّفين) | المالك | **خارج التجربة**: Tenant 1 مخصص لمراجعة سلة؛ يُحسم لاحقًا عند التفعيل العام فقط |
 | تأكيد `review_status`/سياسة التجارة لعناصر Meta | المالك عبر Commerce Manager | عنصر مرفوض بالسياسة لا يظهر ولو تطابق المحتوى |
 | التحقق البصري من كتالوج واتساب على هاتف | المالك | الظهور غير قابل للإثبات برمجيًا |
 
 ---
 
-## 7. خطة التجربة المحدودة على Tenant 1 (قبل أي تفعيل عام)
+## 7. خطة التجربة المحدودة على Tenant 35 (قبل أي تفعيل عام)
 
-**لا يُنفَّذ شيء من هذا دون موافقة المالك. كل خطوة قراءة أولًا.**
+**قرار المالك:** متجر التجربة هو **Tenant 35**. **Tenant 1 مخصص لمراجعة سلة؛ لا يُستخدم للتجربة ولا تُغيَّر منتجاته أو كتالوجه أو إعداداته.** **Tenant 33** (متجر العسل) خارج أي كتابة تجريبية. **لا يُنفَّذ شيء من هذا دون موافقة المالك. كل خطوة قراءة أولًا. إذا تبيّن أن Tenant 35 تنقصه متطلبات، تتوقف الخطة ولا تنتقل إلى Tenant 1 تلقائيًا.**
 
-### 7.1 قراءة فقط (لا كتابة على Meta ولا DB)
-1. `python backend/scripts/report_meta_catalog_readiness.py --tenant-id 1 --include-meta-live-read` → عدد العناصر الحية، ما سيُنشأ، ما سيُحدَّث، ما هو محجوب ولماذا.
-2. `GET /merchant/catalog/waba-link-status` للمستأجر 1 → أي كتالوج مربوط فعلًا بالـ WABA الحالي، ومحفظة الأعمال المالكة.
-3. مقارنة `meta_catalog_id` المحفوظ مع ناتج الخطوة 2؛ إن اختلفا يتوقف كل شيء حتى يحسم المالك.
-4. `GET /merchant/catalog/whatsapp-sync/status` → `catalog_configured`, `catalog_link.state`, عدد `pending` (المنتظر منذ أشهر).
+### 7.0 ما نعرفه عن Tenant 35 من سجلات الإنتاج (قراءة فقط، 2026-10-02، نشر `fc2a9973`)
+
+| الطبقة | الدليل | الحكم |
+|---|---|---|
+| سلة | `[Registry] tenant=35 → adapter=salla integration_id=68 store_id=1979048767 api_sync=True easy_mode=False has_refresh=True needs_reauth=False` | متجر سلة مرتبط ورمزه صالح |
+| منتجات سلة → نهلة | كل ~15 دقيقة: `[Salla:products] tenant=35 page 1 fetched 20 items total_pages=1` ثم `products sync done — created=0 updated=20 total_upserted=20`؛ قراءة `/products/{id}/variants` لكل منتج | **20 منتجًا** في المتجر، المسار Salla → Nahla يعمل |
+| معرّفات سلة الخارجية للمنتجات العشرين | `1081492808, 1990796879, 617350990, 1256716365, 2031802700, 792574531, 1565563714, 59407425, 833445184, 1740652103, 368779078, 941551685, 1848758596, 475312763, 1116705658, 1889629305, 650401144, 691341437, 1426011775, 2064783230` | معرّفات `products.external_id`؛ المعرّفات المحلية (`products.id`) تحتاج قراءة DB (§7.1) |
+| واتساب | `[Guardian] IDLE tenant=35 phone_id=1127027493832697 connection_type=embedded waba_id=1682673239554563`؛ كل 30 دقيقة `[WA provider_get] op=template_sync tenant=35 provider=meta path=1682673239554563/message_templates status=200 source=merchant_oauth` | اتصال Embedded Signup نشط، ورمز التاجر صالح **لقراءة WABA** على الأقل؛ حركة عملاء ضئيلة (رقم واحد، 09-29 إلى 10-01) — مناسب لتجربة محدودة |
+| الكتالوج | `[NATIVE_CATALOG] native_catalog_entry_fallback tenant=35 reason=catalog_disabled` (09-29، 09-30، 10-01) — المصدر `core/native_catalog_capability.py` يُصدر هذا السبب عندما `whatsapp_connections.catalog_enabled` ليس صحيحًا | **الكتالوج غير مفعّل** على اتصال المستأجر 35؛ `meta_catalog_id` غير معروف (الفحص يتوقف قبله)؛ لا دليل على ربط WABA ↔ كتالوج |
+| حلقة التصريف | `[WA_CATALOG_SYNC] auto drain skipped tenant=35 (NAHLA_WHATSAPP_CATALOG_AUTO_SYNC!=1)` كل ساعة | هذه الرسالة تصدر من `store_sync` بعد كل مزامنة منتجات ولا تثبت تفعيل الكتالوج؛ التصريف الساعي الفعلي يختار فقط الاتصالات ذات `catalog_enabled=true` فلن يلتقط 35 الآن |
+| شذوذ | `[catalog/variants] tenant=35 product=183 upsert failed — continuing parent sync` (2026-09-28 20:48 مرة واحدة) | المنتج المحلي 183 يخص المستأجر 35؛ يُفحص في §7.1 ويُستبعد من قائمة التجربة إن لم يُفهم السبب |
+
+**متطلبات ناقصة لا يمكن سدّها من هذا المسار (كلها بيد المالك، ولا تُنفَّذ قبل موافقته):**
+1. تفعيل الكتالوج على اتصال المستأجر 35 (`catalog_enabled=true`) من لوحة التاجر.
+2. كتالوج Meta مملوك لمحفظة الأعمال التي تملك WABA `1682673239554563` (أو مشارَك معها)، وختم معرّفه في `meta_catalog_id` — عبر `GET /merchant/catalog/waba-link-status` ثم ضمان الكتالوج في وضع dry-run أولًا؛ **لا إنشاء كتالوج ولا ربط قبل قرار المالك**.
+3. صلاحية `catalog_management` (و`business_management`) على رمز `merchant_oauth` للمستأجر 35؛ المُثبت حاليًا قراءة قوالب WABA فقط.
+4. استحقاق الميزة `meta_catalog_sync` للمستأجر 35 (تفحصه الجاهزية عبر `get_entitlements`).
+5. المعرّفات المحلية وعدد متغيرات كل منتج (قراءة DB، §7.1).
+
+**ما لا يمكن قراءته من هذه البيئة:** لا وصول إلى قاعدة بيانات الإنتاج ولا إلى Graph؛ قيم متغيرات Railway محجوبة. الصلاحية الناقصة بالضبط: تشغيل `backend/scripts/report_meta_catalog_readiness.py` واستعلامات §7.1 على قاعدة الإنتاج (يحتاج `DATABASE_URL` للقراءة)، واستدعاء `GET /merchant/catalog/waba-link-status` و`GET /merchant/catalog/whatsapp-sync/status` بهوية المستأجر 35.
+
+### 7.1 قراءة فقط على Tenant 35 (لا كتابة على Meta ولا DB)
+1. **المنتجات والمتغيرات (DB):**
+   ```sql
+   SELECT p.id, p.external_id, p.title, p.in_stock, p.stock_quantity, p.catalog_status, p.sync_status,
+          (SELECT count(*) FROM product_variants v WHERE v.product_id = p.id) AS variants,
+          (p.extra_metadata->>'image_url')   IS NOT NULL AS has_image,
+          (p.extra_metadata->>'product_url') IS NOT NULL AS has_url,
+          p.extra_metadata->>'source_status' AS source_status
+   FROM products p
+   WHERE p.tenant_id = 35 AND p.source = 'salla'
+   ORDER BY p.id;
+   ```
+   المتوقع: 20 صفًا بالمعرّفات الخارجية في §7.0. فحص المنتج 183 (سبب فشل upsert المتغيرات في 09-28).
+2. `python backend/scripts/report_meta_catalog_readiness.py --tenant-id 35 --pretty` (بلا قراءة Meta) → لكل متغير: جاهز أم محجوب ولماذا (`missing_image`, `missing_url`, `price`, `hidden`...). ثم بعد تجهيز الكتالوج: `--include-meta-live-read` (GET فقط) → ما سيُنشأ وما سيُحدَّث.
+3. `GET /merchant/catalog/waba-link-status` للمستأجر 35 → الكتالوجات المرتبطة فعلًا بـ WABA `1682673239554563` ومحفظة الأعمال المالكة.
+4. `GET /merchant/catalog/whatsapp-sync/status` → `blocker_code` المتوقع الآن `catalog_disabled`؛ بعد التجهيز: `catalog_configured`, `catalog_link.state`, عدد `pending`.
+5. **اختيار المنتجات (3 منتجات من العشرين):** (أ) منتج بسيط بمتغير واحد، (ب) منتج بمتغيرين أو أكثر (مقاس/لون) لإثبات `item_group_id`، (ج) منتج ثالث متوفر بصورة ورابط وسعر. الشروط: `in_stock=true`، `catalog_status='active'`، صورة ورابط موجودان، ليس المنتج 183 ما لم يُفهم شذوذه. ناتج الاختيار: ثلاثة معرّفات محلية `<id_A>,<id_B>,<id_C>` وعدد متغيراتها `nA+nB+nC` = عدد العناصر التي ستُكتب على Meta.
 
 ### 7.2 ما سيُكتب في التجربة (بالضبط)
-- **على Meta:** لكل متغير سلة مؤهل في المستأجر 1: `POST /{catalog}/products` (إنشاء) إن لم يوجد `retailer_id={external_id}-{salla_variant_id}`، أو `POST /{item_id}` (تحديث) إن وُجد. الحقول: `retailer_id, name, description, image_url, url, price (هللة), currency, availability, item_group_id, size/color`. **لا DELETE.** الكتالوج المستخدم هو المحفوظ في `meta_catalog_id` فقط؛ لا إنشاء كتالوج.
-- **في DB (المستأجر 1 فقط):**
-  - `products.sync_status / meta_item_id / last_synced_at` و`products.extra_metadata.sync_meta` (أجيال المحتوى، الإيجار، `last_push_at`، أعلام `retire_pending/retired`) و`products.extra_metadata.source_event_at` لكل صف تكتبه سلة.
-  - صفوف `meta_catalog_memberships` (هوية `retailer_id` ↔ `meta_item_id` لكل متغير).
-  - **جدول `catalog_channel_retirements` (الهجرة `0116`):** يُكتب فيه صف لكل هوية قناة (`tenant_id, catalog_id, retailer_id, meta_item_id, product_id, reason`) **عند حذف منتج فقط** (يدويًا أو بحدث `product.deleted` من سلة)، في نفس معاملة الحذف؛ حالته `pending` → `done` بعد تحقق Graph، أو `exhausted` بعد استنفاد المحاولات (تعيد المصالحة فتحه). الصفوف لا تُحذف بعد الإنجاز بل تبقى سجلًا. **الإخفاء لا يكتب في هذا الجدول** بل يضع `retire_pending` على `sync_meta` للمنتج نفسه. إن لم يُحذف أي منتج أثناء التجربة يبقى الجدول فارغًا للمستأجر 1.
-  - `whatsapp_connections.extra_metadata.wa_catalog_reconcile` (لقطة المصالحة الدورية وحالة ربط WABA) ما زالت تُكتب على صف اتصال المستأجر 1 كما في التنفيذ الحالي؛ لا شيء آخر يُكتب على صف الاتصال في التجربة (`meta_catalog_bind` يُكتب فقط عند إعادة اتصال واتساب، وهي خارج نطاق التجربة).
-- عدد العناصر المتوقع: ناتج الخطوة 7.1-1 (مرجع #902: 34 عنصرًا).
+- **على Meta (كتالوج المستأجر 35 فقط):** لكل متغير من المنتجات الثلاثة المختارة: `POST /{catalog}/products` (إنشاء) إن لم يوجد `retailer_id={external_id}-{salla_variant_id}`، أو `POST /{item_id}` (تحديث) إن وُجد. الحقول: `retailer_id, name, description, image_url, url, price (هللة), currency, availability, item_group_id, size/color`. **لا DELETE.** الكتالوج المستخدم هو المحفوظ في `meta_catalog_id` للمستأجر 35 فقط؛ لا إنشاء كتالوج. العدد المتوقع = `nA+nB+nC` من §7.1-5 (معلوم قبل رفع العلم).
+- **في DB (المستأجر 35 فقط):**
+  - `products.sync_status / meta_item_id / last_synced_at` و`products.extra_metadata.sync_meta` (أجيال المحتوى، الإيجار، `last_push_at`، أعلام `retire_pending/retired`) للمنتجات الثلاثة؛ و`products.extra_metadata.source_event_at` لكل صف يكتبه مسار سلة (هذا الختم جزء من مزامنة سلة الموجودة ويُكتب لكل المستأجرين بعد النشر، وهو قراءة من سلة لا كتابة على Meta).
+  - صفوف `meta_catalog_memberships` (هوية `retailer_id` ↔ `meta_item_id` لكل متغير مكتوب).
+  - **جدول `catalog_channel_retirements` (الهجرة `0116`):** يُكتب فيه صف لكل هوية قناة (`tenant_id, catalog_id, retailer_id, meta_item_id, product_id, reason`) **عند حذف منتج فقط** (يدويًا أو بحدث `product.deleted` من سلة)، في نفس معاملة الحذف؛ حالته `pending` → `done` بعد تحقق Graph، أو `exhausted` بعد استنفاد المحاولات (تعيد المصالحة فتحه). الصفوف لا تُحذف بعد الإنجاز بل تبقى سجلًا. **الإخفاء لا يكتب في هذا الجدول** بل يضع `retire_pending` على `sync_meta` للمنتج نفسه. إن لم يُحذف أي منتج أثناء التجربة يبقى الجدول فارغًا للمستأجر 35.
+  - `whatsapp_connections.extra_metadata.wa_catalog_reconcile` (لقطة المصالحة الدورية وحالة ربط WABA) تُكتب على صف اتصال المستأجر 35 كما في التنفيذ الحالي؛ لا شيء آخر يُكتب على صف الاتصال في التجربة (`meta_catalog_bind` يُكتب فقط عند إعادة اتصال واتساب، وهي خارج نطاق التجربة).
+- **لا يُكتب شيء** لأي مستأجر آخر: لا Tenant 1، لا Tenant 33، لا غيرهما — لا على Meta ولا في صفوف منتجاتهم أو اتصالاتهم (الدليل: `test_proposed_tenant_35_trial_scope_refuses_tenants_1_33_and_every_other_tenant`). ما يراه التاجر المستثنى هو لافتة حالة `sync_scope_excluded` فقط، وهي قراءة لا تغيير إعداد.
 
 ### 7.3 التفعيل التدريجي (محصور بالنطاق، لا تغيير لأي متجر آخر)
-0. **قبل رفع علم التشغيل:** ضبط `NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS=1` و`NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS=1:<id>,1:<id>,...` بقائمة المنتجات المختارة من تقرير §7.1 (العدد معلوم مسبقًا = متغيراتها المؤهلة). بهذا يرفض الكود أي كتابة لغير المستأجر 1 ولغير هذه المنتجات، بما فيها ربط الكتالوج عند إعادة اتصال واتساب لتاجر آخر (يصبح قراءة فقط)؛ المستأجران 33 و35 يظهران في لوحتهما بعائق `sync_scope_excluded` بلا إجراء، ولا يُغيَّر `catalog_enabled` لأي منهما. تطبيق الهجرة `alembic upgrade 0116` (أو الاعتماد على `create_all` عند الإقلاع) والتحقق منها بالاستعلامات الثلاثة في §7.4 قبل أول حذف منتج.
-1. رفع `NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1` ثم `POST /merchant/catalog/whatsapp-sync` للمستأجر 1 (أو انتظار التصريف الدوري).
-2. مراقبة السجلات: `[META_CATALOG_PUSH]`, `[NATIVE_META_SYNC] ... content=matched`, `[WA_CATALOG_SYNC] tenants=.. synced=.. failed=..`.
-3. التحقق: الحالة تُظهر `phase=published` **و** `catalog_link.state=linked`؛ ثم تحقق بصري على الهاتف.
-4. اختبار التغيير الواحد: تعديل سعر منتج في سلة → خلال ≤ 120 ثانية + زمن Meta يظهر `content=matched` بالسعر الجديد؛ قيم `latency` تُسجَّل.
-5. اختبار الإخفاء: إخفاء منتج في سلة → `retire_pending` ثم `retired` و`availability=out of stock` في Commerce Manager.
+0. **قبل رفع علم التشغيل (ولا يُضبط شيء منها في الإنتاج قبل موافقة المالك):**
+   ```text
+   NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS=35
+   NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS=35:<id_A>,35:<id_B>,35:<id_C>
+   ```
+   بالمعرّفات المحلية المختارة في §7.1-5. بهذا يرفض الكود أي كتابة لغير المستأجر 35 ولغير هذه المنتجات الثلاثة، بما فيها ربط الكتالوج عند إعادة اتصال واتساب لتاجر آخر (يصبح قراءة فقط)؛ المستأجران 1 و33 وبقية التجار يظهرون في لوحاتهم بعائق `sync_scope_excluded` بلا إجراء، ولا يُغيَّر `catalog_enabled` أو أي إعداد لأي منهم. استكمال متطلبات §7.0 الناقصة للمستأجر 35 (تفعيل الكتالوج، الكتالوج والربط، الصلاحية) بيد المالك. تطبيق الهجرة `alembic upgrade 0116` (أو الاعتماد على `create_all` عند الإقلاع) والتحقق منها بالاستعلامات الثلاثة في §7.4 قبل أول حذف منتج.
+1. رفع `NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1` ثم `POST /merchant/catalog/whatsapp-sync` للمستأجر 35 (أو انتظار التصريف الدوري).
+2. مراقبة السجلات: `[META_CATALOG_PUSH] tenant=35`, `[NATIVE_META_SYNC] tenant=35 ... content=matched`, `[WA_CATALOG_SYNC] tenants=1 synced=.. failed=..`؛ والتأكد من **عدم** ظهور أي سطر كتابة (`META_CATALOG_PUSH`/`NATIVE_META_SYNC`) لمستأجر غير 35.
+3. التحقق: حالة المستأجر 35 تُظهر `phase=published` **و** `catalog_link.state=linked` وعدد العناصر = `nA+nB+nC`؛ ثم تحقق بصري على الهاتف.
+4. اختبار التغيير الواحد: تعديل سعر أحد المنتجات الثلاثة في متجر سلة 1979048767 → خلال ≤ 120 ثانية + زمن Meta يظهر `content=matched` بالسعر الجديد؛ قيم `latency` تُسجَّل.
+5. اختبار الإخفاء: إخفاء أحد المنتجات الثلاثة في سلة → `retire_pending` ثم `retired` و`availability=out of stock` في Commerce Manager؛ ثم إظهاره → إعادة النشر بـ `visibility=published`.
 6. ترك المصالحة تعمل دورة واحدة (6 ساعات أو عبر `POST /whatsapp-sync/reconcile`) والتأكد من `requeued=0`.
+7. التوسيع لاحقًا (منتجات أكثر أو مستأجرون آخرون) بتعديل المتغيرين فقط وبموافقة منفصلة؛ Tenant 1 لا يدخل النطاق إلا بقرار صريح بعد انتهاء مراجعة سلة.
 
 ### 7.4 التراجع
 - إطفاء العلم (`NAHLA_WHATSAPP_CATALOG_AUTO_SYNC` ≠ 1) وإعادة النشر: يتوقف كل تصريف وسحب ومصالحة فورًا؛ العناصر المنشورة تبقى كما هي (لا حذف). توسيع النطاق لاحقًا يكون بتعديل المتغيرين فقط، وإزالتهما تعيد السلوك العام للمنصة.
 - إعادة أي عنصر إلى حالة غير مرئية: `retire` يدوي عبر إخفاء المنتج ثم تشغيل التصريف مرة واحدة، أو من Commerce Manager.
 - **ثلاث طبقات تراجع منفصلة، تُنفَّذ بالترتيب وتتوقف عند أول طبقة تكفي:**
-  1. **إيقاف المزامنة (بلا نشر كود):** إطفاء العلم كما أعلاه. يبقى الكود والجدول وطلبات السحب المعلقة في `catalog_channel_retirements` كما هي؛ تُستأنف عند إعادة التشغيل دون فقدان.
+  1. **إيقاف المزامنة (بلا نشر كود):** إطفاء العلم كما أعلاه. يبقى الكود والجدول وطلبات السحب غير المنجزة في `catalog_channel_retirements` كما هي؛ تُستأنف عند إعادة التشغيل دون فقدان.
   2. **التراجع عن الكود:** `revert` للـ PR وإعادة النشر. يبقى جدول `catalog_channel_retirements` وصفوفه في قاعدة البيانات (الكود القديم لا يعرفه ولا يلمسه)؛ لا تُفقد أي طلبات سحب مسجَّلة، وتُصرَّف عند إعادة نشر الكود لاحقًا. **لا يُسقَط الجدول في هذه الخطوة.**
-  3. **التراجع عن الهجرة (قرار مستقل، ليس تلقائيًا):** `alembic downgrade 0116 -1` يُسقط الجدول **وكل سجل طلبات السحب معه** (معلقة ومنجزة). لا يُنفَّذ إلا بقرار صريح من المالك وبعد التأكد أن `SELECT count(*) FROM catalog_channel_retirements WHERE status='pending'` يساوي صفرًا، أو بعد تصدير الصفوف. إبقاء الجدول بعد التراجع عن الكود آمن تمامًا.
+  3. **التراجع عن الهجرة (قرار مستقل، ليس تلقائيًا):** `alembic downgrade 0116 -1` يُسقط الجدول **وكل سجل طلبات السحب معه** (غير المنجزة والمنجزة). لا يُنفَّذ إلا بقرار صريح من المالك وبعد استيفاء الشرطين معًا:
+     - **لا طلبات غير منجزة لأي مستأجر** — غير المنجز يشمل `pending` **و`exhausted`** (المستنفد ليس منجزًا؛ المصالحة تعيد فتحه):
+       ```sql
+       SELECT status, count(*) FROM catalog_channel_retirements
+       WHERE status IN ('pending', 'exhausted') GROUP BY status;
+       ```
+       يجب أن يعيد صفرًا من الصفوف. إن لم يكن صفرًا: إما تشغيل التصريف/المصالحة حتى تُنجَز (الطبقة 1 أو 2 تسمح بذلك مع بقاء الكود)، أو الإبقاء على الجدول.
+     - **تصدير الصفوف وحده لا يكفي.** إن اختار المالك التصدير بدل الانتظار، يلزم قبل الإسقاط خطة استعادة موثقة ومجرَّبة: إعادة تطبيق `alembic upgrade 0116`، إعادة إدراج الصفوف المصدَّرة بالحالة `pending` و`attempts=0` و`next_attempt_at=NULL` مع نفس `(tenant_id, catalog_id, retailer_id, meta_item_id, product_id, reason)`، ثم استئناف المعالجة (`POST /merchant/catalog/whatsapp-sync/reconcile` أو انتظار التصريف) والتحقق أن عدد `done` بعد الاستئناف = عدد الصفوف المستعادة. بلا هذه الخطة يبقى الجدول.
+     - إبقاء الجدول بعد التراجع عن الكود آمن تمامًا وهو الخيار الافتراضي.
 - **الهجرة `0116` وطريقة التحقق من تطبيقها:** الجدول يُنشأ بأحد مسارين: `Base.metadata.create_all` عند إقلاع الخدمة (يُنشئ جداول الموديلات الجديدة بعد `alembic upgrade 0093` المثبّت في عقد الإقلاع)، أو `alembic upgrade 0116` صراحةً. الهجرة إضافية ومثالية التكرار: إن وُجد الجدول تكتفي بتخفيف `catalog_id` إلى `NULL`-able، وإلا تُنشئه. للتحقق قبل أول حذف منتج في التجربة:
   - وجود الجدول: `SELECT to_regclass('public.catalog_channel_retirements');` يجب ألا يعيد `NULL`.
   - تسجيل الهجرة: `SELECT version_num FROM alembic_version;` يجب أن يحوي `0116` ضمن رؤوس المستودع (`REPOSITORY_ALEMBIC_HEADS` في `scripts/operators/bootstrap_migration_contract.py` = `{0092, 0111, 0114, 0115, 0116}`). إن أنشأ `create_all` الجدول دون تسجيل، يُشغَّل `alembic upgrade 0116` لتسجيله؛ لا يغيّر البيانات.

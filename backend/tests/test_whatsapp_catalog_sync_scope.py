@@ -322,3 +322,145 @@ def test_reconnect_bind_and_onboarding_are_read_only_for_out_of_scope_tenants(mo
         assert conn.meta_catalog_id == "CAT-OTHER"
     finally:
         session.close(); engine.dispose()
+
+
+@_READY
+def test_proposed_tenant_35_trial_scope_refuses_tenants_1_33_and_every_other_tenant(monkeypatch):
+    """The exact environment proposed for the limited trial
+    (``NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS=35`` and a ``35:<id>`` product
+    list) must leave tenant 1 (Salla review store), tenant 33 (read-only honey
+    store) and any other tenant untouched: no Graph call, no product state
+    change, no connection-row change, and only the listed tenant-35 products
+    may be published."""
+    from services.meta_catalog_push import push_one_meta_catalog_item, retire_meta_catalog_item
+    from services.native_meta_sync_orchestrator import attempt_native_meta_sync
+    from services.whatsapp_catalog_reconcile import reconcile_due_tenants
+    from services.whatsapp_catalog_retirement import (
+        REASON_SOURCE_DELETED,
+        attempt_product_channel_retirement,
+        drain_channel_retirement_ledger,
+        enqueue_channel_retirement_ledger,
+    )
+    from services.whatsapp_catalog_sync import (
+        drain_ready_tenants,
+        evaluate_whatsapp_catalog_sync_readiness,
+        schedule_whatsapp_catalog_drain,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        # Explicit ids mirror the production roles named by the owner; the
+        # store data itself stays generic.
+        for tid, name in ((1, "متجر مراجعة سلة"), (2, "متجر تجريبي عام"), (33, "متجر قراءة فقط"), (35, "متجر التجربة")):
+            session.add(Tenant(id=tid, name=name, is_active=True))
+        session.commit()
+        for tid in (1, 2, 33, 35):
+            session.add(WhatsAppConnection(
+                tenant_id=tid, whatsapp_business_account_id=f"WABA-{tid}", phone_number_id=f"PN-{tid}",
+                access_token="EAAB-test", meta_catalog_id=f"CAT-{tid}", catalog_enabled=True,
+                extra_metadata={"marker": f"untouched-{tid}"},
+            ))
+        session.commit()
+
+        trial_rows = [_salla_row(session, 35, f"35000{i}") for i in range(3)]
+        unlisted_trial_row = _salla_row(session, 35, "350099")
+        foreign = {tid: _salla_row(session, tid, f"{tid}00100") for tid in (1, 2, 33)}
+        foreign_hidden = {tid: _salla_row(session, tid, f"{tid}00200", hidden=True) for tid in (1, 2, 33)}
+        imported_33 = _imported_row(session, 33)
+        for tid in (1, 2, 33):
+            enqueue_channel_retirement_ledger(
+                session, tid,
+                [{"retailer_id": f"{tid}00300-1", "meta_item_id": f"META-{tid}00300-1", "catalog_id": f"CAT-{tid}", "product_id": 999}],
+                reason=REASON_SOURCE_DELETED,
+            )
+        session.commit()
+
+        before = {
+            tid: (c.meta_catalog_id, c.catalog_enabled, dict(c.extra_metadata or {}))
+            for tid, c in ((c.tenant_id, c) for c in session.query(WhatsAppConnection).all())
+        }
+
+        monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
+        monkeypatch.setenv(TENANT_SCOPE_ENV, "35")
+        monkeypatch.setenv(PRODUCT_SCOPE_ENV, ",".join(f"35:{p.id}" for p in trial_rows))
+
+        # Membership: only tenant 35 and only the listed products.
+        assert tenant_in_sync_scope(35) is True
+        assert all(tenant_in_sync_scope(t) is False for t in (1, 2, 33))
+        assert all(product_in_sync_scope(35, p.id) for p in trial_rows)
+        assert product_in_sync_scope(35, unlisted_trial_row.id) is False
+        assert product_in_sync_scope(1, foreign[1].id) is False and product_in_sync_scope(33, imported_33.id) is False
+        assert scope_description()["tenant_ids"] == [35]
+
+        graph = CountingGraph()
+        with patch("services.meta_catalog_push._resolve_catalog_and_token",
+                   lambda conn, *a, **k: (str(getattr(conn, "meta_catalog_id", "") or "CAT-35"), "tok")), \
+             patch("services.meta_catalog_push.select_catalog_graph_token", lambda *a, **k: {"token": "tok"}), \
+             patch("services.meta_catalog_reconcile.select_catalog_graph_token", lambda *a, **k: {"token": "tok"}), \
+             patch("services.meta_catalog_access.select_catalog_graph_token", lambda *a, **k: {"token": "tok"}):
+            for tid in (1, 2, 33):
+                conn = session.query(WhatsAppConnection).filter_by(tenant_id=tid).first()
+                assert evaluate_whatsapp_catalog_sync_readiness(session, tid)["blocker_code"] == SCOPE_BLOCKER_CODE
+                res = attempt_native_meta_sync(session, tid, foreign[tid].id, client=graph)
+                assert res["skipped"] is True and res["error_code"] == SCOPE_BLOCKER_CODE
+                res = push_one_meta_catalog_item(session, tid, f"{tid}00100-1", confirm=True, client=graph)
+                assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
+                res = retire_meta_catalog_item(conn, f"CAT-{tid}", f"{tid}00200-1", f"META-{tid}00200-1", client=graph)
+                assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
+                res = attempt_product_channel_retirement(session, tid, foreign_hidden[tid].id, client=graph)
+                assert res["skipped"] is True and res["error_code"] == SCOPE_BLOCKER_CODE
+                out = drain_channel_retirement_ledger(session, tid, client=graph)
+                assert out["processed"] == 0 and out["skipped_scope"] == 1
+                with patch("services.whatsapp_catalog_sync._whatsapp_catalog_drain_coalescer") as coal:
+                    schedule_whatsapp_catalog_drain(tid, allow_without_auto_flag=True)
+                assert not coal.called
+            # The imported (meta_readonly) honey-store product is never a publish candidate either.
+            res = attempt_native_meta_sync(session, 33, imported_33.id, client=graph)
+            assert res["skipped"] is True
+            # Tenant 35 itself: an unlisted product is refused without state change.
+            res = attempt_native_meta_sync(session, 35, unlisted_trial_row.id, client=graph)
+            assert res["skipped"] is True and res["error_code"] == SCOPE_BLOCKER_CODE
+            assert graph.calls == []
+            # Periodic reconcile picks tenant 35 only; the hourly drain iterates tenant 35 only.
+            with patch("services.whatsapp_catalog_reconcile.reconcile_tenant_channel_catalog",
+                       return_value={"requeued": 0, "retire_requeued": 0}) as rec_mock:
+                reconcile_due_tenants(session, max_tenants=10)
+            assert [c.args[1] for c in rec_mock.call_args_list] == [35]
+            with patch("services.whatsapp_catalog_sync.drain_whatsapp_catalog_sync",
+                       return_value={"processed": 0, "synced": 0, "failed": 0}) as drain_mock:
+                drain_ready_tenants(session)
+            assert sorted(c.args[1] for c in drain_mock.call_args_list) == [35]
+            # The listed tenant-35 products are the only ones handed to the publisher.
+            pushed = []
+
+            def _fake_attempt(db, tenant_id, product_id, *, client=None, **kw):
+                pushed.append((int(tenant_id), int(product_id)))
+                row = db.get(Product, int(product_id))
+                row.sync_status = "synced"
+                db.commit()
+                return {"ok": True, "sync_status": "synced"}
+
+            with patch("services.whatsapp_catalog_sync.attempt_native_meta_sync", _fake_attempt):
+                summary = drain_ready_tenants(session, limit_per_tenant=25)
+            assert summary["tenants"] == 1
+            assert sorted(pushed) == sorted((35, p.id) for p in trial_rows)
+        assert graph.calls == []
+
+        session.expire_all()
+        for tid in (1, 2, 33):
+            assert session.get(Product, foreign[tid].id).sync_status == "pending"
+            assert session.get(Product, foreign_hidden[tid].id).sync_status == "synced"
+            row = session.query(CatalogChannelRetirement).filter_by(tenant_id=tid).one()
+            assert row.status == "pending" and row.attempts == 0
+        assert session.get(Product, imported_33.id).sync_status is None
+        assert session.get(Product, unlisted_trial_row.id).sync_status == "pending"
+        after = {
+            c.tenant_id: (c.meta_catalog_id, c.catalog_enabled, dict(c.extra_metadata or {}))
+            for c in session.query(WhatsAppConnection).all()
+        }
+        for tid in (1, 2, 33):
+            assert after[tid] == before[tid]
+    finally:
+        session.close(); engine.dispose()
