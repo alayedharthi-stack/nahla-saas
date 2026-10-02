@@ -165,6 +165,9 @@ def fetch_meta_catalog_live_products(
                 "currency": str(row.get("currency") or "").strip() or None,
                 "availability": str(row.get("availability") or "").strip() or None,
             }
+            for key in ("description", "image_url", "url", "item_group_id", "visibility"):
+                if key in row:
+                    live[rid][key] = str(row.get(key) or "").strip() or None
         meta_info["items"] = len(live)
         return True
 

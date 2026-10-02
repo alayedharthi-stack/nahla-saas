@@ -534,7 +534,9 @@ def test_graph_section_reads_waba_catalogs_without_a_stamped_id_and_reports_perm
         assert "embedded_signup_configuration_permissions" in perm["interpretation"]["needs_manual_reads"]
         # candidates classified against the linked catalog even though nothing is stamped locally
         pres = g["live_items"]["against_linked_catalogs"]["CAT-900"]
-        assert pres["candidates_absent"] == ["617350990-1", "617350990-2"] and pres["expected_actions"]["create"] == 2
+        assert pres["candidates_absent"] == ["617350990-1", "617350990-2"]
+        assert pres["classification"] == {"create_if_absent": 2, "match_needs_verification": 0}
+        assert "needs verification" in pres["note"]
         assert "token_catalog_management:not_on_token" in report["missing_requirements"]
         assert "meta_catalog_id" in report["missing_requirements"]
         assert not any(m.startswith("waba_catalog_link") for m in report["missing_requirements"])

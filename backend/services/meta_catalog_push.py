@@ -41,6 +41,17 @@ REQUEST_TIMEOUT: float = 45.0
 # Graph Catalog Product Item fields used after a push. Identity plus
 # the content fields this API version exposes on GET.
 GRAPH_FIELDS = "id,retailer_id,name,price,currency,availability"
+
+# A live Graph item that merely shares a retailer_id is NOT ours to update. The
+# push adopts an existing item only with publication evidence for this tenant:
+# a membership row bound to that exact Graph item with a publication provenance
+# (this path published it, or an operator explicitly bound it), or the legacy
+# product-level stamp equal to the item id. A retailer_id format, a link domain
+# or a reconcile-derived membership (Graph presence) never count.
+PUBLICATION_PROVENANCES = frozenset({"salla_variant_push", "literal_retailer_bind"})
+ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED = "live_match_ownership_unverified"
+ACTION_BLOCK_OWNERSHIP = "block_ownership_unverified"
+REASON_NO_PUBLICATION_EVIDENCE = "live_item_without_publication_evidence"
 SIBLING_GRAPH_FIELDS = "id,retailer_id,price,currency,availability,url,image_url"
 
 
@@ -224,6 +235,87 @@ def find_meta_catalog_item_by_retailer_id(
         return _run(client)
     with httpx.Client(timeout=REQUEST_TIMEOUT) as owned:
         return _run(owned)
+
+
+def live_item_publication_evidence(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    meta_product_id: str,
+    parent: Any = None,
+) -> Dict[str, Any]:
+    """Did THIS path (or an explicit operator bind) publish the live Graph item?
+
+    ``owned`` is True only with evidence tied to the exact Graph item id:
+    a ``MetaCatalogMembership`` for (tenant, catalog, retailer_id) whose
+    ``meta_item_id`` equals the live id and whose provenance is a publication
+    provenance, or the legacy ``Product.meta_item_id`` equal to the live id.
+    Everything else — an absent membership, a reconcile-derived membership, a
+    mismatching id, a matching retailer_id format or a familiar link domain —
+    is ``owned=False`` with the reasons listed, and the caller must not update.
+    """
+    mid = str(meta_product_id or "").strip()
+    rid = str(retailer_id or "").strip()
+    cid = str(catalog_id or "").strip()
+    out: Dict[str, Any] = {
+        "owned": False, "source": None, "meta_product_id": mid or None, "retailer_id": rid,
+        "catalog_id": cid or None, "membership": None, "reasons": [],
+    }
+    if not mid:
+        out["reasons"].append("live_item_id_missing")
+        return out
+    membership = None
+    try:
+        from models import MetaCatalogMembership  # noqa: PLC0415
+
+        membership = (
+            db.query(MetaCatalogMembership)
+            .filter(
+                MetaCatalogMembership.tenant_id == int(tenant_id),
+                MetaCatalogMembership.catalog_id == cid,
+                MetaCatalogMembership.retailer_id == rid,
+            )
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["reasons"].append(f"membership_lookup_failed:{type(exc).__name__}")
+    if membership is not None:
+        m_mid = str(getattr(membership, "meta_item_id", None) or "").strip()
+        prov = str(getattr(membership, "provenance", None) or "").strip()
+        out["membership"] = {"meta_item_id": m_mid or None, "provenance": prov or None}
+        if not m_mid:
+            out["reasons"].append("membership_without_meta_item_id")
+        elif m_mid != mid:
+            out["reasons"].append("membership_meta_item_id_mismatch")
+        elif prov not in PUBLICATION_PROVENANCES:
+            out["reasons"].append(f"membership_provenance_not_publication:{prov or 'none'}")
+        else:
+            out["owned"] = True
+            out["source"] = f"membership:{prov}"
+            return out
+    else:
+        out["reasons"].append("membership_absent")
+    legacy = str(getattr(parent, "meta_item_id", None) or "").strip() if parent is not None else ""
+    if legacy and legacy == mid:
+        out["owned"] = True
+        out["source"] = "legacy_product_meta_item_id"
+        out["reasons"] = []
+        return out
+    if legacy:
+        out["reasons"].append("legacy_product_meta_item_id_differs")
+    return out
+
+
+def _ownership_block(result: Dict[str, Any], lookup: Dict[str, Any], meta_product_id: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
+    result["action"] = ACTION_BLOCK_OWNERSHIP
+    result["error"] = ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    result["ok"] = False
+    result["meta_product_id"] = str(meta_product_id)
+    result["ownership_evidence"] = evidence
+    result["lookup"] = {**(lookup or {}), "reason": REASON_NO_PUBLICATION_EVIDENCE, "identity_class": None}
+    return result
 
 
 def _parent_variants_for_gate(db: Any, parent: Any, variant: Any, tenant_id: int) -> List[Any]:
@@ -537,6 +629,15 @@ def push_one_meta_catalog_item(
                 "identity_class": None,
             }
             return result
+        evidence = live_item_publication_evidence(
+            db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+            meta_product_id=str(meta_product_id), parent=parent,
+        )
+        result["ownership_evidence"] = evidence
+        if not evidence.get("owned"):
+            # a retailer_id match without publication evidence is a "match that
+            # needs verification": never update someone else's (or an unproven) item
+            return _ownership_block(result, lookup, str(meta_product_id), evidence)
         result["action"] = "update"
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
@@ -560,6 +661,16 @@ def push_one_meta_catalog_item(
                 "content_mismatches": blocked.get("content_mismatches") or [],
                 "canonical_rule": blocked.get("canonical_rule"),
             }
+            if blocked.get("action") == ACTION_LINK and blocked.get("meta_product_id"):
+                # linking to a live sibling adopts it: the same evidence rule applies
+                evidence = live_item_publication_evidence(
+                    db, tenant_id=int(tenant_id), catalog_id=catalog_id,
+                    retailer_id=str(blocked.get("sibling_retailer_id") or ""),
+                    meta_product_id=str(blocked.get("meta_product_id")), parent=parent,
+                )
+                result["ownership_evidence"] = evidence
+                if not evidence.get("owned"):
+                    return _ownership_block(result, result.get("lookup") or {}, str(blocked.get("meta_product_id")), evidence)
             return result
         result["action"] = "create"
         post_url = _graph_base(catalog_id, "products")
@@ -942,4 +1053,9 @@ __all__ = [
     "parent_would_create_in_meta",
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
+    "live_item_publication_evidence",
+    "PUBLICATION_PROVENANCES",
+    "ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED",
+    "ACTION_BLOCK_OWNERSHIP",
+    "REASON_NO_PUBLICATION_EVIDENCE",
 ]

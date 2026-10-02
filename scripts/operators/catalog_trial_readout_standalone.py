@@ -1320,7 +1320,14 @@ def _graph_section(
                     "live_item_count": len(live), "fetch": meta_fetch,
                     "candidates_present": present,
                     "candidates_absent": [rid for rid in candidate_retailer_ids if rid not in live],
-                    "expected_actions": {"create": len(candidate_retailer_ids) - len(present), "update_or_noop": len(present)},
+                    "classification": {
+                        "create_if_absent": len(candidate_retailer_ids) - len(present),
+                        "match_needs_verification": len(present),
+                    },
+                    "note": ("a retailer_id present in the catalog is a match that needs verification, not an "
+                             "item this path may update: ownership requires a membership bound to that Graph "
+                             "item with a publication provenance (or the legacy product stamp); noop requires "
+                             "every synced field to be read and equal"),
                 }
         except Exception as exc:  # noqa: BLE001
             presence["error"] = type(exc).__name__

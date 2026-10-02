@@ -76,6 +76,8 @@ class MetaCatalogReadinessItem:
     live_name: Optional[str] = None
     local_name: Optional[str] = None
     action_needed: Optional[str] = None
+    ownership: Optional[Dict[str, Any]] = None
+    live_compare: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -109,6 +111,10 @@ class MetaCatalogReadinessItem:
             out["local_name"] = self.local_name
         if self.action_needed is not None:
             out["action_needed"] = self.action_needed
+        if self.ownership is not None:
+            out["ownership"] = dict(self.ownership)
+        if self.live_compare is not None:
+            out["live_compare"] = dict(self.live_compare)
         return out
 
 
@@ -461,32 +467,150 @@ def _payload_fields(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+# Every field the publish path sends. ``noop`` is declared only when each of
+# these that the local payload sets is present in the live row and equal; a
+# field the live read did not return stays unsettled (``unsettled``), never noop.
+LIVE_SYNCED_FIELDS = (
+    "name", "description", "price", "currency", "availability",
+    "image_url", "url", "item_group_id", "visibility",
+)
+LIVE_READ_FIELDS = "id,retailer_id,name,description,price,currency,availability,image_url,url,item_group_id,visibility"
+LIVE_READ_FIELDS_NO_VISIBILITY = LIVE_READ_FIELDS.replace(",visibility", "")
+# The readiness classification is a *comparison*; it never authorizes a write.
+PUBLICATION_PROVENANCES = frozenset({"salla_variant_push", "literal_retailer_bind"})
+
+ACTION_CREATE = "create"
+ACTION_UPDATE = "update"
+ACTION_NOOP = "noop"
+ACTION_SKIP = "skip"
+ACTION_VERIFY_OWNERSHIP = "verify_ownership"   # live retailer_id match without publication evidence
+ACTION_UNSETTLED = "unsettled"                 # owned, nothing differs, but some synced fields were not readable
+
+
+_ARABIC_INDIC = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
+_PRICE_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _price_minor_text(value: Any) -> str:
+    """Minor-unit string for a payload price (int minor units) or a Graph display price.
+
+    Graph returns formatted strings such as ``SAR120.00`` / ``120.00 SAR`` (major
+    units, Arabic digits possible); a digit-only string is treated as minor units
+    like the raw payload int. Unparseable → "" (compares as different, never equal).
+    """
+    if value is None or value == "" or isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(int(value))
+    if isinstance(value, float):
+        return str(int(round(value * 100)))
+    text = str(value).strip().translate(_ARABIC_INDIC).replace("٫", ".").replace("٬", "").replace(",", "")
+    if text.isdigit():
+        return str(int(text))
+    m = _PRICE_NUMBER.search(text)
+    if not m:
+        return ""
+    token = m.group(0)
+    if "." in token:
+        return str(int(round(float(token) * 100)))
+    return str(int(token))
+
+
+def _norm_field(key: str, value: Any) -> str:
+    text = str(value or "").strip()
+    if key == "price":
+        return _price_minor_text(value)
+    if key in ("availability", "visibility", "currency"):
+        return text.lower().replace("_", " ")
+    return text
+
+
+def compare_live_payload(local_payload: Dict[str, Any], live_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Field-by-field comparison of the local publish payload with the live Graph row.
+
+    Returns ``compared`` (equal), ``differing`` and ``missing`` (set locally but
+    not returned by the live read). ``matches`` is True only when nothing differs
+    and nothing is missing.
+    """
+    compared: List[str] = []
+    differing: List[str] = []
+    missing: List[str] = []
+    for key in LIVE_SYNCED_FIELDS:
+        local_value = (local_payload or {}).get(key)
+        if local_value in (None, ""):
+            continue
+        live_value = (live_row or {}).get(key)
+        if live_value in (None, ""):
+            missing.append(key)
+            continue
+        if _norm_field(key, local_value) == _norm_field(key, live_value):
+            compared.append(key)
+        else:
+            differing.append(key)
+    return {"compared": compared, "differing": differing, "missing": missing,
+            "matches": not differing and not missing}
+
+
 def _live_payload_matches(local_payload: Dict[str, Any], live_row: Dict[str, Any]) -> bool:
-    local_name = str(local_payload.get("name") or "").strip()
-    live_name = str(live_row.get("name") or "").strip()
-    if local_name != live_name:
-        return False
-    local_avail = str(local_payload.get("availability") or "").strip().lower()
-    live_avail = str(live_row.get("availability") or "").strip().lower()
-    if live_avail and local_avail and live_avail != local_avail:
-        return False
-    return True
+    return bool(compare_live_payload(local_payload, live_row)["matches"])
 
 
 def resolve_action_needed(
     status: str,
     local_payload: Optional[Dict[str, Any]],
     live_row: Optional[Dict[str, Any]],
+    *,
+    ownership: Optional[bool] = None,
 ) -> str:
+    """Classify one identity against the live catalog.
+
+    ``ownership`` is the publication evidence for the live item (see
+    ``live_item_publication_evidence``): True → this path published it, False /
+    None → unproven. A live match without proven ownership is
+    ``verify_ownership`` — a comparison result, not permission to update.
+    """
     if status in ("blocked", "skipped"):
-        return "skip"
+        return ACTION_SKIP
     if not local_payload:
-        return "skip"
+        return ACTION_SKIP
     if not live_row:
-        return "create"
-    if _live_payload_matches(local_payload, live_row):
-        return "noop"
-    return "update"
+        return ACTION_CREATE
+    if ownership is not True:
+        return ACTION_VERIFY_OWNERSHIP
+    cmp = compare_live_payload(local_payload, live_row)
+    if cmp["differing"]:
+        return ACTION_UPDATE
+    if cmp["missing"]:
+        return ACTION_UNSETTLED
+    return ACTION_NOOP
+
+
+def live_row_ownership(parent: Any, live_row: Optional[Dict[str, Any]], membership: Any) -> Dict[str, Any]:
+    """Publication evidence for a live row, from a membership and the legacy stamp (no Graph)."""
+    mid = str((live_row or {}).get("meta_product_id") or "").strip()
+    out: Dict[str, Any] = {"owned": False, "source": None, "reasons": []}
+    if not live_row:
+        out["reasons"].append("no_live_row")
+        return out
+    if not mid:
+        out["reasons"].append("live_item_id_missing")
+        return out
+    if membership is not None:
+        m_mid = str(getattr(membership, "meta_item_id", None) or "").strip()
+        prov = str(getattr(membership, "provenance", None) or "").strip()
+        if m_mid == mid and prov in PUBLICATION_PROVENANCES:
+            return {"owned": True, "source": f"membership:{prov}", "reasons": []}
+        out["reasons"].append(
+            "membership_without_meta_item_id" if not m_mid
+            else "membership_meta_item_id_mismatch" if m_mid != mid
+            else f"membership_provenance_not_publication:{prov or 'none'}"
+        )
+    else:
+        out["reasons"].append("membership_absent")
+    legacy = str(getattr(parent, "meta_item_id", None) or "").strip() if parent is not None else ""
+    if legacy and legacy == mid:
+        return {"owned": True, "source": "legacy_product_meta_item_id", "reasons": []}
+    return out
 
 
 def eligibility_to_readiness_item(
@@ -497,6 +621,7 @@ def eligibility_to_readiness_item(
     has_real_variants: bool,
     live_row: Optional[Dict[str, Any]] = None,
     include_meta: bool = False,
+    ownership: Optional[Dict[str, Any]] = None,
 ) -> MetaCatalogReadinessItem:
     status, reasons = classify_readiness_status(
         eligibility,
@@ -555,7 +680,12 @@ def eligibility_to_readiness_item(
                 item.reasons.append(code)
         if item.status == "ready" and "live_name_size_mismatch" in live_reasons:
             item.status = "warn"
-        item.action_needed = resolve_action_needed(item.status, payload or None, live)
+        owned = bool((ownership or {}).get("owned")) if ownership is not None else None
+        item.action_needed = resolve_action_needed(item.status, payload or None, live, ownership=owned)
+        if live:
+            item.ownership = dict(ownership) if ownership is not None else {"owned": None, "source": None, "reasons": ["not_evaluated"]}
+            if payload:
+                item.live_compare = compare_live_payload(payload, live)
 
     return item
 
@@ -584,6 +714,9 @@ def _compute_counts(
         "missing_in_meta": 0,
         "needs_update": 0,
         "needs_create": 0,
+        "needs_ownership_verification": 0,
+        "unsettled_items": 0,
+        "noop_items": 0,
         "review_name_quality_items": 0,
         "composite_option_summary_items": 0,
         "orphan_option_value_ids_items": 0,
@@ -631,6 +764,12 @@ def _compute_counts(
             counts["needs_create"] += 1
         elif item.action_needed == "update":
             counts["needs_update"] += 1
+        elif item.action_needed == ACTION_VERIFY_OWNERSHIP:
+            counts["needs_ownership_verification"] += 1
+        elif item.action_needed == ACTION_UNSETTLED:
+            counts["unsettled_items"] += 1
+        elif item.action_needed == ACTION_NOOP:
+            counts["noop_items"] += 1
 
     return counts
 
@@ -705,12 +844,30 @@ def build_meta_catalog_readiness_report(
             report.error = "catalog_id_missing"
             return report
         live_by_retailer, meta_fetch = fetch_meta_catalog_live_products(
-            conn, catalog_id, client=client,
+            conn, catalog_id, client=client, fields=LIVE_READ_FIELDS,
         )
+        if meta_fetch.get("error") and meta_fetch.get("http_status") == 400 and "visibility" in str(meta_fetch.get("error")).lower():
+            # this Graph version does not return visibility: read without it and keep it unsettled
+            live_by_retailer, meta_fetch = fetch_meta_catalog_live_products(
+                conn, catalog_id, client=client, fields=LIVE_READ_FIELDS_NO_VISIBILITY,
+            )
+            meta_fetch["visibility_readable"] = False
         report.meta_fetch = meta_fetch
         if meta_fetch.get("error"):
             report.error = str(meta_fetch["error"])
             return report
+        try:
+            from models import MetaCatalogMembership  # noqa: PLC0415
+
+            membership_by_rid = {
+                str(m.retailer_id or "").strip(): m
+                for m in db.query(MetaCatalogMembership).filter(
+                    MetaCatalogMembership.tenant_id == int(tenant_id),
+                    MetaCatalogMembership.catalog_id == catalog_id,
+                ).all()
+            }
+        except Exception:  # noqa: BLE001
+            membership_by_rid = {}
 
     all_items: List[MetaCatalogReadinessItem] = []
     for elig in eligibility.items:
@@ -721,9 +878,12 @@ def build_meta_catalog_readiness_report(
 
         has_real = real_variants_by_product.get(int(elig.product_id), False)
         live_row = None
+        ownership = None
         if include_meta_live_read:
             rid = str(elig.retailer_id or "").strip()
             live_row = live_by_retailer.get(rid) if rid else None
+            if live_row:
+                ownership = live_row_ownership(parent, live_row, membership_by_rid.get(rid))
 
         item = eligibility_to_readiness_item(
             elig,
@@ -732,6 +892,7 @@ def build_meta_catalog_readiness_report(
             has_real_variants=has_real,
             live_row=live_row,
             include_meta=include_meta_live_read,
+            ownership=ownership,
         )
         if include_meta_live_read:
             sibling_hits = live_canonical_sibling_hits(

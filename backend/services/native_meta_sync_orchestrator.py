@@ -100,6 +100,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "existing_catalog_identity",
     "ambiguous_sibling",
     "ambiguous_variant_identity",
+    "live_match_ownership_unverified",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",
