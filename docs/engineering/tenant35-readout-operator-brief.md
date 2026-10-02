@@ -10,8 +10,8 @@
 | البيئة | `production` (`ede962ce-3042-4dae-94de-623837e83ed9`) |
 | الخدمة | `nahla-saas` (`686b36c5-a926-4e58-912a-5e9d13fbc2e7`) |
 | الصلاحية المطلوبة | حساب Railway يستطيع `railway ssh` إلى هذه الخدمة (قراءة/تشغيل أوامر داخل الحاوية). **لا تحتاج** صلاحية تعديل المتغيرات أو النشر، ولا يجوز استخدامها إن وُجدت |
-| الملف | `scripts/operators/catalog_trial_readout_standalone.py` من فرع `claude/nahla-product-catalog-sync-7nhht0` في مستودع `alayedharthi-stack/nahla-saas` عند الالتزام `3857d6f9` |
-| تحقق سلامة الملف | `sha256sum` يبدأ بـ `18682b1263268bd0`، الحجم 29942 بايت |
+| الملف | `scripts/operators/catalog_trial_readout_standalone.py` من فرع `claude/nahla-product-catalog-sync-7nhht0` في مستودع `alayedharthi-stack/nahla-saas` من آخر التزام على الفرع (v2) |
+| تحقق سلامة الملف | **v2:** `sha256sum` يبدأ بـ `c90f7d9ed52d484e`، الحجم 46735 بايت (الإصدار الأول `18682b12…` انتهى دوره) |
 | على جهازك | Python 3.9+ و Railway CLI مسجّل الدخول (`railway whoami`) |
 
 > إن لم يُتَح لك قراءة المستودع، اطلب من المالك إرسال الملف نفسه؛ لا تعدّل محتواه.
@@ -32,10 +32,12 @@ railway whoami
 railway status
 
 # 1) الملف محليًا (بعد الحصول عليه)، تحقق من سلامته
-sha256sum catalog_trial_readout_standalone.py      # يبدأ بـ 18682b1263268bd0
+sha256sum catalog_trial_readout_standalone.py      # v2 يبدأ بـ c90f7d9ed52d484e
 
 # 2) اطلب من الملف نفسه طباعة أمر railway ssh الذي يحمله ويشغّله من /app داخل الحاوية
-python3 catalog_trial_readout_standalone.py --print-ssh-command --tenant-id 35 --include-graph > run_readout.sh
+python3 catalog_trial_readout_standalone.py --print-ssh-command \
+  --tenant-id 35 --include-graph --include-salla \
+  --candidate-ids 185,188,190 --expected-business-id 2138142656950660 > run_readout.sh
 head -c 200 run_readout.sh      # يجب أن يبدأ بـ: railway ssh --environment production --service nahla-saas -- bash -lc 'echo
 
 # 3) شغّل الأمر المطبوع واحفظ الناتج
@@ -50,8 +52,8 @@ echo "exit=$?"
 cat > /tmp/catalog_trial_readout_standalone.py <<'PYEOF'
 # (الصق محتوى الملف كاملًا هنا)
 PYEOF
-sha256sum /tmp/catalog_trial_readout_standalone.py   # يبدأ بـ 18682b1263268bd0
-cd /app && python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph --pretty
+sha256sum /tmp/catalog_trial_readout_standalone.py   # v2 يبدأ بـ c90f7d9ed52d484e
+cd /app && python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph --include-salla --candidate-ids 185,188,190 --expected-business-id 2138142656950660 --pretty
 ```
 وانسخ ناتج JSON من الطرفية.
 
@@ -69,11 +71,15 @@ cd /app && python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --incl
 4. الأمر الذي شُغِّل بالضبط (دون الـbase64 نفسه؛ يكفي الـ200 حرفًا الأولى) ووقت التشغيل UTC.
 5. تأكيد صريح: لم يُنفَّذ أي أمر من ممنوعات القسم 2.
 
-## 6. ما سيُقرأ من الناتج (للعلم، لا يلزم تحليله)
+## 6. ما الجديد في التشغيل الثاني (v2) ولماذا
+
+التشغيل الأول أثبت: 20 منتجًا/130 متغيرًا، الاستحقاق متاح، `catalog_enabled=false`، `meta_catalog_id=null`، `catalog_management=missing`، لكنه لم يحسم ربط الكتالوج (أعاد `missing_catalog_id` لغياب معرّف محلي) واختار منتجًا متناقض المخزون (186). v2 يقرأ كتالوجات الـ WABA مباشرة ويقارن مالكها بالمحفظة `2138142656950660`، يطبع الحالة الخام للصلاحية، يقيّم المنتجات 185/188/190 ويطبع هويات متغيراتها وحمولات نشرها، يفحص وجودها في أي كتالوج مرتبط، ويعيد قراءة المنتج 186 من سلة (GET فقط) لتحديد موضع التناقض. **لا يزال قراءة فقط.**
+
+## 7. ما سيُقرأ من الناتج (للعلم، لا يلزم تحليله)
 
 - `products[]`: المعرّفات المحلية `product_id` والخارجية `external_id`، المتغيرات وهوياتها `retailer_id`، `anomalies` (يُفحص فيها المنتج المحلي 183).
 - `connection`: `catalog_enabled`، `meta_catalog_id`، مصدر الرمز بلا قيمته.
-- `graph.waba_link`: الكتالوجات المرتبطة فعلًا بالـ WABA `1682673239554563`؛ `graph.waba_owner_business`؛ `graph.catalogs` ومقارنة المالك؛ `graph.token_catalog_management.verdict` (`granted`/`missing`/`unproven`); `graph.live_items.candidate_plan` (إنشاء/تعديل/بلا تغيير).
+- `graph.waba_catalogs` (الكتالوجات المرتبطة فعلًا بالـ WABA `1682673239554563` بلا اشتراط معرّف محلي)؛ `graph.waba_owner_business.matches_expected`؛ `graph.catalogs` و`graph.catalog_business_matches_waba_owner`؛ `graph.token_catalog_management` (`catalog_management_status`: `absent`/`declined`/`granted` و`listed_permissions`)؛ `graph.live_items.against_linked_catalogs` (أي هوية مرشحة موجودة/غائبة في كل كتالوج مرتبط)؛ `candidate_payloads.items`؛ `salla_check.checked[].verdict`.
 - `entitlement.meta_catalog_sync`، `readiness.blocker_code`، `trial_candidates.selected` و`proposed_env`، و`missing_requirements`.
 
 **الخطأ المتوقع إن كان الكتالوج غير مفعّل:** `readiness.blocker_code = "catalog_disabled"` مع بقاء قراءات Graph تعمل؛ هذا ليس فشلًا في الأداة.

@@ -46,6 +46,9 @@ def main() -> int:
         help="Also read Meta Graph (GET only): WABA link, catalog owner, token permission, live items.",
     )
     parser.add_argument("--candidates", type=int, default=3, help="How many trial products to propose.")
+    parser.add_argument("--candidate-ids", default="", help="Comma-separated local product ids chosen by the owner; evaluated instead of the automatic pick.")
+    parser.add_argument("--expected-business-id", default="", help="Business Manager id expected to own the WABA and its catalog.")
+    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only).")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON.")
     args = parser.parse_args()
 
@@ -65,6 +68,9 @@ def main() -> int:
             int(args.tenant_id),
             include_graph=bool(args.include_graph),
             candidate_count=int(args.candidates),
+            candidate_ids=[int(x) for x in args.candidate_ids.replace(";", ",").split(",") if x.strip().isdigit()] or None,
+            expected_business_id=args.expected_business_id or None,
+            include_salla=bool(args.include_salla),
         )
         db.rollback()  # defensive: the readout never writes; make sure nothing is left open
         print(json.dumps(report, ensure_ascii=False, indent=2 if args.pretty else None, default=str))

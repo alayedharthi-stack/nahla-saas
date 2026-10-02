@@ -57,9 +57,10 @@ class _Resp:
 class FakeGraph:
     """GET-only Graph double; any POST is a test failure."""
 
-    def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None):
+    def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None, linked=True):
         self.waba, self.catalog, self.business, self.perm = waba, catalog, business, perm
         self.live = live or {}
+        self.linked = linked
         self.calls = []
 
     def _route(self, method, url, params):
@@ -67,10 +68,13 @@ class FakeGraph:
         if method != "GET":
             raise AssertionError(f"readout must not {method} {url}")
         if url.endswith("/me/permissions"):
-            return _Resp(200, {"data": [{"permission": "catalog_management", "status": self.perm},
-                                        {"permission": "whatsapp_business_management", "status": "granted"}]})
+            rows = [{"permission": "whatsapp_business_management", "status": "granted"},
+                    {"permission": "business_management", "status": "granted"}]
+            if self.perm is not None:
+                rows.insert(0, {"permission": "catalog_management", "status": self.perm})
+            return _Resp(200, {"data": rows})
         if url.endswith(f"/{self.waba}/product_catalogs"):
-            return _Resp(200, {"data": [{"id": self.catalog, "name": "متجر تجريبي عام"}]})
+            return _Resp(200, {"data": [{"id": self.catalog, "name": "متجر تجريبي عام"}] if self.linked else []})
         if url.endswith(f"/{self.waba}"):
             return _Resp(200, {"id": self.waba, "owner_business_info": {"id": self.business, "name": "BM"}})
         if url.endswith(f"/{self.catalog}/products"):
@@ -228,15 +232,17 @@ def test_readout_reports_catalog_disabled_without_claiming_no_catalog_exists(mon
         assert report["connection"]["meta_catalog_id"] == "CAT-900"
         assert report["readiness"]["blocker_code"] == "catalog_disabled"
         g = report["graph"]
-        assert g["waba_link"]["linked_catalog_ids"] == ["CAT-900"] and g["waba_link"]["expected_catalog_linked"] is True
+        assert g["waba_catalogs"]["verdict"] == "catalog_linked_to_waba"
+        assert [c["id"] for c in g["waba_catalogs"]["catalogs"]] == ["CAT-900"]
+        assert g["waba_catalogs"]["stamped_catalog_is_linked"] is True
         assert g["waba_owner_business"]["business_id"] == "BM-900"
         assert g["token_catalog_management"]["verdict"] == "granted"
         assert g["catalogs"][0]["catalog_id"] == "CAT-900" and g["catalogs"][0]["business_id"] == "BM-900"
         assert g["catalog_business_matches_waba_owner"]["CAT-900"] is True
         assert all(m == "GET" for m, _ in graph.calls)
         assert "catalog_enabled" in report["missing_requirements"]
-        assert "waba_catalog_link" not in report["missing_requirements"]
-        assert "token_catalog_management" not in report["missing_requirements"]
+        assert not any(m.startswith("waba_catalog_link") or m.startswith("token_catalog_management")
+                       for m in report["missing_requirements"])
     finally:
         session.close(); engine.dispose()
 
@@ -259,8 +265,9 @@ def test_readout_graph_reads_classify_create_update_and_missing_permission(monke
             report = build_catalog_trial_readout(session, tid, include_graph=True, client=graph)
         _no_token_anywhere(report)
         g = report["graph"]
-        assert g["token_catalog_management"]["verdict"] == "missing"
-        assert "token_catalog_management" in report["missing_requirements"]
+        assert g["token_catalog_management"]["verdict"] == "declined"
+        assert g["token_catalog_management"]["catalog_management_status"] == "declined"
+        assert "token_catalog_management:declined" in report["missing_requirements"]
         plan = g["live_items"]["candidate_plan"]
         created = {r["retailer_id"] for r in plan["create"]}
         touched = {r["retailer_id"] for r in plan["update"] + plan["noop"]}
@@ -385,3 +392,163 @@ def test_standalone_cli_runs_against_a_sqlite_database_and_prints_the_ssh_comman
     assert module.main() == 1
     # the bundle is plain python the production interpreter can compile
     assert subprocess.run([sys.executable, "-m", "py_compile", str(build.TARGET)], capture_output=True).returncode == 0
+
+
+# ── owner review on the first live readout ────────────────────────────────
+
+@_ENT
+@_READY
+def test_parent_in_stock_with_all_variants_out_is_an_anomaly_and_never_a_candidate(monkeypatch):
+    """A parent row that says in stock (quantity 1) while every variant row is out of stock
+    is flagged and excluded; number-completeness is reported apart from scenario coverage."""
+    monkeypatch.delenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", raising=False)
+    session, tid, _other, engine = _make_db()
+    try:
+        contradictory = _salla(session, tid, "600186", variants=3)
+        for v in session.query(ProductVariant).filter_by(product_id=contradictory.id).all():
+            v.in_stock = False; v.stock_quantity = 0
+        contradictory.stock_quantity = 1; session.commit()
+        inverse = _salla(session, tid, "600187", variants=2, in_stock=False)
+        v = session.query(ProductVariant).filter_by(product_id=inverse.id).first(); v.in_stock = True; v.stock_quantity = 4; session.commit()
+        multi_a = _salla(session, tid, "600185", variants=4)
+        multi_b = _salla(session, tid, "600188", variants=6)
+        multi_c = _salla(session, tid, "600190", variants=10)
+
+        report = build_catalog_trial_readout(session, tid, candidate_count=3)
+        ext = {p["external_id"]: p for p in report["products"]}
+        assert ext["600186"]["anomalies"] == ["parent_in_stock_but_all_variants_out_of_stock"]
+        assert ext["600186"]["variants_in_stock_count"] == 0 and ext["600186"]["in_stock"] is True
+        assert ext["600187"]["anomalies"] == ["parent_out_of_stock_but_variant_in_stock"]
+        sel = report["trial_candidates"]
+        chosen = {c["product_id"] for c in sel["selected"]}
+        assert contradictory.id not in chosen and inverse.id not in chosen
+        assert chosen == {multi_a.id, multi_b.id, multi_c.id}
+        assert sel["selection_complete"] is True
+        # three products, but no single-variant one: the count is complete, the coverage is not
+        cov = sel["scenario_coverage"]
+        assert cov["coverage_complete"] is False and cov["missing_roles"] == ["single_variant"]
+        assert "trial_scenario_coverage:single_variant" in report["missing_requirements"]
+        assert sel["expected_meta_items"] == 4 + 6 + 10
+        # publish payloads for the chosen variants carry the identities the push will use
+        payloads = report["candidate_payloads"]
+        assert payloads["pushable"] == 20 and payloads["blocked"] == 0
+        rids = {i["retailer_id"] for i in payloads["items"]}
+        assert "600185-1" in rids and "600190-10" in rids
+        assert all(i["item_group_id"] for i in payloads["items"])
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_owner_chosen_candidate_ids_are_evaluated_not_replaced(monkeypatch):
+    monkeypatch.delenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", raising=False)
+    session, tid, _other, engine = _make_db()
+    try:
+        a = _salla(session, tid, "617350990", variants=5)
+        b = _salla(session, tid, "792574531", variants=7)
+        c = _salla(session, tid, "59407425", variants=8)
+        bad = _salla(session, tid, "600186", variants=2)
+        for v in session.query(ProductVariant).filter_by(product_id=bad.id).all():
+            v.in_stock = False; v.stock_quantity = 0
+        session.commit()
+        report = build_catalog_trial_readout(session, tid, candidate_ids=[a.id, b.id, c.id, bad.id, 999999])
+        sel = report["trial_candidates"]
+        assert sel["mode"] == "preferred_ids"
+        assert [c_["product_id"] for c_ in sel["selected"]] == [a.id, b.id, c.id]
+        ev = {e["product_id"]: e for e in sel["preferred_evaluation"]}
+        assert ev[bad.id]["accepted"] is False and "anomaly:parent_in_stock_but_all_variants_out_of_stock" in ev[bad.id]["reasons"]
+        assert ev[999999]["reasons"] == ["not_found_for_tenant"]
+        assert sel["expected_meta_items"] == 20
+        assert sel["proposed_env"]["NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS"] == f"{tid}:{a.id},{tid}:{b.id},{tid}:{c.id}"
+        assert sel["scenario_coverage"]["missing_roles"] == ["single_variant"]
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_graph_section_reads_waba_catalogs_without_a_stamped_id_and_reports_permission_not_requested(monkeypatch):
+    """`missing_catalog_id` from the legacy link status never proved the WABA has no catalog:
+    the readout lists WABA-linked catalogs directly, checks their owner against the expected
+    Business Manager, and tells a never-requested permission apart from a declined one."""
+    session, tid, _other, engine = _make_db(catalog_enabled=False, catalog_id=None)
+    try:
+        a = _salla(session, tid, "617350990", variants=2)
+        graph = FakeGraph(perm=None, business="2138142656950660", live={})
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph), \
+             patch("services.meta_catalog_reconcile.select_catalog_graph_token", lambda *a, **k: {"token": SECRET}):
+            report = build_catalog_trial_readout(session, tid, include_graph=True, client=graph,
+                                                 candidate_ids=[a.id], expected_business_id="2138142656950660")
+        _no_token_anywhere(report)
+        g = report["graph"]
+        assert g["waba_link_legacy"]["error"] == "missing_catalog_id"           # the old answer
+        assert g["waba_catalogs"]["verdict"] == "catalog_linked_to_waba"       # the real answer
+        assert g["waba_catalogs"]["stamped_catalog_is_linked"] is None
+        assert g["waba_owner_business"]["matches_expected"] is True
+        assert g["catalog_business_matches_waba_owner"]["CAT-900"] is True
+        assert g["token_catalog_management"]["verdict"] == "not_requested"
+        assert g["token_catalog_management"]["catalog_management_status"] == "absent"
+        assert g["token_catalog_management"]["listed_permissions"]["whatsapp_business_management"] == "granted"
+        # candidates classified against the linked catalog even though nothing is stamped locally
+        pres = g["live_items"]["against_linked_catalogs"]["CAT-900"]
+        assert pres["candidates_absent"] == ["617350990-1", "617350990-2"] and pres["expected_actions"]["create"] == 2
+        assert "token_catalog_management:not_requested" in report["missing_requirements"]
+        assert "meta_catalog_id" in report["missing_requirements"]
+        assert not any(m.startswith("waba_catalog_link") for m in report["missing_requirements"])
+        assert all(m == "GET" for m, _ in graph.calls)
+
+        # and when the WABA truly has no catalog the verdict says so, distinctly
+        graph2 = FakeGraph(perm=None, business="2138142656950660", linked=False)
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph2):
+            report2 = build_catalog_trial_readout(session, tid, include_graph=True, client=graph2, candidate_ids=[a.id])
+        assert report2["graph"]["waba_catalogs"]["verdict"] == "no_catalog_linked_to_waba"
+        assert "waba_catalog_link:none_linked" in report2["missing_requirements"]
+        assert report2["graph"]["live_items"]["expected_actions_if_new_catalog"] == {"create": 2, "update": 0, "noop": 0}
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_salla_recheck_locates_the_stock_inconsistency(monkeypatch):
+    monkeypatch.delenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", raising=False)
+    session, tid, _other, engine = _make_db()
+    try:
+        bad = _salla(session, tid, "600186", variants=2)
+        for v in session.query(ProductVariant).filter_by(product_id=bad.id).all():
+            v.in_stock = False; v.stock_quantity = 0
+        bad.stock_quantity = 1; session.commit()
+        stale = _salla(session, tid, "600189", variants=1)
+        for v in session.query(ProductVariant).filter_by(product_id=stale.id).all():
+            v.in_stock = False; v.stock_quantity = 0
+        session.commit()
+
+        class FakeSalla:
+            calls = []
+
+            async def _get(self, path, params=None):
+                self.calls.append(path)
+                ext = path.split("/")[2]
+                qty = 1 if ext == "600186" else 3
+                return {"data": {"id": int(ext), "quantity": qty, "status": {"slug": "sale"}}}
+
+            async def get_raw_variants(self, ext):
+                self.calls.append(f"/products/{ext}/variants")
+                if ext == "600186":
+                    return [{"id": 1, "quantity": 0}, {"id": 2, "quantity": 0}]
+                return [{"id": 1, "quantity": 3}]
+
+        fake = FakeSalla()
+        report = build_catalog_trial_readout(session, tid, include_salla=True, salla_adapter=fake)
+        checked = {c["external_id"]: c for c in report["salla_check"]["checked"]}
+        assert checked["600186"]["verdict"] == "salla_parent_quantity_inconsistent_with_its_variants"
+        assert checked["600186"]["salla"]["quantity"] == 1 and checked["600186"]["salla"]["variants_in_stock"] == 0
+        assert checked["600189"]["verdict"] == "local_variant_stock_stale"
+        assert all(p.startswith("/products/") for p in fake.calls)   # GET only
+    finally:
+        session.close(); engine.dispose()

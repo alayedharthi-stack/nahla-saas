@@ -82,6 +82,12 @@ def _ssh_command(args: argparse.Namespace) -> str:
     flags = f"--tenant-id {int(args.tenant_id)}"
     if args.include_graph:
         flags += " --include-graph"
+    if args.include_salla:
+        flags += " --include-salla"
+    if args.candidate_ids:
+        flags += f" --candidate-ids {args.candidate_ids}"
+    if args.expected_business_id:
+        flags += f" --expected-business-id {args.expected_business_id}"
     flags += f" --candidates {int(args.candidates)} --pretty"
     remote = (
         "bash -lc 'echo " + payload + " | base64 -d > /tmp/catalog_trial_readout_standalone.py "
@@ -99,6 +105,9 @@ def main() -> int:
     parser.add_argument("--tenant-id", type=int, required=True)
     parser.add_argument("--include-graph", action="store_true", help="Also read Meta Graph (GET only).")
     parser.add_argument("--candidates", type=int, default=3)
+    parser.add_argument("--candidate-ids", default="", help="Comma-separated local product ids chosen by the owner.")
+    parser.add_argument("--expected-business-id", default="", help="Business Manager id expected to own the WABA and its catalog.")
+    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only).")
     parser.add_argument("--pretty", action="store_true")
     parser.add_argument("--print-ssh-command", action="store_true",
                         help="Print the railway ssh one-liner that ships this file and runs it; do nothing else.")
@@ -124,6 +133,9 @@ def main() -> int:
     try:
         report = build_catalog_trial_readout(
             db, int(args.tenant_id), include_graph=bool(args.include_graph), candidate_count=int(args.candidates),
+            candidate_ids=[int(x) for x in args.candidate_ids.replace(";", ",").split(",") if x.strip().isdigit()] or None,
+            expected_business_id=args.expected_business_id or None,
+            include_salla=bool(args.include_salla),
         )
         db.rollback()
         print(json.dumps(report, ensure_ascii=False, indent=2 if args.pretty else None, default=str))

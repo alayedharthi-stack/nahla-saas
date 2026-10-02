@@ -35,6 +35,11 @@ ANOMALY_DUPLICATE_RETAILER_ID = "duplicate_retailer_id"
 ANOMALY_PRICE_NOT_NUMERIC = "price_not_numeric"
 ANOMALY_MISSING_IMAGE = "missing_image"
 ANOMALY_MISSING_URL = "missing_url"
+ANOMALY_PARENT_IN_STOCK_VARIANTS_OUT = "parent_in_stock_but_all_variants_out_of_stock"
+ANOMALY_PARENT_OUT_VARIANT_IN_STOCK = "parent_out_of_stock_but_variant_in_stock"
+STOCK_CONSISTENCY_ANOMALIES = frozenset({ANOMALY_PARENT_IN_STOCK_VARIANTS_OUT, ANOMALY_PARENT_OUT_VARIANT_IN_STOCK})
+
+CANDIDATE_ROLES = ("single_variant", "multi_variant", "in_stock_with_media")
 
 _NUMERIC_RE = re.compile(r"^\d+(\.\d+)?$")
 
@@ -117,6 +122,18 @@ def _product_anomalies(product: Any, variants: List[Any]) -> List[str]:
     price = _strip(getattr(product, "price", None))
     if price and not _NUMERIC_RE.match(price):
         out.append(ANOMALY_PRICE_NOT_NUMERIC)
+    # Stock consistency between the parent row and its variant rows. A parent
+    # that says "in stock" while every variant is out of stock cannot be sold
+    # (the AI offers variants) and would publish 0 sellable items; the inverse
+    # hides a sellable variant. Either way the product is not trial material
+    # until the source data is understood.
+    if variants:
+        in_stock_variants = [v for v in variants if _variant_in_stock(v)]
+        parent_in_stock = bool(getattr(product, "in_stock", False))
+        if parent_in_stock and not in_stock_variants:
+            out.append(ANOMALY_PARENT_IN_STOCK_VARIANTS_OUT)
+        if not parent_in_stock and in_stock_variants:
+            out.append(ANOMALY_PARENT_OUT_VARIANT_IN_STOCK)
     if not _strip(meta.get("image_url")) and not _strip(getattr(product, "image_url", None)):
         out.append(ANOMALY_MISSING_IMAGE)
     if not _strip(meta.get("product_url")) and not _strip(getattr(product, "product_url", None)):
@@ -127,6 +144,19 @@ def _product_anomalies(product: Any, variants: List[Any]) -> List[str]:
         if a not in deduped:
             deduped.append(a)
     return deduped
+
+
+def _variant_in_stock(variant: Any) -> bool:
+    flag = getattr(variant, "in_stock", None)
+    qty = getattr(variant, "stock_quantity", None)
+    if flag is False:
+        return False
+    if qty is not None:
+        try:
+            return int(qty) > 0
+        except (TypeError, ValueError):
+            return bool(flag)
+    return bool(flag) if flag is not None else True
 
 
 def _product_entry(product: Any, variants: List[Any], memberships: List[Any]) -> Dict[str, Any]:
@@ -159,6 +189,7 @@ def _product_entry(product: Any, variants: List[Any], memberships: List[Any]) ->
         "has_image": bool(_strip(meta.get("image_url")) or _strip(getattr(product, "image_url", None))),
         "has_url": bool(_strip(meta.get("product_url")) or _strip(getattr(product, "product_url", None))),
         "variant_count": len(variants),
+        "variants_in_stock_count": sum(1 for v in variants if _variant_in_stock(v)),
         "variants": [
             {
                 "variant_id": int(v.id),
@@ -178,49 +209,113 @@ def _product_entry(product: Any, variants: List[Any], memberships: List[Any]) ->
     }
 
 
-def _select_candidates(products: List[Dict[str, Any]], count: int) -> Dict[str, Any]:
-    """Pick trial products by explicit criteria.
-
-    Order: (a) one single-variant product, (b) one multi-variant product
-    (proves ``item_group_id``), (c) further in-stock products. Only rows
-    that are publish-eligible, in stock, with image and url, from an
-    external platform source and with no anomaly qualify.
-    """
+def _candidate_pool(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     pool = [
         p for p in products
         if p["publish_eligible"] and p["in_stock"] and p["has_image"] and p["has_url"]
         and p["external_id"] and not p["anomalies"] and p["variant_count"] > 0
     ]
     pool.sort(key=lambda p: p["product_id"])
+    return pool
+
+
+def _candidate_rejections(p: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    if not p["publish_eligible"]:
+        reasons.append(f"not_publish_eligible:{p.get('publish_rejection') or 'unknown'}")
+    if not p["in_stock"]:
+        reasons.append("out_of_stock")
+    if not p["has_image"]:
+        reasons.append("missing_image")
+    if not p["has_url"]:
+        reasons.append("missing_url")
+    if not p["external_id"]:
+        reasons.append("no_external_id")
+    if p["variant_count"] == 0:
+        reasons.append("no_variant_rows")
+    for a in p["anomalies"]:
+        if a not in reasons:
+            reasons.append(f"anomaly:{a}")
+    return reasons
+
+
+def _role_of(p: Dict[str, Any]) -> str:
+    return "single_variant" if p["variant_count"] == 1 else "multi_variant"
+
+
+def _select_candidates(
+    products: List[Dict[str, Any]],
+    count: int,
+    *,
+    preferred_ids: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """Pick trial products by explicit criteria, or evaluate the owner's picks.
+
+    Automatic order: (a) one single-variant product, (b) one multi-variant
+    product (proves ``item_group_id``), (c) further in-stock products. Only
+    rows that are publish-eligible, in stock, with image and url, from an
+    external platform source, with variant rows and with no anomaly qualify.
+
+    ``selection_complete`` says whether *count* products were found;
+    ``scenario_coverage`` says, separately, which trial roles the selection
+    actually covers — a set with no single-variant product is complete in
+    number but does not cover the single-item scenario.
+    """
+    pool = _candidate_pool(products)
+    by_id = {p["product_id"]: p for p in products}
     chosen: List[Dict[str, Any]] = []
     chosen_ids: Set[int] = set()
     reasons: List[str] = []
+    preferred_evaluation: List[Dict[str, Any]] = []
 
-    def _take(pred, label: str) -> None:
-        for p in pool:
-            if p["product_id"] in chosen_ids:
+    if preferred_ids:
+        for pid in preferred_ids:
+            p = by_id.get(int(pid))
+            if p is None:
+                preferred_evaluation.append({"product_id": int(pid), "accepted": False, "reasons": ["not_found_for_tenant"]})
                 continue
-            if pred(p):
-                chosen.append(dict(p, selection_role=label))
+            rejections = _candidate_rejections(p)
+            preferred_evaluation.append({
+                "product_id": int(pid), "external_id": p["external_id"], "accepted": not rejections,
+                "reasons": rejections, "variant_count": p["variant_count"],
+            })
+            if not rejections and p["product_id"] not in chosen_ids:
+                chosen.append(dict(p, selection_role=_role_of(p)))
                 chosen_ids.add(p["product_id"])
-                return
-        reasons.append(f"no_candidate_for:{label}")
+    else:
+        def _take(pred, label: str) -> None:
+            for p in pool:
+                if p["product_id"] in chosen_ids:
+                    continue
+                if pred(p):
+                    chosen.append(dict(p, selection_role=label))
+                    chosen_ids.add(p["product_id"])
+                    return
+            reasons.append(f"no_candidate_for:{label}")
 
-    if count >= 1:
-        _take(lambda p: p["variant_count"] == 1, "single_variant")
-    if count >= 2:
-        _take(lambda p: p["variant_count"] >= 2, "multi_variant")
-    while len(chosen) < count:
-        before = len(chosen)
-        _take(lambda p: True, "in_stock_with_media")
-        if len(chosen) == before:
-            break
+        if count >= 1:
+            _take(lambda p: p["variant_count"] == 1, "single_variant")
+        if count >= 2:
+            _take(lambda p: p["variant_count"] >= 2, "multi_variant")
+        while len(chosen) < count:
+            before = len(chosen)
+            _take(lambda p: True, "in_stock_with_media")
+            if len(chosen) == before:
+                break
+
+    roles_filled = sorted({c["selection_role"] for c in chosen} | (
+        {"in_stock_with_media"} if chosen else set()
+    ))
+    missing_roles = [r for r in CANDIDATE_ROLES if r not in roles_filled]
     return {
         "criteria": [
             "publish_eligible", "in_stock", "has_image", "has_url", "external_platform_source",
-            "no_anomalies", "roles: single_variant, multi_variant, in_stock_with_media",
+            "variant_rows_present", "no_anomalies (incl. parent/variant stock consistency)",
+            "roles: single_variant, multi_variant, in_stock_with_media",
         ],
+        "mode": "preferred_ids" if preferred_ids else "automatic",
         "eligible_pool_size": len(pool),
+        "eligible_pool_product_ids": [p["product_id"] for p in pool],
         "requested": int(count),
         "selected": [
             {
@@ -229,11 +324,19 @@ def _select_candidates(products: List[Dict[str, Any]], count: int) -> Dict[str, 
                 "title": p["title"],
                 "role": p["selection_role"],
                 "variant_count": p["variant_count"],
+                "variants_in_stock_count": p["variants_in_stock_count"],
                 "retailer_ids": [v["retailer_id"] for v in p["variants"] if v["retailer_id"]],
             }
             for p in chosen
         ],
+        "preferred_evaluation": preferred_evaluation,
         "selection_complete": len(chosen) >= count,
+        "scenario_coverage": {
+            "required_roles": list(CANDIDATE_ROLES),
+            "roles_filled": roles_filled,
+            "missing_roles": missing_roles,
+            "coverage_complete": not missing_roles,
+        },
         "shortfall_reasons": reasons,
     }
 
@@ -269,8 +372,19 @@ def build_catalog_trial_readout(
     include_graph: bool = False,
     candidate_count: int = 3,
     client: Any = None,
+    candidate_ids: Optional[List[int]] = None,
+    expected_business_id: Optional[str] = None,
+    include_salla: bool = False,
+    salla_adapter: Any = None,
 ) -> Dict[str, Any]:
-    """Read-only readout; see module docstring."""
+    """Read-only readout; see module docstring.
+
+    ``candidate_ids`` evaluates the owner's chosen products instead of the
+    automatic pick; ``expected_business_id`` is the Business Manager that
+    should own the WABA and its catalog; ``include_salla`` re-reads anomalous
+    products from the store (GET only) to say whether the inconsistency is in
+    Salla's data or in the local copy.
+    """
     from models import (  # noqa: PLC0415
         MetaCatalogMembership,
         Product,
@@ -379,8 +493,8 @@ def build_catalog_trial_readout(
         out["readiness"] = {"error": type(exc).__name__}
     out["sync_scope"] = _scope_snapshot(tid)
 
-    # ── candidates + proposed env ────────────────────────────────────────
-    selection = _select_candidates(products, int(candidate_count))
+    # ── candidates + proposed env + publish payloads ─────────────────────
+    selection = _select_candidates(products, int(candidate_count), preferred_ids=candidate_ids)
     chosen_ids = [c["product_id"] for c in selection["selected"]]
     selection["expected_meta_items"] = sum(c["variant_count"] for c in selection["selected"])
     selection["proposed_env"] = {
@@ -388,10 +502,20 @@ def build_catalog_trial_readout(
         "NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS": ",".join(f"{tid}:{pid}" for pid in chosen_ids),
     }
     out["trial_candidates"] = selection
+    out["candidate_payloads"] = _candidate_payloads(db, tid, chosen_ids)
+
+    # ── Salla re-read of anomalous products (GET only, opt-in) ───────────
+    if include_salla:
+        anomalous = [p for p in products if any(a in STOCK_CONSISTENCY_ANOMALIES for a in p["anomalies"])]
+        out["salla_check"] = _salla_check(db, tid, anomalous, adapter=salla_adapter)
 
     # ── Graph (GET only, opt-in) ─────────────────────────────────────────
     if include_graph:
-        out["graph"] = _graph_section(db, tid, conn, token_pick, chosen_ids, client=client)
+        out["graph"] = _graph_section(
+            db, tid, conn, token_pick, chosen_ids, client=client,
+            expected_business_id=_strip(expected_business_id) or None,
+            candidate_retailer_ids=[rid for c in selection["selected"] for rid in c["retailer_ids"]],
+        )
 
     # ── missing requirements ─────────────────────────────────────────────
     out["missing_requirements"] = _missing_requirements(out)
@@ -409,6 +533,149 @@ def _count_by(items: List[Dict[str, Any]], key: str) -> Dict[str, int]:
     return out
 
 
+def _candidate_payloads(db: Any, tid: int, chosen_ids: List[int]) -> Dict[str, Any]:
+    """Per-variant publish identity and payload preview for the chosen products (no Graph)."""
+    if not chosen_ids:
+        return {"items": [], "pushable": 0, "blocked": 0}
+    try:
+        from services.meta_catalog_readiness import build_meta_catalog_readiness_report  # noqa: PLC0415
+
+        report = build_meta_catalog_readiness_report(db, tid)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": type(exc).__name__, "items": [], "pushable": 0, "blocked": 0}
+    wanted = {int(x) for x in chosen_ids}
+    items: List[Dict[str, Any]] = []
+    for it in report.to_dict().get("items") or []:
+        if int(it.get("product_id") or 0) not in wanted:
+            continue
+        preview = it.get("payload_preview") or {}
+        items.append({
+            "product_id": it.get("product_id"),
+            "variant_id": it.get("variant_id"),
+            "salla_variant_id": it.get("salla_variant_id"),
+            "retailer_id": it.get("retailer_id"),
+            "item_group_id": it.get("item_group_id"),
+            "status": it.get("status"),
+            "reasons": it.get("reasons"),
+            "name": preview.get("name") or it.get("generated_name"),
+            "price": preview.get("price") or it.get("price"),
+            "currency": preview.get("currency") or it.get("currency"),
+            "availability": preview.get("availability") or it.get("availability"),
+            "image_url_present": bool(preview.get("image_url")) or bool(it.get("image_url_present")),
+            "url_present": bool(preview.get("url")) or bool(it.get("url_present")),
+            "payload_fields": sorted(preview.keys()),
+        })
+    pushable = sum(1 for i in items if i["status"] in ("ready", "warn"))
+    return {"items": items, "pushable": pushable, "blocked": len(items) - pushable,
+            "counts_all_products": report.to_dict().get("counts")}
+
+
+def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter: Any = None, limit: int = 5) -> Dict[str, Any]:
+    """Re-read anomalous products from Salla (GET only) and say where the inconsistency lives."""
+    import asyncio  # noqa: PLC0415
+
+    out: Dict[str, Any] = {"checked": [], "skipped": [], "reads": []}
+    if not anomalous:
+        return out
+    if adapter is None:
+        try:
+            from services.store_sync import StoreSyncService  # noqa: PLC0415
+
+            adapter = StoreSyncService(db, tid)._get_adapter()
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"adapter_unavailable:{type(exc).__name__}"
+            return out
+    if adapter is None or not hasattr(adapter, "_get"):
+        out["error"] = "adapter_unavailable"
+        return out
+
+    async def _read(ext: str):
+        raw = await adapter._get(f"/products/{ext}")
+        data = raw.get("data") if isinstance(raw, dict) else None
+        variants = await adapter.get_raw_variants(ext) if hasattr(adapter, "get_raw_variants") else []
+        return (data if isinstance(data, dict) else {}), (variants or [])
+
+    for p in anomalous[:limit]:
+        ext = p["external_id"]
+        if not ext:
+            out["skipped"].append({"product_id": p["product_id"], "reason": "no_external_id"})
+            continue
+        try:
+            data, variants = asyncio.run(_read(ext))
+        except Exception as exc:  # noqa: BLE001
+            out["checked"].append({"product_id": p["product_id"], "external_id": ext, "error": type(exc).__name__})
+            continue
+        out["reads"].append(f"GET /products/{ext}")
+        out["reads"].append(f"GET /products/{ext}/variants")
+        salla_qty = data.get("quantity")
+        salla_unlimited = bool(data.get("unlimited_quantity"))
+        status = data.get("status")
+        if isinstance(status, dict):
+            status = status.get("slug") or status.get("name")
+        var_qty = []
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            q = v.get("quantity")
+            if q is None:
+                q = v.get("stock_quantity")
+            var_qty.append({"id": str(v.get("id")), "quantity": q, "available": v.get("available")})
+        salla_variants_in_stock = sum(1 for v in var_qty if (v["available"] is True) or (
+            v["available"] is None and isinstance(v["quantity"], (int, float)) and v["quantity"] > 0))
+        try:
+            salla_parent_in_stock = salla_unlimited or (salla_qty is not None and int(salla_qty) > 0)
+        except (TypeError, ValueError):
+            salla_parent_in_stock = None
+        local_variants_in_stock = p["variants_in_stock_count"]
+        if salla_parent_in_stock and var_qty and salla_variants_in_stock == 0:
+            verdict = "salla_parent_quantity_inconsistent_with_its_variants"
+        elif salla_variants_in_stock > 0 and local_variants_in_stock == 0:
+            verdict = "local_variant_stock_stale"
+        elif (salla_parent_in_stock is False) and p["in_stock"]:
+            verdict = "local_parent_stock_stale"
+        elif not var_qty and p["variant_count"] > 0:
+            verdict = "salla_reports_no_variants_for_a_local_variant_product"
+        else:
+            verdict = "consistent_with_salla"
+        out["checked"].append({
+            "product_id": p["product_id"], "external_id": ext,
+            "local": {"in_stock": p["in_stock"], "stock_quantity": p["stock_quantity"],
+                      "variant_count": p["variant_count"], "variants_in_stock_count": local_variants_in_stock},
+            "salla": {"quantity": salla_qty, "unlimited_quantity": salla_unlimited, "status": status,
+                      "variant_count": len(var_qty), "variants_in_stock": salla_variants_in_stock,
+                      "variant_quantities": var_qty[:50]},
+            "verdict": verdict,
+        })
+    return out
+
+
+def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
+    """GET /me/permissions: raw status per permission; absent means never requested."""
+    try:
+        from services.meta_catalog_linking import _graph_json  # noqa: PLC0415
+
+        resp = _graph_json("GET", "me/permissions", token, params={}, client=client)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": type(exc).__name__}
+    if not resp.get("ok"):
+        return {"ok": False, "http_status": resp.get("http_status"), "error": (resp.get("error") or {}).get("message") if isinstance(resp.get("error"), dict) else resp.get("error")}
+    rows = (resp.get("body") or {}).get("data") or []
+    statuses = {str(r.get("permission")): str(r.get("status") or "") for r in rows if isinstance(r, dict)}
+    cm = statuses.get("catalog_management")
+    verdict = "granted" if cm == "granted" else ("declined" if cm == "declined" else "not_requested")
+    return {
+        "ok": True,
+        "listed_permissions": statuses,
+        "catalog_management_status": cm or "absent",
+        "verdict": verdict,
+        "meaning": {
+            "granted": "the token carries catalog_management",
+            "declined": "the permission was requested at authorization and the user declined it",
+            "not_requested": "the permission was never part of the authorization request; the merchant was never asked",
+        }[verdict],
+    }
+
+
 def _graph_section(
     db: Any,
     tid: int,
@@ -417,6 +684,8 @@ def _graph_section(
     chosen_ids: List[int],
     *,
     client: Any,
+    expected_business_id: Optional[str] = None,
+    candidate_retailer_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     section: Dict[str, Any] = {"reads": []}
     if conn is None:
@@ -428,54 +697,62 @@ def _graph_section(
         return section
     waba_id = _strip(getattr(conn, "whatsapp_business_account_id", None))
     expected_catalog = _strip(getattr(conn, "meta_catalog_id", None))
+    section["expected_business_id"] = expected_business_id
 
-    # 1. link status (GET /{waba}/product_catalogs)
+    # 1. catalogs actually linked to the WABA — independent of any local catalog id
+    linked_ids: List[str] = []
     try:
         from services.meta_catalog_linking import (  # noqa: PLC0415
+            _fetch_waba_product_catalogs,
             fetch_waba_owner_business_id,
             get_waba_catalog_link_status,
         )
 
-        link = get_waba_catalog_link_status(db, tid)
-        section["waba_link"] = {
-            k: link.get(k)
-            for k in (
-                "ok", "connected", "link_status", "waba_id", "expected_catalog_id",
-                "expected_catalog_linked", "linked_catalogs", "linked_catalog_ids",
-                "catalog_exists", "token_source", "error", "error_category", "http_status",
-            )
-            if k in link
-        }
+        catalogs, http_status, err = _fetch_waba_product_catalogs(waba_id, token, client=client)
         section["reads"].append(f"GET /{waba_id}/product_catalogs")
+        linked_ids = [c["id"] for c in catalogs]
+        section["waba_catalogs"] = {
+            "ok": err is None,
+            "http_status": http_status,
+            "catalogs": catalogs,
+            "count": len(catalogs),
+            "error": err,
+            "verdict": (
+                "unproven_graph_error" if err is not None
+                else ("no_catalog_linked_to_waba" if not catalogs else "catalog_linked_to_waba")
+            ),
+            "stamped_catalog_id": expected_catalog or None,
+            "stamped_catalog_is_linked": (expected_catalog in linked_ids) if expected_catalog else None,
+        }
         owner = fetch_waba_owner_business_id(waba_id, token, client=client)
+        section["reads"].append(f"GET /{waba_id}?fields=owner_business_info")
         section["waba_owner_business"] = {
             k: owner.get(k) for k in ("ok", "business_id", "business_name", "error") if k in owner
         }
-        section["reads"].append(f"GET /{waba_id}?fields=owner_business_info")
-    except Exception as exc:  # noqa: BLE001
-        section["waba_link"] = {"error": type(exc).__name__}
-
-    # 2. token permission (GET /me/permissions)
-    try:
-        from services.meta_catalog_onboarding import _catalog_management_granted  # noqa: PLC0415
-
-        granted = _catalog_management_granted(token, client=client)
-        section["token_catalog_management"] = {
-            "granted": granted,
-            "verdict": "granted" if granted is True else ("missing" if granted is False else "unproven"),
+        if expected_business_id:
+            section["waba_owner_business"]["matches_expected"] = (
+                _strip(owner.get("business_id")) == expected_business_id if owner.get("ok") else None
+            )
+        # legacy view (needs the stamped id) kept for comparison
+        link = get_waba_catalog_link_status(db, tid)
+        section["waba_link_legacy"] = {
+            k: link.get(k) for k in ("link_status", "expected_catalog_linked", "error", "missing") if k in link
         }
-        section["reads"].append("GET /me/permissions")
     except Exception as exc:  # noqa: BLE001
-        section["token_catalog_management"] = {"granted": None, "verdict": "unproven", "error": type(exc).__name__}
+        section["waba_catalogs"] = {"ok": False, "error": type(exc).__name__, "verdict": "unproven_exception"}
 
-    # 3. catalogs readable (GET /{catalog}?fields=...)
+    # 2. token permission (raw status, absent vs declined vs granted)
+    section["token_catalog_management"] = _permission_status(token, client=client)
+    section["reads"].append("GET /me/permissions")
+
+    # 3. catalogs readable + owner match (stamped id and every WABA-linked id)
     try:
         from services.meta_catalog_access import probe_catalog_readable  # noqa: PLC0415
 
         ids: List[str] = []
         if expected_catalog:
             ids.append(expected_catalog)
-        for cid in (section.get("waba_link") or {}).get("linked_catalog_ids") or []:
+        for cid in linked_ids:
             if cid not in ids:
                 ids.append(str(cid))
         probes = []
@@ -487,50 +764,65 @@ def _graph_section(
             section["reads"].append(f"GET /{cid}?fields=id,name,product_count,business")
         section["catalogs"] = probes
         owner_bm = _strip((section.get("waba_owner_business") or {}).get("business_id"))
+        reference_bm = expected_business_id or owner_bm
         section["catalog_business_matches_waba_owner"] = {
-            p["catalog_id"]: (bool(owner_bm) and _strip(p.get("business_id")) == owner_bm) if p.get("ok") else None
+            p["catalog_id"]: (bool(reference_bm) and _strip(p.get("business_id")) == reference_bm) if p.get("ok") else None
             for p in probes
         }
     except Exception as exc:  # noqa: BLE001
         section["catalogs"] = [{"error": type(exc).__name__}]
 
-    # 4. live items for the candidates (GET /{catalog}/products)
-    if not expected_catalog:
-        section["live_items"] = {"skipped": "catalog_id_missing"}
-        return section
-    try:
-        from services.meta_catalog_readiness import build_meta_catalog_readiness_report  # noqa: PLC0415
+    # 4. live items: against the stamped catalog (full readiness classification) or,
+    #    when nothing is stamped, presence of the candidate retailer ids in each WABA-linked catalog
+    if expected_catalog:
+        try:
+            from services.meta_catalog_readiness import build_meta_catalog_readiness_report  # noqa: PLC0415
 
-        report = build_meta_catalog_readiness_report(
-            db, tid, include_meta_live_read=True, client=client,
-        )
-        data = report.to_dict()
-        wanted = set(int(x) for x in chosen_ids)
-        plan: Dict[str, List[Dict[str, Any]]] = {"create": [], "update": [], "noop": [], "skip": []}
-        for item in data.get("items") or []:
-            if int(item.get("product_id") or 0) not in wanted:
-                continue
-            action = str(item.get("action_needed") or "skip")
-            plan.setdefault(action, []).append({
-                "product_id": item.get("product_id"),
-                "retailer_id": item.get("retailer_id"),
-                "status": item.get("status"),
-                "reasons": item.get("reasons"),
-                "meta_product_id": item.get("meta_product_id"),
-            })
+            report = build_meta_catalog_readiness_report(db, tid, include_meta_live_read=True, client=client)
+            data = report.to_dict()
+            wanted = set(int(x) for x in chosen_ids)
+            plan: Dict[str, List[Dict[str, Any]]] = {"create": [], "update": [], "noop": [], "skip": []}
+            for item in data.get("items") or []:
+                if int(item.get("product_id") or 0) not in wanted:
+                    continue
+                action = str(item.get("action_needed") or "skip")
+                plan.setdefault(action, []).append({
+                    "product_id": item.get("product_id"), "retailer_id": item.get("retailer_id"),
+                    "status": item.get("status"), "reasons": item.get("reasons"), "meta_product_id": item.get("meta_product_id"),
+                })
+            section["live_items"] = {
+                "catalog_id": expected_catalog, "counts": data.get("counts"), "meta_fetch": data.get("meta_fetch"),
+                "error": data.get("error"), "candidate_plan": plan,
+                "candidate_create": len(plan["create"]), "candidate_update": len(plan["update"]),
+                "candidate_noop": len(plan["noop"]), "candidate_skip": len(plan.get("skip", [])),
+            }
+            section["reads"].append(f"GET /{expected_catalog}/products")
+        except Exception as exc:  # noqa: BLE001
+            section["live_items"] = {"error": type(exc).__name__}
+    elif linked_ids and candidate_retailer_ids:
+        presence: Dict[str, Any] = {}
+        try:
+            from services.meta_catalog_reconcile import fetch_meta_catalog_live_products  # noqa: PLC0415
+
+            for cid in linked_ids[:3]:
+                live, meta_fetch = fetch_meta_catalog_live_products(conn, cid, client=client)
+                section["reads"].append(f"GET /{cid}/products")
+                present = [rid for rid in candidate_retailer_ids if rid in live]
+                presence[cid] = {
+                    "live_item_count": len(live), "fetch": meta_fetch,
+                    "candidates_present": present,
+                    "candidates_absent": [rid for rid in candidate_retailer_ids if rid not in live],
+                    "expected_actions": {"create": len(candidate_retailer_ids) - len(present), "update_or_noop": len(present)},
+                }
+        except Exception as exc:  # noqa: BLE001
+            presence["error"] = type(exc).__name__
+        section["live_items"] = {"catalog_id": None, "note": "no catalog stamped locally; presence checked against WABA-linked catalogs",
+                                 "against_linked_catalogs": presence}
+    else:
         section["live_items"] = {
-            "counts": data.get("counts"),
-            "meta_fetch": data.get("meta_fetch"),
-            "error": data.get("error"),
-            "candidate_plan": plan,
-            "candidate_create": len(plan["create"]),
-            "candidate_update": len(plan["update"]),
-            "candidate_noop": len(plan["noop"]),
-            "candidate_skip": len(plan.get("skip", [])),
+            "skipped": "no_catalog_stamped_and_none_linked" if not linked_ids else "no_candidates",
+            "expected_actions_if_new_catalog": {"create": len(candidate_retailer_ids or []), "update": 0, "noop": 0},
         }
-        section["reads"].append(f"GET /{expected_catalog}/products")
-    except Exception as exc:  # noqa: BLE001
-        section["live_items"] = {"error": type(exc).__name__}
     return section
 
 
@@ -557,14 +849,25 @@ def _missing_requirements(out: Dict[str, Any]) -> List[str]:
     else:
         perm = (graph.get("token_catalog_management") or {}).get("verdict")
         if perm != "granted":
-            missing.append("token_catalog_management")
-        link = graph.get("waba_link") or {}
-        if not link.get("expected_catalog_linked"):
-            missing.append("waba_catalog_link")
+            missing.append(f"token_catalog_management:{perm or 'unproven'}")
+        wc = graph.get("waba_catalogs") or {}
+        verdict = wc.get("verdict")
+        if verdict == "no_catalog_linked_to_waba":
+            missing.append("waba_catalog_link:none_linked")
+        elif verdict != "catalog_linked_to_waba":
+            missing.append("waba_catalog_link:unproven")
+        elif conn.get("meta_catalog_id") and wc.get("stamped_catalog_is_linked") is False:
+            missing.append("waba_catalog_link:stamped_id_not_linked")
         matches = graph.get("catalog_business_matches_waba_owner") or {}
-        expected = conn.get("meta_catalog_id")
-        if expected and matches.get(expected) is not True:
-            missing.append("catalog_business_ownership")
+        for cid in (wc.get("catalogs") or []):
+            if matches.get(cid.get("id")) is not True:
+                missing.append(f"catalog_business_ownership:{cid.get('id')}")
+        owner = graph.get("waba_owner_business") or {}
+        if owner.get("matches_expected") is False:
+            missing.append("waba_owner_business_mismatch")
+    cov = (out.get("trial_candidates") or {}).get("scenario_coverage") or {}
+    if cov and not cov.get("coverage_complete"):
+        missing.append("trial_scenario_coverage:" + ",".join(cov.get("missing_roles") or []))
     return missing
 
 
