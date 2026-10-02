@@ -767,17 +767,24 @@ def test_membership_bound_to_a_different_graph_item_blocks():
     assert client.post.call_count == 0
 
 
-def test_explicit_operator_bind_is_publication_evidence():
+def test_literal_bind_provenance_has_no_writer_and_is_not_evidence():
+    """`literal_retailer_bind` is a constant without any writer in the codebase; until an
+    explicit, audited bind path exists it proves nothing."""
     result, client = _push_existing(_mock_db(membership=_membership(provenance="literal_retailer_bind")))
-    assert result["ok"] is True and result["action"] == "update"
-    assert result["ownership_evidence"]["source"] == "membership:literal_retailer_bind"
-    assert client.post.call_count == 1
+    assert result["action"] == "block_ownership_unverified"
+    assert any(r.startswith("membership_provenance_not_publication") for r in result["ownership_evidence"]["reasons"])
+    assert client.post.call_count == 0
 
 
-def test_legacy_product_stamp_equal_to_live_item_is_publication_evidence():
+def test_legacy_product_stamp_equal_to_live_item_is_not_publication_evidence():
+    """`Product.meta_item_id` is also written by the Meta import, the identity bind and the
+    sibling adoption, so a matching stamp alone never authorizes an update."""
     parent = _parent()
     parent.meta_item_id = "META-ITEM-EXISTING"
     result, client = _push_existing(_mock_db(parent=parent, membership=None))
-    assert result["ok"] is True and result["action"] == "update"
-    assert result["ownership_evidence"]["source"] == "legacy_product_meta_item_id"
-    assert client.post.call_count == 1
+    assert result["action"] == "block_ownership_unverified"
+    ev = result["ownership_evidence"]
+    assert ev["owned"] is False
+    assert ev["legacy_product_meta_item_id"] == {"value": "META-ITEM-EXISTING", "matches_live_item": True}
+    assert "legacy_stamp_is_not_publication_evidence" in ev["reasons"]
+    assert client.post.call_count == 0

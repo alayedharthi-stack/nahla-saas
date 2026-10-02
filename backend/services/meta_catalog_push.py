@@ -44,11 +44,13 @@ GRAPH_FIELDS = "id,retailer_id,name,price,currency,availability"
 
 # A live Graph item that merely shares a retailer_id is NOT ours to update. The
 # push adopts an existing item only with publication evidence for this tenant:
-# a membership row bound to that exact Graph item with a publication provenance
-# (this path published it, or an operator explicitly bound it), or the legacy
-# product-level stamp equal to the item id. A retailer_id format, a link domain
-# or a reconcile-derived membership (Graph presence) never count.
-PUBLICATION_PROVENANCES = frozenset({"salla_variant_push", "literal_retailer_bind"})
+# a membership row for (tenant, catalog, retailer_id) bound to that exact Graph
+# item with the publication provenance, which is written only after a successful
+# create/update POST. Not evidence: a retailer_id format, a link domain, a
+# reconcile-derived membership (Graph presence), and the legacy product-level
+# ``Product.meta_item_id`` stamp — the import path (Meta → local rows), the
+# identity bind and the sibling adoption write that stamp without publishing.
+from core.meta_catalog_membership import PUBLICATION_PROVENANCES  # noqa: E402
 ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED = "live_match_ownership_unverified"
 ACTION_BLOCK_OWNERSHIP = "block_ownership_unverified"
 REASON_NO_PUBLICATION_EVIDENCE = "live_item_without_publication_evidence"
@@ -246,15 +248,17 @@ def live_item_publication_evidence(
     meta_product_id: str,
     parent: Any = None,
 ) -> Dict[str, Any]:
-    """Did THIS path (or an explicit operator bind) publish the live Graph item?
+    """Did THIS path publish the live Graph item?
 
-    ``owned`` is True only with evidence tied to the exact Graph item id:
-    a ``MetaCatalogMembership`` for (tenant, catalog, retailer_id) whose
-    ``meta_item_id`` equals the live id and whose provenance is a publication
-    provenance, or the legacy ``Product.meta_item_id`` equal to the live id.
-    Everything else — an absent membership, a reconcile-derived membership, a
-    mismatching id, a matching retailer_id format or a familiar link domain —
-    is ``owned=False`` with the reasons listed, and the caller must not update.
+    ``owned`` is True only with evidence tied to the exact Graph item id: a
+    ``MetaCatalogMembership`` for (tenant, catalog, retailer_id) — the query
+    filters all three, so another tenant's or another catalog's row never
+    counts — whose ``meta_item_id`` equals the live id and whose provenance is
+    the publication provenance. Everything else — an absent membership, a
+    reconcile-derived membership, a mismatching id, the legacy
+    ``Product.meta_item_id`` stamp (written by import, identity bind and sibling
+    adoption too), a retailer_id format or a familiar link domain — is
+    ``owned=False`` with the reasons listed, and the caller must not update.
     """
     mid = str(meta_product_id or "").strip()
     rid = str(retailer_id or "").strip()
@@ -298,13 +302,11 @@ def live_item_publication_evidence(
     else:
         out["reasons"].append("membership_absent")
     legacy = str(getattr(parent, "meta_item_id", None) or "").strip() if parent is not None else ""
-    if legacy and legacy == mid:
-        out["owned"] = True
-        out["source"] = "legacy_product_meta_item_id"
-        out["reasons"] = []
-        return out
     if legacy:
-        out["reasons"].append("legacy_product_meta_item_id_differs")
+        # indicator only: the stamp is also written by import, identity bind and
+        # sibling adoption, so it never proves that this path published the item
+        out["legacy_product_meta_item_id"] = {"value": legacy, "matches_live_item": legacy == mid}
+        out["reasons"].append("legacy_stamp_is_not_publication_evidence")
     return out
 
 
@@ -1001,7 +1003,9 @@ def push_ready_meta_catalog_batch(
                 confirm=True,
                 client=client,
             )
-            if push_result.get("ok"):
+            if push_result.get("ok") and str(push_result.get("action") or "") in ("create", "update"):
+                # a LINK result adopts an existing item; only a real create/update
+                # POST may write the publication-provenance membership
                 _stamp_salla_batch_membership(
                     db,
                     int(tenant_id),

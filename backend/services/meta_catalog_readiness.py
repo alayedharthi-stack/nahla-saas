@@ -477,7 +477,7 @@ LIVE_SYNCED_FIELDS = (
 LIVE_READ_FIELDS = "id,retailer_id,name,description,price,currency,availability,image_url,url,item_group_id,visibility"
 LIVE_READ_FIELDS_NO_VISIBILITY = LIVE_READ_FIELDS.replace(",visibility", "")
 # The readiness classification is a *comparison*; it never authorizes a write.
-PUBLICATION_PROVENANCES = frozenset({"salla_variant_push", "literal_retailer_bind"})
+from core.meta_catalog_membership import PUBLICATION_PROVENANCES  # noqa: E402
 
 ACTION_CREATE = "create"
 ACTION_UPDATE = "update"
@@ -608,8 +608,9 @@ def live_row_ownership(parent: Any, live_row: Optional[Dict[str, Any]], membersh
     else:
         out["reasons"].append("membership_absent")
     legacy = str(getattr(parent, "meta_item_id", None) or "").strip() if parent is not None else ""
-    if legacy and legacy == mid:
-        return {"owned": True, "source": "legacy_product_meta_item_id", "reasons": []}
+    if legacy:
+        out["legacy_product_meta_item_id"] = {"value": legacy, "matches_live_item": legacy == mid}
+        out["reasons"].append("legacy_stamp_is_not_publication_evidence")
     return out
 
 

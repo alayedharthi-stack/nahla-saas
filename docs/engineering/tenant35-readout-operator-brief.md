@@ -102,7 +102,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 **الخطوات (بلا أي تعديل):**
 1. افتح Commerce Manager → الكتالوج `871742015873294` («كتالوج متجر فساتين - نحلة») → Items.
 2. صدّر العناصر كلها (Export → CSV). إن لم يتوفر التصدير، انقل قائمة العناصر بالأعمدة أدناه.
-3. تأكد أن الملف يحوي لكل عنصر: `id`/*Content ID* (هو `retailer_id`), `title`, `description`, `price`, `availability`, `link`, `image_link`, `item_group_id`, وأي عمود للظهور (`visibility`/`status`) إن وُجد. انقل الأعمدة كما هي.
+3. تأكد أن الملف يحوي لكل عنصر: **`id`/*Content ID*** (هو **`retailer_id`** الذي يضعه التاجر أو المنصة — **ليس** معرّف عنصر Meta), `title`, `description`, `price`, `availability`, `link`, `image_link`, `item_group_id`, وأي عمود للظهور (`visibility`/`status`) إن وُجد. **إن ظهر عمود لمعرّف عنصر Meta الرقمي** (مثل `fb_product_id` / *Product ID* / `product_id` من فيسبوك — رقم طويل مستقل عن Content ID) فانقله **في عمود منفصل باسمه كما ورد**، ولا تخلطه بـContent ID؛ نحتاج الاثنين للمطابقة مع `meta_item_id` في عضوياتنا. انقل الأعمدة كما هي دون إعادة تسمية.
 4. من صفحة الكتالوج (معلومات/إعدادات) انقل: عدد العناصر، تاريخ آخر تحديث، مصدر البيانات (feed/تحديث يدوي/API — كما تعرضه الواجهة)، وهل الكتالوج مربوط بأي حساب واتساب أو أصل آخر (قراءة فقط).
 5. **لا تعدّل عنصرًا، لا تحذف، لا تربط الكتالوج، لا تنقر «ربط كتالوج»، لا تنشئ feed.**
 
@@ -112,7 +112,7 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 ### ق-5 (تُطلب فقط إن أظهر ق-4 أي تطابق أو أي هوية بصيغة نهلة) — قراءة قاعدة الإنتاج (SELECT واحدة عبر `railway ssh`)
 
-هذا هو **إثبات مصدر النشر** الوحيد المتاح: صفوف `meta_catalog_memberships` حيث `catalog_id='871742015873294'` (المستأجر، `retailer_id`, `meta_item_id`, `provenance`) و`products.meta_item_id` غير الفارغة بالمستأجر. عضوية بمصدر `salla_variant_push` أو `literal_retailer_bind` ومعرّف عنصر مطابق = نشر مثبت لذلك المستأجر؛ عضوية `meta_graph_reconcile` أو غياب العضوية = غير مثبت. الاستعلام الدقيق يُعطى عند الحاجة؛ قراءة فقط؛ **لا SSH قبل نتيجة ق-4.**
+هذا هو **إثبات مصدر النشر** الوحيد المتاح: صفوف `meta_catalog_memberships` حيث `catalog_id='871742015873294'` (المستأجر، `retailer_id`, `meta_item_id`, `provenance`)، ومعها `products.meta_item_id` غير الفارغة بالمستأجر **كمؤشر فقط** (الختم يكتبه الاستيراد والتبنّي أيضًا فلا يثبت النشر). عضوية بمصدر **`salla_variant_push`** ومعرّف عنصر Meta مطابق لمعرّف العنصر في التصدير = نشر مثبت لذلك المستأجر؛ عضوية `meta_graph_reconcile` أو `literal_retailer_bind` (لا كاتب لها) أو غياب العضوية = غير مثبت. الاستعلام الدقيق يُعطى عند الحاجة؛ قراءة فقط؛ **لا SSH قبل نتيجة ق-4.**
 
 ### ق-3 (منجز جزئيًا) — Business Manager → المحفظة `2138142656950660` → Data sources → Catalogs
 
