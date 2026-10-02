@@ -195,7 +195,7 @@ CUSTOMER_REGEX_CHANGED=NO
 - **Operations بالأدلة:** كل ادعاء حالة (منشور/مربوط/مسحوب) مربوط بقراءة Graph أو ختم محفوظ. ما لا يمكن إثباته (الظهور) يُعلن غير قابل للإثبات.
 - **منصة لا تاجر:** لا معرّف مستأجر أو منتج في المنطق؛ اختبارات بمتجر عام.
 - **ملكية:** حارس صريح يمنع مسّ ما لم ينشره هذا المسار.
-- **مخاطر معروفة:** (1) سجل السحب JSON على صف الاتصال يُقفل بـ `FOR UPDATE` على PostgreSQL فقط؛ (2) حقل `visibility` في Graph يعتمد على التوثيق ولم يُجرَّب حيًا من هذه البيئة — المسار يتراجع تلقائيًا إلى التوفر وحده إذا رُفض؛ (3) التصريف يعمل بعاملين؛ عمليات السحب متكررة بلا ضرر (idempotent) لو تداخلت.
+- **مخاطر معروفة:** (1) أقفال الصفوف (`FOR UPDATE` على صف الاتصال عند كتابة لقطاته، وعلى صفوف `catalog_channel_retirements` عند إعادة القراءة بعد نداءات Graph) تُطبَّق على PostgreSQL فقط؛ على SQLite (الاختبارات) لا قفل، ويعوّضه فحص `(attempts, updated_at, reason)` قبل تعليم الصف `done`؛ (2) حقل `visibility` في Graph يعتمد على التوثيق ولم يُجرَّب حيًا من هذه البيئة — المسار يتراجع تلقائيًا إلى التوفر وحده إذا رُفض؛ (3) التصريف يعمل بعاملين؛ عمليات السحب متكررة بلا ضرر (idempotent) لو تداخلت.
 
 ---
 
@@ -223,11 +223,15 @@ CUSTOMER_REGEX_CHANGED=NO
 
 ### 7.2 ما سيُكتب في التجربة (بالضبط)
 - **على Meta:** لكل متغير سلة مؤهل في المستأجر 1: `POST /{catalog}/products` (إنشاء) إن لم يوجد `retailer_id={external_id}-{salla_variant_id}`، أو `POST /{item_id}` (تحديث) إن وُجد. الحقول: `retailer_id, name, description, image_url, url, price (هللة), currency, availability, item_group_id, size/color`. **لا DELETE.** الكتالوج المستخدم هو المحفوظ في `meta_catalog_id` فقط؛ لا إنشاء كتالوج.
-- **في DB:** `products.sync_status/meta_item_id/last_synced_at/sync_meta`، صفوف `meta_catalog_memberships`، و`whatsapp_connections.extra_metadata.{wa_catalog_reconcile, wa_catalog_retirements}` للمستأجر 1 فقط.
+- **في DB (المستأجر 1 فقط):**
+  - `products.sync_status / meta_item_id / last_synced_at` و`products.extra_metadata.sync_meta` (أجيال المحتوى، الإيجار، `last_push_at`، أعلام `retire_pending/retired`) و`products.extra_metadata.source_event_at` لكل صف تكتبه سلة.
+  - صفوف `meta_catalog_memberships` (هوية `retailer_id` ↔ `meta_item_id` لكل متغير).
+  - **جدول `catalog_channel_retirements` (الهجرة `0116`):** يُكتب فيه صف لكل هوية قناة (`tenant_id, catalog_id, retailer_id, meta_item_id, product_id, reason`) **عند حذف منتج فقط** (يدويًا أو بحدث `product.deleted` من سلة)، في نفس معاملة الحذف؛ حالته `pending` → `done` بعد تحقق Graph، أو `exhausted` بعد استنفاد المحاولات (تعيد المصالحة فتحه). الصفوف لا تُحذف بعد الإنجاز بل تبقى سجلًا. **الإخفاء لا يكتب في هذا الجدول** بل يضع `retire_pending` على `sync_meta` للمنتج نفسه. إن لم يُحذف أي منتج أثناء التجربة يبقى الجدول فارغًا للمستأجر 1.
+  - `whatsapp_connections.extra_metadata.wa_catalog_reconcile` (لقطة المصالحة الدورية وحالة ربط WABA) ما زالت تُكتب على صف اتصال المستأجر 1 كما في التنفيذ الحالي؛ لا شيء آخر يُكتب على صف الاتصال في التجربة (`meta_catalog_bind` يُكتب فقط عند إعادة اتصال واتساب، وهي خارج نطاق التجربة).
 - عدد العناصر المتوقع: ناتج الخطوة 7.1-1 (مرجع #902: 34 عنصرًا).
 
 ### 7.3 التفعيل التدريجي (محصور بالنطاق، لا تغيير لأي متجر آخر)
-0. **قبل رفع علم التشغيل:** ضبط `NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS=1` و`NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS=1:<id>,1:<id>,...` بقائمة المنتجات المختارة من تقرير §7.1 (العدد معلوم مسبقًا = متغيراتها المؤهلة). بهذا يرفض الكود أي كتابة لغير المستأجر 1 ولغير هذه المنتجات، بما فيها ربط الكتالوج عند إعادة اتصال واتساب لتاجر آخر (يصبح قراءة فقط)؛ المستأجران 33 و35 يظهران في لوحتهما بعائق `sync_scope_excluded` بلا إجراء، ولا يُغيَّر `catalog_enabled` لأي منهما. تطبيق الهجرة `alembic upgrade 0116` (أو الاعتماد على `create_all` عند الإقلاع) قبل أول حذف منتج.
+0. **قبل رفع علم التشغيل:** ضبط `NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS=1` و`NAHLA_WHATSAPP_CATALOG_SYNC_PRODUCT_IDS=1:<id>,1:<id>,...` بقائمة المنتجات المختارة من تقرير §7.1 (العدد معلوم مسبقًا = متغيراتها المؤهلة). بهذا يرفض الكود أي كتابة لغير المستأجر 1 ولغير هذه المنتجات، بما فيها ربط الكتالوج عند إعادة اتصال واتساب لتاجر آخر (يصبح قراءة فقط)؛ المستأجران 33 و35 يظهران في لوحتهما بعائق `sync_scope_excluded` بلا إجراء، ولا يُغيَّر `catalog_enabled` لأي منهما. تطبيق الهجرة `alembic upgrade 0116` (أو الاعتماد على `create_all` عند الإقلاع) والتحقق منها بالاستعلامات الثلاثة في §7.4 قبل أول حذف منتج.
 1. رفع `NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1` ثم `POST /merchant/catalog/whatsapp-sync` للمستأجر 1 (أو انتظار التصريف الدوري).
 2. مراقبة السجلات: `[META_CATALOG_PUSH]`, `[NATIVE_META_SYNC] ... content=matched`, `[WA_CATALOG_SYNC] tenants=.. synced=.. failed=..`.
 3. التحقق: الحالة تُظهر `phase=published` **و** `catalog_link.state=linked`؛ ثم تحقق بصري على الهاتف.
@@ -238,7 +242,14 @@ CUSTOMER_REGEX_CHANGED=NO
 ### 7.4 التراجع
 - إطفاء العلم (`NAHLA_WHATSAPP_CATALOG_AUTO_SYNC` ≠ 1) وإعادة النشر: يتوقف كل تصريف وسحب ومصالحة فورًا؛ العناصر المنشورة تبقى كما هي (لا حذف). توسيع النطاق لاحقًا يكون بتعديل المتغيرين فقط، وإزالتهما تعيد السلوك العام للمنصة.
 - إعادة أي عنصر إلى حالة غير مرئية: `retire` يدوي عبر إخفاء المنتج ثم تشغيل التصريف مرة واحدة، أو من Commerce Manager.
-- الكود قابل للتراجع بـ revert للـ PR؛ لا هجرة قاعدة بيانات.
+- **ثلاث طبقات تراجع منفصلة، تُنفَّذ بالترتيب وتتوقف عند أول طبقة تكفي:**
+  1. **إيقاف المزامنة (بلا نشر كود):** إطفاء العلم كما أعلاه. يبقى الكود والجدول وطلبات السحب المعلقة في `catalog_channel_retirements` كما هي؛ تُستأنف عند إعادة التشغيل دون فقدان.
+  2. **التراجع عن الكود:** `revert` للـ PR وإعادة النشر. يبقى جدول `catalog_channel_retirements` وصفوفه في قاعدة البيانات (الكود القديم لا يعرفه ولا يلمسه)؛ لا تُفقد أي طلبات سحب مسجَّلة، وتُصرَّف عند إعادة نشر الكود لاحقًا. **لا يُسقَط الجدول في هذه الخطوة.**
+  3. **التراجع عن الهجرة (قرار مستقل، ليس تلقائيًا):** `alembic downgrade 0116 -1` يُسقط الجدول **وكل سجل طلبات السحب معه** (معلقة ومنجزة). لا يُنفَّذ إلا بقرار صريح من المالك وبعد التأكد أن `SELECT count(*) FROM catalog_channel_retirements WHERE status='pending'` يساوي صفرًا، أو بعد تصدير الصفوف. إبقاء الجدول بعد التراجع عن الكود آمن تمامًا.
+- **الهجرة `0116` وطريقة التحقق من تطبيقها:** الجدول يُنشأ بأحد مسارين: `Base.metadata.create_all` عند إقلاع الخدمة (يُنشئ جداول الموديلات الجديدة بعد `alembic upgrade 0093` المثبّت في عقد الإقلاع)، أو `alembic upgrade 0116` صراحةً. الهجرة إضافية ومثالية التكرار: إن وُجد الجدول تكتفي بتخفيف `catalog_id` إلى `NULL`-able، وإلا تُنشئه. للتحقق قبل أول حذف منتج في التجربة:
+  - وجود الجدول: `SELECT to_regclass('public.catalog_channel_retirements');` يجب ألا يعيد `NULL`.
+  - تسجيل الهجرة: `SELECT version_num FROM alembic_version;` يجب أن يحوي `0116` ضمن رؤوس المستودع (`REPOSITORY_ALEMBIC_HEADS` في `scripts/operators/bootstrap_migration_contract.py` = `{0092, 0111, 0114, 0115, 0116}`). إن أنشأ `create_all` الجدول دون تسجيل، يُشغَّل `alembic upgrade 0116` لتسجيله؛ لا يغيّر البيانات.
+  - قابلية `NULL` في `catalog_id`: `SELECT is_nullable FROM information_schema.columns WHERE table_name='catalog_channel_retirements' AND column_name='catalog_id';` يجب أن يعيد `YES`.
 
 ---
 
