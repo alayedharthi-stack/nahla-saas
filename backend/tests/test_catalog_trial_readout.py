@@ -667,7 +667,7 @@ def test_graph_error_on_waba_catalogs_leaves_the_link_unproven_and_names_the_bus
         assert wc["ok"] is False and wc["http_status"] == 400 and wc["count"] is None
         assert wc["verdict"] == "unproven_graph_error"
         assert wc["error_class"]["class"] == "business_type_restriction" and wc["error_class"]["meta_code"] == 10
-        assert "not for a missing permission" in wc["error_class"]["note"]
+        assert "refusal of this operation only" in wc["error_class"]["note"]
         # the failed read is not turned into "no catalog": nothing is linked *or* unlinked here
         li = g["live_items"]
         assert li["skipped"] == "waba_catalog_link_unproven_graph_error"
@@ -680,16 +680,28 @@ def test_graph_error_on_waba_catalogs_leaves_the_link_unproven_and_names_the_bus
                                     "verdict": "coexistence_confirmed_by_graph"}
         assert "GET /PN-900?fields=is_on_biz_app,platform_type" in g["reads"]
         pa = g["catalog_path_assessment"]
-        assert pa["api_catalog_link_for_this_waba"] == "blocked_by_business_type_per_graph"
+        assert pa["api_catalog_link_for_this_waba"] == "current_read_refused_with_business_type_message"
         assert pa["catalog_exists_for_this_waba"] == "unproven"
+        assert pa["final_cause_of_refusal"] == "unknown" and pa["alternative_paths"] == "unknown_until_manual_reads"
         assert pa["would_catalog_management_alone_lift_the_block"] == "unproven"
-        assert any("not supported once a number is running Coexistence" in d["excerpt"] for d in pa["documentation"])
-        assert all("verify" in d["verification"] for d in pa["documentation"])
+        assert pa["tenant_verdict"] == "conditional"
+        assert any(c.startswith("coexistence.is_on_biz_app") for c in pa["conditional_on"])
+        assert any(c.startswith("meta_dashboard_reads") for c in pa["conditional_on"])
+        docs = {d["kind"]: d for d in pa["documentation"]}
+        # the official table is carried with its columns and the two questions kept apart
+        table = docs["official_page_table"]
+        assert len(table["columns_per_excerpt"]) == 3
+        assert table["row_business_tools_per_excerpt"]["change_to_business_app_feature_after_onboarding"] == "No change"
+        assert table["row_business_tools_per_excerpt"]["supported_on_cloud_api"] == "Not supported"
+        assert "persists" in next(k for k in table["reading"] if "persists" in k)
+        # the circulating sentence is never attributed to Meta's Limitations section
+        assert "NOT to be cited as Meta's Limitations section" in docs["unattributed_excerpt"]["attribution"]
+        assert all("verif" in d["verification"] for d in pa["documentation"])
         assert "whatsapp_manager:business_portfolio_that_owns_the_waba_and_its_type" in pa["needs_manual_reads"]
         missing = report["missing_requirements"]
         assert "waba_catalog_link:unproven" in missing
         assert "waba_catalog_link:none_linked" not in missing
-        assert "meta_business_type_restriction:product_catalogs" in missing
+        assert "graph_refused_product_catalogs:business_type_message" in missing
         assert "coexistence:api_catalog_path_unproven" in missing
         assert all(m == "GET" for m, _ in graph.calls)
 
@@ -705,8 +717,9 @@ def test_graph_error_on_waba_catalogs_leaves_the_link_unproven_and_names_the_bus
         assert g2["live_items"]["skipped"] == "waba_catalog_link_unproven_graph_error"
         assert g2["coexistence"]["verdict"] == "not_on_business_app_per_graph"
         assert g2["catalog_path_assessment"]["api_catalog_link_for_this_waba"] == "unproven"
+        assert g2["catalog_path_assessment"]["final_cause_of_refusal"] == "n/a"
         assert g2["catalog_path_assessment"]["documentation"] == []
-        assert "meta_business_type_restriction:product_catalogs" not in report2["missing_requirements"]
+        assert "graph_refused_product_catalogs:business_type_message" not in report2["missing_requirements"]
         assert "coexistence:api_catalog_path_unproven" not in report2["missing_requirements"]
     finally:
         session.close(); engine.dispose()

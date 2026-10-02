@@ -1014,29 +1014,55 @@ def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
 
 GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION = "business_type_restriction"
 
-# Meta's own words (coexistence onboarding page, "Limitations"); the page could not be
-# fetched from this execution environment (egress blocked), so the sentence is carried as
-# a search-engine excerpt of the official page and must be verified on the page itself.
+# Documentation facts carried with their attribution. ``developers.facebook.com`` could not be
+# fetched from the readout author's environment (egress blocked); every excerpt below reached
+# us through a search engine and must be transcribed verbatim from the page by the operator.
 COEXISTENCE_DOC_REFERENCES = [
     {
-        "title": "Onboard WhatsApp Business app users (Embedded Signup → coexistence) — Limitations",
+        "title": "Onboard WhatsApp Business app users (Embedded Signup → coexistence) — feature comparison table",
         "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/",
-        "excerpt": ("Group chats, disappearing messages, view-once messages, live location messages, broadcast lists, "
-                    "voice and video calls, and business tools such as the catalog are not supported once a number is "
-                    "running Coexistence."),
-        "verification": "excerpt_via_search_engine; direct fetch blocked from the readout author's environment; verify on page",
+        "kind": "official_page_table",
+        "columns_per_excerpt": [
+            "Feature",
+            "Changes to the WhatsApp Business app feature after onboarding to Cloud API",
+            "WhatsApp Business app feature supported on Cloud API?",
+        ],
+        "row_business_tools_per_excerpt": {
+            "feature": "Business tools (catalog, orders, status)",
+            "change_to_business_app_feature_after_onboarding": "No change",
+            "supported_on_cloud_api": "Not supported",
+        },
+        "reading": {
+            "business_app_catalog_persists_after_onboarding": "yes per 'No change' (app-side; the merchant keeps the app catalog)",
+            "business_app_catalog_usable_or_syncable_via_cloud_api": "'Not supported' per the excerpt — a separate question from persistence",
+        },
+        "attribution": "official page, reached only as a search-engine excerpt; columns and wording to be transcribed verbatim by the operator",
+        "verification": "verify on page (operator Part ب)",
+    },
+    {
+        "title": "Sentence circulating in search results and partner documentation",
+        "text": ("Group chats, disappearing messages, view-once messages, live location messages, broadcast lists, "
+                 "voice and video calls, and business tools such as the catalog are not supported once a number is "
+                 "running Coexistence."),
+        "kind": "unattributed_excerpt",
+        "attribution": ("source section not established from here; wording also appears in partner documentation. "
+                        "NOT to be cited as Meta's Limitations section until the operator confirms it on the page"),
+        "verification": "verify on page (operator Part ب) or drop",
     },
     {
         "title": "Onboard WhatsApp Business app users — detecting coexistence",
         "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users/",
-        "excerpt": "GET /{phone_number_id}?fields=is_on_biz_app,platform_type — is_on_biz_app=true with platform_type=CLOUD_API means the number runs on both.",
-        "verification": "matches this repository's own coexistence verification (services/meta_coexistence.verify_coexistence_phone)",
+        "kind": "official_page_excerpt",
+        "text": "GET /{phone_number_id}?fields=is_on_biz_app,platform_type — is_on_biz_app=true with platform_type=CLOUD_API means the number runs on both.",
+        "attribution": "matches this repository's own coexistence verification (services/meta_coexistence.verify_coexistence_phone)",
+        "verification": "verify on page",
     },
     {
-        "title": "Sell products and services (Cloud API) — catalog must be connected to the WABA in Commerce Manager / via POST /{waba}/product_catalogs with catalog_management",
+        "title": "Sell products and services (Cloud API) — catalog connected to the WABA, catalog_management",
         "url": "https://developers.facebook.com/docs/whatsapp/cloud-api/guides/sell-products-and-services/",
-        "excerpt": "not fetched from this environment",
-        "verification": "verify on page",
+        "kind": "official_page_not_fetched",
+        "attribution": "not fetched from this environment",
+        "verification": "verify on page (operator Part ب)",
     },
 ]
 
@@ -1050,9 +1076,10 @@ def _classify_graph_error(err: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     low = msg.lower()
     if code == 10 and "smb business type" in low:
         klass = GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION
-        note = ("Graph reused code 10 for a restriction on the WABA's owning business type, not for a missing "
-                "permission; this neither proves nor disproves that a catalog exists, and adding "
-                "catalog_management to the token is not shown to lift it")
+        note = ("Graph refused THIS call and its message names the WABA's owning business type, not a missing "
+                "permission. It proves the refusal of this operation only: not the final cause, not whether other "
+                "paths (Commerce Manager / WhatsApp Manager UI, a catalog shared to the portfolio) are also closed, "
+                "not that a catalog is absent, and not that catalog_management would change the answer")
     elif code in (190, 102):
         klass, note = "access_token_invalid", "token rejected"
     elif code in (10, 200, 294) or err.get("meta_subcode") == 2388100:
@@ -1105,8 +1132,10 @@ def _coexistence_facts(conn: Any, token: str, *, client: Any) -> tuple[Dict[str,
 def _catalog_path_assessment(section: Dict[str, Any]) -> Dict[str, Any]:
     """Interpretation of the raw Graph facts: can this WABA take an API-linked catalog?
 
-    Separates what Graph said from what is documented; never asserts that a
-    permission grant would lift a business-type restriction.
+    Keeps three things apart: what Graph answered to *this* call, what the documentation
+    says (with attribution), and what is still unknown. The tenant verdict stays
+    conditional on the coexistence read and the manual dashboard reads; a refusal of one
+    operation is never promoted to a final cause or to "all paths are closed".
     """
     wc = section.get("waba_catalogs") or {}
     ec = (wc.get("error_class") or {}).get("class")
@@ -1121,22 +1150,31 @@ def _catalog_path_assessment(section: Dict[str, Any]) -> Dict[str, Any]:
     if wc.get("verdict") in ("catalog_linked_to_waba", "no_catalog_linked_to_waba"):
         state = "api_catalog_link_readable_for_this_waba"
     elif ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION:
-        state = "blocked_by_business_type_per_graph"
+        state = "current_read_refused_with_business_type_message"
     else:
         state = "unproven"
+    refused = state == "current_read_refused_with_business_type_message"
     return {
         "api_catalog_link_for_this_waba": state,
         "catalog_exists_for_this_waba": ("yes" if wc.get("verdict") == "catalog_linked_to_waba"
                                          else "no" if wc.get("verdict") == "no_catalog_linked_to_waba" else "unproven"),
-        "would_catalog_management_alone_lift_the_block": "unproven" if ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION else "n/a",
+        "final_cause_of_refusal": "unknown" if refused else "n/a",
+        "alternative_paths": "unknown_until_manual_reads" if refused else "n/a",
+        "would_catalog_management_alone_lift_the_block": "unproven" if refused else "n/a",
+        "tenant_verdict": "conditional" if state != "api_catalog_link_readable_for_this_waba" else "readable",
+        "conditional_on": ([
+            "coexistence.is_on_biz_app (Graph read of the phone number)",
+            "meta_dashboard_reads (embedded signup config, access level, app review)",
+            "whatsapp_manager_reads (owning portfolio and its type, catalog tab offering)",
+            "official_comparison_table_transcribed_verbatim",
+        ] if state != "api_catalog_link_readable_for_this_waba" else []),
         "facts": facts,
-        "documentation": COEXISTENCE_DOC_REFERENCES if (coex.get("verdict") == "coexistence_confirmed_by_graph"
-                                                         or ec == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION) else [],
+        "documentation": COEXISTENCE_DOC_REFERENCES if (coex.get("verdict") == "coexistence_confirmed_by_graph" or refused) else [],
         "needs_manual_reads": ([
             "whatsapp_manager:business_portfolio_that_owns_the_waba_and_its_type",
             "whatsapp_manager:catalog_tab_for_this_waba (does it offer connecting a Commerce Manager catalog?)",
             "commerce_manager:catalogs_owned_by_the_expected_business_and_their_whatsapp_connection",
-            "meta_docs:coexistence_limitations_page_current_wording_on_catalog",
+            "meta_docs:coexistence_page_feature_comparison_table_transcribed_with_its_columns",
         ] if state != "api_catalog_link_readable_for_this_waba" else []),
     }
 
@@ -1343,7 +1381,7 @@ def _missing_requirements(out: Dict[str, Any]) -> List[str]:
         elif verdict != "catalog_linked_to_waba":
             missing.append("waba_catalog_link:unproven")
         if (wc.get("error_class") or {}).get("class") == GRAPH_ERROR_BUSINESS_TYPE_RESTRICTION:
-            missing.append("meta_business_type_restriction:product_catalogs")
+            missing.append("graph_refused_product_catalogs:business_type_message")
         coex = graph.get("coexistence") or {}
         if coex.get("verdict") == "coexistence_confirmed_by_graph" and verdict != "catalog_linked_to_waba":
             missing.append("coexistence:api_catalog_path_unproven")
