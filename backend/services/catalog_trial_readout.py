@@ -349,8 +349,10 @@ def _scrub(value: Any, secrets: Iterable[str]) -> Any:
         for k, v in value.items():
             key = str(k)
             low = key.lower()
-            if low in ("token", "access_token", "refresh_token", "token_tail") or (
-                low.endswith("_token") and isinstance(v, str)
+            # secret-bearing keys: exact names, or *_token keys whose value is a
+            # long opaque string (status words such as "unknown" are kept)
+            if low in ("token", "access_token", "refresh_token", "input_token", "app_token", "token_tail") or (
+                low.endswith("_token") and isinstance(v, str) and len(v) >= 16 and " " not in v
             ):
                 out[key] = "<redacted>"
                 continue
@@ -649,30 +651,158 @@ def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter:
     return out
 
 
+def _debug_token(token: str, *, client: Any) -> Dict[str, Any]:
+    """GET /debug_token with the app token (from the container env): token type, app and scopes.
+
+    Read-only. Returns ``available=False`` when the app credentials are not in
+    the environment or the call fails; never includes the tokens themselves.
+    """
+    import os  # noqa: PLC0415
+
+    app_id = _strip(os.environ.get("META_APP_ID"))
+    app_secret = _strip(os.environ.get("META_APP_SECRET"))
+    out: Dict[str, Any] = {"available": False}
+    if not (token and app_id and app_secret):
+        out["reason"] = "app_credentials_not_in_environment" if token else "no_token"
+        return out
+    try:
+        import httpx  # noqa: PLC0415
+
+        version = _strip(os.environ.get("META_GRAPH_API_VERSION")) or "v21.0"
+        url = f"https://graph.facebook.com/{version}/debug_token"
+        params = {"input_token": token, "access_token": f"{app_id}|{app_secret}"}
+        if client is not None:
+            resp = client.get(url, params=params)
+        else:
+            with httpx.Client(timeout=20) as owned:
+                resp = owned.get(url, params=params)
+        body = resp.json() if getattr(resp, "content", b"") else {}
+    except Exception as exc:  # noqa: BLE001
+        out["reason"] = f"transport:{type(exc).__name__}"
+        return out
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        out["reason"] = "unexpected_response"
+        out["http_status"] = getattr(resp, "status_code", None)
+        return out
+    scopes = [str(x) for x in (data.get("scopes") or [])]
+    granular = [str(g.get("scope")) for g in (data.get("granular_scopes") or []) if isinstance(g, dict)]
+    return {
+        "available": True,
+        "is_valid": data.get("is_valid"),
+        "type": data.get("type"),
+        "app_id_matches_configured_app": (str(data.get("app_id") or "") == app_id) if data.get("app_id") else None,
+        "scopes": scopes,
+        "granular_scopes": granular,
+        "catalog_management_in_scopes": ("catalog_management" in scopes) if scopes else None,
+        "expires_at": data.get("expires_at"),
+    }
+
+
+def _explicit_oauth_scope_requests_catalog_management() -> Dict[str, Any]:
+    """Does the deployed connect flow ask for catalog_management in its explicit OAuth scope?
+
+    Read from the deployed source file (never from this branch's copy), so the
+    answer describes the code the merchants actually authorized against.
+    """
+    import re  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    for root in (Path("/app"), Path.cwd(), Path(__file__).resolve().parents[2] if len(Path(__file__).resolve().parents) > 2 else Path.cwd()):
+        f = root / "backend" / "routers" / "whatsapp_embedded.py"
+        if f.is_file():
+            try:
+                text = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            m = re.search(r'"scope":\s*",".join\(\[(.*?)\]\)', text, re.S)
+            if not m:
+                return {"known": False, "reason": "scope_list_not_found", "source": str(f)}
+            scopes = re.findall(r'"([a-z_]+)"', m.group(1))
+            return {"known": True, "source": str(f), "explicit_scopes": scopes,
+                    "requests_catalog_management": "catalog_management" in scopes}
+    return {"known": False, "reason": "source_file_not_found"}
+
+
 def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
-    """GET /me/permissions: raw status per permission; absent means never requested."""
+    """Raw facts about catalog_management on the token, kept apart from any cause.
+
+    ``raw`` holds what Graph returned (``/me/permissions`` status and
+    ``/debug_token`` scopes). ``interpretation`` says only whether the token
+    carries the permission now; the *reason* it does not is undetermined from
+    the token alone — the Embedded Signup configuration (``config_id``) and the
+    app's access level for the permission are read in the Meta App Dashboard,
+    not through Graph with a merchant token.
+    """
+    import os  # noqa: PLC0415
+
+    raw: Dict[str, Any] = {}
     try:
         from services.meta_catalog_linking import _graph_json  # noqa: PLC0415
 
         resp = _graph_json("GET", "me/permissions", token, params={}, client=client)
+        if resp.get("ok"):
+            rows = (resp.get("body") or {}).get("data") or []
+            statuses = {str(r.get("permission")): str(r.get("status") or "") for r in rows if isinstance(r, dict)}
+            cm = statuses.get("catalog_management")
+            raw["me_permissions"] = {
+                "ok": True, "listed_permissions": statuses,
+                "catalog_management_status": cm if cm in ("granted", "declined") else "absent",
+            }
+        else:
+            err = resp.get("error")
+            raw["me_permissions"] = {"ok": False, "http_status": resp.get("http_status"),
+                                     "error": (err.get("message") if isinstance(err, dict) else err),
+                                     "catalog_management_status": "unknown"}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": type(exc).__name__}
-    if not resp.get("ok"):
-        return {"ok": False, "http_status": resp.get("http_status"), "error": (resp.get("error") or {}).get("message") if isinstance(resp.get("error"), dict) else resp.get("error")}
-    rows = (resp.get("body") or {}).get("data") or []
-    statuses = {str(r.get("permission")): str(r.get("status") or "") for r in rows if isinstance(r, dict)}
-    cm = statuses.get("catalog_management")
-    verdict = "granted" if cm == "granted" else ("declined" if cm == "declined" else "not_requested")
+        raw["me_permissions"] = {"ok": False, "error": type(exc).__name__, "catalog_management_status": "unknown"}
+    raw["debug_token"] = _debug_token(token, client=client)
+    raw["explicit_oauth_scope_in_deployed_code"] = _explicit_oauth_scope_requests_catalog_management()
+    cfg = _strip(os.environ.get("META_EMBEDDED_SIGNUP_CONFIG_ID")) or _strip(os.environ.get("META_WA_CONFIG_ID"))
+    raw["embedded_signup_config"] = {
+        "config_id_present": bool(cfg),
+        "config_id_tail": cfg[-4:] if cfg else None,
+        "requested_permissions": "not_readable_via_graph_with_a_merchant_token; read in Meta App Dashboard -> WhatsApp -> Embedded Signup configurations",
+    }
+    raw["app_access_level_for_catalog_management"] = "not_readable_via_graph; read in Meta App Dashboard -> App Review -> Permissions and Features"
+
+    status = raw["me_permissions"]["catalog_management_status"]
+    in_scopes = raw["debug_token"].get("catalog_management_in_scopes")
+    if status == "granted" or in_scopes is True:
+        on_token = "granted"
+    elif status in ("declined", "absent") or in_scopes is False:
+        on_token = "not_on_token"
+    else:
+        on_token = "unknown"
+    explicit = raw["explicit_oauth_scope_in_deployed_code"]
+    possible_causes: List[Dict[str, Any]] = []
+    if on_token != "granted":
+        possible_causes = [
+            {"cause": "explicit_oauth_scope_omits_catalog_management",
+             "evidence": ("confirmed" if explicit.get("known") and explicit.get("requests_catalog_management") is False
+                          else "ruled_out" if explicit.get("known") and explicit.get("requests_catalog_management") else "unknown"),
+             "note": "the connect flow's explicit scope list; Meta applies the config_id's permissions on top, so this alone does not prove the merchant was never asked"},
+            {"cause": "embedded_signup_config_does_not_include_catalog_management",
+             "evidence": "unknown", "how_to_verify": "Meta App Dashboard -> WhatsApp -> Embedded Signup -> configuration for the config_id in META_EMBEDDED_SIGNUP_CONFIG_ID/META_WA_CONFIG_ID -> permissions/assets requested"},
+            {"cause": "app_lacks_access_level_for_catalog_management",
+             "evidence": "unknown", "how_to_verify": "Meta App Dashboard -> App Review -> Permissions and Features -> catalog_management: Standard vs Advanced access, review status"},
+            {"cause": "merchant_declined_at_authorization",
+             "evidence": "confirmed" if status == "declined" else ("ruled_out" if status in ("granted", "absent") else "unknown")},
+            {"cause": "token_type_or_app_mismatch",
+             "evidence": ("unknown" if not raw["debug_token"].get("available")
+                          else ("suspect" if raw["debug_token"].get("app_id_matches_configured_app") is False else "ruled_out")),
+             "note": f"debug_token type={raw['debug_token'].get('type')}"},
+        ]
     return {
-        "ok": True,
-        "listed_permissions": statuses,
-        "catalog_management_status": cm or "absent",
-        "verdict": verdict,
-        "meaning": {
-            "granted": "the token carries catalog_management",
-            "declined": "the permission was requested at authorization and the user declined it",
-            "not_requested": "the permission was never part of the authorization request; the merchant was never asked",
-        }[verdict],
+        "raw": raw,
+        "interpretation": {
+            "catalog_management_on_token": on_token,
+            "cause": "n/a" if on_token == "granted" else "undetermined_from_token_alone",
+            "possible_causes": possible_causes,
+            "needs_manual_reads": [] if on_token == "granted" else [
+                "embedded_signup_configuration_permissions", "app_access_level_catalog_management", "app_review_status",
+            ],
+        },
     }
 
 
@@ -847,9 +977,9 @@ def _missing_requirements(out: Dict[str, Any]) -> List[str]:
     if graph is None:
         missing.append("graph_reads_not_run")
     else:
-        perm = (graph.get("token_catalog_management") or {}).get("verdict")
+        perm = ((graph.get("token_catalog_management") or {}).get("interpretation") or {}).get("catalog_management_on_token")
         if perm != "granted":
-            missing.append(f"token_catalog_management:{perm or 'unproven'}")
+            missing.append(f"token_catalog_management:{perm or 'unknown'}")
         wc = graph.get("waba_catalogs") or {}
         verdict = wc.get("verdict")
         if verdict == "no_catalog_linked_to_waba":

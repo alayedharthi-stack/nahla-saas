@@ -57,17 +57,26 @@ class _Resp:
 class FakeGraph:
     """GET-only Graph double; any POST is a test failure."""
 
-    def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None, linked=True):
+    def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None, linked=True,
+                 debug_scopes=None):
         self.waba, self.catalog, self.business, self.perm = waba, catalog, business, perm
         self.live = live or {}
         self.linked = linked
+        self.debug_scopes = debug_scopes   # None -> /debug_token answers with an error
         self.calls = []
 
     def _route(self, method, url, params):
         self.calls.append((method, url))
         if method != "GET":
             raise AssertionError(f"readout must not {method} {url}")
+        if url.endswith("/debug_token"):
+            if self.debug_scopes is None:
+                return _Resp(400, {"error": {"code": 190, "message": "invalid app token"}})
+            return _Resp(200, {"data": {"is_valid": True, "type": "USER", "app_id": "APP-900",
+                                        "scopes": list(self.debug_scopes), "granular_scopes": []}})
         if url.endswith("/me/permissions"):
+            if self.perm == "error":
+                return _Resp(400, {"error": {"code": 100, "message": "unsupported"}})
             rows = [{"permission": "whatsapp_business_management", "status": "granted"},
                     {"permission": "business_management", "status": "granted"}]
             if self.perm is not None:
@@ -236,7 +245,7 @@ def test_readout_reports_catalog_disabled_without_claiming_no_catalog_exists(mon
         assert [c["id"] for c in g["waba_catalogs"]["catalogs"]] == ["CAT-900"]
         assert g["waba_catalogs"]["stamped_catalog_is_linked"] is True
         assert g["waba_owner_business"]["business_id"] == "BM-900"
-        assert g["token_catalog_management"]["verdict"] == "granted"
+        assert g["token_catalog_management"]["interpretation"]["catalog_management_on_token"] == "granted"
         assert g["catalogs"][0]["catalog_id"] == "CAT-900" and g["catalogs"][0]["business_id"] == "BM-900"
         assert g["catalog_business_matches_waba_owner"]["CAT-900"] is True
         assert all(m == "GET" for m, _ in graph.calls)
@@ -265,9 +274,13 @@ def test_readout_graph_reads_classify_create_update_and_missing_permission(monke
             report = build_catalog_trial_readout(session, tid, include_graph=True, client=graph)
         _no_token_anywhere(report)
         g = report["graph"]
-        assert g["token_catalog_management"]["verdict"] == "declined"
-        assert g["token_catalog_management"]["catalog_management_status"] == "declined"
-        assert "token_catalog_management:declined" in report["missing_requirements"]
+        perm = g["token_catalog_management"]
+        assert perm["raw"]["me_permissions"]["catalog_management_status"] == "declined"
+        assert perm["interpretation"]["catalog_management_on_token"] == "not_on_token"
+        assert perm["interpretation"]["cause"] == "undetermined_from_token_alone"
+        causes = {c["cause"]: c["evidence"] for c in perm["interpretation"]["possible_causes"]}
+        assert causes["merchant_declined_at_authorization"] == "confirmed"
+        assert "token_catalog_management:not_on_token" in report["missing_requirements"]
         plan = g["live_items"]["candidate_plan"]
         created = {r["retailer_id"] for r in plan["create"]}
         touched = {r["retailer_id"] for r in plan["update"] + plan["noop"]}
@@ -489,13 +502,24 @@ def test_graph_section_reads_waba_catalogs_without_a_stamped_id_and_reports_perm
         assert g["waba_catalogs"]["stamped_catalog_is_linked"] is None
         assert g["waba_owner_business"]["matches_expected"] is True
         assert g["catalog_business_matches_waba_owner"]["CAT-900"] is True
-        assert g["token_catalog_management"]["verdict"] == "not_requested"
-        assert g["token_catalog_management"]["catalog_management_status"] == "absent"
-        assert g["token_catalog_management"]["listed_permissions"]["whatsapp_business_management"] == "granted"
+        perm = g["token_catalog_management"]
+        assert perm["raw"]["me_permissions"]["catalog_management_status"] == "absent"
+        assert perm["raw"]["me_permissions"]["listed_permissions"]["whatsapp_business_management"] == "granted"
+        assert perm["interpretation"]["catalog_management_on_token"] == "not_on_token"
+        # an absent row is a fact; its cause is not: the explicit scope is read from the deployed
+        # file, the config_id's permissions and the app access level stay "unknown" until read manually
+        assert perm["interpretation"]["cause"] == "undetermined_from_token_alone"
+        causes = {c["cause"]: c["evidence"] for c in perm["interpretation"]["possible_causes"]}
+        assert causes["explicit_oauth_scope_omits_catalog_management"] == "confirmed"   # this repo's connect flow
+        assert causes["embedded_signup_config_does_not_include_catalog_management"] == "unknown"
+        assert causes["app_lacks_access_level_for_catalog_management"] == "unknown"
+        assert causes["merchant_declined_at_authorization"] == "ruled_out"
+        assert perm["raw"]["explicit_oauth_scope_in_deployed_code"]["requests_catalog_management"] is False
+        assert "embedded_signup_configuration_permissions" in perm["interpretation"]["needs_manual_reads"]
         # candidates classified against the linked catalog even though nothing is stamped locally
         pres = g["live_items"]["against_linked_catalogs"]["CAT-900"]
         assert pres["candidates_absent"] == ["617350990-1", "617350990-2"] and pres["expected_actions"]["create"] == 2
-        assert "token_catalog_management:not_requested" in report["missing_requirements"]
+        assert "token_catalog_management:not_on_token" in report["missing_requirements"]
         assert "meta_catalog_id" in report["missing_requirements"]
         assert not any(m.startswith("waba_catalog_link") for m in report["missing_requirements"])
         assert all(m == "GET" for m, _ in graph.calls)
@@ -550,5 +574,54 @@ def test_salla_recheck_locates_the_stock_inconsistency(monkeypatch):
         assert checked["600186"]["salla"]["quantity"] == 1 and checked["600186"]["salla"]["variants_in_stock"] == 0
         assert checked["600189"]["verdict"] == "local_variant_stock_stale"
         assert all(p.startswith("/products/") for p in fake.calls)   # GET only
+    finally:
+        session.close(); engine.dispose()
+
+
+@_ENT
+@_READY
+def test_permission_facts_stay_unknown_when_graph_cannot_answer_and_granted_scopes_win(monkeypatch):
+    """Unknown stays unknown: a failing /me/permissions and an unavailable /debug_token
+    yield no verdict and no cause; a debug_token that lists the scope proves it is on the token."""
+    session, tid, _other, engine = _make_db(catalog_id=None)
+    try:
+        _salla(session, tid, "500100", variants=1)
+        import services.catalog_trial_readout as readout
+
+        monkeypatch.delenv("META_APP_ID", raising=False)
+        monkeypatch.delenv("META_APP_SECRET", raising=False)
+        monkeypatch.setattr(readout, "_explicit_oauth_scope_requests_catalog_management",
+                            lambda: {"known": False, "reason": "source_file_not_found"})
+        graph = FakeGraph(perm="error", debug_scopes=None)
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph):
+            report = build_catalog_trial_readout(session, tid, include_graph=True, client=graph)
+        _no_token_anywhere(report)
+        perm = report["graph"]["token_catalog_management"]
+        assert perm["raw"]["me_permissions"]["ok"] is False
+        assert perm["raw"]["me_permissions"]["catalog_management_status"] == "unknown"
+        assert perm["raw"]["debug_token"]["available"] is False
+        assert perm["raw"]["debug_token"]["reason"] == "app_credentials_not_in_environment"
+        assert perm["interpretation"]["catalog_management_on_token"] == "unknown"
+        assert perm["interpretation"]["cause"] == "undetermined_from_token_alone"
+        assert all(c["evidence"] == "unknown" for c in perm["interpretation"]["possible_causes"])
+        assert "token_catalog_management:unknown" in report["missing_requirements"]
+
+        # app credentials present and debug_token lists the scope: granted even though /me/permissions failed
+        monkeypatch.setenv("META_APP_ID", "APP-900")
+        monkeypatch.setenv("META_APP_SECRET", "app-secret-not-to-print")
+        graph2 = FakeGraph(perm="error", debug_scopes=["whatsapp_business_management", "catalog_management"])
+        with patch("services.meta_catalog_linking._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_import._select_graph_token", lambda conn: {"token": SECRET, "token_source": "merchant_meta_oauth"}), \
+             patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph2):
+            report2 = build_catalog_trial_readout(session, tid, include_graph=True, client=graph2)
+        perm2 = report2["graph"]["token_catalog_management"]
+        assert perm2["raw"]["debug_token"]["available"] is True
+        assert perm2["raw"]["debug_token"]["catalog_management_in_scopes"] is True
+        assert perm2["raw"]["debug_token"]["app_id_matches_configured_app"] is True
+        assert perm2["interpretation"]["catalog_management_on_token"] == "granted"
+        assert "app-secret-not-to-print" not in json.dumps(report2)
+        assert not any(m.startswith("token_catalog_management") for m in report2["missing_requirements"])
     finally:
         session.close(); engine.dispose()
