@@ -989,8 +989,8 @@ COEXISTENCE_DOC_REFERENCES = [
             "business_app_catalog_persists_after_onboarding": "yes per 'No change' (app-side; the merchant keeps the app catalog)",
             "business_app_catalog_usable_or_syncable_via_cloud_api": "'Not supported' per the excerpt — a separate question from persistence",
         },
-        "attribution": "official page, reached only as a search-engine excerpt; columns and wording to be transcribed verbatim by the operator",
-        "verification": "verify on page (operator Part ب)",
+        "attribution": "official page; first reached as a search-engine excerpt, then read on the page by the operator (2026-10-02): the table separates 'No change' for the in-app catalog from 'Not supported' via Cloud API",
+        "verification": "verified on page by operator read 2026-10-02; verbatim transcription still to be filed with the dashboard reads",
     },
     {
         "title": "Sentence circulating in search results and partner documentation",
@@ -998,9 +998,9 @@ COEXISTENCE_DOC_REFERENCES = [
                  "voice and video calls, and business tools such as the catalog are not supported once a number is "
                  "running Coexistence."),
         "kind": "unattributed_excerpt",
-        "attribution": ("source section not established from here; wording also appears in partner documentation. "
-                        "NOT to be cited as Meta's Limitations section until the operator confirms it on the page"),
-        "verification": "verify on page (operator Part ب) or drop",
+        "attribution": ("wording appears in partner documentation; the operator read Meta's Limitations section on 2026-10-02 "
+                        "and this sentence is NOT present there verbatim. NOT to be cited as Meta's Limitations section"),
+        "verification": "verified absent by operator read 2026-10-02 (Limitations section); keep only as a partner-documentation phrase",
     },
     {
         "title": "Onboard WhatsApp Business app users — detecting coexistence",

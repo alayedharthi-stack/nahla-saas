@@ -1,10 +1,10 @@
-# تكليف وكيل التشغيل — التشغيل الثالث (v3): قراءة Tenant 35 داخل حاوية Railway + قراءة لوحة Meta/WhatsApp Manager بعد تسجيل دخول المالك (قراءة فقط)
+# تكليف وكيل التشغيل — ما بعد التشغيل الثالث: القراءات الضرورية فقط من لوحة Meta وWhatsApp Manager بعد تسجيل دخول المالك (قراءة فقط)
 
-**الغرض:** التشغيل الثاني (v2) أعاد: `GET /{waba}/product_catalogs` → HTTP 400 كود 10 «This operation can not be performed on SMB business type» (الربط **غير مثبت**، لا «لا كتالوج»)، المنتج 186 متناقض في سلة نفسها (الأب 1، خمسة متغيرات × 0)، المنتجات 185/188/190 = 20 متغيرًا (8 متوفرة، 12 نافدة) اجتازت **الفحص المحلي** فقط، ولوحة Meta لم تُقرأ (طلبت تسجيل الدخول). الأداة v3 تصحح تفسير فشل القراءة، وتقرأ coexistence من الرقم، وتسمّي قيد نوع المحفظة منفصلًا عن الصلاحية، وتقارن متغيرات المرشحين الثلاثة بسلة (سعر/توفر/تسمية خيار)، وتطبع تحذيرات الحمولات بأسبابها. **كل شيء قراءة فقط: لا كتابة في قاعدة البيانات، لا POST إلى Meta أو سلة، لا أسرار في الناتج. لا دمج، لا نشر، لا تغيير متغيرات أو إعدادات أو صلاحيات، لا هجرة، لا استبدال ملفات التطبيق، لا تغيير لوضع coexistence.**
+**الحالة (2026-10-02):** التشغيل الثالث (v3) **منجز ووصلت نتائجه نصًا**: `is_on_biz_app=true` و`platform_type=CLOUD_API` (coexistence مثبت)؛ المنتجات 185/188/190 = 20 متغيرًا تطابق سلة سعرًا وتوفرًا (8 متوفرة، 12 نافدة)؛ `GET /{waba}/product_catalogs` ما زال مرفوضًا برسالة نوع النشاط؛ `catalog_management` غائبة عن الرمز وسببها غير محسوم؛ جدول Meta الرسمي يفصل «لا تغيير» لكتالوج التطبيق عن «غير مدعوم» عبر Cloud API، والجملة المتداولة ليست في قسم Limitations نصًا. **لا تشغيل رابع للأداة.** المتبقي قراءات لوحة محددة أدناه، كل منها بسببها، **معلّقة حتى يسجّل المالك الدخول**. **قراءة فقط: لا تغيير إعداد أو صلاحية أو وضع تطبيق، لا طلب مراجعة، لا إنشاء أو ربط كتالوج، لا مسّ باتصال واتساب أو coexistence.** أعد النتائج **نصًا داخل الرسالة** إضافةً إلى الإرفاق.
 
-> **تسليم الملفات:** ملفات التشغيل الثاني لم تصل إلى بيئة التحليل. أعد هذه المرة الملفات **نصًا داخل الرسالة** (JSON كاملًا) إضافةً إلى الإرفاق.
+## الجزء أ — التشغيل الثالث (منجز؛ يُحتفظ به للمرجع والتحقق من البصمة)
 
-## الجزء أ — تشغيل الأداة v3 عبر `railway ssh`
+> البصمة المثبَّتة أدناه هي للملف الذي **شُغِّل فعلًا** في التشغيل الثالث. النسخة اللاحقة من الملف في الفرع تختلف عنها في نصوص التوثيق المضمّنة فقط (تسجيل قراءة المشغّل لجدول Meta)، ولا تُشغَّل: لا تشغيل رابع.
 
 ### أ-1. ما تحتاجه
 
@@ -76,27 +76,28 @@ python /tmp/catalog_trial_readout_standalone.py --tenant-id 35 --include-graph -
 
 `graph.coexistence` (`is_on_biz_app`, `platform_type`, `verdict`)؛ `graph.waba_catalogs` (`verdict`, `error_class.class`)؛ `graph.catalog_path_assessment` (`api_catalog_link_for_this_waba`, `catalog_exists_for_this_waba`, `would_catalog_management_alone_lift_the_block`, `needs_manual_reads`)؛ `graph.waba_owner_business.matches_expected`؛ `graph.token_catalog_management.raw` و`.interpretation` (احتمال الرفض يبقى `unknown` عند `absent`)؛ `trial_candidates.preferred_evaluation` و`scenario_coverage`؛ `candidate_payloads` (`local_payload_checks_passed` = فحص محلي فقط، `availability_counts`، `warnings` بأسبابها، `items`)؛ `candidate_salla_crosscheck` (لكل متغير: `verdict`, `salla_price`, `salla_available`, `salla_option_label`; `salla_variants_missing_locally`)؛ `salla_check.checked[].verdict` للمنتج 186؛ `graph.live_items` (`skipped=waba_catalog_link_unproven_graph_error` مع `conditional_actions` إن فشلت قراءة الكتالوجات)؛ `missing_requirements`.
 
-## الجزء ب — طلب منفصل: قراءة لوحة تطبيق Meta وWhatsApp Manager **بعد تسجيل دخول المالك** (قراءة فقط، بلا أي تعديل)
+## الجزء ب — القراءات الضرورية فقط، بعد تسجيل دخول المالك (قراءة فقط، بلا أي تعديل)
 
-في التشغيل الثاني طلبت الصفحة تسجيل الدخول ولم يُقرأ أي بند؛ **كل البنود أدناه ما زالت «غير معروفة»**. المالك يسجّل الدخول بحسابه ثم ينفّذ المشغّل القراءة أمامه أو ينفّذها المالك بنفسه. لا يمكن قراءة هذه البنود عبر Graph برمز تاجر، وهي حاكمة في تفسير غياب `catalog_management` **وفي حسم ما إذا كان WABA `1682673239554563` يقبل كتالوج API أصلًا** (خطأ «SMB business type» يثبت رفض العملية الحالية فقط، لا السبب النهائي ولا كل المسارات). المطلوب قراءة ونقل فقط؛ **لا تغيّر أي إعداد أو صلاحية أو وضع تطبيق، ولا تقدّم طلب مراجعة، ولا تربط أو تنشئ كتالوجًا، ولا تلمس اتصال واتساب أو وضع coexistence.**
+كل بند أدناه له سؤال واحد يحسمه وسبب يجعله ضروريًا. **ابدأ بـ ق-1؛ إن كانت نتيجته «لا ربط متاح» فلا حاجة إلى ق-3، ويبقى ق-2 لمسار التجار على Cloud API فقط.**
 
-### ب-1. لوحة التطبيق (developers.facebook.com → التطبيق)
+### ق-1 (حاسم لـ Tenant 35) — WhatsApp Manager (business.facebook.com/wa/manage) → الحساب `1682673239554563`
 
-1. **إعداد Embedded Signup المرتبط بـ `config_id`:** WhatsApp → Embedded Signup → Configurations. معرّف الإعداد المستخدم هو قيمة المتغير `META_EMBEDDED_SIGNUP_CONFIG_ID` (أو الاسم القديم `META_WA_CONFIG_ID`) في خدمة `nahla-saas`؛ يكفي مطابقة **آخر 4 أرقام** مع `graph.token_catalog_management.raw.embedded_signup_config.config_id_tail` في ناتج الأداة، دون نقل المعرّف كاملًا إن لم يلزم. انقل: اسم الإعداد، الصلاحيات/الأصول التي يطلبها (هل يتضمن إدارة الكتالوج/Commerce؟)، ونوع التدفق (WhatsApp فقط أم WhatsApp + Commerce)، وهل هو إعداد coexistence (يسمح بالرقم الموجود على تطبيق WhatsApp Business).
-2. **مستوى وصول الصلاحيات:** App Review → Permissions and Features → لكل من `catalog_management` و`business_management` و`whatsapp_business_management` و`whatsapp_business_messaging`: الحالة (Standard Access / Advanced Access / غير مضافة)، وحالة طلب المراجعة إن وُجد (Pending / Approved / Rejected مع التاريخ).
-3. **حالة التطبيق:** App Mode (Development / Live)، وحالة Business Verification للمحفظة المالكة للتطبيق.
-4. **دور مشغّل Tenant 35 في التطبيق:** هل حساب Meta الذي ربط واتساب لـ Tenant 35 له دور في التطبيق (Admin / Developer / Tester) أم لا دور. يحدد هذا ما إذا كان Standard Access كافيًا لتجربة 35.
+1. **محفظة الأعمال المالكة للحساب ونوعها:** اسم المحفظة ومعرّفها كما تعرضهما الصفحة (هل هي `2138142656950660` أم محفظة أُنشئت تلقائيًا عند الربط من تطبيق WhatsApp Business؟)، وأي وصف لنوعها أو حالة توثيقها حرفيًا. *السبب:* Graph رفض `product_catalogs` برسالة «SMB business type»؛ هذه القراءة تسمّي النوع من الواجهة مباشرة.
+2. **تبويب الكتالوج (Catalog / Commerce) لهذا الحساب:** ماذا يعرض بالضبط — خيار «Connect catalog» من Commerce Manager؟ كتالوج تطبيق WhatsApp Business فقط؟ رسالة بأن الميزة غير متاحة لهذا الحساب؟ انقل النص حرفيًا ولقطة شاشة. **اقرأ فقط؛ لا تنقر «ربط».** *السبب:* هذا هو الطريق الوحيد المتبقي لمعرفة هل ربط كتالوج API ممكن لهذا الحساب مع بقاء الرقم على التطبيق، بعد أن أغلق Graph القراءة.
 
-### ب-2. WhatsApp Manager وBusiness Manager (business.facebook.com)
+### ق-2 (يحكم سبب غياب الصلاحية؛ ضروري لمسار Cloud API عامةً، ولـ Tenant 35 فقط إن كانت ق-1 «ربط متاح») — لوحة التطبيق (developers.facebook.com)
 
-5. **محفظة الـ WABA `1682673239554563`:** في WhatsApp Manager → Account tools / Overview: اسم ومعرّف محفظة الأعمال المالكة للحساب، وهل هي المحفظة `2138142656950660` أم محفظة أُنشئت تلقائيًا عند الربط من تطبيق WhatsApp Business (تظهر عادةً باسم المتجر دون توثيق). انقل ما تعرضه الصفحة حرفيًا عن «نوع» المحفظة أو حالتها.
-6. **تبويب الكتالوج للـ WABA:** في WhatsApp Manager → Catalog (أو Commerce): هل يعرض خيار «Connect catalog» من Commerce Manager لهذا الحساب، أم يعرض كتالوج تطبيق WhatsApp Business، أم رسالة بأن الكتالوج غير متاح؟ **اقرأ فقط ولا تنقر «ربط».**
-7. **المحفظة `2138142656950660`:** Business settings → Data sources → Catalogs: هل يوجد كتالوج مملوك لها؟ اسمه ومعرّفه وعدد عناصره، وهل هو مربوط بحساب واتساب (أي حساب)؟ (قراءة فقط.)
-8. **كتالوج التطبيق:** إن كان رقم Tenant 35 على تطبيق WhatsApp Business: هل يوجد كتالوج داخل التطبيق؟ عدد عناصره فقط (قراءة من هاتف التاجر بإذنه، دون تعديل).
+3. **إعداد Embedded Signup المرتبط بـ `config_id`:** WhatsApp → Embedded Signup → Configurations؛ طابق **آخر 4 أرقام** مع `graph.token_catalog_management.raw.embedded_signup_config.config_id_tail` في ناتج v3. انقل: اسم الإعداد، الصلاحيات/الأصول التي يطلبها (هل يتضمن إدارة الكتالوج/Commerce؟)، نوع التدفق، وهل هو إعداد coexistence. *السبب:* الحوار الذي رآه التاجر يُبنى من هذا الإعداد، ولا يُقرأ عبر Graph.
+4. **مستوى وصول `catalog_management` وحالة App Review** (App Review → Permissions and Features)، ومعه `business_management` و`whatsapp_business_management` و`whatsapp_business_messaging`: Standard/Advanced/غير مضافة، وحالة أي طلب مراجعة بتاريخه. *السبب:* يحدد من يمكن منحه الصلاحية أصلًا.
+5. **وضع التطبيق (Development/Live) وحالة توثيق المحفظة المالكة للتطبيق، ودور حساب Meta الذي ربط Tenant 35 في التطبيق.** *السبب:* يحدد هل Standard Access كافٍ لتجربة 35.
 
-### ب-3. نص الوثائق الرسمية (للتحقق من مقتطفات البحث — نقل حرفي، لا تلخيص)
+### ق-3 (اختياري؛ فقط إن كانت ق-1 «ربط متاح») — Business Manager → المحفظة `2138142656950660` → Data sources → Catalogs
 
-9. افتح صفحة Meta الرسمية «Onboard WhatsApp Business app users» (Embedded Signup → coexistence). انقل **جدول مقارنة الميزات حرفيًا بأعمدته** (المتوقع حسب مقتطف البحث: *Feature* / *Changes to the WhatsApp Business app feature after onboarding to Cloud API* / *WhatsApp Business app feature supported on Cloud API?* — انقل الأعمدة كما هي حتى لو اختلفت) **وكل صفوفه**، وخاصةً صف *Business tools (catalog, orders, status)* بقيمتَي عموديه. ثم انقل **قسم Limitations** حرفيًا إن وُجد، وبيّن **هل** الجملة «…business tools such as the catalog are not supported once a number is running Coexistence» موجودة فيه نصًا أم لا (لا تُنسب إليه قبل التحقق).
-10. افتح دليل «Sell products and services» (Cloud API) وانقل الفقرة التي تحدد شروط ربط الكتالوج بالـ WABA والصلاحيات المطلوبة، وأي ذكر لنوع محفظة الأعمال أو لـcoexistence.
+6. هل يوجد كتالوج مملوك للمحفظة؟ اسمه ومعرّفه وعدد عناصره، وهل هو مربوط بحساب واتساب (أي حساب)؟ قراءة فقط. *السبب:* يحسم «وجود كتالوج» الذي لا تستطيع الأداة قراءته، ويحدد إنشاء/تعديل العناصر العشرين.
 
-**الإخراج:** نص أو لقطات شاشة مع إخفاء أي أسرار (App Secret، رموز). يُرفق مع ناتج الجزء أ، **ويُنقل نصًا داخل الرسالة أيضًا** (JSON الجزء أ كاملًا، ونص الجزء ب) لتجاوز مشكلة وصول الملفات.
+### ملاحق (غير حاسمة)
+
+7. **النقل الحرفي لجدول المقارنة** في صفحة «Onboard WhatsApp Business app users» بأعمدته وصفوفه (قُرئ على الصفحة وأُكِّد؛ يُرفق النص الحرفي للسجل).
+8. فقرة دليل «Sell products and services» عن شروط ربط الكتالوج بالـ WABA والصلاحيات (غير حاسمة لـ ق-1؛ للسجل).
+
+**الإخراج:** نص داخل الرسالة أولًا (ثم لقطات شاشة مرفقة) مع إخفاء أي أسرار (App Secret، رموز). **ما لا يُطلب:** تشغيل رابع للأداة، إعادة `GET /{waba}/product_catalogs`، أي قراءة سلة إضافية، أي تعديل.
