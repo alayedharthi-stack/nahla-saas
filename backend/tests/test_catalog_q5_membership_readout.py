@@ -306,6 +306,11 @@ def q5_pg_schema():
               Integration, StoreKnowledgeSnapshot, WhatsAppConnection]
     Base.metadata.create_all(scoped, tables=[t.__table__ for t in tables])
     with scoped.begin() as conn:
+        # Other test modules may have rendered JSONB columns as JSON on the shared
+        # metadata; production columns are jsonb, so make the scratch schema match.
+        for table, column in (("products", "metadata"), ("tenant_settings", "store_settings"),
+                              ("store_knowledge_snapshots", "store_profile"), ("integrations", "config")):
+            conn.execute(text(f'ALTER TABLE {table} ALTER COLUMN "{column}" TYPE jsonb USING "{column}"::jsonb'))
         conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
         conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0093')"))
         conn.execute(text("INSERT INTO tenants (id, name, domain, is_active, is_platform_tenant) VALUES (35, 'q5 trial tenant', 'q5-trial.test', true, false)"))

@@ -46,12 +46,32 @@ CATALOG_HELD = "CAT-HELD-7001"
 CATALOG_FRESH = "CAT-FRESH-7002"
 
 
+_JSONB_ORIGINALS: dict = {}
+
+
 @event.listens_for(Base.metadata, "before_create")
 def _remap_jsonb(target, connection, **kw):
+    """SQLite only: render JSONB columns as JSON for this create_all, and remember
+    the originals so ``_restore_jsonb`` puts them back — the metadata is shared
+    process-wide and a later real-PostgreSQL create_all must still get jsonb."""
+    if connection.dialect.name != "sqlite":
+        return
     for table in target.sorted_tables:
         for col in table.columns:
             if isinstance(col.type, JSONB):
+                _JSONB_ORIGINALS[(table.name, col.name)] = col.type
                 col.type = JSON()
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _restore_jsonb(target, connection, **kw):
+    if connection.dialect.name != "sqlite":
+        return
+    for table in target.sorted_tables:
+        for col in table.columns:
+            orig = _JSONB_ORIGINALS.pop((table.name, col.name), None)
+            if orig is not None:
+                col.type = orig
 
 
 def _db():
