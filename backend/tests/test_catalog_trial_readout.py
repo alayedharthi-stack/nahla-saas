@@ -58,8 +58,10 @@ class FakeGraph:
     """GET-only Graph double; any POST is a test failure."""
 
     def __init__(self, *, waba="WABA-900", catalog="CAT-900", business="BM-900", perm="granted", live=None, linked=True,
-                 debug_scopes=None, catalogs_error=None, phone="PN-900", on_biz_app=None):
+                 debug_scopes=None, catalogs_error=None, phone="PN-900", on_biz_app=None,
+                 debug_type="USER", debug_granular=None, debug_user_id=None):
         self.waba, self.catalog, self.business, self.perm = waba, catalog, business, perm
+        self.debug_type, self.debug_granular, self.debug_user_id = debug_type, debug_granular, debug_user_id
         self.live = live or {}
         self.linked = linked
         self.debug_scopes = debug_scopes   # None -> /debug_token answers with an error
@@ -74,8 +76,11 @@ class FakeGraph:
         if url.endswith("/debug_token"):
             if self.debug_scopes is None:
                 return _Resp(400, {"error": {"code": 190, "message": "invalid app token"}})
-            return _Resp(200, {"data": {"is_valid": True, "type": "USER", "app_id": "APP-900",
-                                        "scopes": list(self.debug_scopes), "granular_scopes": []}})
+            data = {"is_valid": True, "type": self.debug_type, "app_id": "APP-900",
+                    "scopes": list(self.debug_scopes), "granular_scopes": list(self.debug_granular or [])}
+            if self.debug_user_id:
+                data["user_id"] = self.debug_user_id
+            return _Resp(200, {"data": data})
         if url.endswith("/me/permissions"):
             if self.perm == "error":
                 return _Resp(400, {"error": {"code": 100, "message": "unsupported"}})
@@ -781,3 +786,33 @@ def test_candidate_salla_crosscheck_compares_every_chosen_variant_with_salla(mon
         assert report["candidate_payloads"]["local_payload_checks_passed"] == 5
     finally:
         session.close(); engine.dispose()
+
+
+def test_system_user_token_is_classified_and_its_granular_targets_recorded_without_claiming_standard_eligibility(monkeypatch):
+    """A SYSTEM_USER (business-integration) token: the readout records the type class, the
+    principal id and the scope -> target ids, and lists Standard-access eligibility as an
+    unknown cause — it never settles it by comparing a user id with human app roles."""
+    import services.catalog_trial_readout as readout
+
+    monkeypatch.setenv("META_APP_ID", "APP-900")
+    monkeypatch.setenv("META_APP_SECRET", "secret-900")
+    monkeypatch.setattr(readout, "_explicit_oauth_scope_requests_catalog_management",
+                        lambda: {"known": True, "requests_catalog_management": False})
+    graph = FakeGraph(
+        perm=None, debug_scopes=["business_management", "whatsapp_business_management", "whatsapp_business_messaging"],
+        debug_type="SYSTEM_USER", debug_user_id="SU-123",
+        debug_granular=[{"scope": "whatsapp_business_management", "target_ids": ["WABA-900"]},
+                        {"scope": "business_management", "target_ids": ["BM-900"]}],
+    )
+    with patch("services.meta_catalog_linking.httpx.Client", lambda *a, **k: graph):
+        perm = readout._permission_status("EAAB-merchant-token", client=graph)
+    dbg = perm["raw"]["debug_token"]
+    assert dbg["type"] == "SYSTEM_USER" and dbg["token_type_class"] == "system_user"
+    assert dbg["principal_id"] == "SU-123"
+    assert dbg["granular_scope_targets"] == {"whatsapp_business_management": ["WABA-900"], "business_management": ["BM-900"]}
+    assert dbg["catalog_management_in_scopes"] is False
+    assert perm["interpretation"]["catalog_management_on_token"] == "not_on_token"
+    causes = {c["cause"]: c for c in perm["interpretation"]["possible_causes"]}
+    assert causes["standard_access_not_usable_for_this_token_principal"]["evidence"] == "unknown"
+    assert "system_user" in causes["standard_access_not_usable_for_this_token_principal"]["note"]
+    assert "EAAB" not in json.dumps(perm)

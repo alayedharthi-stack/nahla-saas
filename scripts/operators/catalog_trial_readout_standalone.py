@@ -891,14 +891,30 @@ def _debug_token(token: str, *, client: Any) -> Dict[str, Any]:
         out["http_status"] = getattr(resp, "status_code", None)
         return out
     scopes = [str(x) for x in (data.get("scopes") or [])]
-    granular = [str(g.get("scope")) for g in (data.get("granular_scopes") or []) if isinstance(g, dict)]
+    granular_rows = [g for g in (data.get("granular_scopes") or []) if isinstance(g, dict)]
+    granular = [str(g.get("scope")) for g in granular_rows]
+    # scope -> asset ids the token is scoped to (business / WABA ids; ids only, never tokens)
+    granular_targets = {
+        str(g.get("scope")): [str(x) for x in (g.get("target_ids") or [])]
+        for g in granular_rows if g.get("scope")
+    }
+    token_type = str(data.get("type") or "") or None
+    principal_id = _strip(data.get("user_id") or data.get("profile_id"))
     return {
         "available": True,
         "is_valid": data.get("is_valid"),
-        "type": data.get("type"),
+        "type": token_type,
+        # SYSTEM_USER = a business-integration system user token (Embedded Signup); its
+        # principal is a system user of the merchant's business, not a human app-role
+        # holder, so Standard-access eligibility cannot be settled by comparing a
+        # user id with the app's human roles.
+        "token_type_class": ("system_user" if (token_type or "").upper() == "SYSTEM_USER"
+                             else "user" if (token_type or "").upper() == "USER" else "other" if token_type else None),
+        "principal_id": principal_id or None,
         "app_id_matches_configured_app": (str(data.get("app_id") or "") == app_id) if data.get("app_id") else None,
         "scopes": scopes,
         "granular_scopes": granular,
+        "granular_scope_targets": granular_targets,
         "catalog_management_in_scopes": ("catalog_management" in scopes) if scopes else None,
         "expires_at": data.get("expires_at"),
     }
@@ -998,6 +1014,15 @@ def _permission_status(token: str, *, client: Any) -> Dict[str, Any]:
              "evidence": ("unknown" if not raw["debug_token"].get("available")
                           else ("suspect" if raw["debug_token"].get("app_id_matches_configured_app") is False else "ruled_out")),
              "note": f"debug_token type={raw['debug_token'].get('type')}"},
+            {"cause": "standard_access_not_usable_for_this_token_principal",
+             "evidence": "unknown",
+             "note": (
+                 "token_type_class=" + str(raw["debug_token"].get("token_type_class")) + "; "
+                 "a SYSTEM_USER (business-integration) token's principal is a system user of the merchant's business: "
+                 "human app roles do not apply, and whether Standard access covers a permission on a business that does not "
+                 "own the app is settled only by Meta's official text (not readable via Graph) and the app's access level per permission"
+             ),
+             "how_to_verify": "Meta docs: access levels for business-integration system user tokens; App Dashboard: access level of each permission; granular_scope_targets vs the merchant business id"},
         ]
     return {
         "raw": raw,
