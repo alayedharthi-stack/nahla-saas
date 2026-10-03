@@ -230,6 +230,14 @@ def validate_salla_order_payload(body: Dict[str, Any]) -> List[str]:
     return missing
 
 
+def _salla_product_status(value: Any) -> Optional[str]:
+    """Plain lowercase Salla product status (``sale`` / ``out`` / ``hidden``)."""
+    if isinstance(value, dict):
+        value = value.get("slug") or value.get("name")
+    text = str(value or "").strip().lower()
+    return text or None
+
+
 def _coerce_salla_price_amount(value: Any) -> Optional[float]:
     """Extract a numeric price from a Salla price field (dict/number/string)."""
     if value is None:
@@ -1863,6 +1871,7 @@ class SallaAdapter(BaseStoreAdapter):
             variants=variants,
             options=options,
             has_required_options=has_required,
+            status=_salla_product_status(raw.get("status")),
         )
 
     def _normalize_options(

@@ -41,6 +41,19 @@ REQUEST_TIMEOUT: float = 45.0
 # Graph Catalog Product Item fields used after a push. Identity plus
 # the content fields this API version exposes on GET.
 GRAPH_FIELDS = "id,retailer_id,name,price,currency,availability"
+
+# A live Graph item that merely shares a retailer_id is NOT ours to update. The
+# push adopts an existing item only with publication evidence for this tenant:
+# a membership row for (tenant, catalog, retailer_id) bound to that exact Graph
+# item with the publication provenance, which is written only after a successful
+# create/update POST. Not evidence: a retailer_id format, a link domain, a
+# reconcile-derived membership (Graph presence), and the legacy product-level
+# ``Product.meta_item_id`` stamp — the import path (Meta → local rows), the
+# identity bind and the sibling adoption write that stamp without publishing.
+from core.meta_catalog_membership import PUBLICATION_PROVENANCES  # noqa: E402
+ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED = "live_match_ownership_unverified"
+ACTION_BLOCK_OWNERSHIP = "block_ownership_unverified"
+REASON_NO_PUBLICATION_EVIDENCE = "live_item_without_publication_evidence"
 SIBLING_GRAPH_FIELDS = "id,retailer_id,price,currency,availability,url,image_url"
 
 
@@ -226,6 +239,87 @@ def find_meta_catalog_item_by_retailer_id(
         return _run(owned)
 
 
+def live_item_publication_evidence(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    meta_product_id: str,
+    parent: Any = None,
+) -> Dict[str, Any]:
+    """Did THIS path publish the live Graph item?
+
+    ``owned`` is True only with evidence tied to the exact Graph item id: a
+    ``MetaCatalogMembership`` for (tenant, catalog, retailer_id) — the query
+    filters all three, so another tenant's or another catalog's row never
+    counts — whose ``meta_item_id`` equals the live id and whose provenance is
+    the publication provenance. Everything else — an absent membership, a
+    reconcile-derived membership, a mismatching id, the legacy
+    ``Product.meta_item_id`` stamp (written by import, identity bind and sibling
+    adoption too), a retailer_id format or a familiar link domain — is
+    ``owned=False`` with the reasons listed, and the caller must not update.
+    """
+    mid = str(meta_product_id or "").strip()
+    rid = str(retailer_id or "").strip()
+    cid = str(catalog_id or "").strip()
+    out: Dict[str, Any] = {
+        "owned": False, "source": None, "meta_product_id": mid or None, "retailer_id": rid,
+        "catalog_id": cid or None, "membership": None, "reasons": [],
+    }
+    if not mid:
+        out["reasons"].append("live_item_id_missing")
+        return out
+    membership = None
+    try:
+        from models import MetaCatalogMembership  # noqa: PLC0415
+
+        membership = (
+            db.query(MetaCatalogMembership)
+            .filter(
+                MetaCatalogMembership.tenant_id == int(tenant_id),
+                MetaCatalogMembership.catalog_id == cid,
+                MetaCatalogMembership.retailer_id == rid,
+            )
+            .first()
+        )
+    except Exception as exc:  # noqa: BLE001
+        out["reasons"].append(f"membership_lookup_failed:{type(exc).__name__}")
+    if membership is not None:
+        m_mid = str(getattr(membership, "meta_item_id", None) or "").strip()
+        prov = str(getattr(membership, "provenance", None) or "").strip()
+        out["membership"] = {"meta_item_id": m_mid or None, "provenance": prov or None}
+        if not m_mid:
+            out["reasons"].append("membership_without_meta_item_id")
+        elif m_mid != mid:
+            out["reasons"].append("membership_meta_item_id_mismatch")
+        elif prov not in PUBLICATION_PROVENANCES:
+            out["reasons"].append(f"membership_provenance_not_publication:{prov or 'none'}")
+        else:
+            out["owned"] = True
+            out["source"] = f"membership:{prov}"
+            return out
+    else:
+        out["reasons"].append("membership_absent")
+    legacy = str(getattr(parent, "meta_item_id", None) or "").strip() if parent is not None else ""
+    if legacy:
+        # indicator only: the stamp is also written by import, identity bind and
+        # sibling adoption, so it never proves that this path published the item
+        out["legacy_product_meta_item_id"] = {"value": legacy, "matches_live_item": legacy == mid}
+        out["reasons"].append("legacy_stamp_is_not_publication_evidence")
+    return out
+
+
+def _ownership_block(result: Dict[str, Any], lookup: Dict[str, Any], meta_product_id: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
+    result["action"] = ACTION_BLOCK_OWNERSHIP
+    result["error"] = ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    result["ok"] = False
+    result["meta_product_id"] = str(meta_product_id)
+    result["ownership_evidence"] = evidence
+    result["lookup"] = {**(lookup or {}), "reason": REASON_NO_PUBLICATION_EVIDENCE, "identity_class": None}
+    return result
+
+
 def _parent_variants_for_gate(db: Any, parent: Any, variant: Any, tenant_id: int) -> List[Any]:
     rows = list(getattr(parent, "variants", None) or [])
     if not rows and db is not None:
@@ -385,6 +479,36 @@ def _post_catalog_item(
         return _run(owned)
 
 
+RETIRED_AVAILABILITY = "out of stock"
+RETIRED_VISIBILITY = "staging"
+PUBLISHED_VISIBILITY = "published"
+RETIRE_LOOKUP_FIELDS = GRAPH_FIELDS + ",visibility"
+
+
+def graph_error_code(response: Any) -> Tuple[Optional[int], Optional[int], str]:
+    """``(code, error_subcode, message)`` from a Graph error body (or text)."""
+    body = response
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            return None, None, body[:240]
+    if not isinstance(body, dict):
+        return None, None, ""
+    err = body.get("error") if isinstance(body.get("error"), dict) else body
+    if not isinstance(err, dict):
+        return None, None, ""
+    try:
+        code = int(err.get("code")) if err.get("code") is not None else None
+    except (TypeError, ValueError):
+        code = None
+    try:
+        sub = int(err.get("error_subcode")) if err.get("error_subcode") is not None else None
+    except (TypeError, ValueError):
+        sub = None
+    return code, sub, str(err.get("message") or "")[:240]
+
+
 def push_one_meta_catalog_item(
     db: Any,
     tenant_id: int,
@@ -392,12 +516,22 @@ def push_one_meta_catalog_item(
     *,
     confirm: bool = False,
     client: Optional[httpx.Client] = None,
+    payload_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Push one catalog item to Meta (dry-run unless ``confirm=True``)."""
+    """Push one catalog item to Meta (dry-run unless ``confirm=True``).
+
+    ``payload_overrides`` adds channel-state fields (for example
+    ``visibility=published`` when re-publishing a retired item). It never
+    overrides identity or verified content fields.
+    """
     rid = (retailer_id or "").strip()
     parent, variant = load_variant_for_push(db, tenant_id, retailer_id=rid)
     preview = preview_meta_variant_payload(parent, variant)
     payload = dict(preview.get("payload") or {})
+    for key, value in dict(payload_overrides or {}).items():
+        if key in {"retailer_id", "price", "currency", "availability"}:
+            continue
+        payload[key] = value
 
     result: Dict[str, Any] = {
         "action": "dry_run",
@@ -421,6 +555,14 @@ def push_one_meta_catalog_item(
         result["error"] = "preview_fatal"
         result["fatal_warnings"] = list(preview.get("warnings") or [])
         return result
+
+    if confirm:
+        from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, product_in_sync_scope  # noqa: PLC0415
+
+        if not product_in_sync_scope(int(tenant_id), getattr(parent, "id", None)):
+            result["action"] = "scope_excluded"
+            result["error"] = SCOPE_BLOCKER_CODE
+            return result
 
     conn = _resolve_connection(db, tenant_id)
     catalog_id, token = _resolve_catalog_and_token(
@@ -489,6 +631,15 @@ def push_one_meta_catalog_item(
                 "identity_class": None,
             }
             return result
+        evidence = live_item_publication_evidence(
+            db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+            meta_product_id=str(meta_product_id), parent=parent,
+        )
+        result["ownership_evidence"] = evidence
+        if not evidence.get("owned"):
+            # a retailer_id match without publication evidence is a "match that
+            # needs verification": never update someone else's (or an unproven) item
+            return _ownership_block(result, lookup, str(meta_product_id), evidence)
         result["action"] = "update"
         result["meta_product_id"] = meta_product_id
         post_url = _graph_product_url(meta_product_id)
@@ -512,6 +663,16 @@ def push_one_meta_catalog_item(
                 "content_mismatches": blocked.get("content_mismatches") or [],
                 "canonical_rule": blocked.get("canonical_rule"),
             }
+            if blocked.get("action") == ACTION_LINK and blocked.get("meta_product_id"):
+                # linking to a live sibling adopts it: the same evidence rule applies
+                evidence = live_item_publication_evidence(
+                    db, tenant_id=int(tenant_id), catalog_id=catalog_id,
+                    retailer_id=str(blocked.get("sibling_retailer_id") or ""),
+                    meta_product_id=str(blocked.get("meta_product_id")), parent=parent,
+                )
+                result["ownership_evidence"] = evidence
+                if not evidence.get("owned"):
+                    return _ownership_block(result, result.get("lookup") or {}, str(blocked.get("meta_product_id")), evidence)
             return result
         result["action"] = "create"
         post_url = _graph_base(catalog_id, "products")
@@ -538,6 +699,130 @@ def push_one_meta_catalog_item(
         catalog_id,
         result.get("meta_product_id"),
         status_code,
+    )
+    return result
+
+
+def retire_meta_catalog_item(
+    conn: Any,
+    catalog_id: str,
+    retailer_id: str,
+    meta_item_id: Optional[str] = None,
+    *,
+    client: Optional[httpx.Client] = None,
+) -> Dict[str, Any]:
+    """Withdraw one live catalog item from the channel without deleting it.
+
+    Sets ``availability=out of stock`` and ``visibility=staging`` on the
+    existing Graph item, then re-reads it. Never issues a Graph DELETE and
+    never touches an item whose retailer_id is not in this catalog.
+    Returns ``action=absent`` when the item does not exist in Graph.
+    """
+    rid = str(retailer_id or "").strip()
+    cid = str(catalog_id or "").strip() or str(getattr(conn, "meta_catalog_id", "") or "").strip()
+    result: Dict[str, Any] = {
+        "ok": False,
+        "action": None,
+        "catalog_id": cid or None,
+        "retailer_id": rid,
+        "meta_product_id": str(meta_item_id or "").strip() or None,
+        "visibility_applied": None,
+        "verified": False,
+        "meta": {"http_status": None, "response": None},
+        "error": None,
+    }
+    if not rid:
+        result["error"] = "retailer_id_missing"
+        return result
+    if not cid:
+        result["error"] = "catalog_id_missing"
+        return result
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(int(getattr(conn, "tenant_id", 0) or 0)):
+        result["action"] = "scope_excluded"
+        result["error"] = SCOPE_BLOCKER_CODE
+        return result
+    try:
+        _cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
+    except MetaCatalogPushError as exc:
+        result["error"] = exc.code
+        return result
+
+    def _lookup(fields: str) -> Tuple[Optional[str], Dict[str, Any]]:
+        return find_meta_catalog_item_by_retailer_id(conn, cid, rid, client=client, fields=fields)
+
+    meta_id, lookup = _lookup(RETIRE_LOOKUP_FIELDS)
+    if lookup.get("error") and lookup.get("http_status") == 400:
+        # ``visibility`` not readable on this Graph version: fall back to the
+        # verified field set and record that visibility was not provable.
+        meta_id, lookup = _lookup(GRAPH_FIELDS)
+    if lookup.get("error"):
+        result["error"] = "lookup_failed"
+        result["lookup"] = lookup
+        return result
+    if not meta_id:
+        result["ok"] = True
+        result["action"] = "absent"
+        result["verified"] = True
+        return result
+    stored = str(meta_item_id or "").strip()
+    if stored and stored != str(meta_id):
+        result["error"] = "meta_item_id_mismatch"
+        result["meta_product_id"] = str(meta_id)
+        return result
+    result["meta_product_id"] = str(meta_id)
+
+    body: Dict[str, Any] = {
+        "availability": RETIRED_AVAILABILITY,
+        "visibility": RETIRED_VISIBILITY,
+    }
+    status_code, response = _post_catalog_item(_graph_product_url(str(meta_id)), token, body, client=client)
+    result["meta"]["http_status"] = status_code
+    result["meta"]["response"] = response
+    visibility_applied = True
+    if status_code >= 400 or (isinstance(response, dict) and response.get("error")):
+        code, _sub, message = graph_error_code(response)
+        if code == 100 and "visibility" in message.lower():
+            visibility_applied = False
+            body = {"availability": RETIRED_AVAILABILITY}
+            status_code, response = _post_catalog_item(
+                _graph_product_url(str(meta_id)), token, body, client=client,
+            )
+            result["meta"]["http_status"] = status_code
+            result["meta"]["response"] = response
+        if status_code >= 400 or (isinstance(response, dict) and response.get("error")):
+            result["error"] = "meta_http_error"
+            return result
+    result["action"] = "retire_update"
+    result["visibility_applied"] = visibility_applied
+
+    _verify_id, verify = _lookup(RETIRE_LOOKUP_FIELDS if visibility_applied else GRAPH_FIELDS)
+    item = verify.get("item") if isinstance(verify.get("item"), dict) else {}
+    live_av = str(item.get("availability") or "").strip().lower().replace("_", " ")
+    if verify.get("error") or not verify.get("matched"):
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    if live_av != RETIRED_AVAILABILITY:
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    live_vis = str(item.get("visibility") or "").strip().lower()
+    if visibility_applied and live_vis and live_vis != RETIRED_VISIBILITY:
+        result["error"] = "verification_failed"
+        result["lookup"] = verify
+        return result
+    result["ok"] = True
+    result["verified"] = True
+    result["lookup"] = verify
+    logger.info(
+        "[META_CATALOG_RETIRE] tenant=%s retailer_id=%s catalog=%s meta_id=%s visibility=%s",
+        getattr(conn, "tenant_id", None),
+        rid,
+        cid,
+        meta_id,
+        RETIRED_VISIBILITY if visibility_applied else "unchanged",
     )
     return result
 
@@ -718,7 +1003,9 @@ def push_ready_meta_catalog_batch(
                 confirm=True,
                 client=client,
             )
-            if push_result.get("ok"):
+            if push_result.get("ok") and str(push_result.get("action") or "") in ("create", "update"):
+                # a LINK result adopts an existing item; only a real create/update
+                # POST may write the publication-provenance membership
                 _stamp_salla_batch_membership(
                     db,
                     int(tenant_id),
@@ -759,10 +1046,20 @@ def push_ready_meta_catalog_batch(
 
 __all__ = [
     "MetaCatalogPushError",
+    "graph_error_code",
+    "retire_meta_catalog_item",
+    "RETIRED_AVAILABILITY",
+    "RETIRED_VISIBILITY",
+    "PUBLISHED_VISIBILITY",
     "existing_identity_retailer_id",
     "find_meta_catalog_item_by_retailer_id",
     "load_variant_for_push",
     "parent_would_create_in_meta",
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
+    "live_item_publication_evidence",
+    "PUBLICATION_PROVENANCES",
+    "ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED",
+    "ACTION_BLOCK_OWNERSHIP",
+    "REASON_NO_PUBLICATION_EVIDENCE",
 ]

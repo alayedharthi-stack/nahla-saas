@@ -22,7 +22,11 @@ from services.meta_catalog_readiness import (  # noqa: E402
     classify_readiness_status,
     eligibility_to_readiness_item,
     resolve_action_needed,
+    compare_live_payload,
 )
+
+# display-name tests reason about *owned* live items; ownership itself is tested separately
+_OWNED = {"owned": True, "source": "membership:salla_variant_push", "reasons": []}
 
 
 @dataclass
@@ -277,16 +281,27 @@ def test_meta_live_create_update_noop_skip():
     assert resolve_action_needed("blocked", local_payload, {"name": "x"}) == "skip"
     assert resolve_action_needed("skipped", local_payload, {"name": "x"}) == "skip"
     assert resolve_action_needed("ready", local_payload, None) == "create"
-    assert resolve_action_needed(
-        "ready",
-        local_payload,
-        {"name": "حذاء رياضي أبيض - 42 - L", "availability": "in stock"},
-    ) == "noop"
+    live_same = {"name": "حذاء رياضي أبيض - 42 - L", "availability": "in stock"}
+    # a live match is never noop/update without publication evidence
+    assert resolve_action_needed("ready", local_payload, live_same) == "verify_ownership"
+    assert resolve_action_needed("ready", local_payload, live_same, ownership=False) == "verify_ownership"
+    assert resolve_action_needed("ready", local_payload, live_same, ownership=True) == "noop"
     assert resolve_action_needed(
         "warn",
         local_payload,
         {"name": "حذاء رياضي أبيض - 42 - L", "availability": "out of stock"},
+        ownership=True,
     ) == "update"
+    # noop needs every synced field the payload sets to be read back and equal
+    full_local = dict(local_payload, description="وصف", price=12000, currency="SAR",
+                      image_url="https://cdn.example/a.jpg", url="https://store.example/p/1", item_group_id="88001")
+    assert resolve_action_needed("ready", full_local, live_same, ownership=True) == "unsettled"
+    full_live = dict(live_same, description="وصف", price="120.00 SAR", currency="SAR",
+                     image_url="https://cdn.example/a.jpg", url="https://store.example/p/1", item_group_id="88001")
+    assert resolve_action_needed("ready", full_local, full_live, ownership=True) == "noop"
+    assert resolve_action_needed("ready", full_local, dict(full_live, image_url="https://cdn.example/b.jpg"), ownership=True) == "update"
+    cmp = compare_live_payload(full_local, dict(full_live, price="125.00 SAR"))
+    assert cmp["differing"] == ["price"] and cmp["missing"] == [] and cmp["matches"] is False
 
     parent = _Parent(id=32, tenant_id=9, title="حذاء رياضي أبيض")
     variant = _Variant(id=101, tenant_id=9, product_id=32, option_summary="42 - L")
@@ -303,9 +318,13 @@ def test_meta_live_create_update_noop_skip():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item.in_meta_live is True
-    assert item.action_needed == "noop"
+    # the live read returned only name/availability: the other synced fields are unsettled
+    assert item.action_needed == "unsettled"
+    assert item.live_compare["differing"] == [] and set(item.live_compare["missing"]) >= {"price", "currency"}
+    assert item.ownership["owned"] is True
     assert item.meta_product_id == "123"
 
     live_unified_name = {
@@ -320,6 +339,7 @@ def test_meta_live_create_update_noop_skip():
         has_real_variants=True,
         live_row=live_unified_name,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item_needs_name_update.action_needed == "update"
 
@@ -498,9 +518,11 @@ def test_live_composite_orphan_still_noop_when_matched():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item.status == "warn"
-    assert item.action_needed == "noop"
+    assert item.action_needed == "unsettled"      # partial live row: matched where readable, rest unsettled
+    assert item.live_compare["differing"] == []
     assert "orphan_option_value_ids" in item.reasons
 
 
@@ -528,6 +550,7 @@ def test_live_name_size_mismatch_warns_keeps_update():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item.status == "warn"
     assert "live_name_size_mismatch" in item.reasons
@@ -559,6 +582,7 @@ def test_live_name_size_mismatch_product_23_variant_226():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item.status == "warn"
     assert "live_name_size_mismatch" in item.reasons
@@ -589,6 +613,7 @@ def test_stale_meta_display_name_same_size_no_mismatch():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert "live_name_size_mismatch" not in item.reasons
     assert "stale_meta_display_name" in item.reasons
@@ -620,6 +645,7 @@ def test_live_name_diff_without_size_token_no_mismatch():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert "live_name_size_mismatch" not in item.reasons
 
@@ -648,10 +674,28 @@ def test_live_name_clean_noop_unchanged():
         has_real_variants=True,
         live_row=live,
         include_meta=True,
+        ownership=_OWNED,
     )
     assert item.status == "ready"
-    assert item.action_needed == "noop"
+    assert item.action_needed == "unsettled"      # name/availability only: not enough for noop
+    assert item.live_compare["differing"] == []
     assert "live_name_size_mismatch" not in item.reasons
+    # with every synced field read back and equal, the same owned item is a noop
+    full_live = dict(live, **{k: v for k, v in (elig.payload or {}).items()
+                             if k in ("description", "price", "currency", "image_url", "url", "item_group_id") and v not in (None, "")})
+    full_item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+        live_row=full_live, include_meta=True, ownership=_OWNED,
+    )
+    assert full_item.action_needed == "noop"
+    assert full_item.live_compare["missing"] == []
+    # and without ownership evidence the same full match is only a match that needs verification
+    unowned = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+        live_row=full_live, include_meta=True, ownership={"owned": False, "source": None, "reasons": ["membership_absent"]},
+    )
+    assert unowned.action_needed == "verify_ownership"
+    assert unowned.ownership["reasons"] == ["membership_absent"]
     assert "stale_meta_display_name" not in item.reasons
 
 

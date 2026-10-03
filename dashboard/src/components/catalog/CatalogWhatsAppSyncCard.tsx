@@ -54,6 +54,30 @@ function useWhatsappSyncCopy() {
   return tStatic(tr => tr.catalogMgmt.whatsappSync)
 }
 
+function fmtSeconds(value: number | null | undefined, lang: Lang): string {
+  if (value === null || value === undefined) return '—'
+  return Math.round(value).toLocaleString(localeTag(lang))
+}
+
+function linkLine(
+  status: WhatsappCatalogSyncStatus,
+  copy: ReturnType<typeof useWhatsappSyncCopy>,
+  lang: Lang,
+): { text: string; tone: 'ok' | 'warn' | 'unknown' } {
+  const link = status.catalog_link
+  const at = link?.evidence_at ? fmtAt(link.evidence_at, lang) : '—'
+  if (link?.state === 'linked') {
+    return { text: copy.linkLinked.replace('{at}', at), tone: 'ok' }
+  }
+  if (link?.state === 'not_linked') {
+    return { text: copy.linkNotLinked.replace('{at}', at), tone: 'warn' }
+  }
+  return {
+    text: status.catalog_configured ? `${copy.linkUnknown} ${copy.configuredNotProven}` : copy.linkUnknown,
+    tone: 'unknown',
+  }
+}
+
 export default function CatalogWhatsAppSyncCard() {
   const { lang } = useLanguage()
   const copy = useWhatsappSyncCopy()
@@ -166,18 +190,14 @@ export default function CatalogWhatsAppSyncCard() {
               <div>
                 <dt className="sr-only">{copy.title}</dt>
                 <dd className="font-semibold">
-                  {status?.catalog_linked
-                    ? copy.catalogLinked
-                    : status
-                      ? phaseLabel(status.phase, copy)
-                      : '—'}
+                  {status ? phaseLabel(status.phase, copy) : '—'}
                 </dd>
               </div>
               <div>
                 <dd>
                   {status?.last_success_at
                     ? copy.lastSuccess.replace('{at}', fmtAt(status.last_success_at, lang))
-                    : (status?.catalog_linked
+                    : (status?.catalog_configured
                         && (status.queue_count ?? counts?.pending ?? 0) === 0
                         && (status.meta_available_count ?? 0) > 0
                       ? null
@@ -186,7 +206,7 @@ export default function CatalogWhatsAppSyncCard() {
               </div>
               <div>
                 <dd>
-                  {status?.catalog_linked
+                  {status?.catalog_configured
                     ? copy.availableCount.replace(
                         '{count}',
                         fmtCount(status.meta_available_count ?? counts?.synced ?? 0, lang),
@@ -226,6 +246,75 @@ export default function CatalogWhatsAppSyncCard() {
         </button>
       </div>
 
+      {status && (() => {
+        const line = linkLine(status, copy, lang)
+        const cls = line.tone === 'ok'
+          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          : line.tone === 'warn'
+            ? 'bg-amber-50 border-amber-200 text-amber-900'
+            : 'bg-slate-50 border-slate-200 text-slate-800'
+        return (
+          <div className={`flex items-start gap-2 border rounded-xl p-3 text-sm ${cls}`}>
+            {line.tone === 'ok' ? <Clock className="w-4 h-4 mt-0.5 shrink-0" /> : <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />}
+            <p>
+              {line.text}
+              {status.catalog_link?.stale ? ` · ${copy.linkStale}` : ''}
+            </p>
+          </div>
+        )
+      })()}
+      {status?.stages && (
+        <dl className="text-xs text-slate-600 space-y-1 border border-slate-100 rounded-xl p-3">
+          <dt className="font-semibold text-slate-700">{copy.stagesTitle}</dt>
+          <dd>
+            {status.stages.source.last_sync_at
+              ? copy.stageSource.replace('{at}', fmtAt(status.stages.source.last_sync_at, lang))
+              : copy.stageSourceNever}
+          </dd>
+          <dd>
+            {copy.stagePublish
+              .replace('{verified}', fmtCount(status.stages.publish.verified_in_meta, lang))
+              .replace('{waiting}', fmtCount(status.stages.publish.waiting, lang))
+              .replace('{rejected}', fmtCount(status.stages.publish.rejected_or_blocked, lang))}
+          </dd>
+          {(status.stages.retirement.pending > 0 || status.stages.retirement.exhausted > 0) && (
+            <dd>
+              {copy.stageRetirement
+                .replace('{pending}', fmtCount(status.stages.retirement.pending, lang))
+                .replace('{exhausted}', fmtCount(status.stages.retirement.exhausted, lang))}
+            </dd>
+          )}
+          <dd>{copy.stageVisibility}</dd>
+        </dl>
+      )}
+      {status?.latency && (
+        <dl className="text-xs text-slate-600 space-y-1">
+          <dt className="font-semibold text-slate-700">{copy.latencyTitle}</dt>
+          {status.latency.platform.n === 0 && status.latency.channel.n === 0 && status.latency.waiting.n === 0 ? (
+            <dd>{copy.latencyNone}</dd>
+          ) : (
+            <>
+              {status.latency.platform.n > 0 && (
+                <dd>
+                  {copy.latencyPlatform
+                    .replace('{p50}', fmtSeconds(status.latency.platform.p50_seconds, lang))
+                    .replace('{max}', fmtSeconds(status.latency.platform.max_seconds, lang))}
+                </dd>
+              )}
+              {status.latency.channel.n > 0 && (
+                <dd>
+                  {copy.latencyChannel
+                    .replace('{p50}', fmtSeconds(status.latency.channel.p50_seconds, lang))
+                    .replace('{max}', fmtSeconds(status.latency.channel.max_seconds, lang))}
+                </dd>
+              )}
+              {status.latency.waiting.n > 0 && (
+                <dd>{copy.latencyWaiting.replace('{max}', fmtSeconds(status.latency.waiting.max_seconds, lang))}</dd>
+              )}
+            </>
+          )}
+        </dl>
+      )}
       {status && status.auto_sync_enabled === false && (
         <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-900">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -250,11 +339,15 @@ export default function CatalogWhatsAppSyncCard() {
       )}
       {status?.failures && status.failures.length > 0 && (
         <ul className="text-xs text-slate-600 space-y-1">
-          {status.failures.slice(0, 5).map((row) => (
-            <li key={row.product_id}>
-              {row.title || `#${row.product_id}`}: {row.error_summary}
-            </li>
-          ))}
+          {status.failures.slice(0, 5).map((row) => {
+            const action = row.action_code ? copy.actions[row.action_code] : undefined
+            return (
+              <li key={row.product_id}>
+                {row.title || `#${row.product_id}`}: {row.error_summary}
+                {action ? ` — ${copy.failedAction.replace('{action}', action)}` : ''}
+              </li>
+            )
+          })}
         </ul>
       )}
     </section>

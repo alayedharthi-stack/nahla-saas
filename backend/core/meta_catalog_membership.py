@@ -25,6 +25,13 @@ from core.catalog import is_synthetic_retailer_id
 logger = logging.getLogger("nahla.meta_catalog_membership")
 
 PROVENANCE_GRAPH_RECONCILE = "meta_graph_reconcile"
+# The only provenance that proves THIS platform published the Graph item: it is
+# written solely after a successful create/update POST (push batch and native
+# sync orchestrator). Reconcile (Graph presence), import (Meta → local rows) and
+# identity/sibling adoption never write it. A ``literal_retailer_bind`` provenance
+# constant exists but has no writer, so it is not evidence either.
+PROVENANCE_VARIANT_PUSH = "salla_variant_push"
+PUBLICATION_PROVENANCES = frozenset({PROVENANCE_VARIANT_PUSH})
 DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING = "ambiguous_local_mapping"
 
 
@@ -429,6 +436,7 @@ def apply_membership_snapshot(
     )
     upserted = 0
     removed = 0
+    preserved = 0
     seen: set[str] = set()
     for row in existing:
         rid = _norm(row.retailer_id)
@@ -439,9 +447,20 @@ def apply_membership_snapshot(
             continue
         row.product_id = int(want.product_id)
         row.variant_id = _optional_int(want.variant_id)
-        row.meta_item_id = _norm(want.meta_item_id) or None
+        wanted_mid = _norm(want.meta_item_id) or None
+        current_mid = _norm(row.meta_item_id) or None
+        # A reconcile pass proves Graph presence, never publication. It must not
+        # erase publication evidence: when the row already carries a publication
+        # provenance and still points at the same Graph item (or Graph returned
+        # no id), keep the provenance and the id. Only a changed Graph item id
+        # downgrades the row to reconcile provenance (the old evidence no longer
+        # describes the live item).
+        if str(row.provenance or "") in PUBLICATION_PROVENANCES and (wanted_mid is None or wanted_mid == current_mid):
+            preserved += 1
+        else:
+            row.meta_item_id = wanted_mid
+            row.provenance = provenance
         row.verified_at = now
-        row.provenance = provenance
         upserted += 1
         seen.add(rid)
     for rid, want in desired_by_rid.items():
@@ -486,7 +505,7 @@ def apply_membership_snapshot(
         upserted,
         removed,
     )
-    return {"upserted": upserted, "removed": removed}
+    return {"upserted": upserted, "removed": removed, "preserved_publication_provenance": preserved}
 
 
 def invalidate_meta_catalog_membership(
