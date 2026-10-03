@@ -373,10 +373,19 @@ def _status_advice(
 def _apply_config_changes(
     conn: WhatsAppConnection,
     patch: CatalogConfigPatch,
+    db: Optional[Session] = None,
 ) -> Dict[str, Any]:
     """Mutate *conn* in place to reflect the patch. Returns a
     dict ``{field: {before, after}}`` listing the actual diffs so
     the caller can audit them. Does NOT commit.
+
+    Cross-tenant isolation: when *db* is given and the patch adopts a
+    new non-empty ``meta_catalog_id``, the id is refused (HTTP 409,
+    ``catalog_claimed_by_other_tenant``) if another tenant's connection
+    already carries it. The check takes a per-catalog PostgreSQL
+    advisory lock (``services.meta_catalog_claim``) so two tenants
+    cannot adopt the same id in two concurrent requests; the caller's
+    commit releases the lock.
 
     Validation:
       * ``catalog_enabled=True`` requires that the resulting
@@ -398,6 +407,22 @@ def _apply_config_changes(
 
     if patch.catalog_enabled is not None:
         after["catalog_enabled"] = bool(patch.catalog_enabled)
+
+    # Isolation: a catalog id already carried by another tenant's
+    # connection is never adopted here (merchant or admin path).
+    if (
+        db is not None
+        and after["meta_catalog_id"]
+        and after["meta_catalog_id"] != before["meta_catalog_id"]
+    ):
+        from services.meta_catalog_claim import (  # noqa: PLC0415
+            CatalogClaimError,
+            guard_catalog_claim,
+        )
+        try:
+            guard_catalog_claim(db, int(conn.tenant_id), after["meta_catalog_id"])
+        except CatalogClaimError as exc:
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
 
     # Validation: enabling requires an id.
     if after["catalog_enabled"] and not after["meta_catalog_id"]:
@@ -773,7 +798,7 @@ async def merchant_catalog_patch(
             ),
         )
 
-    changes = _apply_config_changes(conn, body)
+    changes = _apply_config_changes(conn, body, db=db)
     if changes:
         db.commit()
         db.refresh(conn)
@@ -955,7 +980,7 @@ async def admin_catalog_patch(
             detail=f"WhatsAppConnection not found for tenant_id={body.tenant_id}",
         )
 
-    changes = _apply_config_changes(conn, body)
+    changes = _apply_config_changes(conn, body, db=db)
     if changes:
         db.commit()
         db.refresh(conn)
