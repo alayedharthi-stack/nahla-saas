@@ -68,11 +68,13 @@
 2. **ربط القاعدة (ثابت من DSN):** مخطط PostgreSQL، المضيف يساوي `NAHLA_CATALOG_REVIEW_DB_HOST`، لا `postgres-staging` ولا علامة إنتاج في المضيف، واسم القاعدة إن ضُبط؛ **تُرفض معاملات الاستعلام في DSN عدا `sslmode`/`sslrootcert`/`sslcert`/`sslkey`/`connect_timeout`/`application_name`** (لأن `?host=`/`?hostaddr=`/`?options=`/`?service=` تعيد توجيه الاتصال أو تزوّر العلامة)، **وتُرفض متغيرات libpq** `PGHOST`/`PGHOSTADDR`/`PGPORT`/`PGSERVICE`/`PGSERVICEFILE`/`PGOPTIONS`/`PGPASSFILE`/`PGDATABASE` إن كانت مضبوطة.
 3. **علامة هوية القاعدة (حي، قراءة واحدة):** `SELECT current_setting('nahla.environment', true), <قيد pg_db_role_setting لقاعدة current_database() مع setrole = 0>, current_database()` — يلزم **قيد محفوظ على مستوى القاعدة** في `pg_db_role_setting` (هو ما يكتبه `ALTER DATABASE … SET`) قيمته `catalog-review`، و**القيمة الفعّالة** مساوية له (تجاوز على مستوى الدور أو الجلسة يُرفض)، واسم القاعدة المتصلة يساوي اسمها في DSN (أو `NAHLA_CATALOG_REVIEW_DB_NAME`). قيمة جلسة وحدها (`SET`/`options=-c`/`PGOPTIONS`) لا تترك قيدًا وتُرفض. **لماذا لا `pg_settings`:** PostgreSQL يحفظ الإعداد المخصص غير المسجَّل كعنصر نائب ولا يُدرجه في `pg_settings` (ثُبت على 16.15 و18.6: صفر صفوف رغم تطبيق الإعداد).
 
+   **قبل العبارة، تحقّق من الخادم المتصل:** قاعدة الإنتاج اسمها أيضًا `railway` ومستخدم Railway `postgres` مستخدم فائق، فالعبارة نفسها في جلسة psql خاطئة تعلّم الإنتاج. نفّذ أولًا في الجلسة نفسها `SELECT inet_server_addr(), inet_server_port(), current_database(), version();` وطابق المضيف مع خدمة `postgres-catalog-review` في Railway (لا مع `Postgres` أو `nahla-postgres-prod`)، ثم نفّذ العبارة، ثم شغّل `scripts/preflight_check.py` من خدمة المراجعة لتأكيد القبول. على PostgreSQL 15+ لا يستطيع إلا المستخدم الفائق ضبط هذا الإعداد على مستوى القاعدة (حتى مالك القاعدة يُرفض)، فالعلامة دليل على إجراء مشغّل مقصود، لا برهان تشفيري.
+
    ```sql
    ALTER DATABASE railway SET nahla.environment = 'catalog-review';
    ```
 
-   أي قاعدة لم تُعلَّم (الإنتاج، `postgres-staging`، قاعدة محلية) تُعيد NULL ⇒ رفض قبل `alembic`/`create_all`. لا جدول، لا هجرة، تبقى بعد الهجرات، وتسري على الاتصالات الجديدة.
+   أي قاعدة لم تُعلَّم (الإنتاج، `postgres-staging`، قاعدة محلية) تُعيد NULL — أو قيمة فارغة `''` إن سبق `ALTER SYSTEM` على هذا الاسم — وكلاهما سواء ⇒ رفض قبل `alembic`/`create_all`. لا جدول، لا هجرة، تبقى بعد الهجرات، وتسري على الاتصالات الجديدة.
 
 ---
 
