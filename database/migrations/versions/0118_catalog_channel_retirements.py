@@ -1,6 +1,6 @@
 """Durable channel-retirement requests for deleted catalog products.
 
-Revision ID: 0116
+Revision ID: 0118
 Revises: 0112
 
 Creates ``catalog_channel_retirements`` (see ``database/models.py``
@@ -11,13 +11,31 @@ nothing is changed. Chained on 0112 as an explicit sibling of the dormant
 0113/0114 runtime branch and the 0115 payments branch, exactly like 0115, so
 applying it never pulls those branches in. No data is touched; downgrade drops
 only this table.
+
+This revision was first drafted as ``0116``. Two other open branches declared
+the same id (OTO connections off 0112, payments readiness off 0115), so the id
+is retired and this one is ``0118`` (OTO is ``0117``, payments readiness
+``0119``).
+Safety rests on the state Alembic reads, not on deployment history. A
+database whose ``alembic_version`` still holds ``0116`` makes ``upgrade``,
+``downgrade`` and ``current`` stop with "Can't locate revision identified by
+'0116'" before any DDL runs, so it is never read as carrying this revision.
+An existing ``catalog_channel_retirements`` table — from any former draft of
+this revision, which did not all share one definition, or from any startup
+``create_all`` — is adopted only when its definition matches the check below
+(``catalog_id NOT NULL`` is relaxed); otherwise the upgrade raises and nothing
+changes. A ``0116`` stamp is not repaired here: recovery is an owner decision
+with explicit authorization, and nothing in this change writes
+``alembic_version``. Normal bootstrap (pinned to 0093) never applies this
+revision. Apply it to a database only after a read-only check of that
+database shows no ``0116``-``0119`` stamp.
 """
 from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0116"
+revision = "0118"
 down_revision = "0112"
 branch_labels = None
 depends_on = None

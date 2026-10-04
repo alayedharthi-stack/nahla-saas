@@ -34,7 +34,7 @@ AI_USAGE_ALEMBIC_HEAD = "0114"
 PAYMENTS_ALEMBIC_HEAD = "0115"
 # Catalog channel retirements (WhatsApp catalog sync) are another sibling off
 # 0112: additive, idempotent, never activated by normal bootstrap.
-CATALOG_RETIREMENTS_ALEMBIC_HEAD = "0116"
+CATALOG_RETIREMENTS_ALEMBIC_HEAD = "0118"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
