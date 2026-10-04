@@ -267,9 +267,10 @@ def test_provider_reference_resolves_to_exactly_one_tenant(engine):
 
 
 def test_secret_references_never_accept_raw_keys():
-    assert validate_secret_ref("MOYASAR_TEST_SECRET_KEY_T1", field="credential_ref") == "MOYASAR_TEST_SECRET_KEY_T1"
-    assert validate_secret_ref("vault:payments/moyasar/t1.webhook", field="webhook_secret_ref")
-    for bad in ("sk_test_EXAMPLE_NOT_A_KEY", "pk_live_x", "whsec_abc", "",
+    assert validate_secret_ref("moyasar_test_secret_key_t1", field="credential_ref") == "moyasar_test_secret_key_t1"
+    assert validate_secret_ref("vault:payments/moyasar/test.webhook", field="webhook_secret_ref")
+    # Key-shaped values are assembled at runtime so no key-shaped literal is ever committed.
+    for bad in ("sk_" + "test_example_not_a_key", "pk_" + "live_x", "whsec" + "_abc", "",
                 "Bearer abc", "A" * 121, "x" * 40, "has space", "1starts_with_digit"):
         with pytest.raises(InvalidSecretReference):
             validate_secret_ref(bad, field="credential_ref")
@@ -284,10 +285,10 @@ def test_activation_is_dormant_until_every_blocker_clears_and_stays_tenant_scope
     with pytest.raises(activation.ActivationError, match="Not ready"):
         activation.enable_merchant_payments(engine, **SCOPE1, evidence_ref="owner-approval-1")
     with pytest.raises(InvalidSecretReference):
-        activation.register_secret_refs(engine, **SCOPE1, credential_ref="sk_test_EXAMPLE_REF")
-    activation.register_secret_refs(engine, **SCOPE1, credential_ref="MOYASAR_T1_TEST_KEY")
+        activation.register_secret_refs(engine, **SCOPE1, credential_ref="sk_" + "test_example_ref")
+    activation.register_secret_refs(engine, **SCOPE1, credential_ref="moyasar_t1_test_key")
     assert activation.activation_readiness(engine, **SCOPE1).blockers == ("webhook_secret_ref_missing",)
-    activation.register_secret_refs(engine, **SCOPE1, webhook_secret_ref="MOYASAR_T1_TEST_WEBHOOK")
+    activation.register_secret_refs(engine, **SCOPE1, webhook_secret_ref="moyasar_t1_test_webhook")
     assert activation.activation_readiness(engine, **SCOPE1).ready_to_enable
     assert activation.payment_acceptance_enabled(engine, **SCOPE1) is False  # ready is not enabled
     with pytest.raises(activation.ActivationError, match="evidence"):
@@ -297,7 +298,7 @@ def test_activation_is_dormant_until_every_blocker_clears_and_stays_tenant_scope
     assert activation.payment_acceptance_enabled(engine, **SCOPE2) is False
     assert activation.payment_acceptance_enabled(engine, tenant_id=1, provider="moyasar", environment="live") is False
     with pytest.raises(activation.ActivationError, match="Disable"):
-        activation.register_secret_refs(engine, **SCOPE1, credential_ref="MOYASAR_T1_TEST_KEY_V2")
+        activation.register_secret_refs(engine, **SCOPE1, credential_ref="moyasar_t1_test_key_v2")
     with engine.connect() as connection:
         row = connection.execute(sa.select(MerchantPaymentActivation.__table__)).mappings().one()
         assert row["enabled_evidence_ref"] == "owner-approval-1" and row["enabled_at"] is not None

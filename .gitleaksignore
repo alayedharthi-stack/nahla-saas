@@ -6,3 +6,9 @@
 # parameter named "token" in reserve_delivery_recovery; a column reference, not a
 # credential. The line no longer exists on that branch's head.
 c3a49028e25281203694340a4da9355483bc91ff:backend/core/commerce_runtime/ledgers.py:generic-api-key:434
+
+# PR #1194, commit 4062a79d: the generic-api-key rule captured the test literal
+# "sk_test_EXAMPLE_REF" (entropy 3.516) passed to register_secret_refs to prove
+# that a key-shaped value is *refused*; not a credential. The literal is assembled
+# at runtime on that branch's head so the line no longer exists there.
+4062a79d9e28e4fac52a285f487fbd23965ccb40:tests/test_merchant_payments_readiness.py:generic-api-key:292
