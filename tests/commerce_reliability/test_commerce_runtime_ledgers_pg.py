@@ -1168,9 +1168,14 @@ def test_standalone_0108_schema_keeps_the_foundation_terminal_available(pg_admin
 def _wait_for_lock_waiters(engine, expected: int) -> None:
     """Return once exactly ``expected`` other backends of this database wait on
     a lock. Synchronisation is on observed backend state, never on elapsed
-    time; the deadline only turns a hang into a failure."""
+    time; the deadline only turns a hang into a failure.
+
+    ``pg_stat_activity`` is a snapshot taken at its first read in a transaction
+    and kept until that transaction ends, so a poll loop inside one transaction
+    keeps reading the state from before the contender queued. Each poll runs as
+    its own autocommit statement and therefore reads the current state."""
     deadline = time.monotonic() + 30
-    with engine.connect() as conn:
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         while True:
             waiting = int(conn.execute(text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "

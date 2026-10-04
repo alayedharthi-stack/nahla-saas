@@ -24,6 +24,7 @@ from database.models import Coupon, Tenant, TenantSettings
 from services.coupon_generator import (
     LEVEL_TO_REPRESENTATIVE_SEGMENT,
     POOL_LOCK_NAMESPACE,
+    SHORT_CODE_PREFIX,
     CouponGeneratorService,
 )
 from services.crm_atoms import CrmStatus
@@ -356,7 +357,49 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
         connection.close()
 
 
-def test_cross_tenant_pool_isolation(postgres_engine) -> None:
+def _tenant_rows(engine, tenant_id: int) -> dict[int, tuple]:
+    """Every coupon row of one tenant, keyed by id, with the fields a fill writes."""
+    session, connection = _new_session(engine)
+    try:
+        rows = (
+            session.query(
+                Coupon.id, Coupon.tenant_id, Coupon.code, Coupon.coupon_level,
+                Coupon.discount_type, Coupon.discount_value, Coupon.extra_metadata,
+            )
+            .filter(Coupon.tenant_id == tenant_id)
+            .all()
+        )
+        return {row[0]: tuple(row) for row in rows}
+    finally:
+        session.close()
+        connection.close()
+
+
+@pytest.mark.parametrize("draws", ["random", "identical_per_tenant"])
+def test_cross_tenant_pool_isolation(postgres_engine, monkeypatch, draws: str) -> None:
+    """Two merchants fill their pools independently.
+
+    Codes are drawn per tenant from a small space, so two merchants may hold the
+    same code; the platform's constraint is ``UNIQUE (tenant_id, code)``, not a
+    global one. Isolation is therefore proven on ownership, not on disjoint
+    codes: each fill creates exactly its own twelve rows, only through its own
+    adapter, and the second fill leaves every row of the first tenant untouched.
+    ``identical_per_tenant`` forces both tenants to draw the same sequence so the
+    overlap that random draws produce only occasionally is exercised every run.
+    """
+    if draws == "identical_per_tenant":
+        sequence = [f"{SHORT_CODE_PREFIX}Q{i:02d}" for i in range(60)]
+        state = {"draw": iter(sequence)}
+        monkeypatch.setattr(
+            "services.coupon_generator._random_short_code", lambda: next(state["draw"])
+        )
+
+        def restart_draws() -> None:
+            state["draw"] = iter(sequence)
+    else:
+        def restart_draws() -> None:
+            return None
+
     session, connection = _new_session(postgres_engine)
     try:
         for tenant_id in (TEST_TENANT_CROSS_A, TEST_TENANT_CROSS_B):
@@ -371,9 +414,12 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
     lock_a = threading.Lock()
     lock_b = threading.Lock()
 
+    restart_draws()
     created_a, outcomes_a = asyncio.run(
         _ensure_pool_once(postgres_engine, TEST_TENANT_CROSS_A, adapter_a, lock_a)
     )
+    rows_a_before_b = _tenant_rows(postgres_engine, TEST_TENANT_CROSS_A)
+    restart_draws()
     created_b, outcomes_b = asyncio.run(
         _ensure_pool_once(postgres_engine, TEST_TENANT_CROSS_B, adapter_b, lock_b)
     )
@@ -389,11 +435,25 @@ def test_cross_tenant_pool_isolation(postgres_engine) -> None:
         for level in ("silver", "gold", "vip"):
             assert _level_count(postgres_engine, tenant_id, level) == 3
 
-    codes_a = set(_all_codes(postgres_engine, TEST_TENANT_CROSS_A))
-    codes_b = set(_all_codes(postgres_engine, TEST_TENANT_CROSS_B))
-    assert len(codes_a) == 12
-    assert len(codes_b) == 12
-    assert codes_a.isdisjoint(codes_b)
+    # Tenant B's fill neither added, removed nor rewrote any row of tenant A.
+    rows_a = _tenant_rows(postgres_engine, TEST_TENANT_CROSS_A)
+    rows_b = _tenant_rows(postgres_engine, TEST_TENANT_CROSS_B)
+    assert rows_a == rows_a_before_b
+    assert len(rows_a) == 12 and len(rows_b) == 12
+    assert not set(rows_a) & set(rows_b)
+    assert {row[1] for row in rows_a.values()} == {TEST_TENANT_CROSS_A}
+    assert {row[1] for row in rows_b.values()} == {TEST_TENANT_CROSS_B}
+
+    # Codes are unique within each tenant; across tenants they may repeat.
+    codes_a = [row[2] for row in rows_a.values()]
+    codes_b = [row[2] for row in rows_b.values()]
+    assert len(set(codes_a)) == 12
+    assert len(set(codes_b)) == 12
+    # Each adapter created exactly its own tenant's codes.
+    assert sorted(call["code"] for call in adapter_a) == sorted(codes_a)
+    assert sorted(call["code"] for call in adapter_b) == sorted(codes_b)
+    if draws == "identical_per_tenant":
+        assert set(codes_a) == set(codes_b)
 
 
 def test_a_code_another_tenant_owns_costs_no_remote_create(postgres_engine, monkeypatch) -> None:
