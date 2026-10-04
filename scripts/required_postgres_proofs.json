@@ -819,6 +819,31 @@
         "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_listed_order_is_not_authorized_for_the_details_read",
         "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_failed_history_read_leaves_the_transaction_usable"
       ]
+    },
+    {
+      "id": "catalog_review_environment_guard",
+      "kind": "proof",
+      "module": "backend/tests/test_review_environment_guard_pg.py",
+      "origin": "PR #1195 — catalog review-environment boot guard: the database marker is proven from pg_db_role_setting (setrole=0, current database) together with the effective value and current_database(); session (options/PGOPTIONS) and role-level forgeries refused; preflight and the app lifespan refuse an unmarked database before any table exists",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_review_environment_guard_pg.py::test_pg_settings_does_not_list_the_database_level_marker[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_marked_review_database_is_accepted_with_a_real_read[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_explicit_db_name_variable_is_honoured[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_unmarked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_session_forged_marker_via_options_is_refused_by_both_layers[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_session_forged_marker_via_pgoptions_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_role_level_forged_marker_on_unmarked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_role_level_override_on_marked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_wrong_persisted_marker_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_configured_name_differs_from_connected_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_wrong_password_is_unreadable_not_accepted[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_preflight_accepts_marked_and_refuses_unmarked_database[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_lifespan_refuses_unmarked_database_and_creates_nothing[server0]"
+      ]
     }
   ]
 }

@@ -7,8 +7,13 @@ throw-away databases per test module:
   * ``rv_marked_<rand>``   — marked once with ``ALTER DATABASE … SET nahla.environment``
   * ``rv_plain_<rand>``    — never marked (stands in for production / staging DR)
 
-Everything is dropped at teardown. Without the variable the module is skipped
-(reported as skipped, never as passed).
+Everything is dropped at teardown. Without the variable the module falls back
+to ``NAHLA_RELIABILITY_PG_ADMIN_DSN`` — the admin DSN the required PostgreSQL
+proofs runner provides on PostgreSQL 16 (``lint-and-test``) and 18
+(``postgres-18-compatibility``), where this module is an inventoried suite and a
+skip fails the run. With neither variable the module is skipped (reported as
+skipped, never as passed); with ``NAHLA_RELIABILITY_REQUIRE_PG=1`` and neither
+variable it fails instead.
 """
 from __future__ import annotations
 
@@ -31,8 +36,14 @@ for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
 
 from core import review_environment as re_mod  # noqa: E402
 
-ADMIN_URLS = [u.strip() for u in os.environ.get("NAHLA_REVIEW_ENV_PG_ADMIN_URLS", "").split(",") if u.strip()]
-pytestmark = pytest.mark.skipif(not ADMIN_URLS, reason="NAHLA_REVIEW_ENV_PG_ADMIN_URLS not set (no real PostgreSQL)")
+ADMIN_URLS = [u.strip() for u in (os.environ.get("NAHLA_REVIEW_ENV_PG_ADMIN_URLS")
+                                   or os.environ.get("NAHLA_RELIABILITY_PG_ADMIN_DSN") or "").split(",") if u.strip()]
+if not ADMIN_URLS and os.environ.get("NAHLA_RELIABILITY_REQUIRE_PG") == "1":
+    raise RuntimeError("NAHLA_RELIABILITY_REQUIRE_PG=1 but no PostgreSQL admin DSN is configured")
+pytestmark = pytest.mark.skipif(not ADMIN_URLS, reason="no PostgreSQL admin DSN set (no real PostgreSQL)")
+# Stable ids (server0, server1, …): the required-proofs inventory must not depend on
+# host, port, or whether a DSN is configured at collection time.
+_SERVER_IDS = [f"server{i}" for i in range(len(ADMIN_URLS))] or ["server0"]
 
 MARKER = "catalog-review"
 APP_PASSWORD = "rv-" + secrets.token_hex(8)
@@ -58,7 +69,7 @@ def _scalar(url: str, sql: str):
         eng.dispose()
 
 
-@pytest.fixture(scope="module", params=ADMIN_URLS or ["unused"], ids=lambda u: "pg" + str(make_url(u).port) if u != "unused" else u)
+@pytest.fixture(scope="module", params=ADMIN_URLS or [None], ids=_SERVER_IDS)
 def pg(request):
     admin_url = request.param
     suffix = secrets.token_hex(4)

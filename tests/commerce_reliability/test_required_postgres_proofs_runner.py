@@ -213,7 +213,10 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "promotion_scoped_read",
                    # A customer's order history is counted by the resolver's own
                    # identity match, and a failed read cannot abort the turn.
-                   "customer_order_history"]
+                   "customer_order_history",
+                   # The catalog review environment refuses any database that does
+                   # not carry the persisted marker, before migrations or workers.
+                   "catalog_review_environment_guard"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -241,6 +244,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "campaign_marketing_continuation": ("proof", {"NAHLA_RELIABILITY_PG_ADMIN_DSN": None}),
         "promotion_scoped_read": ("proof", harness_env),
         "customer_order_history": ("proof", harness_env),
+        "catalog_review_environment_guard": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]
