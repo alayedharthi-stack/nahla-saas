@@ -6,6 +6,7 @@ import {
   type WhatsappCatalogSyncStatus,
 } from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
+import { resolveCatalogBlocker } from '../../i18n/catalogRuntimeLabels'
 import type { Lang } from '../../i18n/types'
 
 const FOLLOW_PHASES = new Set<WhatsappCatalogSyncPhase>([
@@ -155,15 +156,15 @@ export default function CatalogWhatsAppSyncCard() {
     try {
       const result = await catalogApi.enqueueWhatsappSync(true)
       if (!result.queued) {
-        setError(result.message_ar || copy.enqueueFailed)
+        setError(resolveCatalogBlocker(result as { blocker_code?: string | null; action_code?: string | null; message_ar?: string | null; action_ar?: string | null }, copy, lang) || copy.enqueueFailed)
       } else {
         setNotice(copy.queued)
       }
       await refresh()
     } catch (e: unknown) {
-      const err = e as { message?: string; detail?: { message_ar?: string; action_ar?: string } }
+      const err = e as { message?: string; detail?: { blocker_code?: string | null; action_code?: string | null; message_ar?: string; action_ar?: string } }
       const detail = err?.detail
-      setError(detail?.message_ar || err?.message || copy.enqueueFailed)
+      setError(resolveCatalogBlocker(detail, copy, lang) || err?.message || copy.enqueueFailed)
       setNotice(null)
     } finally {
       inFlight.current = false
@@ -173,7 +174,7 @@ export default function CatalogWhatsAppSyncCard() {
 
   const counts = status?.counts
   const blockerText = status && !ready
-    ? [status.message_ar, status.action_ar].filter(Boolean).join(' ')
+    ? resolveCatalogBlocker(status, copy, lang)
     : null
 
   return (

@@ -60,6 +60,7 @@ import {
 import { CatalogProductPriceCell } from '../components/catalog/CatalogProductPriceCell'
 import { ProductThumbnail } from '../components/catalog/ProductThumbnail'
 import { useLanguage } from '../i18n/context'
+import { resolveCatalogIssue } from '../i18n/catalogRuntimeLabels'
 import type { Lang, Translations } from '../i18n/types'
 
 function localeTag(lang: Lang): string {
@@ -1274,7 +1275,7 @@ function ProductDrawer(props: {
     } catch (err: unknown) {
       const detail = (err as { detail?: MetaSyncConfirmResponse | string })?.detail
       if (detail && typeof detail === 'object' && 'message_ar' in detail) {
-        setMetaConfirmError(detail.message_ar || dr.metaSyncConfirmFailed)
+        setMetaConfirmError(resolveCatalogIssue({ code: detail.error_code, message_ar: detail.message_ar }, dr, lang) || dr.metaSyncConfirmFailed)
       } else {
         setMetaConfirmError(dr.metaSyncConfirmFailed)
       }
@@ -1421,9 +1422,9 @@ function ProductDrawer(props: {
                     </span>
                   )}
                 </div>
-                {!metaPreview.eligible && metaPreview.message_ar && (
+                {!metaPreview.eligible && (metaPreview.message_ar || metaPreview.error_code) && (
                   <p className="text-sm text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
-                    {metaPreview.message_ar}
+                    {resolveCatalogIssue({ code: metaPreview.error_code, message_ar: metaPreview.message_ar }, dr, lang)}
                   </p>
                 )}
                 {metaPreview.eligible && (
@@ -1445,7 +1446,7 @@ function ProductDrawer(props: {
                         <h4 className="text-xs font-bold text-rose-800 mb-1.5">{dr.metaSyncFatalTitle}</h4>
                         <ul className="text-xs text-rose-900 space-y-1">
                           {metaPreview.fatal_errors!.map(item => (
-                            <li key={item.code}>{item.message_ar}</li>
+                            <li key={item.code}>{resolveCatalogIssue(item, dr, lang)}</li>
                           ))}
                         </ul>
                       </div>
@@ -1455,7 +1456,7 @@ function ProductDrawer(props: {
                         <h4 className="text-xs font-bold text-amber-800 mb-1.5">{dr.metaSyncWarningsTitle}</h4>
                         <ul className="text-xs text-amber-900 space-y-1">
                           {metaPreview.warnings!.map(item => (
-                            <li key={item.code}>{item.message_ar}</li>
+                            <li key={item.code}>{resolveCatalogIssue(item, dr, lang)}</li>
                           ))}
                         </ul>
                       </div>

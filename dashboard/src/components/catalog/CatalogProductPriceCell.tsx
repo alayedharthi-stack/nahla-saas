@@ -21,7 +21,7 @@ function formatCatalogPriceAmount(value: string | null | undefined): string {
 }
 
 export function CatalogProductPriceCell({ row }: { row: CatalogProductDiagRow }) {
-  const { tStatic } = useLanguage()
+  const { tStatic, lang } = useLanguage()
   const discountedBadge = tStatic(tr => tr.catalogMgmt.importedProducts.discountedPriceBadge)
   const sale = formatCatalogPriceAmount(row.sale_price)
   const regular = formatCatalogPriceAmount(row.regular_price)
@@ -31,7 +31,7 @@ export function CatalogProductPriceCell({ row }: { row: CatalogProductDiagRow })
     && regular
     && sale !== regular
   ) {
-    const suffix = row.currency?.trim() ? ` ${row.currency.trim()}` : ' ريال'
+    const suffix = row.currency?.trim() ? ` ${row.currency.trim()}` : (lang === 'ar' ? ' ريال' : ' SAR')
     return (
       <div className="flex flex-col gap-1 min-w-[7rem]">
         <span className="text-[10px] font-semibold text-orange-700 bg-orange-50 border border-orange-200 rounded px-1.5 py-0.5 w-fit shrink-0">

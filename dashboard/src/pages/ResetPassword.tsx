@@ -2,8 +2,13 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Sparkles, Eye, EyeOff, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
 import { API_BASE } from '../api/client'
+import { useLanguage } from '../i18n/context'
 
 export default function ResetPassword() {
+  const { t, dir } = useLanguage()
+  const pw = t(tr => tr.authFlow.password)
+  const rs = t(tr => tr.authFlow.reset)
+  const brand = t(tr => tr.login.title)
   const navigate = useNavigate()
   const [token,    setToken]    = useState('')
   const [password, setPassword] = useState('')
@@ -16,15 +21,15 @@ export default function ResetPassword() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const t = params.get('token') ?? ''
-    if (!t) setError('رابط إعادة التعيين غير صالح.')
+    if (!t) setError(rs.invalidLink)
     setToken(t)
-  }, [])
+  }, [rs.invalidLink])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
-    if (password !== confirm) { setError('كلمتا المرور غير متطابقتين'); return }
-    if (password.length < 8)  { setError('كلمة المرور يجب أن تكون 8 أحرف على الأقل'); return }
+    if (password !== confirm) { setError(pw.mismatch); return }
+    if (password.length < 8)  { setError(pw.tooShort); return }
 
     setLoading(true)
     try {
@@ -34,38 +39,38 @@ export default function ResetPassword() {
         body: JSON.stringify({ token, password }),
       })
       const data = await res.json()
-      if (!res.ok) { setError(data.detail ?? 'فشلت عملية الاستعادة'); return }
+      if (!res.ok) { setError(data.detail ?? rs.failed); return }
       setDone(true)
       setTimeout(() => navigate('/login', { replace: true }), 3000)
     } catch {
-      setError('تعذّر الاتصال بالخادم. حاول مرة أخرى.')
+      setError(pw.serverUnreachable)
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir="rtl">
+    <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4" dir={dir}>
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 bg-brand-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-brand-500/30">
             <Sparkles className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-white">نحلة</h1>
-          <p className="text-slate-400 text-sm mt-1">تعيين كلمة مرور جديدة</p>
+          <h1 className="text-2xl font-bold text-white">{brand}</h1>
+          <p className="text-slate-400 text-sm mt-1">{rs.subtitle}</p>
         </div>
 
         <div className="bg-white rounded-2xl shadow-xl p-6 space-y-5">
           {done ? (
             <div className="text-center space-y-4 py-2">
               <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto" />
-              <h2 className="font-bold text-slate-900">تم تغيير كلمة المرور ✅</h2>
-              <p className="text-slate-500 text-sm">سيتم تحويلك لصفحة تسجيل الدخول...</p>
+              <h2 className="font-bold text-slate-900">{rs.doneTitle}</h2>
+              <p className="text-slate-500 text-sm">{rs.doneBody}</p>
             </div>
           ) : (
             <>
               <h2 className="text-base font-semibold text-slate-800 text-center">
-                كلمة مرور جديدة
+                {rs.heading}
               </h2>
 
               {error && (
@@ -78,7 +83,7 @@ export default function ResetPassword() {
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                    كلمة المرور الجديدة
+                    {pw.newPasswordLabel}
                   </label>
                   <div className="relative">
                     <input
@@ -86,7 +91,7 @@ export default function ResetPassword() {
                       required
                       value={password}
                       onChange={e => setPassword(e.target.value)}
-                      placeholder="8 أحرف على الأقل"
+                      placeholder={pw.minLengthPh}
                       dir="ltr"
                       className="w-full px-3 py-2.5 pe-10 text-sm border border-slate-200 rounded-lg
                                  focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
@@ -100,7 +105,7 @@ export default function ResetPassword() {
 
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1.5">
-                    تأكيد كلمة المرور
+                    {pw.confirmLabel}
                   </label>
                   <div className="relative">
                     <input
@@ -108,7 +113,7 @@ export default function ResetPassword() {
                       required
                       value={confirm}
                       onChange={e => setConfirm(e.target.value)}
-                      placeholder="أعد إدخال كلمة المرور"
+                      placeholder={pw.confirmPh}
                       dir="ltr"
                       className="w-full px-3 py-2.5 pe-10 text-sm border border-slate-200 rounded-lg
                                  focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
@@ -131,13 +136,13 @@ export default function ResetPassword() {
                              flex items-center justify-center gap-2"
                 >
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {loading ? 'جارٍ الحفظ...' : 'حفظ كلمة المرور'}
+                  {loading ? pw.saving : pw.saveBtn}
                 </button>
               </form>
 
               <p className="text-center text-xs text-slate-500">
                 <Link to="/login" className="text-brand-600 font-medium hover:underline">
-                  العودة لتسجيل الدخول
+                  {pw.backToLogin}
                 </Link>
               </p>
             </>

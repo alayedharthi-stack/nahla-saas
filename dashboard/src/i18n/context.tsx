@@ -52,6 +52,17 @@ const LangContext = createContext<LangContextValue | null>(null)
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 
+/** Persisted language for modules outside React (api client). Falls back to the default. */
+export function readStoredLang(): Lang {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored === 'ar' || stored === 'en') return stored
+  } catch {
+    // localStorage unavailable (SSR / privacy mode)
+  }
+  return DEFAULT_LANG
+}
+
 function getInitialLang(): Lang {
   try {
     const stored = localStorage.getItem(STORAGE_KEY)

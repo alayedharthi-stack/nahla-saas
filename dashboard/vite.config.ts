@@ -1,5 +1,6 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import { checkReviewApiBase, describeReviewApiBaseFailure } from './src/lib/reviewEnvironmentPolicy'
 
 const buildStamp =
   process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 12) ??
@@ -18,7 +19,23 @@ const SALLA_IFRAME_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // Catalog review environment build (VITE_NAHLA_CATALOG_REVIEW_ENV=1): the API
+  // base must be explicit and must not be production. Vite gives process.env
+  // precedence over .env.production, so the review service's variables win;
+  // when they are missing the build FAILS here instead of shipping a bundle
+  // that silently talks to api.nahlah.ai.
+  const bakedEnv = { ...loadEnv(mode, process.cwd(), ''), ...process.env } as Record<string, string | undefined>
+  const reviewCheck = checkReviewApiBase(bakedEnv)
+  if (reviewCheck.enabled && !reviewCheck.ok) {
+    throw new Error('[review-env] build refused: ' + describeReviewApiBaseFailure(reviewCheck))
+  }
+  if (reviewCheck.enabled) {
+    // eslint-disable-next-line no-console
+    console.log(`[review-env] building against review API host ${reviewCheck.host}`)
+  }
+
+  return {
   define: {
     __NAHLA_BUILD_STAMP__: JSON.stringify(buildStamp),
   },
@@ -39,4 +56,5 @@ export default defineConfig({
     allowedHosts: true,
     headers: SALLA_IFRAME_HEADERS,
   },
+  }
 })
