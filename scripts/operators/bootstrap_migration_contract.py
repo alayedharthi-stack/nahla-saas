@@ -32,6 +32,9 @@ NAVIGATION_ALEMBIC_HEAD = "0113"
 AI_USAGE_ALEMBIC_HEAD = "0114"
 # Payments remain a sibling off 0112 and never activate during normal bootstrap.
 PAYMENTS_ALEMBIC_HEAD = "0115"
+# Payments readiness (0116) extends the payments branch and replaces 0115 as
+# its head. It merges nothing and bootstrap stays pinned to 0093.
+PAYMENTS_READINESS_ALEMBIC_HEAD = "0116"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -44,7 +47,9 @@ NAVIGATION_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD})
 AI_USAGE_REPOSITORY_ALEMBIC_HEADS = frozenset(
     {"0092", APPLICATION_ALEMBIC_HEAD, AI_USAGE_ALEMBIC_HEAD})
-REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
+PAYMENTS_FOUNDATION_REPOSITORY_ALEMBIC_HEADS = (
+    AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD})
+REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_READINESS_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -53,6 +58,9 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     SHIPMENT_REPOSITORY_ALEMBIC_HEADS,
     NAVIGATION_REPOSITORY_ALEMBIC_HEADS,
     AI_USAGE_REPOSITORY_ALEMBIC_HEADS,
+    # A checkout that predates the payments readiness revision is still a
+    # supported topology; 0116 replaces 0115 as the payments head.
+    PAYMENTS_FOUNDATION_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -63,8 +71,9 @@ def repository_heads_expected(heads) -> bool:
     Accepted source checkouts are exactly ``{0092, 0111}``, the intermediate
     address checkout ``{0092, 0110, 0111}``, and the current shipment checkout
     ``{0092, 0111, 0112}``, navigation ``{0092, 0111, 0113}``,
-    AI usage ``{0092, 0111, 0114}``, and payments
-    ``{0092, 0111, 0114, 0115}``. No arbitrary extra head is accepted.
+    AI usage ``{0092, 0111, 0114}``, payments foundation
+    ``{0092, 0111, 0114, 0115}`` and payments readiness
+    ``{0092, 0111, 0114, 0116}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS

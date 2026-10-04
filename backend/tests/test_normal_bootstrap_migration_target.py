@@ -28,7 +28,11 @@ from scripts.operators.bootstrap_migration_contract import repository_heads_expe
 def test_repository_accepts_only_known_parallel_head_topologies() -> None:
     # Payments 0115 branches from 0112, independently of the existing 0114
     # AI usage branch. Both preserve normal bootstrap pinned to 0093.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115"})
+    # Payments readiness 0116 replaces 0115 as the payments head; both
+    # checkouts stay supported, and no other extra head is accepted.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0116"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0116"})
     assert repository_heads_expected({"0092", "0111", "0114"})
     assert repository_heads_expected({"0092", "0111", "0113"})
     assert not repository_heads_expected({"0092", "0111", "0113", "0114"})
