@@ -13,7 +13,8 @@ and scopes are confirmed. Public Moyasar documentation currently supports the
 following design facts:
 
 - Platforms/marketplaces support merchant onboarding/KYB, flexible fees,
-  checkout splits, per-merchant settlements and optional payouts.
+  checkout splits (disputed — see the note above), per-merchant settlements and
+  optional payouts.
 - Standard Payments API supports create/fetch/list/update, full or partial
   refunds, capture and void.
 - Webhooks use an HTTPS endpoint and a shared secret; documented payment events

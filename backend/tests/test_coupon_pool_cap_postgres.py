@@ -358,18 +358,19 @@ def test_pool_provenance_jsonb_postgres(postgres_engine) -> None:
 
 
 def _tenant_rows(engine, tenant_id: int) -> dict[int, tuple]:
-    """Every coupon row of one tenant, keyed by id, with the fields a fill writes."""
+    """Every coupon row of one tenant, keyed by id: ``(id, tenant_id, code, *every column)``.
+
+    Every column is compared, so a fill that rewrites any field of another
+    tenant's row — expiry, source, channel, description — is caught."""
     session, connection = _new_session(engine)
     try:
-        rows = (
-            session.query(
-                Coupon.id, Coupon.tenant_id, Coupon.code, Coupon.coupon_level,
-                Coupon.discount_type, Coupon.discount_value, Coupon.extra_metadata,
-            )
-            .filter(Coupon.tenant_id == tenant_id)
-            .all()
-        )
-        return {row[0]: tuple(row) for row in rows}
+        columns = list(Coupon.__table__.columns)
+        rows = connection.execute(
+            Coupon.__table__.select().where(Coupon.__table__.c.tenant_id == tenant_id)
+        ).mappings().all()
+        names = [c.name for c in columns]
+        return {row["id"]: (row["id"], row["tenant_id"], row["code"], *(row[n] for n in names))
+                for row in rows}
     finally:
         session.close()
         connection.close()

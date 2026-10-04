@@ -1170,10 +1170,11 @@ def _wait_for_lock_waiters(engine, expected: int) -> None:
     a lock. Synchronisation is on observed backend state, never on elapsed
     time; the deadline only turns a hang into a failure.
 
-    ``pg_stat_activity`` is a snapshot taken at its first read in a transaction
-    and kept until that transaction ends, so a poll loop inside one transaction
-    keeps reading the state from before the contender queued. Each poll runs as
-    its own autocommit statement and therefore reads the current state."""
+    Inside one transaction ``pg_stat_activity`` lists the backends captured at
+    its first read and keeps that list until the transaction ends: a contender
+    whose connection opens after the first poll is never listed, so a poll loop
+    inside one transaction can count 0 until the deadline. Each poll runs as its
+    own autocommit statement and therefore sees the backends that exist now."""
     deadline = time.monotonic() + 30
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         while True:
