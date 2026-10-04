@@ -74,7 +74,7 @@ def session_factory(monkeypatch):
 def run(argv, env, session_factory=None, marker="catalog-review", stdin=None):
     from core.review_environment import MarkerReading
 
-    reading = MarkerReading(marker, "database", "railway") if marker else MarkerReading(None, None, "railway")
+    reading = MarkerReading(marker, marker, "railway") if marker else MarkerReading(None, None, "railway")
     buf = io.StringIO()
     with redirect_stdout(buf):
         rc = op.run(argv, env=env, session_factory=session_factory, marker_reader=lambda u: reading, stdin_reader=stdin)

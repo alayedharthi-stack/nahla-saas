@@ -28,18 +28,33 @@ start background workers:
      expected review database host, host free of production markers and
      of the staging DR host, database name equal to the expected name
      when one is configured.
-  3. Database identity (dynamic, one read-only statement): the server
-     setting ``nahla.environment`` of the connected database equals the
-     expected marker (default ``catalog-review``). The operator sets it
-     **once** on the fresh review database only::
+  3. Database identity (dynamic, one read-only statement). The operator
+     marks the fresh review database **once**::
 
          ALTER DATABASE <review_db> SET nahla.environment = 'catalog-review';
 
-     ``current_setting('nahla.environment', true)`` returns NULL on any
-     database that was never marked (production, staging DR, a local
-     dev database), so a wrong binding is caught **before** Alembic or
-     ``create_all`` touch the schema. The marker is per database, needs
-     no table and survives migrations.
+     The guard then requires all of:
+
+       * a **persisted, database-wide** entry ``nahla.environment=<marker>``
+         in ``pg_db_role_setting`` for ``current_database()`` with
+         ``setrole = 0`` (this is what ``ALTER DATABASE … SET`` writes);
+       * the **effective** value ``current_setting('nahla.environment',
+         true)`` equal to the same marker (a role-level override or a
+         session value that differs is refused);
+       * ``current_database()`` equal to the database named in the DSN
+         (or ``NAHLA_CATALOG_REVIEW_DB_NAME``).
+
+     Why not ``pg_settings``: PostgreSQL keeps an unregistered custom
+     setting such as ``nahla.environment`` as a *placeholder*, and
+     placeholders are not listed in ``pg_settings`` (verified on
+     PostgreSQL 16.15 and 18.6: zero rows even when the database-level
+     setting is applied). A session value (``options=-c …``,
+     ``PGOPTIONS``, ``SET``) changes only the effective value and leaves
+     no ``pg_db_role_setting`` row, so it can never satisfy the
+     persisted-entry requirement. ``pg_db_role_setting`` is readable by
+     ordinary roles. A database that was never marked (production,
+     staging DR, a local dev database) has no entry, so a wrong binding
+     is caught **before** Alembic or ``create_all`` touch the schema.
   4. Dashboard URL: ``DASHBOARD_URL`` present and not the production
      dashboard, so invite / verification / reset links and OAuth
      redirects never point at production.
@@ -68,15 +83,21 @@ DEFAULT_REVIEW_ENVIRONMENT = "staging"
 DEFAULT_REVIEW_DB_HOST = "postgres-catalog-review.railway.internal"
 DEFAULT_REVIEW_DB_MARKER = "catalog-review"
 
-#: PostgreSQL custom setting read with ``current_setting(..., true)``.
+#: PostgreSQL custom setting that carries the review-database marker.
 DB_MARKER_SETTING = "nahla.environment"
+#: One read-only statement: effective value, the persisted database-wide
+#: entry written by ``ALTER DATABASE … SET`` (``pg_db_role_setting`` row with
+#: ``setrole = 0`` for the current database), and the database name.
 DB_MARKER_SQL = (
-    "SELECT current_setting('nahla.environment', true) AS marker, "
-    "(SELECT source FROM pg_settings WHERE name = 'nahla.environment') AS source, "
+    "SELECT current_setting('nahla.environment', true) AS effective, "
+    "(SELECT cfg FROM pg_catalog.pg_db_role_setting AS d, "
+    "unnest(d.setconfig) AS cfg "
+    "WHERE d.setdatabase = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) "
+    "AND d.setrole = 0 "
+    "AND split_part(cfg, '=', 1) = 'nahla.environment' "
+    "LIMIT 1) AS persisted, "
     "current_database() AS database"
 )
-#: ``pg_settings.source`` for a setting applied by ``ALTER DATABASE … SET``.
-DB_MARKER_EXPECTED_SOURCE = "database"
 
 _PRODUCTION_MARKERS = ("production", "prod", "live")
 _FORBIDDEN_DB_HOST_FRAGMENTS = ("postgres-staging",)
@@ -104,11 +125,17 @@ F_DB_HOST_NOT_ALLOWLISTED = "database_host_not_allowlisted"
 F_DB_NAME_MISMATCH = "database_name_mismatch"
 F_DB_QUERY_REJECTED = "database_url_query_rejected"
 F_LIBPQ_ENV_OVERRIDE = "libpq_environment_override"
-F_DB_MARKER_SOURCE = "database_marker_source_rejected"
 F_DB_IDENTITY_MISMATCH = "database_identity_mismatch"
 F_DB_MARKER_UNREADABLE = "database_marker_unreadable"
+#: No persisted database-wide marker and no effective value either.
 F_DB_MARKER_MISSING = "database_marker_missing"
+#: An effective value exists but no persisted database-wide entry backs it
+#: (session ``SET`` / ``options=-c`` / ``PGOPTIONS`` / role-level setting).
+F_DB_MARKER_NOT_PERSISTED = "database_marker_not_persisted"
+#: The persisted database-wide entry carries a different marker.
 F_DB_MARKER_MISMATCH = "database_marker_mismatch"
+#: The effective value differs from the persisted marker (role/session override).
+F_DB_MARKER_EFFECTIVE_MISMATCH = "database_marker_effective_mismatch"
 F_DASHBOARD_URL_MISSING = "dashboard_url_missing"
 F_DASHBOARD_URL_PRODUCTION = "dashboard_url_is_production"
 
@@ -235,15 +262,32 @@ def _check_dashboard_url(env: Mapping[str, str]) -> List[str]:
 
 @dataclass(frozen=True)
 class MarkerReading:
-    """What the connected database says about itself (no secrets)."""
+    """What the connected database says about itself (no secrets).
 
-    marker: Optional[str]
-    source: Optional[str]
+    ``effective``: ``current_setting('nahla.environment', true)``.
+    ``persisted``: value of the database-wide ``pg_db_role_setting`` entry
+    (``setrole = 0``) for ``current_database()``, or None when absent.
+    ``database``: ``current_database()``.
+    """
+
+    effective: Optional[str]
+    persisted: Optional[str]
     database: Optional[str]
 
 
+def _persisted_value(entry: Any) -> Optional[str]:
+    """``'nahla.environment=catalog-review'`` → ``'catalog-review'``."""
+    text_value = str(entry or "").strip()
+    if not text_value:
+        return None
+    name, sep, value = text_value.partition("=")
+    if not sep or name.strip() != DB_MARKER_SETTING:
+        return None
+    return value.strip() or None
+
+
 def read_database_marker(database_url: str) -> MarkerReading:
-    """Read the identity marker, its ``pg_settings.source`` and ``current_database()``.
+    """Read the effective marker, the persisted database-wide entry and ``current_database()``.
 
     One read-only statement on a throw-away connection. Raises on connection
     failure (the caller maps that to ``database_marker_unreadable``).
@@ -259,28 +303,25 @@ def read_database_marker(database_url: str) -> MarkerReading:
         engine.dispose()
     if row is None:
         return MarkerReading(None, None, None)
-    marker, source, database = (str(v or "").strip() or None for v in (row[0], row[1], row[2]))
-    return MarkerReading(marker, source, database)
+    effective = str(row[0] or "").strip() or None
+    persisted = _persisted_value(row[1])
+    database = str(row[2] or "").strip() or None
+    return MarkerReading(effective, persisted, database)
 
 
 def _coerce_reading(value: Any) -> MarkerReading:
+    """Only a ``MarkerReading`` carries proof. Anything else counts as no marker."""
     if isinstance(value, MarkerReading):
         return value
-    if value is None:
-        return MarkerReading(None, None, None)
-    if isinstance(value, str):  # legacy readers: a bare marker is treated as database-sourced
-        return MarkerReading(value.strip() or None, DB_MARKER_EXPECTED_SOURCE, None)
-    if isinstance(value, Mapping):
-        return MarkerReading(value.get("marker"), value.get("source"), value.get("database"))
     return MarkerReading(None, None, None)
 
 
 def check_database_marker(
     env: Optional[Mapping[str, str]] = None,
     *,
-    marker_reader: Optional[Callable[[str], Optional[str]]] = None,
+    marker_reader: Optional[Callable[[str], Any]] = None,
 ) -> List[str]:
-    """Dynamic identity check against the connected database."""
+    """Dynamic identity check against the connected database (fail-closed)."""
     env = env if env is not None else os.environ
     raw = (env.get("DATABASE_URL") or "").strip()
     if not raw:
@@ -290,20 +331,20 @@ def check_database_marker(
         reading = _coerce_reading(reader(raw))
     except Exception:  # noqa: BLE001 — connection errors are reported as a code; the DSN is never echoed
         return [F_DB_MARKER_UNREADABLE]
-    if not reading.marker:
-        return [F_DB_MARKER_MISSING]
+    expected = expected_db_marker(env)
     failures: List[str] = []
-    if reading.marker != expected_db_marker(env):
+    if not reading.persisted:
+        # A value that only lives in the session (or a role setting) is not proof.
+        failures.append(F_DB_MARKER_NOT_PERSISTED if reading.effective else F_DB_MARKER_MISSING)
+    elif reading.persisted != expected:
         failures.append(F_DB_MARKER_MISMATCH)
-    # The marker must come from ALTER DATABASE … SET (source='database'); a
-    # session-level SET or a forged ``options=-c …`` yields 'session'/'client'.
-    if (reading.source or "") != DB_MARKER_EXPECTED_SOURCE:
-        failures.append(F_DB_MARKER_SOURCE)
+    if reading.persisted and reading.effective != reading.persisted:
+        failures.append(F_DB_MARKER_EFFECTIVE_MISMATCH)
     want_name = (env.get(REVIEW_DB_NAME_ENV) or "").strip()
     parsed = _parse_dsn(raw)
     dsn_name = str(getattr(parsed, "database", "") or "").strip() if parsed is not None else ""
     expected_name = want_name or dsn_name
-    if expected_name and reading.database and reading.database != expected_name:
+    if not reading.database or not expected_name or reading.database != expected_name:
         failures.append(F_DB_IDENTITY_MISMATCH)
     return failures
 
@@ -312,7 +353,7 @@ def evaluate_review_environment(
     env: Optional[Mapping[str, str]] = None,
     *,
     with_database_marker: bool = True,
-    marker_reader: Optional[Callable[[str], Optional[str]]] = None,
+    marker_reader: Optional[Callable[[str], Any]] = None,
 ) -> ReviewEnvironmentCheck:
     """Run every check. Inert (ok, enabled=False) when review mode is off."""
     env = env if env is not None else os.environ
@@ -345,7 +386,7 @@ def assert_review_environment(
     env: Optional[Mapping[str, str]] = None,
     *,
     with_database_marker: bool = True,
-    marker_reader: Optional[Callable[[str], Optional[str]]] = None,
+    marker_reader: Optional[Callable[[str], Any]] = None,
 ) -> ReviewEnvironmentCheck:
     """Raise ``ReviewEnvironmentViolation`` unless the environment is isolated.
 
@@ -363,7 +404,7 @@ def format_report(check: ReviewEnvironmentCheck) -> List[str]:
         return ["[review-env] not a catalog review environment (flag unset) — guard inert."]
     lines = [f"[review-env] {n}" for n in check.notes]
     if check.ok:
-        lines.append("[review-env] isolation verified: identity, database binding, database marker (source=database), dashboard URL.")
+        lines.append("[review-env] isolation verified: identity, database binding, persisted database marker (pg_db_role_setting), dashboard URL.")
     else:
         for code in check.failures:
             lines.append(f"[review-env][FAIL] {code}")
@@ -377,7 +418,6 @@ def format_report(check: ReviewEnvironmentCheck) -> List[str]:
 
 __all__ = [
     "DB_MARKER_SETTING",
-    "DB_MARKER_EXPECTED_SOURCE",
     "DB_MARKER_SQL",
     "MarkerReading",
     "DEFAULT_REVIEW_DB_HOST",

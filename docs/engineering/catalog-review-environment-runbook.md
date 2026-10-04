@@ -66,7 +66,7 @@
 
 1. **هوية الخدمة:** `RAILWAY_PROJECT_NAME=desirable-growth` و`RAILWAY_ENVIRONMENT_NAME=staging` ولا علامة إنتاج في `ENVIRONMENT`.
 2. **ربط القاعدة (ثابت من DSN):** مخطط PostgreSQL، المضيف يساوي `NAHLA_CATALOG_REVIEW_DB_HOST`، لا `postgres-staging` ولا علامة إنتاج في المضيف، واسم القاعدة إن ضُبط؛ **تُرفض معاملات الاستعلام في DSN عدا `sslmode`/`sslrootcert`/`sslcert`/`sslkey`/`connect_timeout`/`application_name`** (لأن `?host=`/`?hostaddr=`/`?options=`/`?service=` تعيد توجيه الاتصال أو تزوّر العلامة)، **وتُرفض متغيرات libpq** `PGHOST`/`PGHOSTADDR`/`PGPORT`/`PGSERVICE`/`PGSERVICEFILE`/`PGOPTIONS`/`PGPASSFILE`/`PGDATABASE` إن كانت مضبوطة.
-3. **علامة هوية القاعدة (حي، قراءة واحدة):** `SELECT current_setting('nahla.environment', true), (SELECT source FROM pg_settings WHERE name='nahla.environment'), current_database()` — القيمة يجب أن تساوي `catalog-review`، **ومصدرها `database`** (أي من `ALTER DATABASE … SET`؛ علامة مضبوطة في الجلسة أو عبر `options` مصدرها `session`/`client` وتُرفض)، واسم القاعدة المتصلة يساوي اسم القاعدة في DSN (أو `NAHLA_CATALOG_REVIEW_DB_NAME`). تُضبط **مرة واحدة** على قاعدة المراجعة الجديدة الفارغة فقط:
+3. **علامة هوية القاعدة (حي، قراءة واحدة):** `SELECT current_setting('nahla.environment', true), <قيد pg_db_role_setting لقاعدة current_database() مع setrole = 0>, current_database()` — يلزم **قيد محفوظ على مستوى القاعدة** في `pg_db_role_setting` (هو ما يكتبه `ALTER DATABASE … SET`) قيمته `catalog-review`، و**القيمة الفعّالة** مساوية له (تجاوز على مستوى الدور أو الجلسة يُرفض)، واسم القاعدة المتصلة يساوي اسمها في DSN (أو `NAHLA_CATALOG_REVIEW_DB_NAME`). قيمة جلسة وحدها (`SET`/`options=-c`/`PGOPTIONS`) لا تترك قيدًا وتُرفض. **لماذا لا `pg_settings`:** PostgreSQL يحفظ الإعداد المخصص غير المسجَّل كعنصر نائب ولا يُدرجه في `pg_settings` (ثُبت على 16.15 و18.6: صفر صفوف رغم تطبيق الإعداد).
 
    ```sql
    ALTER DATABASE railway SET nahla.environment = 'catalog-review';
@@ -83,10 +83,10 @@ python /app/scripts/preflight_check.py
 ```
 
 المخرجات المتوقعة: أسطر `[preflight][review-env]` تذكر المضيف والعلامة والهوية **المتوقعة** ثم
-`isolation verified: identity, database binding, database marker (source=database), dashboard URL.` ورمز خروج `0`.
+`isolation verified: identity, database binding, persisted database marker (pg_db_role_setting), dashboard URL.` ورمز خروج `0`.
 أي `[review-env][FAIL] <code>` يعني رفض الإقلاع؛ الرموز: `review_project_*`، `review_environment_*`،
 `production_marker_detected`، `database_url_*`, `database_scheme_rejected`, `database_host_*`,
-`database_name_mismatch`, `database_url_query_rejected`, `libpq_environment_override`, `database_marker_{unreadable,missing,mismatch}`, `database_marker_source_rejected`, `database_identity_mismatch`, `dashboard_url_*`.
+`database_name_mismatch`, `database_url_query_rejected`, `libpq_environment_override`, `database_marker_{unreadable,missing,mismatch}`, `database_marker_not_persisted`, `database_marker_effective_mismatch`, `database_identity_mismatch`, `dashboard_url_*`.
 
 وللواجهة محليًا قبل البناء:
 
