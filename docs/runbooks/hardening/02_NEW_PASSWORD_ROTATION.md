@@ -1,8 +1,12 @@
 # NEW DB Password Rotation Plan
 
-> **Target**: `desirable-growth → nahla-postgres-prod`
-> (host `kodama.proxy.rlwy.net:35880`, internal
-> `postgres-ancu.railway.internal:5432/railway`).
+> **Control notice (2026-08-03):** This historical plan is superseded by
+> `docs/runbooks/CANONICAL_PRODUCTION_DATABASE_BINDING.md`. Do not execute
+> commands below that capture resolved URLs, passwords, or environment
+> snapshots. The canonical runbook and its fail-closed identity guard are the
+> only approved production procedure.
+>
+> **Target**: `desirable-growth → nahla-postgres-prod`.
 >
 > **Status**: planning only. **No execution** without explicit operator GO.
 

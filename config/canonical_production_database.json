@@ -1,0 +1,20 @@
+{
+  "project": "desirable-growth",
+  "environment": "production",
+  "application_service": "nahla-saas",
+  "postgres_service": "nahla-postgres-prod",
+  "postgres_service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+  "volume_name": "postgres-volume-hU16",
+  "volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
+  "volume_mount_path": "/var/lib/postgresql/data",
+  "database_name": "railway",
+  "alembic_version": "0096",
+  "tenant_1_products_count_reference": 28,
+  "managed_reference": "${{nahla-postgres-prod.DATABASE_URL}}",
+  "legacy_noncanonical_target": {
+    "postgres_service": "Postgres",
+    "postgres_service_id": "15973ab3-d018-4117-8607-4140875166b3",
+    "volume_id": "9a0a8a9c-291f-4fb7-8791-9f2bf2089637",
+    "approved_for_nahla_saas": false
+  }
+}
