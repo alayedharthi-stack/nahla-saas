@@ -128,9 +128,9 @@ def test_readiness_tables_stay_out_of_startup_and_out_of_0115():
         assert isinstance(column.type, sa.String) and column.type.length == 120
 
 
-def test_migration_0116_requires_0115_then_creates_only_readiness_tables(monkeypatch):
+def test_migration_0119_requires_0115_then_creates_only_readiness_tables(monkeypatch):
     path = (Path(__file__).resolve().parents[1] / "database/migrations/versions"
-            / "0116_merchant_payments_readiness.py")
+            / "0119_merchant_payments_readiness.py")
     spec = importlib.util.spec_from_file_location("merchant_payments_readiness_migration", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

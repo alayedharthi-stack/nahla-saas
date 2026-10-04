@@ -19,7 +19,7 @@ wherever the two disagree. It is a design and gating document, not a contract.
 ## Readiness closed in this repository (dormant, route-free)
 
 All of the following live under `backend/payments/` and are created only by
-migration `0116` (which requires `0115` to be present and is never part of
+migration `0119` (which requires `0115` to be present and is never part of
 normal bootstrap). No route, worker, WhatsApp, AI, cart, catalog or billing
 path imports them.
 
@@ -55,7 +55,7 @@ path imports them.
   may never change; a status change is a newer observation) and settlement
   *lines*, linking a `payment` line to an observed payment only when that
   payment belongs to the same tenant, and the line table is tenant-bound to its
-  settlement at the database (`uq_mps_tenant_settlement`, added by 0116 to a
+  settlement at the database (`uq_mps_tenant_settlement`, added by 0119 to a
   database that already carries 0115). `reconciliation.py` labels every figure
   by its evidence: `settled_gross` counts only payments named by a `payment`
   line of a settlement whose provider status is final
@@ -104,12 +104,12 @@ Do not implement these from guesses:
 7. **Order linkage** — a tenant-safe foreign key from an observed payment to
    an internal order (`orders` is not declared unique as `(tenant_id, id)`).
 8. **Production activation** — explicit review and application of `0115` then
-   `0116` in the target database, credential storage in the existing secret
+   `0119` in the target database, credential storage in the existing secret
    manager, operator runbook and rollback. None of this is part of any PR.
 
 ## Operating rules while dormant
 
-- Migrations `0115` and `0116` are applied explicitly, never by bootstrap or
+- Migrations `0115` and `0119` are applied explicitly, never by bootstrap or
   `alembic upgrade head`, and never in production under this readiness work.
 - No production data, keys, identities or bank accounts are used in tests.
 - Human-facing name: **Nahlah AI** in English, **نحلة** in Arabic.

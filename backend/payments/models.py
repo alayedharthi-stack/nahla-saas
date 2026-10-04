@@ -182,7 +182,7 @@ class MerchantPaymentSettlement(PaymentBase):
         UniqueConstraint("provider", "environment", "provider_settlement_ref", name="uq_mps_provider_settlement"),
         # Tenant-bound key so settlement lines can reference a settlement only
         # together with its tenant. A unique index (not a constraint) so that
-        # 0116 can add it to a database that already carries 0115.
+        # 0119 can add it to a database that already carries 0115.
         Index("uq_mps_tenant_settlement", "tenant_id", "provider", "environment", "provider_settlement_ref",
               unique=True),
         Index("ix_mps_tenant_observed", "tenant_id", "provider_observed_at"),
@@ -233,8 +233,8 @@ class MerchantPaymentProviderEvent(PaymentBase):
 
 
 
-# ── Revision 0116: dormant readiness tables ─────────────────────────────────
-# Everything below is created only by migration 0116, never by 0115. The 0115
+# ── Revision 0119: dormant readiness tables ─────────────────────────────────
+# Everything below is created only by migration 0119, never by 0115. The 0115
 # relations are left untouched: readiness state lives in separate tables that
 # reference the merchant profile through its composite key. No API key, webhook
 # secret, IBAN, identity document or card data is ever stored here; credential
@@ -460,7 +460,7 @@ PAYMENT_TABLES = (
     MerchantPaymentProviderEvent.__table__,
 )
 
-# Created only by migration 0116. Kept apart from PAYMENT_TABLES so that 0115
+# Created only by migration 0119. Kept apart from PAYMENT_TABLES so that 0115
 # keeps creating exactly the six foundation relations it was reviewed with.
 PAYMENT_READINESS_TABLES = (
     MerchantPaymentActivation.__table__,

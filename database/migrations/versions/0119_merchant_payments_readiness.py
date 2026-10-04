@@ -1,7 +1,20 @@
 """Dormant merchant payments readiness tables.
 
-Revision ID: 0116
+Revision ID: 0119
 Revises: 0115
+
+First drafted as ``0116``; that id was declared by two other open branches and
+is retired (OTO connections are ``0117``, catalog channel retirements ``0118``).
+Safety rests on the state Alembic reads, not on deployment history. A
+database whose ``alembic_version`` still holds ``0116`` makes ``upgrade``,
+``downgrade`` and ``current`` stop with "Can't locate revision identified by
+'0116'" before any DDL runs, so it is never read as carrying this revision.
+Any existing readiness table (from the former ``0116`` or anything else)
+makes this upgrade raise instead of adopting it. Neither case is repaired
+here: recovery is an owner decision with explicit authorization, and nothing
+in this change writes ``alembic_version``. Apply it to a database only after
+a read-only check of that database shows no ``0116`` stamp, the 0115 tables
+present and none of the four readiness tables.
 
 Extends the payments branch only. It creates the four readiness relations
 (activation switch, onboarding audit, webhook delivery ledger, settlement
@@ -33,7 +46,7 @@ from backend.payments.models import (
 )
 
 
-revision = "0116"
+revision = "0119"
 down_revision = "0115"
 branch_labels = None
 depends_on = None
@@ -51,7 +64,7 @@ def upgrade() -> None:
     overlap = existing.intersection(table.name for table in PAYMENT_READINESS_TABLES)
     if overlap:
         raise RuntimeError(
-            "Merchant payment readiness schema already exists; inspect it before applying 0116: "
+            "Merchant payment readiness schema already exists; inspect it before applying 0119: "
             + ", ".join(sorted(overlap))
         )
     settlements = MerchantPaymentSettlement.__table__

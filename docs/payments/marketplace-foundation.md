@@ -6,7 +6,7 @@
 > sandbox, platform-fee terms and settlement terms remain pending a signed
 > agreement, and there is no wallet. Read this document together with
 > `moyasar-platform-api-readiness.md`, which records that update, what the
-> repository closed in response (revision `0116`), and what still depends on
+> repository closed in response (revision `0119`), and what still depends on
 > Moyasar or on a business decision. The "Marketplace Agreement" wording below
 > is kept as history of the original design; it is no longer the target.
 

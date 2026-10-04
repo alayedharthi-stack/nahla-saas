@@ -6,7 +6,7 @@ reviewed integration and a signed provider agreement.
 
 Modules:
 
-* ``models`` — tenant-bound financial tables (0115 foundation, 0116 readiness)
+* ``models`` — tenant-bound financial tables (0115 foundation, 0119 readiness)
 * ``fees`` / ``observations`` — provisional fee quotes over provider-confirmed payments
 * ``provider`` — dormant Platform API, Payments and Payout boundaries (fail closed)
 * ``onboarding`` / ``activation`` / ``secret_refs`` — merchant state and activation gate
