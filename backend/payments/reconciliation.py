@@ -4,8 +4,11 @@ Nothing in this report is a balance, a receivable or a payable. Each figure
 says where it came from:
 
 * ``confirmed_gross`` — payments the provider confirmed (``observe_payment``).
-* ``settled_gross`` — the part of that gross named by a provider settlement
-  ``payment`` line. This is the only figure that may be shown as settled.
+* ``settled_gross`` — the part of that gross named by a ``payment`` line of a
+  settlement whose provider status is in ``FINAL_SETTLEMENT_STATUSES``. This is
+  the only figure that may be shown as settled.
+* ``pending_settlement_gross`` — named by a line of a settlement the provider
+  has not yet reported as final (for example still pending transfer).
 * ``awaiting_settlement_gross`` — confirmed but not yet named by any line.
 * ``provider_reported_settlement_total`` — settlement totals as reported,
   including amounts whose lines were not fetched or did not match.
@@ -21,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Sequence, Tuple
+from typing import Tuple
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
@@ -34,6 +37,10 @@ from .models import (
 )
 
 ZERO = Decimal("0.00")
+# Provider status words that mean the settlement transfer is final. The public
+# settlement documentation reports completed transfers as ``transferred``; the
+# signed agreement may extend this set. Anything else is pending, never settled.
+FINAL_SETTLEMENT_STATUSES = frozenset({"transferred"})
 
 
 @dataclass(frozen=True)
@@ -41,8 +48,10 @@ class PaymentSettlementState:
     transaction_id: int
     provider_payment_ref: str
     gross_amount: Decimal
-    settlement_state: str  # awaiting_provider_settlement | provider_settled | adjusted_after_settlement
+    # awaiting_provider_settlement | named_in_pending_settlement | provider_settled | adjusted_after_settlement
+    settlement_state: str
     settlement_reference: str | None
+    settlement_provider_status: str | None
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,7 @@ class ReconciliationReport:
     confirmed_gross: Decimal
     settled_payment_count: int
     settled_gross: Decimal
+    pending_settlement_gross: Decimal
     awaiting_settlement_gross: Decimal
     provider_reported_settlement_total: Decimal
     settlement_count: int
@@ -72,7 +82,13 @@ def _dec(value) -> Decimal:
 
 
 def reconcile_merchant(
-    engine: Engine, *, tenant_id: int, provider: str, environment: str, currency: str = "SAR"
+    engine: Engine,
+    *,
+    tenant_id: int,
+    provider: str,
+    environment: str,
+    currency: str = "SAR",
+    final_settlement_statuses: frozenset = FINAL_SETTLEMENT_STATUSES,
 ) -> ReconciliationReport:
     if tenant_id <= 0 or not provider or environment not in ("test", "live"):
         raise ValueError("Invalid reconciliation scope")
@@ -97,15 +113,25 @@ def reconcile_merchant(
             .order_by(payments.c.id)
         ).mappings().all()
         line_rows = connection.execute(
-            sa.select(lines.c.transaction_id, lines.c.line_type, lines.c.amount, lines.c.provider_settlement_ref)
-            .where(*scope(lines))
-        ).mappings().all()
-        settlement_row = connection.execute(
             sa.select(
-                sa.func.coalesce(sa.func.sum(settlements.c.reported_amount), 0),
-                sa.func.count(settlements.c.id),
-            ).where(*scope(settlements))
-        ).one()
+                lines.c.transaction_id, lines.c.line_type, lines.c.amount, lines.c.provider_settlement_ref,
+                settlements.c.provider_status.label("settlement_status"),
+            ).select_from(
+                lines.join(
+                    settlements,
+                    sa.and_(
+                        lines.c.tenant_id == settlements.c.tenant_id,
+                        lines.c.provider == settlements.c.provider,
+                        lines.c.environment == settlements.c.environment,
+                        lines.c.provider_settlement_ref == settlements.c.provider_settlement_ref,
+                    ),
+                )
+            ).where(*scope(lines))
+        ).mappings().all()
+        settlement_rows = connection.execute(
+            sa.select(settlements.c.provider_settlement_ref, settlements.c.reported_amount)
+            .where(*scope(settlements))
+        ).mappings().all()
         allocation_row = connection.execute(
             sa.select(
                 sa.func.coalesce(sa.func.sum(allocations.c.platform_fee_amount), 0),
@@ -122,9 +148,12 @@ def reconcile_merchant(
         ).one()
 
     payment_lines: dict[int, list] = {}
+    lines_by_settlement: dict[str, Decimal] = {}
     unmatched_count, unmatched_total, line_total = 0, ZERO, ZERO
     for row in line_rows:
         line_total += _dec(row["amount"])
+        ref = row["provider_settlement_ref"]
+        lines_by_settlement[ref] = lines_by_settlement.get(ref, ZERO) + _dec(row["amount"])
         if row["transaction_id"] is not None:
             payment_lines.setdefault(row["transaction_id"], []).append(row)
         elif row["line_type"] == "payment":
@@ -133,32 +162,40 @@ def reconcile_merchant(
             unmatched_count += 1
             unmatched_total += _dec(row["amount"])
 
-    states, settled_gross, settled_count, inconsistent = [], ZERO, 0, False
+    states, settled_gross, pending_gross, settled_count, inconsistent = [], ZERO, ZERO, 0, False
     for payment in confirmed:
         gross = _dec(payment["gross_amount"])
         linked = payment_lines.get(payment["id"], [])
         paid_lines = [row for row in linked if row["line_type"] == "payment"]
         adjustments = [row for row in linked if row["line_type"] in ("refund", "chargeback", "adjustment")]
         if not paid_lines:
-            state, ref = "awaiting_provider_settlement", None
+            state, ref, status = "awaiting_provider_settlement", None, None
         else:
             if len(paid_lines) > 1 or _dec(paid_lines[0]["amount"]) != gross:
                 inconsistent = True
-            settled_gross += gross
-            settled_count += 1
-            state = "adjusted_after_settlement" if adjustments else "provider_settled"
             ref = paid_lines[0]["provider_settlement_ref"]
+            status = paid_lines[0]["settlement_status"]
+            if status in final_settlement_statuses:
+                settled_gross += gross
+                settled_count += 1
+                state = "adjusted_after_settlement" if adjustments else "provider_settled"
+            else:
+                pending_gross += gross
+                state = "named_in_pending_settlement"
         states.append(PaymentSettlementState(
-            payment["id"], payment["provider_payment_ref"], gross, state, ref,
+            payment["id"], payment["provider_payment_ref"], gross, state, ref, status,
         ))
 
     confirmed_gross = sum((_dec(p["gross_amount"]) for p in confirmed), ZERO)
-    reported_total = _dec(settlement_row[0])
-    if settled_gross > confirmed_gross or (line_rows and settlement_row[1] == 0):
-        inconsistent = True
+    reported_total = sum((_dec(row["reported_amount"]) for row in settlement_rows), ZERO)
+    # A settlement whose lines were fetched must add up to what the provider reported.
+    for row in settlement_rows:
+        ref = row["provider_settlement_ref"]
+        if ref in lines_by_settlement and lines_by_settlement[ref] != _dec(row["reported_amount"]):
+            inconsistent = True
     if inconsistent:
         evidence = "inconsistent"
-    elif not confirmed and not line_rows and settlement_row[1] == 0:
+    elif not confirmed and not line_rows and not settlement_rows:
         evidence = "none"
     elif confirmed and settled_count == len(confirmed) and unmatched_count == 0:
         evidence = "complete"
@@ -169,8 +206,9 @@ def reconcile_merchant(
         tenant_id=tenant_id, provider=provider, environment=environment, currency=currency,
         confirmed_payment_count=len(confirmed), confirmed_gross=confirmed_gross,
         settled_payment_count=settled_count, settled_gross=settled_gross,
-        awaiting_settlement_gross=confirmed_gross - settled_gross,
-        provider_reported_settlement_total=reported_total, settlement_count=int(settlement_row[1]),
+        pending_settlement_gross=pending_gross,
+        awaiting_settlement_gross=confirmed_gross - settled_gross - pending_gross,
+        provider_reported_settlement_total=reported_total, settlement_count=len(settlement_rows),
         settlement_line_total=line_total, unmatched_line_count=unmatched_count,
         unmatched_line_total=unmatched_total,
         provisional_platform_fees=_dec(allocation_row[0]),

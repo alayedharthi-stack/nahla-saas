@@ -20,26 +20,32 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, FrozenSet, Mapping, Optional, Protocol, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
-from .models import MerchantPaymentWebhookDelivery
+from .models import MerchantPaymentProviderEvent, MerchantPaymentWebhookDelivery
 
 EVENT_CATEGORIES: FrozenSet[str] = frozenset({"unknown", "onboarding", "payment", "settlement", "payout"})
 TERMINAL_STATES: FrozenSet[str] = frozenset({"processed", "rejected", "failed", "ignored"})
 MAX_STORED_PAYLOAD_BYTES = 64 * 1024
 
-# Keys whose values are replaced before storage, matched case-insensitively at
-# any depth. Covers card data, provider secrets/tokens and bank identifiers.
-REDACTED_KEYS: FrozenSet[str] = frozenset({
-    "number", "card_number", "pan", "cvc", "cvv", "expiry", "exp_month", "exp_year",
-    "token", "secret", "secret_token", "secret_key", "api_key", "authorization",
-    "password", "iban", "account_number", "bank_account", "id_number", "national_id",
-    "cr_number", "document", "documents",
+# Redaction matches *normalised* keys (lower-case, non-alphanumerics removed)
+# at any depth. A key is redacted when it contains one of these stems
+# (card data, provider secrets/tokens/keys, bank and identity identifiers) or
+# equals one of the exact personal-data keys. Over-redaction is accepted: the
+# ledger needs identifiers and amounts for replay, never the values below.
+REDACTED_KEY_STEMS: FrozenSet[str] = frozenset({
+    "number", "pan", "cvc", "cvv", "expiry", "expmonth", "expyear", "token", "secret", "apikey",
+    "secretkey", "authorization", "password", "passcode", "iban", "account", "nationalid",
+    "idnumber", "crnumber", "document", "email", "phone", "mobile",
+})
+REDACTED_EXACT_KEYS: FrozenSet[str] = frozenset({
+    "key", "name", "firstname", "lastname", "fullname", "cardholder", "holdername", "address",
 })
 REDACTED = "[redacted]"
 
@@ -68,8 +74,8 @@ class SharedSecretAuthenticator:
     expected secret is held in memory only; it is never written by the ledger.
     """
 
-    expected_secret: str
-    extract: Callable[[bytes, Mapping[str, str]], Optional[str]]
+    expected_secret: str = field(repr=False)
+    extract: Callable[[bytes, Mapping[str, str]], Optional[str]] = field(repr=False)
     method: str = "shared_secret"
 
     def authenticate(self, *, raw_payload: bytes, headers: Mapping[str, str]) -> AuthenticationResult:
@@ -84,7 +90,7 @@ class SharedSecretAuthenticator:
 class HmacSha256Authenticator:
     """Hex HMAC-SHA256 of the raw body carried in a header."""
 
-    secret: str
+    secret: str = field(repr=False)
     header_name: str
     method: str = "hmac_sha256"
 
@@ -104,6 +110,13 @@ class RecordedDelivery:
     authentication_state: str
 
 
+def _sensitive_key(key: str) -> bool:
+    normalised = "".join(ch for ch in key.lower() if ch.isalnum())
+    if normalised in REDACTED_EXACT_KEYS:
+        return True
+    return any(stem in normalised for stem in REDACTED_KEY_STEMS)
+
+
 def redact_payload(raw_payload: bytes) -> str:
     """Return a JSON string with sensitive keys replaced; non-JSON bodies are not stored."""
     try:
@@ -114,7 +127,7 @@ def redact_payload(raw_payload: bytes) -> str:
     def scrub(node):
         if isinstance(node, dict):
             return {
-                key: (REDACTED if str(key).lower() in REDACTED_KEYS else scrub(value))
+                key: (REDACTED if _sensitive_key(str(key)) else scrub(value))
                 for key, value in node.items()
             }
         if isinstance(node, list):
@@ -164,32 +177,43 @@ def record_delivery(
     key = _delivery_key(provider, environment, payload_sha256)
     now = datetime.now(timezone.utc)
 
+    def replay(connection, existing) -> RecordedDelivery:
+        values = {"attempts": existing["attempts"] + 1, "last_received_at": now}
+        if auth.verified and existing["authentication_state"] != "verified":
+            values.update(authentication_state="verified", authentication_method=auth.method)
+        connection.execute(
+            sa.update(deliveries).where(deliveries.c.id == existing["id"]).values(**values)
+        )
+        return RecordedDelivery(
+            existing["id"], True, values["attempts"],
+            values.get("authentication_state", existing["authentication_state"]),
+        )
+
     with engine.begin() as connection:
         existing = connection.execute(
             sa.select(deliveries).where(deliveries.c.delivery_key == key)
         ).mappings().one_or_none()
         if existing is not None:
-            values = {"attempts": existing["attempts"] + 1, "last_received_at": now}
-            if auth.verified and existing["authentication_state"] != "verified":
-                values.update(authentication_state="verified", authentication_method=auth.method)
-            connection.execute(
-                sa.update(deliveries).where(deliveries.c.id == existing["id"]).values(**values)
-            )
-            return RecordedDelivery(
-                existing["id"], True, values["attempts"],
-                values.get("authentication_state", existing["authentication_state"]),
-            )
+            return replay(connection, existing)
         stored = redact_payload(raw_payload) if len(raw_payload) <= MAX_STORED_PAYLOAD_BYTES else None
-        delivery_id = connection.execute(
-            sa.insert(deliveries).values(
-                provider=provider, environment=environment, delivery_key=key,
-                payload_sha256=payload_sha256, payload_size=len(raw_payload),
-                redacted_payload=stored, authentication_state=auth_state,
-                authentication_method=auth.method if authenticator is not None else None,
-                event_category="unknown", processing_state="received", attempts=1,
-                received_at=now, last_received_at=now,
-            )
-        ).inserted_primary_key[0]
+        try:
+            with connection.begin_nested():
+                delivery_id = connection.execute(
+                    sa.insert(deliveries).values(
+                        provider=provider, environment=environment, delivery_key=key,
+                        payload_sha256=payload_sha256, payload_size=len(raw_payload),
+                        redacted_payload=stored, authentication_state=auth_state,
+                        authentication_method=auth.method if authenticator is not None else None,
+                        event_category="unknown", processing_state="received", attempts=1,
+                        received_at=now, last_received_at=now,
+                    )
+                ).inserted_primary_key[0]
+        except IntegrityError:
+            # A concurrent identical delivery won the insert: treat ours as its replay.
+            existing = connection.execute(
+                sa.select(deliveries).where(deliveries.c.delivery_key == key)
+            ).mappings().one()
+            return replay(connection, existing)
         return RecordedDelivery(delivery_id, False, 1, auth_state)
 
 
@@ -244,7 +268,20 @@ def admit_delivery(
         ).scalar_one_or_none()
         if other is not None:
             raise WebhookLedgerError("Provider event reference is already attributed to another tenant")
-        connection.execute(
+        if provider_event_id is not None:
+            events = MerchantPaymentProviderEvent.__table__
+            event = connection.execute(
+                sa.select(events.c.tenant_id, events.c.provider, events.c.environment, events.c.provider_event_ref)
+                .where(events.c.id == provider_event_id)
+            ).mappings().one_or_none()
+            if event is None or (
+                event["tenant_id"] != tenant_id
+                or event["provider"] != row["provider"]
+                or event["environment"] != row["environment"]
+                or event["provider_event_ref"] != provider_event_ref
+            ):
+                raise WebhookLedgerError("Provider event row does not belong to this tenant and event")
+        updated = connection.execute(
             sa.update(deliveries).where(
                 deliveries.c.id == delivery_id, deliveries.c.processing_state == "received"
             ).values(
@@ -252,7 +289,9 @@ def admit_delivery(
                 event_category=event_category, processing_state="admitted",
                 provider_event_id=provider_event_id,
             )
-        )
+        ).rowcount
+        if updated != 1:
+            raise WebhookLedgerError("Delivery state changed concurrently; retry")
 
 
 def complete_delivery(
@@ -276,13 +315,17 @@ def complete_delivery(
             raise WebhookLedgerError("Delivery already has a terminal outcome")
         if outcome == "processed" and state != "admitted":
             raise WebhookLedgerError("Only an admitted delivery can be marked processed")
-        connection.execute(
-            sa.update(deliveries).where(deliveries.c.id == delivery_id).values(
+        updated = connection.execute(
+            sa.update(deliveries).where(
+                deliveries.c.id == delivery_id, deliveries.c.processing_state == state
+            ).values(
                 processing_state=outcome,
                 outcome_reason=reason.strip()[:255] if reason else None,
                 processed_at=now,
             )
-        )
+        ).rowcount
+        if updated != 1:
+            raise WebhookLedgerError("Delivery state changed concurrently; retry")
 
 
 def tenant_deliveries(engine: Engine, *, tenant_id: int) -> Sequence[Mapping]:

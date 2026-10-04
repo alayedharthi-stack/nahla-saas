@@ -180,6 +180,11 @@ class MerchantPaymentSettlement(PaymentBase):
             name="fk_mps_profile",
         ),
         UniqueConstraint("provider", "environment", "provider_settlement_ref", name="uq_mps_provider_settlement"),
+        # Tenant-bound key so settlement lines can reference a settlement only
+        # together with its tenant. A unique index (not a constraint) so that
+        # 0116 can add it to a database that already carries 0115.
+        Index("uq_mps_tenant_settlement", "tenant_id", "provider", "environment", "provider_settlement_ref",
+              unique=True),
         Index("ix_mps_tenant_observed", "tenant_id", "provider_observed_at"),
         CheckConstraint("environment IN ('test', 'live')", name="ck_mps_environment"),
         CheckConstraint("length(currency) = 3", name="ck_mps_currency"),
@@ -405,10 +410,10 @@ class MerchantPaymentSettlementLine(PaymentBase):
     __tablename__ = "merchant_payment_settlement_lines"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["provider", "environment", "provider_settlement_ref"],
-            ["merchant_payment_settlements.provider", "merchant_payment_settlements.environment",
-             "merchant_payment_settlements.provider_settlement_ref"],
-            name="fk_mpsl_settlement",
+            ["tenant_id", "provider", "environment", "provider_settlement_ref"],
+            ["merchant_payment_settlements.tenant_id", "merchant_payment_settlements.provider",
+             "merchant_payment_settlements.environment", "merchant_payment_settlements.provider_settlement_ref"],
+            name="fk_mpsl_tenant_settlement",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "transaction_id"],

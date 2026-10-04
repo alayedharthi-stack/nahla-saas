@@ -54,13 +54,27 @@ path imports them.
   provider-reported settlements idempotently (amount, currency and recipient
   may never change; a status change is a newer observation) and settlement
   *lines*, linking a `payment` line to an observed payment only when that
-  payment belongs to the same tenant. `reconciliation.py` labels every figure
-  by its evidence: `settled_gross` counts only payments named by a provider
-  settlement line; everything else is `awaiting_settlement_gross`,
-  `provider_reported_settlement_total`, `unmatched_line_total` or
-  `provisional_*`. `evidence_state` becomes `inconsistent` when the figures
-  disagree, so no dashboard can present a number as final by accident. There is
-  no balance field.
+  payment belongs to the same tenant, and the line table is tenant-bound to its
+  settlement at the database (`uq_mps_tenant_settlement`, added by 0116 to a
+  database that already carries 0115). `reconciliation.py` labels every figure
+  by its evidence: `settled_gross` counts only payments named by a `payment`
+  line of a settlement whose provider status is final
+  (`FINAL_SETTLEMENT_STATUSES`, currently `transferred` from the public
+  settlement documentation; the agreement may extend it); a line of a pending
+  settlement is `pending_settlement_gross`; everything else is
+  `awaiting_settlement_gross`, `provider_reported_settlement_total`,
+  `unmatched_line_total` or `provisional_*`. `evidence_state` becomes
+  `inconsistent` when a payment line disagrees with the confirmed gross or a
+  settlement's fetched lines do not add up to its reported amount, so no
+  dashboard can present a number as final by accident. There is no balance
+  field.
+
+  Relationship to PR #1191 (Draft, not merged): its `read_model.py` summary
+  (confirmed gross, provisional fees, reported settlements) and
+  `webhook_events.py` admission (approved profiles only, shared-secret check)
+  are not re-implemented here. Whichever lands second should import the other's
+  totals/secret helper rather than keep two copies; the delivery ledger and the
+  settlement-line reconciliation have no counterpart in #1191.
 
 Tests: `tests/test_merchant_payments_readiness.py` (two unrelated generic
 merchants on one provider environment; tenant isolation, replay/dedup,

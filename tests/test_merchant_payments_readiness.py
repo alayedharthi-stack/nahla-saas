@@ -143,9 +143,17 @@ def test_migration_0116_requires_0115_then_creates_only_readiness_tables(monkeyp
         with pytest.raises(RuntimeError, match="0115"):
             module.upgrade()
         PaymentBase.metadata.create_all(connection, tables=list(PAYMENT_TABLES))
+        # Simulate a database whose 0115 was applied before the tenant-bound settlement index existed.
+        connection.execute(sa.text("DROP INDEX uq_mps_tenant_settlement"))
         module.upgrade()
         names = set(sa.inspect(connection).get_table_names())
         assert {table.name for table in ALL_PAYMENT_TABLES}.issubset(names)
+        settlement_indexes = {
+            index["name"]: index for index in sa.inspect(connection).get_indexes("merchant_payment_settlements")
+        }
+        assert settlement_indexes["uq_mps_tenant_settlement"]["unique"]
+        assert settlement_indexes["uq_mps_tenant_settlement"]["column_names"] == [
+            "tenant_id", "provider", "environment", "provider_settlement_ref"]
         with pytest.raises(RuntimeError, match="already exists"):
             module.upgrade()
         with pytest.raises(RuntimeError, match="must not be dropped"):
@@ -347,7 +355,7 @@ def test_webhook_deliveries_are_durable_deduplicated_redacted_and_authenticated(
             MerchantPaymentWebhookDelivery.__table__.c.id == first.delivery_id)).mappings().one()
     stored = json.loads(row["redacted_payload"])
     assert stored["secret_token"] == "[redacted]" and stored["data"]["source"]["number"] == "[redacted]"
-    assert stored["data"]["source"]["name"] == "A" and stored["data"]["amount"] == 10000
+    assert stored["data"]["source"]["name"] == "[redacted]" and stored["data"]["amount"] == 10000
     assert "4111111111111111" not in row["redacted_payload"] and "s3cret" not in row["redacted_payload"]
     assert row["payload_sha256"] == hashlib.sha256(body).hexdigest() and row["tenant_id"] is None
 
@@ -375,6 +383,17 @@ def test_webhook_deliveries_are_durable_deduplicated_redacted_and_authenticated(
     )
     assert downgrade_attempt.authentication_state == "verified"
 
+    assert "s3cret" not in repr(auth) and "hs" not in repr(
+        webhook_ledger.HmacSha256Authenticator(secret="hs", header_name="X-Signature"))
+    stems = json.loads(webhook_ledger.redact_payload(json.dumps({
+        "cardNumber": "4111111111111111", "access_token": "tok", "api_secret": "s", "Email": "a@b.c",
+        "card": {"cvv2": "123", "name": "Cardholder"}, "amount": 10000, "order_id": "o-1", "status": "paid",
+    }).encode()))
+    assert stems["cardNumber"] == stems["access_token"] == stems["api_secret"] == stems["Email"] == "[redacted]"
+    assert stems["card"] == {"cvv2": "[redacted]", "name": "[redacted]"}
+    assert (stems["amount"], stems["order_id"], stems["status"]) == (10000, "o-1", "paid")
+    assert "non-JSON" in webhook_ledger.redact_payload(b"\x00binary")
+
     hmac_body = b'{"id":"evt-4"}'
     signature = hmac.new(b"hs", hmac_body, hashlib.sha256).hexdigest()
     signed = webhook_ledger.record_delivery(
@@ -386,6 +405,74 @@ def test_webhook_deliveries_are_durable_deduplicated_redacted_and_authenticated(
     with pytest.raises(webhook_ledger.WebhookLedgerError):
         webhook_ledger.record_delivery(engine, provider="moyasar", environment="test", raw_payload=b"",
                                        headers={}, authenticator=None)
+
+
+def test_concurrent_identical_delivery_is_a_replay_not_an_error(engine, monkeypatch):
+    auth = webhook_ledger.SharedSecretAuthenticator("k", lambda *_: "k")
+    body = b'{"id":"evt-race"}'
+    real_select = sa.select
+    calls = {"n": 0}
+
+    def racing_select(*args, **kwargs):
+        # The first SELECT (dedup lookup) sees nothing; inject the competing row before our INSERT.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with engine.begin() as other:
+                other.execute(sa.insert(MerchantPaymentWebhookDelivery).values(
+                    provider="moyasar", environment="test",
+                    delivery_key=webhook_ledger._delivery_key("moyasar", "test", hashlib.sha256(body).hexdigest()),
+                    payload_sha256=hashlib.sha256(body).hexdigest(), payload_size=len(body),
+                    authentication_state="verified", authentication_method="shared_secret",
+                    processing_state="received", attempts=1, received_at=NOW, last_received_at=NOW,
+                ))
+            return real_select(*args, **kwargs).where(sa.literal(False))
+        return real_select(*args, **kwargs)
+
+    monkeypatch.setattr(webhook_ledger.sa, "select", racing_select)
+    result = webhook_ledger.record_delivery(engine, provider="moyasar", environment="test",
+                                            raw_payload=body, headers={}, authenticator=auth)
+    assert result.replay and result.attempts == 2
+    with engine.connect() as connection:
+        assert connection.execute(sa.select(sa.func.count()).select_from(
+            MerchantPaymentWebhookDelivery.__table__)).scalar_one() == 1
+
+
+def test_admission_refuses_foreign_provider_event_row_and_stale_state(engine):
+    from backend.payments.models import MerchantPaymentProviderEvent
+    auth = webhook_ledger.SharedSecretAuthenticator("k", lambda *_: "k")
+    with engine.begin() as connection:
+        mine = connection.execute(sa.insert(MerchantPaymentProviderEvent).values(
+            **SCOPE1, provider_event_ref="evt-1", event_type="payment_paid", payload_sha256="a" * 64,
+            authenticated_at=NOW)).inserted_primary_key[0]
+        theirs = connection.execute(sa.insert(MerchantPaymentProviderEvent).values(
+            **SCOPE2, provider_event_ref="evt-2", event_type="payment_paid", payload_sha256="b" * 64,
+            authenticated_at=NOW)).inserted_primary_key[0]
+    delivery = webhook_ledger.record_delivery(engine, provider="moyasar", environment="test",
+                                              raw_payload=b'{"id":"evt-1"}', headers={}, authenticator=auth)
+    for bad_event in (theirs, 999_999):
+        with pytest.raises(webhook_ledger.WebhookLedgerError, match="does not belong"):
+            webhook_ledger.admit_delivery(engine, delivery_id=delivery.delivery_id, tenant_id=1,
+                                          provider_event_ref="evt-1", event_type="payment_paid",
+                                          event_category="payment", provider_event_id=bad_event)
+    with pytest.raises(webhook_ledger.WebhookLedgerError, match="does not belong"):
+        webhook_ledger.admit_delivery(engine, delivery_id=delivery.delivery_id, tenant_id=1,
+                                      provider_event_ref="evt-other", event_type="payment_paid",
+                                      event_category="payment", provider_event_id=mine)
+    webhook_ledger.admit_delivery(engine, delivery_id=delivery.delivery_id, tenant_id=1,
+                                  provider_event_ref="evt-1", event_type="payment_paid",
+                                  event_category="payment", provider_event_id=mine)
+    assert webhook_ledger.tenant_deliveries(engine, tenant_id=1)[0]["provider_event_id"] == mine
+
+    # A completer that read a stale state loses: the first terminal outcome stands.
+    deliveries = MerchantPaymentWebhookDelivery.__table__
+    with engine.begin() as connection:
+        connection.execute(sa.update(deliveries).where(deliveries.c.id == delivery.delivery_id).values(
+            processing_state="failed", outcome_reason="worker crashed", processed_at=NOW))
+    with pytest.raises(webhook_ledger.WebhookLedgerError, match="terminal"):
+        webhook_ledger.complete_delivery(engine, delivery_id=delivery.delivery_id, outcome="processed")
+    with engine.connect() as connection:
+        row = connection.execute(sa.select(deliveries).where(deliveries.c.id == delivery.delivery_id)).mappings().one()
+    assert (row["processing_state"], row["outcome_reason"]) == ("failed", "worker crashed")
 
 
 def test_webhook_admission_keeps_tenant_ownership_and_terminal_outcomes(engine):
@@ -539,6 +626,8 @@ def test_settlement_lines_are_the_only_settlement_evidence_and_stay_tenant_bound
     assert after.evidence_state == "partial"
     states = {p.provider_payment_ref: (p.settlement_state, p.settlement_reference) for p in after.payments}
     assert states == {"pay-a": ("provider_settled", "stl-1"), "pay-b": ("awaiting_provider_settlement", None)}
+    assert {p.settlement_provider_status for p in after.payments} == {"transferred", None}
+    assert after.pending_settlement_gross == Decimal("0.00")
     assert not hasattr(after, "balance") and not hasattr(after, "available_balance")
 
     # The perfume store sees none of the shoe store's evidence.
@@ -548,7 +637,7 @@ def test_settlement_lines_are_the_only_settlement_evidence_and_stay_tenant_bound
     assert other.provisional_platform_fees == Decimal("0.00")
 
     # A shoe-store settlement line naming the perfume store's payment is refused and writes nothing.
-    provider.settlements.append(_settlement("stl-2", "300.00"))
+    provider.settlements.append(_settlement("stl-2", "350.00"))
     provider.lines.append(_line("stl-2", "ln-3", "payment", "300.00", "pay-p"))
     _run(observe_settlements(engine, tenant_id=1, environment="test", provider=provider))
     with pytest.raises(SettlementObservationConflict, match="another tenant"):
@@ -567,7 +656,8 @@ def test_settlement_lines_are_the_only_settlement_evidence_and_stay_tenant_bound
     assert unmatched.linked_to_payments == 0
     report = reconcile_merchant(engine, **SCOPE1)
     assert report.unmatched_line_count == 1 and report.unmatched_line_total == Decimal("300.00")
-    assert report.settled_gross == Decimal("100.00") and report.evidence_state == "partial"
+    # Lines fetched so far (300.00) do not add up to the reported 350.00: flagged, not hidden.
+    assert report.settled_gross == Decimal("100.00") and report.evidence_state == "inconsistent"
 
     # Completing the remaining payment with a provider line yields 'complete' only when nothing is unmatched.
     provider.lines = [l for l in provider.lines if l.line_reference != "ln-4"]
@@ -578,6 +668,69 @@ def test_settlement_lines_are_the_only_settlement_evidence_and_stay_tenant_bound
     assert complete.settled_gross == Decimal("150.00") and complete.awaiting_settlement_gross == Decimal("0.00")
     # ln-4 remains stored (evidence is never deleted) so the report stays partial, not complete.
     assert complete.unmatched_line_count == 1 and complete.evidence_state == "partial"
+
+
+def test_pending_settlement_lines_never_count_as_settled(engine):
+    pid = _confirmed_payment(engine, SCOPE1, "pay-p1", "120.00")
+    provider = FakeSettlementsProvider(
+        [_settlement("stl-pending", "120.00", status="pending")],
+        [_line("stl-pending", "ln-1", "payment", "120.00", "pay-p1")],
+    )
+    _run(observe_settlements(engine, tenant_id=1, environment="test", provider=provider))
+    _run(observe_settlement_lines(engine, tenant_id=1, environment="test",
+                                  settlement_reference="stl-pending", provider=provider))
+    report = reconcile_merchant(engine, **SCOPE1)
+    assert report.settled_gross == Decimal("0.00") and report.settled_payment_count == 0
+    assert report.pending_settlement_gross == Decimal("120.00")
+    assert report.awaiting_settlement_gross == Decimal("0.00")
+    assert report.evidence_state == "partial"
+    assert report.payments[0].settlement_state == "named_in_pending_settlement"
+    assert report.payments[0].settlement_provider_status == "pending"
+    assert report.payments[0].transaction_id == pid
+    # Only the provider's final status flips it, and only through a newer observation.
+    provider.settlements = [_settlement("stl-pending", "120.00", status="transferred")]
+    _run(observe_settlements(engine, tenant_id=1, environment="test", provider=provider))
+    final = reconcile_merchant(engine, **SCOPE1)
+    assert final.settled_gross == Decimal("120.00") and final.pending_settlement_gross == Decimal("0.00")
+    assert final.evidence_state == "complete"
+    # An unknown status word is pending, not settled, unless the caller's closed set says otherwise.
+    provider.settlements = [_settlement("stl-pending", "120.00", status="completed")]
+    _run(observe_settlements(engine, tenant_id=1, environment="test", provider=provider))
+    assert reconcile_merchant(engine, **SCOPE1).settled_gross == Decimal("0.00")
+    assert reconcile_merchant(
+        engine, **SCOPE1, final_settlement_statuses=frozenset({"completed"})
+    ).settled_gross == Decimal("120.00")
+
+
+def test_settlement_lines_must_add_up_to_the_reported_settlement(engine):
+    _confirmed_payment(engine, SCOPE1, "pay-s", "40.00")
+    provider = FakeSettlementsProvider(
+        [_settlement("stl-s", "40.00")],
+        [_line("stl-s", "l1", "payment", "40.00", "pay-s"), _line("stl-s", "l2", "fee", "-1.00")],
+    )
+    _run(observe_settlements(engine, tenant_id=1, environment="test", provider=provider))
+    _run(observe_settlement_lines(engine, tenant_id=1, environment="test",
+                                  settlement_reference="stl-s", provider=provider))
+    assert reconcile_merchant(engine, **SCOPE1).evidence_state == "inconsistent"  # 39.00 != 40.00
+
+
+def test_settlement_lines_are_tenant_bound_at_the_database(engine):
+    with engine.begin() as connection:
+        connection.execute(sa.insert(MerchantPaymentSettlement).values(
+            **SCOPE1, provider_settlement_ref="stl-db", recipient_ref="r", currency="SAR",
+            reported_amount=Decimal("10.00"), provider_status="transferred", provider_observed_at=NOW,
+        ))
+    with engine.connect() as connection:
+        with pytest.raises(IntegrityError), connection.begin():
+            connection.execute(sa.insert(MerchantPaymentSettlementLine).values(
+                **SCOPE2, provider_settlement_ref="stl-db", provider_line_ref="l1", line_type="fee",
+                currency="SAR", amount=Decimal("-1.00"), provider_observed_at=NOW,
+            ))  # the perfume store cannot attach a line to the shoe store's settlement
+        with connection.begin():
+            connection.execute(sa.insert(MerchantPaymentSettlementLine).values(
+                **SCOPE1, provider_settlement_ref="stl-db", provider_line_ref="l1", line_type="fee",
+                currency="SAR", amount=Decimal("-1.00"), provider_observed_at=NOW,
+            ))
 
 
 def test_reconciliation_flags_inconsistent_evidence_and_empty_scope(engine):

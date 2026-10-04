@@ -15,6 +15,7 @@ from typing import Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from .fees import CENT
 from .models import (
@@ -103,47 +104,57 @@ async def observe_settlements(
 
     settlements = MerchantPaymentSettlement.__table__
     now = datetime.now(timezone.utc)
+    try:
+        with engine.begin() as connection:
+            return _write_settlements(connection, settlements, tenant_id, environment, provider.name,
+                                      merchant_ref, reported, now)
+    except IntegrityError as exc:
+        # A concurrent observation (possibly another tenant's) won the unique key.
+        raise SettlementObservationConflict("Concurrent settlement observation conflicts; retry") from exc
+
+
+def _write_settlements(connection, settlements, tenant_id, environment, provider_name, merchant_ref,
+                       reported, now) -> SettlementObservation:
     ids, inserted, updated = [], 0, 0
-    with engine.begin() as connection:
-        current_ref = _approved_merchant_ref(
-            connection, tenant_id=tenant_id, provider=provider.name, environment=environment
-        )
-        if current_ref != merchant_ref:
-            raise SettlementObservationConflict("Merchant approval changed")
-        for item in reported:
-            existing = connection.execute(
-                sa.select(settlements).where(
-                    settlements.c.provider == provider.name,
-                    settlements.c.environment == environment,
-                    settlements.c.provider_settlement_ref == item.reference,
+    current_ref = _approved_merchant_ref(
+        connection, tenant_id=tenant_id, provider=provider_name, environment=environment
+    )
+    if current_ref != merchant_ref:
+        raise SettlementObservationConflict("Merchant approval changed")
+    for item in reported:
+        existing = connection.execute(
+            sa.select(settlements).where(
+                settlements.c.provider == provider_name,
+                settlements.c.environment == environment,
+                settlements.c.provider_settlement_ref == item.reference,
+            )
+        ).mappings().one_or_none()
+        if existing is None:
+            ids.append(connection.execute(
+                sa.insert(settlements).values(
+                    tenant_id=tenant_id, provider=provider_name, environment=environment,
+                    provider_settlement_ref=item.reference, recipient_ref=item.recipient_reference,
+                    currency=item.currency, reported_amount=item.amount,
+                    provider_status=item.status, provider_observed_at=now,
                 )
-            ).mappings().one_or_none()
-            if existing is None:
-                ids.append(connection.execute(
-                    sa.insert(settlements).values(
-                        tenant_id=tenant_id, provider=provider.name, environment=environment,
-                        provider_settlement_ref=item.reference, recipient_ref=item.recipient_reference,
-                        currency=item.currency, reported_amount=item.amount,
-                        provider_status=item.status, provider_observed_at=now,
-                    )
-                ).inserted_primary_key[0])
-                inserted += 1
-                continue
-            if (
-                existing["tenant_id"] != tenant_id
-                or Decimal(existing["reported_amount"]) != item.amount
-                or existing["currency"] != item.currency
-                or (existing["recipient_ref"] or "") != item.recipient_reference
-            ):
-                raise SettlementObservationConflict("Existing settlement scope, amount or recipient conflicts")
-            if existing["provider_status"] != item.status:
-                connection.execute(
-                    sa.update(settlements).where(settlements.c.id == existing["id"]).values(
-                        provider_status=item.status, provider_observed_at=now,
-                    )
+            ).inserted_primary_key[0])
+            inserted += 1
+            continue
+        if (
+            existing["tenant_id"] != tenant_id
+            or Decimal(existing["reported_amount"]) != item.amount
+            or existing["currency"] != item.currency
+            or (existing["recipient_ref"] or "") != item.recipient_reference
+        ):
+            raise SettlementObservationConflict("Existing settlement scope, amount or recipient conflicts")
+        if existing["provider_status"] != item.status:
+            connection.execute(
+                sa.update(settlements).where(settlements.c.id == existing["id"]).values(
+                    provider_status=item.status, provider_observed_at=now,
                 )
-                updated += 1
-            ids.append(existing["id"])
+            )
+            updated += 1
+        ids.append(existing["id"])
     return SettlementObservation(tuple(ids), inserted, updated)
 
 
@@ -166,8 +177,6 @@ async def observe_settlement_lines(
     if tenant_id <= 0 or environment not in ("test", "live") or not settlement_reference:
         raise ValueError("Invalid settlement line scope")
     settlements = MerchantPaymentSettlement.__table__
-    lines = MerchantPaymentSettlementLine.__table__
-    payments = MerchantPaymentTransaction.__table__
 
     with engine.connect() as connection:
         merchant_ref = _approved_merchant_ref(
@@ -198,6 +207,17 @@ async def observe_settlement_lines(
             raise SettlementObservationConflict("Invalid provider settlement line evidence")
 
     now = datetime.now(timezone.utc)
+    try:
+        return _write_settlement_lines(engine, tenant_id, environment, settlement_reference, provider.name,
+                                       reported, now)
+    except IntegrityError as exc:
+        raise SettlementObservationConflict("Concurrent settlement line observation conflicts; retry") from exc
+
+
+def _write_settlement_lines(engine, tenant_id, environment, settlement_reference, provider_name,
+                            reported, now) -> SettlementLineObservation:
+    lines = MerchantPaymentSettlementLine.__table__
+    payments = MerchantPaymentTransaction.__table__
     inserted, replayed, linked = 0, 0, 0
     with engine.begin() as connection:
         for line in reported:
@@ -205,7 +225,7 @@ async def observe_settlement_lines(
             if line.payment_reference:
                 owner = connection.execute(
                     sa.select(payments.c.id, payments.c.tenant_id, payments.c.verification_state).where(
-                        payments.c.provider == provider.name,
+                        payments.c.provider == provider_name,
                         payments.c.environment == environment,
                         payments.c.provider_payment_ref == line.payment_reference,
                     )
@@ -219,7 +239,7 @@ async def observe_settlement_lines(
                         transaction_id = owner["id"]
             existing = connection.execute(
                 sa.select(lines).where(
-                    lines.c.provider == provider.name,
+                    lines.c.provider == provider_name,
                     lines.c.environment == environment,
                     lines.c.provider_settlement_ref == settlement_reference,
                     lines.c.provider_line_ref == line.line_reference,
@@ -243,7 +263,7 @@ async def observe_settlement_lines(
                 continue
             connection.execute(
                 sa.insert(lines).values(
-                    tenant_id=tenant_id, provider=provider.name, environment=environment,
+                    tenant_id=tenant_id, provider=provider_name, environment=environment,
                     provider_settlement_ref=settlement_reference, provider_line_ref=line.line_reference,
                     line_type=line.line_type, transaction_id=transaction_id,
                     provider_payment_ref=line.payment_reference, currency=line.currency,

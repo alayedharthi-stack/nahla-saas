@@ -5,7 +5,11 @@ Revises: 0115
 
 Extends the payments branch only. It creates the four readiness relations
 (activation switch, onboarding audit, webhook delivery ledger, settlement
-lines) and leaves the six 0115 foundation tables untouched. Like 0115 it is
+lines) and adds one tenant-bound unique index to ``merchant_payment_settlements``
+(``uq_mps_tenant_settlement``) when a database created with the original 0115
+DDL lacks it; the 0115 tables are otherwise untouched. That index is implied by
+the existing ``(provider, environment, provider_settlement_ref)`` key, so it can
+never conflict with stored rows. Like 0115 it is
 never part of normal bootstrap (pinned to 0093) and must be applied explicitly,
 after a database review, in a target that already carries 0115. Code
 deployment cannot create these tables: the metadata is separate from the
@@ -21,7 +25,12 @@ from alembic import op
 
 # Alembic is normally invoked from database/, and loads revisions before env.py.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
-from backend.payments.models import PAYMENT_READINESS_TABLES, PAYMENT_TABLES, PaymentBase
+from backend.payments.models import (
+    PAYMENT_READINESS_TABLES,
+    PAYMENT_TABLES,
+    MerchantPaymentSettlement,
+    PaymentBase,
+)
 
 
 revision = "0116"
@@ -45,6 +54,11 @@ def upgrade() -> None:
             "Merchant payment readiness schema already exists; inspect it before applying 0116: "
             + ", ".join(sorted(overlap))
         )
+    settlements = MerchantPaymentSettlement.__table__
+    tenant_index = next(index for index in settlements.indexes if index.name == "uq_mps_tenant_settlement")
+    present = {index["name"] for index in sa.inspect(bind).get_indexes(settlements.name)}
+    if tenant_index.name not in present:
+        tenant_index.create(bind)
     PaymentBase.metadata.create_all(bind, tables=list(PAYMENT_READINESS_TABLES), checkfirst=False)
 
 
