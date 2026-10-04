@@ -1,5 +1,13 @@
 # Moyasar readiness gates
 
+> **Conflict to resolve before any design relies on it (noted 2026-10-04).** The
+> "checkout splits" item below comes from earlier public documentation. PR #1194
+> (`docs/payments/moyasar-platform-api-readiness.md`) records a 2026-10-03
+> statement from Moyasar that Marketplace split — one payment split across
+> merchants — is not supported at present. Neither statement was re-verified for
+> this note; until the account-specific agreement settles it, no per-payment
+> provider split is designed, stored or displayed.
+
 Nahlah Payments remains dormant until the account-specific Marketplace contract
 and scopes are confirmed. Public Moyasar documentation currently supports the
 following design facts:
