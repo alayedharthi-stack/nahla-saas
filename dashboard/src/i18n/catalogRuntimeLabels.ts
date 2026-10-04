@@ -42,6 +42,6 @@ export function resolveCatalogIssue(
   const mapped = code ? drawer.metaSyncIssues[code] : undefined
   if (mapped) return mapped
   if (issue.message_ar && issue.message_ar.trim()) return issue.message_ar
-  if (code) return lang === 'en' ? `${drawer.metaSyncIssueFallback} (${code})` : `${drawer.metaSyncIssueFallback} (${code})`
+  if (code) return `${drawer.metaSyncIssueFallback} (${code})`
   return drawer.metaSyncIssueFallback
 }

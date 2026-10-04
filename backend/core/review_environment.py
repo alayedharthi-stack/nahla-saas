@@ -70,12 +70,24 @@ DEFAULT_REVIEW_DB_MARKER = "catalog-review"
 
 #: PostgreSQL custom setting read with ``current_setting(..., true)``.
 DB_MARKER_SETTING = "nahla.environment"
-DB_MARKER_SQL = "SELECT current_setting('nahla.environment', true)"
+DB_MARKER_SQL = (
+    "SELECT current_setting('nahla.environment', true) AS marker, "
+    "(SELECT source FROM pg_settings WHERE name = 'nahla.environment') AS source, "
+    "current_database() AS database"
+)
+#: ``pg_settings.source`` for a setting applied by ``ALTER DATABASE … SET``.
+DB_MARKER_EXPECTED_SOURCE = "database"
 
 _PRODUCTION_MARKERS = ("production", "prod", "live")
 _FORBIDDEN_DB_HOST_FRAGMENTS = ("postgres-staging",)
 _PRODUCTION_DASHBOARD_HOSTS = ("app.nahlah.ai", "www.nahlah.ai", "nahlah.ai")
 _POSTGRES_SCHEMES = frozenset({"postgresql", "postgresql+psycopg2", "postgresql+psycopg", "postgres"})
+#: DSN query parameters that may appear. Anything else (``host``, ``hostaddr``,
+#: ``options``, ``service``, ``passfile``, ``dbname`` …) can redirect the connection
+#: or forge the session marker and is refused.
+_ALLOWED_DSN_QUERY_KEYS = frozenset({"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"})
+#: libpq environment variables that override the DSN host/options. Refused in review mode.
+_FORBIDDEN_LIBPQ_ENV = ("PGHOST", "PGHOSTADDR", "PGPORT", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGPASSFILE", "PGDATABASE")
 
 # Stable failure codes (never carry values).
 F_PROJECT_MISSING = "review_project_missing"
@@ -90,6 +102,10 @@ F_DB_HOST_MISSING = "database_host_missing"
 F_DB_HOST_FORBIDDEN = "database_host_forbidden"
 F_DB_HOST_NOT_ALLOWLISTED = "database_host_not_allowlisted"
 F_DB_NAME_MISMATCH = "database_name_mismatch"
+F_DB_QUERY_REJECTED = "database_url_query_rejected"
+F_LIBPQ_ENV_OVERRIDE = "libpq_environment_override"
+F_DB_MARKER_SOURCE = "database_marker_source_rejected"
+F_DB_IDENTITY_MISMATCH = "database_identity_mismatch"
 F_DB_MARKER_UNREADABLE = "database_marker_unreadable"
 F_DB_MARKER_MISSING = "database_marker_missing"
 F_DB_MARKER_MISMATCH = "database_marker_mismatch"
@@ -194,24 +210,43 @@ def check_database_binding(env: Optional[Mapping[str, str]] = None) -> List[str]
     want_name = (env.get(REVIEW_DB_NAME_ENV) or "").strip()
     if want_name and str(parsed.database or "").strip() != want_name:
         failures.append(F_DB_NAME_MISMATCH)
+    query = dict(getattr(parsed, "query", {}) or {})
+    if any(str(k).lower() not in _ALLOWED_DSN_QUERY_KEYS for k in query):
+        failures.append(F_DB_QUERY_REJECTED)
+    if any((env.get(name) or "").strip() for name in _FORBIDDEN_LIBPQ_ENV):
+        failures.append(F_LIBPQ_ENV_OVERRIDE)
     return failures
 
 
 def _check_dashboard_url(env: Mapping[str, str]) -> List[str]:
-    raw = (env.get("DASHBOARD_URL") or "").strip().lower().rstrip("/")
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    raw = (env.get("DASHBOARD_URL") or "").strip()
     if not raw:
         return [F_DASHBOARD_URL_MISSING]
-    host = raw.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
-    if host in _PRODUCTION_DASHBOARD_HOSTS:
+    try:
+        host = (urlparse(raw).hostname or "").lower().rstrip(".")
+    except ValueError:
+        host = ""
+    if not host or host in _PRODUCTION_DASHBOARD_HOSTS:
         return [F_DASHBOARD_URL_PRODUCTION]
     return []
 
 
-def read_database_marker(database_url: str) -> Optional[str]:
-    """Read ``current_setting('nahla.environment', true)`` with a throw-away connection.
+@dataclass(frozen=True)
+class MarkerReading:
+    """What the connected database says about itself (no secrets)."""
 
-    Returns ``None`` when the setting is unset. Raises on connection failure
-    (the caller maps that to ``database_marker_unreadable``). Read-only.
+    marker: Optional[str]
+    source: Optional[str]
+    database: Optional[str]
+
+
+def read_database_marker(database_url: str) -> MarkerReading:
+    """Read the identity marker, its ``pg_settings.source`` and ``current_database()``.
+
+    One read-only statement on a throw-away connection. Raises on connection
+    failure (the caller maps that to ``database_marker_unreadable``).
     """
     from sqlalchemy import create_engine, text  # noqa: PLC0415
     from sqlalchemy.pool import NullPool  # noqa: PLC0415
@@ -219,11 +254,25 @@ def read_database_marker(database_url: str) -> Optional[str]:
     engine = create_engine(database_url, poolclass=NullPool, future=True, connect_args={"connect_timeout": 10})
     try:
         with engine.connect() as conn:
-            value = conn.execute(text(DB_MARKER_SQL)).scalar()
+            row = conn.execute(text(DB_MARKER_SQL)).first()
     finally:
         engine.dispose()
-    value = str(value or "").strip()
-    return value or None
+    if row is None:
+        return MarkerReading(None, None, None)
+    marker, source, database = (str(v or "").strip() or None for v in (row[0], row[1], row[2]))
+    return MarkerReading(marker, source, database)
+
+
+def _coerce_reading(value: Any) -> MarkerReading:
+    if isinstance(value, MarkerReading):
+        return value
+    if value is None:
+        return MarkerReading(None, None, None)
+    if isinstance(value, str):  # legacy readers: a bare marker is treated as database-sourced
+        return MarkerReading(value.strip() or None, DB_MARKER_EXPECTED_SOURCE, None)
+    if isinstance(value, Mapping):
+        return MarkerReading(value.get("marker"), value.get("source"), value.get("database"))
+    return MarkerReading(None, None, None)
 
 
 def check_database_marker(
@@ -238,14 +287,25 @@ def check_database_marker(
         return [F_DB_URL_MISSING]
     reader = marker_reader or read_database_marker
     try:
-        marker = reader(raw)
+        reading = _coerce_reading(reader(raw))
     except Exception:  # noqa: BLE001 — connection errors are reported as a code; the DSN is never echoed
         return [F_DB_MARKER_UNREADABLE]
-    if not marker:
+    if not reading.marker:
         return [F_DB_MARKER_MISSING]
-    if marker != expected_db_marker(env):
-        return [F_DB_MARKER_MISMATCH]
-    return []
+    failures: List[str] = []
+    if reading.marker != expected_db_marker(env):
+        failures.append(F_DB_MARKER_MISMATCH)
+    # The marker must come from ALTER DATABASE … SET (source='database'); a
+    # session-level SET or a forged ``options=-c …`` yields 'session'/'client'.
+    if (reading.source or "") != DB_MARKER_EXPECTED_SOURCE:
+        failures.append(F_DB_MARKER_SOURCE)
+    want_name = (env.get(REVIEW_DB_NAME_ENV) or "").strip()
+    parsed = _parse_dsn(raw)
+    dsn_name = str(getattr(parsed, "database", "") or "").strip() if parsed is not None else ""
+    expected_name = want_name or dsn_name
+    if expected_name and reading.database and reading.database != expected_name:
+        failures.append(F_DB_IDENTITY_MISMATCH)
+    return failures
 
 
 def evaluate_review_environment(
@@ -303,7 +363,7 @@ def format_report(check: ReviewEnvironmentCheck) -> List[str]:
         return ["[review-env] not a catalog review environment (flag unset) — guard inert."]
     lines = [f"[review-env] {n}" for n in check.notes]
     if check.ok:
-        lines.append("[review-env] isolation verified: identity, database binding, database marker, dashboard URL.")
+        lines.append("[review-env] isolation verified: identity, database binding, database marker (source=database), dashboard URL.")
     else:
         for code in check.failures:
             lines.append(f"[review-env][FAIL] {code}")
@@ -317,7 +377,9 @@ def format_report(check: ReviewEnvironmentCheck) -> List[str]:
 
 __all__ = [
     "DB_MARKER_SETTING",
+    "DB_MARKER_EXPECTED_SOURCE",
     "DB_MARKER_SQL",
+    "MarkerReading",
     "DEFAULT_REVIEW_DB_HOST",
     "DEFAULT_REVIEW_DB_MARKER",
     "DEFAULT_REVIEW_ENVIRONMENT",

@@ -2295,6 +2295,7 @@ const ar: Translations = {
         waba_catalog_not_linked:   'الكتالوج غير مربوط بحساب واتساب التجاري في Meta.',
         access_token_missing:      'صلاحيات Meta غير مكتملة أو منتهية.',
         sync_scope_excluded:       'مزامنة الكتالوج تعمل حاليًا ضمن تجربة محدودة لا تشمل هذا المتجر.',
+        waba_catalog_link_unproven: 'ربط الكتالوج بواتساب غير مثبت بعد؛ شغّل إعادة التحقق.',
       },
     },
     channels: {

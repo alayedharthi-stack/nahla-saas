@@ -14,7 +14,9 @@ echo "[start.sh] HOST=${HOST_BIND} PORT=${PORT_BIND} HTTP=${HTTP_IMPL} NAHLA_MIN
 # / DATABASE_URL in production. Refuses to bind a port when any of them are
 # missing or set to a known placeholder. Skipped in non-production envs.
 # Override with NAHLA_SKIP_PREFLIGHT=1 only for emergency boots.
-if [ "${NAHLA_SKIP_PREFLIGHT:-}" != "1" ]; then
+# Catalog review environment: the bypass is ignored — isolation must be
+# proven before the port is bound, every time.
+if [ "${NAHLA_SKIP_PREFLIGHT:-}" != "1" ] || [ -n "${NAHLA_CATALOG_REVIEW_ENV:-}" ]; then
   echo "[start.sh] running preflight checks…" >&2
   python /app/scripts/preflight_check.py
 fi

@@ -18,7 +18,7 @@
 | البند | الملف | السلوك |
 |---|---|---|
 | حارس عزل الخادم | `backend/core/review_environment.py` | في وضع المراجعة يرفض الإقلاع/الهجرات/العمال ما لم تُثبت الهوية وربط القاعدة **وعلامة هوية القاعدة** وعنوان اللوحة. خامل خارج وضع المراجعة. لا يطبع DSN ولا أسرارًا |
-| ربط الحارس | `scripts/preflight_check.py` (قبل uvicorn، لأي `ENVIRONMENT`)، `backend/main.py` (الخطوة 0 قبل Step A/B/C في مسار الهجرات؛ وبوابة `_start` لكل العمال) | فشل الحارس ⇒ لا منفذ، لا `alembic`، لا `create_all`، لا عامل |
+| ربط الحارس | `scripts/preflight_check.py` (قبل uvicorn، لأي `ENVIRONMENT`؛ `NAHLA_SKIP_PREFLIGHT` **يُتجاهَل** في وضع المراجعة — `start.sh`)، `backend/main.py` (نقطة اختناق واحدة في رأس `on_startup` تقرأ علامة القاعدة وترفع استثناءً فيُنهي uvicorn الإقلاع قبل `create_all` وإصلاحات الأعمدة والمسوحات والعمال والطلبات؛ إضافةً إلى الخطوة 0 في سلسلة الهجرات وبوابة `_start`) | فشل الحارس ⇒ لا منفذ، لا `alembic`، لا `create_all`، لا عامل، لا طلب |
 | سياسة عنوان API في اللوحة | `dashboard/src/lib/reviewEnvironmentPolicy.ts` (+ `reviewEnvironment.ts`) | في وضع المراجعة: غياب العنوان الصريح أو توجيهه إلى API الإنتاج أو `localhost` أو بغير https ⇒ **فشل البناء** (`vite.config.ts`) **وفشل التشغيل** (`auth.ts` يرمي؛ `main.tsx` يعرض شاشة فشل ثابتة بدل التطبيق؛ لا تجاوز من localStorage) |
 | فحص CI للسياسة | `dashboard/scripts/check-review-env-api-base.mts` (ضمن `npm run check:platform-policy`) | جدول حالات + تحقق من الربط في البناء والتشغيل |
 | روابط الدعوة | `backend/routers/admin.py` | `invite_url` من `DASHBOARD_URL` (الافتراضي الإنتاجي `https://app.nahlah.ai` بلا تغيير). روابط التحقق واستعادة كلمة المرور في `auth.py` كانت تستخدم `DASHBOARD_URL` أصلًا |
@@ -53,10 +53,10 @@
 | المتغير | الغرض |
 |---|---|
 | `VITE_NAHLA_CATALOG_REVIEW_ENV` | `1` يفعّل السياسة (بناءً وتشغيلًا) |
-| `VITE_API_BASE` | `https://api.catalog-review.nahlah.ai` (غيابه أو توجيهه إلى `api.nahlah.ai` يفشل البناء) |
+| `VITE_API_BASE` | `https://api.catalog-review.nahlah.ai` (غيابه أو توجيهه إلى `api.nahlah.ai` يفشل البناء). مع nixpacks تُصدَّر متغيرات الخدمة إلى البناء تلقائيًا؛ مع `Dockerfile.dashboard` يلزم تمرير `--build-arg VITE_NAHLA_CATALOG_REVIEW_ENV=1 --build-arg VITE_API_BASE=…` |
 
 **المشغّل (داخل حاوية API فقط):** `NAHLA_CATALOG_REVIEW_WA_TOKEN` (أو `--token-stdin`)،
-`NAHLA_CATALOG_REVIEW_CONNECTION_WRITE_CONFIRM=RUN_CATALOG_REVIEW_CONNECTION_WRITE` مع `--write`.
+`NAHLA_CATALOG_REVIEW_CONNECTION_WRITE_CONFIRM=RUN_CATALOG_REVIEW_CONNECTION_WRITE` مع `--write`؛ ويتوقف إن غاب `WA_TOKEN_ENC_KEY` (لا يُشفَّر الرمز الحقيقي بمفاتيح التطوير الاحتياطية). التجربة الجافة تعمل بلا رمز.
 
 ---
 
@@ -65,8 +65,8 @@
 وجود `DATABASE_URL` ليس دليلًا. الحارس يثبت ثلاث طبقات، كلها بلا طباعة للقيم:
 
 1. **هوية الخدمة:** `RAILWAY_PROJECT_NAME=desirable-growth` و`RAILWAY_ENVIRONMENT_NAME=staging` ولا علامة إنتاج في `ENVIRONMENT`.
-2. **ربط القاعدة (ثابت من DSN):** مخطط PostgreSQL، المضيف يساوي `NAHLA_CATALOG_REVIEW_DB_HOST`، لا `postgres-staging` ولا علامة إنتاج في المضيف، واسم القاعدة إن ضُبط.
-3. **علامة هوية القاعدة (حي، قراءة واحدة):** `SELECT current_setting('nahla.environment', true)` يجب أن يُعيد `catalog-review`. تُضبط **مرة واحدة** على قاعدة المراجعة الجديدة الفارغة فقط:
+2. **ربط القاعدة (ثابت من DSN):** مخطط PostgreSQL، المضيف يساوي `NAHLA_CATALOG_REVIEW_DB_HOST`، لا `postgres-staging` ولا علامة إنتاج في المضيف، واسم القاعدة إن ضُبط؛ **تُرفض معاملات الاستعلام في DSN عدا `sslmode`/`sslrootcert`/`sslcert`/`sslkey`/`connect_timeout`/`application_name`** (لأن `?host=`/`?hostaddr=`/`?options=`/`?service=` تعيد توجيه الاتصال أو تزوّر العلامة)، **وتُرفض متغيرات libpq** `PGHOST`/`PGHOSTADDR`/`PGPORT`/`PGSERVICE`/`PGSERVICEFILE`/`PGOPTIONS`/`PGPASSFILE`/`PGDATABASE` إن كانت مضبوطة.
+3. **علامة هوية القاعدة (حي، قراءة واحدة):** `SELECT current_setting('nahla.environment', true), (SELECT source FROM pg_settings WHERE name='nahla.environment'), current_database()` — القيمة يجب أن تساوي `catalog-review`، **ومصدرها `database`** (أي من `ALTER DATABASE … SET`؛ علامة مضبوطة في الجلسة أو عبر `options` مصدرها `session`/`client` وتُرفض)، واسم القاعدة المتصلة يساوي اسم القاعدة في DSN (أو `NAHLA_CATALOG_REVIEW_DB_NAME`). تُضبط **مرة واحدة** على قاعدة المراجعة الجديدة الفارغة فقط:
 
    ```sql
    ALTER DATABASE railway SET nahla.environment = 'catalog-review';
@@ -83,10 +83,10 @@ python /app/scripts/preflight_check.py
 ```
 
 المخرجات المتوقعة: أسطر `[preflight][review-env]` تذكر المضيف والعلامة والهوية **المتوقعة** ثم
-`isolation verified: identity, database binding, database marker, dashboard URL.` ورمز خروج `0`.
+`isolation verified: identity, database binding, database marker (source=database), dashboard URL.` ورمز خروج `0`.
 أي `[review-env][FAIL] <code>` يعني رفض الإقلاع؛ الرموز: `review_project_*`، `review_environment_*`،
 `production_marker_detected`، `database_url_*`, `database_scheme_rejected`, `database_host_*`,
-`database_name_mismatch`, `database_marker_{unreadable,missing,mismatch}`, `dashboard_url_*`.
+`database_name_mismatch`, `database_url_query_rejected`, `libpq_environment_override`, `database_marker_{unreadable,missing,mismatch}`, `database_marker_source_rejected`, `database_identity_mismatch`, `dashboard_url_*`.
 
 وللواجهة محليًا قبل البناء:
 

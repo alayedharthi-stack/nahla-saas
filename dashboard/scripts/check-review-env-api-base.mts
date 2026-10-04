@@ -11,7 +11,7 @@ import {
   checkReviewApiBase,
   describeReviewApiBaseFailure,
   REVIEW_ENV_FLAG,
-} from '../src/lib/reviewEnvironmentPolicy.ts'
+} from '../src/lib/reviewEnvironmentPolicy.js'
 
 let failed = 0
 function assert(name: string, ok: boolean, detail = '') {
@@ -58,6 +58,33 @@ assert('auth.ts fails closed in review mode (no production default, no override)
 const mainSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
 assert('main.tsx renders a failure screen instead of the app when misconfigured',
   mainSource.includes('reviewApiBaseCheck()'))
+
+// ── No silent production fallback anywhere in src (literal production API hosts) ──
+import { readdirSync, statSync } from 'node:fs'
+import { join, relative } from 'node:path'
+const SRC = new URL('../src/', import.meta.url).pathname
+const ALLOWED_LITERAL_FILES = new Set([
+  'lib/reviewEnvironmentPolicy.js', 'lib/reviewEnvironmentPolicy.d.ts', // the policy and its deny-list
+  'auth.ts',                        // historic production default, bypassed in review mode
+  'pages/Login.tsx',                // operator diagnostics panel (hidden in review mode)
+  'pages/Integrations.tsx',         // documentation of webhook URLs shown to merchants
+  'pages/Settings.tsx',             // read-only display of the baked API base
+  'i18n/en.ts', 'i18n/ar.ts', 'i18n/embedded.ts',
+])
+const offenders: string[] = []
+function walk(dir: string) {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name)
+    if (statSync(p).isDirectory()) { walk(p); continue }
+    if (!/\.(ts|tsx)$/.test(name)) continue
+    const rel = relative(SRC, p).replace(/\\/g, '/')
+    if (ALLOWED_LITERAL_FILES.has(rel)) continue
+    const src = readFileSync(p, 'utf8')
+    if (/https:\/\/api\.nahlah\.ai|nahla-saas-production\.up\.railway\.app/.test(src)) offenders.push(rel)
+  }
+}
+walk(SRC)
+assert('no literal production API host outside the allow-listed files', offenders.length === 0, offenders.join(', '))
 
 if (failed > 0) {
   console.error(`\n${failed} check(s) failed`)

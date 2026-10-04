@@ -1,20 +1,22 @@
 /**
- * reviewEnvironmentPolicy.ts
+ * reviewEnvironmentPolicy.js
  * ──────────────────────────
  * Pure policy for the **catalog_management review environment** build of the
- * dashboard (`nahla-catalog-review-web`). No `import.meta`, no DOM — it is
- * shared by the browser bootstrap (`reviewEnvironment.ts` / `auth.ts`), the
- * Vite build step (`vite.config.ts`) and the CI check script, so the same
- * rule is enforced at build time and at runtime.
+ * dashboard (`nahla-catalog-review-web`). No `import.meta`, no DOM, no Node
+ * globals — it is shared by the browser bootstrap (`reviewEnvironment.ts` /
+ * `auth.ts`), the Vite build step (`vite.config.ts`) and the CI check script,
+ * so the same rule is enforced at build time and at runtime.
+ *
+ * It is plain ESM JavaScript (types in `reviewEnvironmentPolicy.d.ts`) on
+ * purpose: `vite.config.ts` belongs to the composite `tsconfig.node.json`
+ * project and the browser code to `tsconfig.json`; a `.ts` source imported by
+ * both projects makes `tsc` fail with TS6305, a declaration file does not.
  *
  * Rule: when `VITE_NAHLA_CATALOG_REVIEW_ENV` is truthy the API base MUST be
  * set explicitly (`VITE_API_BASE`, or the legacy aliases) and MUST NOT point
  * at the production API or at a localhost default. There is no silent
  * fallback to production: a missing or production API base is a hard,
- * visible failure.
- *
- * Outside review mode this module is inert and the historic resolution
- * (env → default) is unchanged.
+ * visible failure. Outside review mode this module is inert.
  */
 
 export const REVIEW_ENV_FLAG = 'VITE_NAHLA_CATALOG_REVIEW_ENV'
@@ -26,36 +28,25 @@ export const API_BASE_ENV_KEYS = [
   'VITE_API_URL',
   'NEXT_PUBLIC_API_URL',
   'REACT_APP_API_URL',
-] as const
+]
 
 /** Hosts that are production (or the production fallback) and therefore forbidden in review mode. */
 export const PRODUCTION_API_HOSTS = [
   'api.nahlah.ai',
   'nahla-saas-production.up.railway.app',
-] as const
+]
 
-export type ReviewApiBaseFailure =
-  | 'api_base_missing'
-  | 'api_base_malformed'
-  | 'api_base_is_production'
-  | 'api_base_is_localhost_default'
-  | 'api_base_not_https'
-
-export interface ReviewApiBaseCheck {
-  /** True when the build/runtime is a review environment. */
-  enabled: boolean
-  ok: boolean
-  failure: ReviewApiBaseFailure | null
-  /** Host of the configured API base (never contains credentials). */
-  host: string | null
-}
-
-export function isTruthyFlag(value: string | undefined | null): boolean {
+/** @param {string | undefined | null} value */
+export function isTruthyFlag(value) {
   return ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
 }
 
-/** First non-empty API base from the given env map, trailing slashes removed. */
-export function pickApiBase(env: Record<string, string | undefined>): string {
+/**
+ * First non-empty API base from the given env map, trailing slashes removed.
+ * @param {Record<string, string | undefined>} env
+ * @returns {string}
+ */
+export function pickApiBase(env) {
   for (const key of API_BASE_ENV_KEYS) {
     const v = env[key]
     if (v && String(v).trim()) return String(v).trim().replace(/\/+$/, '')
@@ -63,22 +54,26 @@ export function pickApiBase(env: Record<string, string | undefined>): string {
   return ''
 }
 
-function hostOf(url: string): string | null {
-  try {
-    return new URL(url).host.toLowerCase()
-  } catch {
-    return null
-  }
+/**
+ * Host (with optional :port) of an http(s) URL, or null. Regex-based so the
+ * module needs no `URL` global.
+ * @param {string} url
+ * @returns {string | null}
+ */
+function hostOf(url) {
+  const m = /^https?:\/\/(?:[^@/?#]*@)?([^/?#:]+)(:\d+)?(?:[/?#]|$)/i.exec(url.trim())
+  if (!m) return null
+  const host = m[1].toLowerCase().replace(/\.$/, '')
+  return m[2] ? `${host}${m[2]}` : host
 }
 
 /**
  * Validate the API base for a review build/runtime.
- * `env` is the (build-time or baked) environment map; `reviewFlag` the raw flag value.
+ * @param {Record<string, string | undefined>} env build-time or baked environment map
+ * @param {string | undefined} [reviewFlag] raw flag value (defaults to env[REVIEW_ENV_FLAG])
+ * @returns {import('./reviewEnvironmentPolicy').ReviewApiBaseCheck}
  */
-export function checkReviewApiBase(
-  env: Record<string, string | undefined>,
-  reviewFlag: string | undefined = env[REVIEW_ENV_FLAG],
-): ReviewApiBaseCheck {
+export function checkReviewApiBase(env, reviewFlag = env[REVIEW_ENV_FLAG]) {
   const enabled = isTruthyFlag(reviewFlag)
   const base = pickApiBase(env)
   if (!enabled) {
@@ -87,7 +82,7 @@ export function checkReviewApiBase(
   if (!base) return { enabled, ok: false, failure: 'api_base_missing', host: null }
   const host = hostOf(base)
   if (!host) return { enabled, ok: false, failure: 'api_base_malformed', host: null }
-  if ((PRODUCTION_API_HOSTS as readonly string[]).includes(host)) {
+  if (PRODUCTION_API_HOSTS.includes(host)) {
     return { enabled, ok: false, failure: 'api_base_is_production', host }
   }
   if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/.test(host)) {
@@ -99,8 +94,12 @@ export function checkReviewApiBase(
   return { enabled, ok: true, failure: null, host }
 }
 
-/** Operator-facing explanation (no secrets; English, shown in logs and on the boot screen). */
-export function describeReviewApiBaseFailure(check: ReviewApiBaseCheck): string {
+/**
+ * Operator-facing explanation (no secrets; English, shown in logs and on the boot screen).
+ * @param {import('./reviewEnvironmentPolicy').ReviewApiBaseCheck} check
+ * @returns {string}
+ */
+export function describeReviewApiBaseFailure(check) {
   switch (check.failure) {
     case 'api_base_missing':
       return `Review environment build requires an explicit API base: set ${API_BASE_ENV_KEYS[0]} to the review API (no fallback to production).`

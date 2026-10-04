@@ -72,9 +72,12 @@ def session_factory(monkeypatch):
 
 
 def run(argv, env, session_factory=None, marker="catalog-review", stdin=None):
+    from core.review_environment import MarkerReading
+
+    reading = MarkerReading(marker, "database", "railway") if marker else MarkerReading(None, None, "railway")
     buf = io.StringIO()
     with redirect_stdout(buf):
-        rc = op.run(argv, env=env, session_factory=session_factory, marker_reader=lambda u: marker, stdin_reader=stdin)
+        rc = op.run(argv, env=env, session_factory=session_factory, marker_reader=lambda u: reading, stdin_reader=stdin)
     lines = [json.loads(l) for l in buf.getvalue().strip().splitlines() if l.strip()]
     return rc, lines[-1] if lines else {}, buf.getvalue()
 
@@ -125,10 +128,34 @@ def test_write_requires_confirmation(session_factory):
     s.close()
 
 
-def test_token_missing_is_refused_without_touching_db(session_factory):
+def test_dry_run_without_token_plans_but_write_without_token_is_refused(session_factory):
     env = review_env(); env.pop("NAHLA_CATALOG_REVIEW_WA_TOKEN")
     rc, out, _ = run(BASE_ARGS, env, session_factory)
+    assert rc == 0 and out["status"] == "dry_run" and out["token_provided"] is False
+    env2 = review_env(**{op.CONFIRMATION_ENV: op.CONFIRMATION_TOKEN}); env2.pop("NAHLA_CATALOG_REVIEW_WA_TOKEN")
+    rc, out, _ = run(BASE_ARGS + ["--write"], env2, session_factory)
     assert rc == 4 and out["error"] == "token_missing"
+    s = session_factory()
+    assert s.query(WhatsAppConnection).count() == 0
+    s.close()
+
+
+def test_missing_dedicated_encryption_key_is_a_hard_stop(session_factory, monkeypatch):
+    """Never encrypt the real system-user token with the JWT/TOTP development fallbacks."""
+    env = review_env(**{op.CONFIRMATION_ENV: op.CONFIRMATION_TOKEN}); env.pop("WA_TOKEN_ENC_KEY")
+    rc, out, text = run(BASE_ARGS + ["--write"], env, session_factory)
+    assert rc == 4 and out["error"] == "wa_token_enc_key_missing"
+    assert TOKEN not in text
+    s = session_factory()
+    assert s.query(WhatsAppConnection).count() == 0
+    s.close()
+
+
+def test_coexistence_connection_type_is_rejected(session_factory):
+    import argparse
+
+    with __import__("pytest").raises(SystemExit):
+        run(BASE_ARGS + ["--connection-type", "coexistence"], review_env(), session_factory)
 
 
 def test_write_encrypts_token_and_configures_connection(session_factory):
@@ -136,6 +163,7 @@ def test_write_encrypts_token_and_configures_connection(session_factory):
     rc, out, text = run(BASE_ARGS + ["--write", "--waba-id", "111222333"], env, session_factory)
     assert rc == 0 and out["status"] == "written", out
     assert out["result"]["token_encrypted"] is True and out["result"]["token_stored_prefix"] == "enc1:"
+    assert out["result"]["key_source"] == "WA_TOKEN_ENC_KEY"
     assert TOKEN not in text
     s = session_factory()
     conn = s.query(WhatsAppConnection).filter_by(tenant_id=1).one()

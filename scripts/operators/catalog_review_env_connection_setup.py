@@ -60,7 +60,8 @@ for _entry in (str(ROOT), str(ROOT / "backend"), str(ROOT / "database")):
 CONFIRMATION_ENV = "NAHLA_CATALOG_REVIEW_CONNECTION_WRITE_CONFIRM"
 CONFIRMATION_TOKEN = "RUN_CATALOG_REVIEW_CONNECTION_WRITE"
 DEFAULT_TOKEN_ENV = "NAHLA_CATALOG_REVIEW_WA_TOKEN"
-_ALLOWED_CONNECTION_TYPES = ("embedded", "direct", "coexistence")
+_ALLOWED_CONNECTION_TYPES = ("embedded", "direct")  # coexistence is excluded from the review plan
+ENC_KEY_ENV = "WA_TOKEN_ENC_KEY"
 
 
 class OperatorStop(RuntimeError):
@@ -214,11 +215,22 @@ def run(argv: Optional[list] = None, *, env: Optional[Mapping[str, str]] = None,
         _emit(_manifest("confirmation", "refused", error="dangerous_action_not_confirmed", isolation=isolation))
         return 3
 
+    # The real system-user token must be encrypted with the dedicated key, never
+    # with the JWT_SECRET / TOTP_ENC_KEY development fallbacks of wa_token_crypto.
+    if not (env.get(ENC_KEY_ENV) or "").strip():
+        _emit(_manifest("token", "refused", error="wa_token_enc_key_missing", isolation=isolation))
+        return 4
+
+    token: Optional[str] = None
+    token_provided = False
     try:
         token = read_token(args, env, stdin_reader=stdin_reader)
+        token_provided = True
     except OperatorStop as stop:
-        _emit(_manifest("token", "refused", error=stop.code, isolation=isolation))
-        return 4
+        if args.write:
+            _emit(_manifest("token", "refused", error=stop.code, isolation=isolation))
+            return 4
+        # Dry-run may plan without exporting the secret.
 
     if session_factory is None:
         from sqlalchemy import create_engine  # noqa: PLC0415
@@ -245,10 +257,11 @@ def run(argv: Optional[list] = None, *, env: Optional[Mapping[str, str]] = None,
             return 5
 
         if not args.write:
-            _emit(_manifest("plan", "dry_run", plan=plan, token_provided=True, isolation=isolation))
+            _emit(_manifest("plan", "dry_run", plan=plan, token_provided=token_provided, key_source=ENC_KEY_ENV, isolation=isolation))
             return 0
 
-        result = apply_connection(session, plan, token)
+        result = apply_connection(session, plan, str(token))
+        result["key_source"] = ENC_KEY_ENV
         _emit(_manifest("apply", "written", result=result, isolation=isolation))
         return 0
     finally:

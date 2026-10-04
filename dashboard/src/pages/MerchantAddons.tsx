@@ -7,7 +7,7 @@ import {
 import { addonsApi, type AddonItem, type SallaInstallResult } from '../api/addons'
 
 // ── Backend base URL ──────────────────────────────────────────────────────────
-const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
+import { API_BASE } from '../api/client'
 
 // ── Tenant ID from session ────────────────────────────────────────────────────
 function getTenantId(): string {

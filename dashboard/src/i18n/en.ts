@@ -2291,6 +2291,7 @@ const en: Translations = {
         waba_catalog_not_linked:   'The catalog is not connected to the WhatsApp Business account in Meta.',
         access_token_missing:      'Meta permissions are incomplete or expired.',
         sync_scope_excluded:       'Catalog sync currently runs as a limited trial that does not include this store.',
+        waba_catalog_link_unproven: 'The catalog ↔ WhatsApp connection is not proven yet; run a recheck.',
       },
     },
     channels: {

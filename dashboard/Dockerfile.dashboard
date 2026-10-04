@@ -12,8 +12,13 @@ WORKDIR /app
 # Vite reads VITE_* variables at build time, not at nginx runtime.
 ARG VITE_API_BASE=http://localhost:8000
 ARG VITE_API_URL=http://localhost:8000
+# Catalog review environment build: pass VITE_NAHLA_CATALOG_REVIEW_ENV=1 so the
+# API-base policy is enforced (the build then FAILS unless VITE_API_BASE is the
+# review API host). Empty by default = production behaviour.
+ARG VITE_NAHLA_CATALOG_REVIEW_ENV=
 ENV VITE_API_BASE=$VITE_API_BASE
 ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_NAHLA_CATALOG_REVIEW_ENV=$VITE_NAHLA_CATALOG_REVIEW_ENV
 
 # Install dependencies (separate layer for caching)
 COPY package.json ./

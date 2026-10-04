@@ -582,6 +582,36 @@ async def on_startup() -> None:
     _t_lifespan = _bt.monotonic()
     logger.warning("[BOOT/lifespan] begin — preparing background tasks")
 
+    # ── Catalog review environment: single choke point ────────────────────
+    # In review mode (NAHLA_CATALOG_REVIEW_ENV) the deploy must prove its
+    # isolation — identity, DSN binding, the database identity marker read
+    # with ONE statement, dashboard URL — before anything else in this
+    # lifespan runs: no create_all, no column repairs, no sweeps, no
+    # workers, no HTTP traffic. A failure raises and uvicorn exits
+    # ("Application startup failed"). Outside review mode nothing runs
+    # here (the rule "no DB connection in lifespan" stays intact for
+    # production). The DSN is never logged.
+    try:
+        from core.review_environment import (  # noqa: PLC0415
+            evaluate_review_environment as _eval_review_env,
+            format_report as _format_review_env,
+        )
+        _review_env = _eval_review_env()
+        if _review_env.enabled:
+            for _line in _format_review_env(_review_env):
+                logger.warning("[BOOT/lifespan] %s", _line)
+            if not _review_env.ok:
+                raise RuntimeError(
+                    "catalog review environment isolation failed: "
+                    + ",".join(_review_env.failures)
+                    + " — refusing to start (no migration, repair, worker or request will run)"
+                )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail closed in review mode only
+        if os.environ.get("NAHLA_CATALOG_REVIEW_ENV", "").strip().lower() in ("1", "true", "yes", "on"):
+            raise RuntimeError(f"catalog review environment guard unavailable: {type(exc).__name__}") from exc
+
     # ── Deployment fingerprint (env-only, no subprocess) ──────────────────
     # We deliberately AVOID `git rev-parse HEAD` here: subprocess.check_output
     # is synchronous and on a misbehaving container can stall the event loop
@@ -700,7 +730,8 @@ async def on_startup() -> None:
                         if not _review.ok:
                             logger.error(
                                 "[BOOT/db] Step 0: review environment isolation FAILED (%s) — "
-                                "abandoning bootstrap; no migration or create_all will run.",
+                                "abandoning this bootstrap chain (cleanup/stamp/upgrade). The lifespan "
+                                "guard is the authoritative stop.",
                                 ",".join(_review.failures),
                             )
                             return
