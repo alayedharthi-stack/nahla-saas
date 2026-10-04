@@ -101,7 +101,7 @@ def oto_integration_enabled() -> bool:
     ``OTO_EXTERNAL_EGRESS_ENABLED=1`` is the documented activation step. Until it
     is set, credential storage, status reads, the public webhook and the
     WhatsApp label notice answer as if the integration did not exist — before
-    any database read, so a deployment without migration 0116 or
+    any database read, so a deployment without migration 0117 or
     ``OTO_TOKEN_ENC_KEY`` stays inert and quiet rather than failing with 500s.
     """
     return os.getenv("OTO_EXTERNAL_EGRESS_ENABLED") == "1"

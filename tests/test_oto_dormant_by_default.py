@@ -1,7 +1,7 @@
 """OTO stays dormant until ``OTO_EXTERNAL_EGRESS_ENABLED=1``.
 
 With the switch absent every OTO route answers before touching the database
-(no migration 0116, no ``OTO_TOKEN_ENC_KEY`` needed), the public webhook does not
+(no migration 0117, no ``OTO_TOKEN_ENC_KEY`` needed), the public webhook does not
 exist, and nothing reaches OTO or WhatsApp. The dashboard reads ``/oto/availability``
 and keeps the existing shipment card while it reports ``enabled: false``.
 """

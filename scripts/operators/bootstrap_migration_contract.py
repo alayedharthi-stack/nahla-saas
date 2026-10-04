@@ -33,7 +33,7 @@ AI_USAGE_ALEMBIC_HEAD = "0114"
 # Payments remain a sibling off 0112 and never activate during normal bootstrap.
 PAYMENTS_ALEMBIC_HEAD = "0115"
 # OTO merchant credentials remain a separate dormant sibling of 0112.
-OTO_ALEMBIC_HEAD = "0116"
+OTO_ALEMBIC_HEAD = "0117"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -69,7 +69,7 @@ def repository_heads_expected(heads) -> bool:
     ``{0092, 0111, 0112}``, navigation ``{0092, 0111, 0113}``,
     AI usage ``{0092, 0111, 0114}``, and payments
     ``{0092, 0111, 0114, 0115}``, and dormant OTO
-    ``{0092, 0111, 0114, 0115, 0116}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115, 0117}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS

@@ -2,9 +2,9 @@
 
 ## State
 
-The code is dormant until the `0116` migration is reviewed and applied, `OTO_TOKEN_ENC_KEY` is configured, and `OTO_EXTERNAL_EGRESS_ENABLED=1` is set. Production additionally requires `OTO_PRODUCTION_ENABLED=1`. These switches are deliberately independent of existing WhatsApp, Salla, AI, and commerce settings.
+The code is dormant until the `0117` migration is reviewed and applied, `OTO_TOKEN_ENC_KEY` is configured, and `OTO_EXTERNAL_EGRESS_ENABLED=1` is set. Production additionally requires `OTO_PRODUCTION_ENABLED=1`. These switches are deliberately independent of existing WhatsApp, Salla, AI, and commerce settings.
 
-`OTO_EXTERNAL_EGRESS_ENABLED=1` is the single activation switch for every OTO surface. Until it is set: every merchant route under `/oto` answers `409 oto_integration_disabled` before any database read (so a deployment without migration `0116` or `OTO_TOKEN_ENC_KEY` stays inert instead of failing with 500s); the public webhook `/oto/webhooks/{environment}/{event_type}` answers `404` without reading the body or the database; the WhatsApp label notice is refused; and the order page keeps the existing internal shipment card — the OTO panel appears only when `GET /oto/availability` reports `enabled: true`. Covered by `tests/test_oto_dormant_by_default.py`.
+`OTO_EXTERNAL_EGRESS_ENABLED=1` is the single activation switch for every OTO surface. Until it is set: every merchant route under `/oto` answers `409 oto_integration_disabled` before any database read (so a deployment without migration `0117` or `OTO_TOKEN_ENC_KEY` stays inert instead of failing with 500s); the public webhook `/oto/webhooks/{environment}/{event_type}` answers `404` without reading the body or the database; the WhatsApp label notice is refused; and the order page keeps the existing internal shipment card — the OTO panel appears only when `GET /oto/availability` reports `enabled: true`. Covered by `tests/test_oto_dormant_by_default.py`.
 
 When switched on, the webhook reads at most 32 KiB of request body: a declared `Content-Length` above that is refused with `413` before any body byte is read, a body without `Content-Length` (chunked) is streamed and refused as soon as it passes 32 KiB, a malformed `Content-Length` (anything but ASCII digits) is refused with `400`, and a client that disconnects mid-body gets `400 client_disconnected` rather than an unhandled error; every refusal carries `Connection: close`, so the server closes the connection instead of draining the rest. Covered against a real uvicorn server (h11 and httptools, bare and behind a pass-through `BaseHTTPMiddleware`) by `tests/test_oto_webhook_body_limit.py`. Responses from OTO itself are not size-capped yet; a limit needs OTO's documented maximum response sizes.
 
@@ -23,7 +23,7 @@ Cancellation is guarded by an OTO shipment ID and the pre-pickup state. OTO's ac
 
 ## Activation checklist
 
-- Confirm the target DB revision and review migration `0116` because this repository has multiple Alembic branches. No migration is run by application startup.
+- Confirm the target DB revision and review migration `0117` because this repository has multiple Alembic branches. No migration is run by application startup.
 - Configure a dedicated Fernet `OTO_TOKEN_ENC_KEY` in the deployment secret store. Never put it, a refresh token, Marketplace token, or webhook secret in Git or screenshots.
 - Obtain a merchant staging token from OTO, staging pickup details, and a signed webhook test. Use staging before enabling production.
 - Register `orderStatus` and `shipmentError` callbacks under `/oto/webhooks/{environment}/{event_type}` with an OTO-provided signing secret; confirm the exact signature algorithm with OTO because its documentation shows both a long RSA-like example and HMAC-SHA256 prose.

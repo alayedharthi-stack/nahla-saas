@@ -26,8 +26,8 @@ from scripts.operators.bootstrap_migration_contract import (  # noqa: E402
 from scripts.operators.bootstrap_migration_contract import repository_heads_expected  # noqa: E402
 
 def test_repository_accepts_only_known_parallel_head_topologies() -> None:
-    # Payments 0115 and OTO 0116 branch from 0112. Normal bootstrap stays 0093.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0116"})
+    # Payments 0115 and OTO 0117 branch from 0112. Normal bootstrap stays 0093.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0117"})
     assert repository_heads_expected({"0092", "0111", "0114"})
     assert repository_heads_expected({"0092", "0111", "0113"})
     assert not repository_heads_expected({"0092", "0111", "0113", "0114"})
