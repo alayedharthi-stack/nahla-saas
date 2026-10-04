@@ -94,20 +94,44 @@ def _shipment(db: Session, tenant_id: int, order_id: int) -> OrderShipment:
     return row
 
 
+def oto_integration_enabled() -> bool:
+    """The one activation switch for every OTO surface (default off).
+
+    ``OTO_EXTERNAL_EGRESS_ENABLED=1`` is the documented activation step. Until it
+    is set, credential storage, status reads, the public webhook and the
+    WhatsApp label notice answer as if the integration did not exist — before
+    any database read, so a deployment without migration 0116 or
+    ``OTO_TOKEN_ENC_KEY`` stays inert and quiet rather than failing with 500s.
+    """
+    return os.getenv("OTO_EXTERNAL_EGRESS_ENABLED") == "1"
+
+
+def _require_integration_enabled() -> None:
+    if not oto_integration_enabled():
+        raise HTTPException(409, "oto_integration_disabled")
+
+
 def _egress_allowed(environment: str, tenant_id: int) -> None:
     from core.acceptance_execution_context import deny_external_egress
 
     deny_external_egress(egress_kind="shipping", operation="oto_api", tenant_id=tenant_id)
-    if os.getenv("OTO_EXTERNAL_EGRESS_ENABLED") != "1":
+    if not oto_integration_enabled():
         raise HTTPException(409, "oto_egress_disabled")
     if environment == "production" and os.getenv("OTO_PRODUCTION_ENABLED") != "1":
         raise HTTPException(409, "oto_production_disabled")
+
+
+@router.get("/availability")
+async def availability(_user: dict = Depends(require_merchant_scope)):
+    """Whether OTO is switched on for this deployment. No database read."""
+    return {"enabled": oto_integration_enabled()}
 
 
 @router.put("/connection")
 async def save_connection(body: ConnectionInput, request: Request, db: Session = Depends(get_db),
                           _user: dict = Depends(require_merchant_scope)):
     """Provision a merchant token acquired out of band; never return its value."""
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_credentials_require_merchant")
@@ -129,6 +153,7 @@ async def save_connection(body: ConnectionInput, request: Request, db: Session =
 @router.get("/connection")
 async def connection_status(request: Request, db: Session = Depends(get_db),
                             _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     rows = db.query(OtoConnection).filter_by(tenant_id=tenant_id).all()
     return [{"environment": x.environment, "enabled": x.enabled,
@@ -140,6 +165,7 @@ async def connection_status(request: Request, db: Session = Depends(get_db),
 @router.post("/connection/{environment}/verify")
 async def verify_connection(environment: Literal["staging", "production"], request: Request,
                             db: Session = Depends(get_db), _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_verification_requires_merchant")
@@ -166,6 +192,7 @@ async def verify_connection(environment: Literal["staging", "production"], reque
 @router.post("/pickup")
 async def create_pickup(body: PickupInput, request: Request, db: Session = Depends(get_db),
                         _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_pickup_requires_merchant")
@@ -190,6 +217,7 @@ async def create_pickup(body: PickupInput, request: Request, db: Session = Depen
 @router.post("/quotes")
 async def quote(body: QuoteInput, request: Request, db: Session = Depends(get_db),
                 _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     _egress_allowed(body.environment, tenant_id)
     row = _connection(db, tenant_id, body.environment)
@@ -209,6 +237,7 @@ async def quote(body: QuoteInput, request: Request, db: Session = Depends(get_db
 @router.post("/orders/{order_id}/shipments")
 async def create_shipment(order_id: int, body: ShipmentInput, request: Request,
                           db: Session = Depends(get_db), _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     from core.order_shipment_service import evaluate_create_shipment, resolve_tenant_cod_enabled
     from core.internal_e2e_safety import assert_external_order_eligible
     from core.acceptance_execution_context import deny_external_egress
@@ -270,6 +299,7 @@ async def create_shipment(order_id: int, body: ShipmentInput, request: Request,
 @router.post("/orders/{order_id}/sync")
 async def sync_shipment(order_id: int, request: Request, db: Session = Depends(get_db),
                         _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     order = _order(db, tenant_id, order_id)
     shipment = _shipment(db, tenant_id, order.id)
@@ -292,6 +322,7 @@ async def sync_shipment(order_id: int, request: Request, db: Session = Depends(g
 @router.post("/orders/{order_id}/label")
 async def retrieve_label(order_id: int, request: Request, db: Session = Depends(get_db),
                          _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     order = _order(db, tenant_id, order_id)
     shipment = _shipment(db, tenant_id, order.id)
@@ -319,6 +350,7 @@ async def send_shipping_whatsapp(order_id: int, request: Request, db: Session = 
     from models import WhatsAppConnection
     from routers.whatsapp_webhook import _post_wa
 
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_notice_requires_merchant")
@@ -370,6 +402,7 @@ async def send_shipping_whatsapp(order_id: int, request: Request, db: Session = 
 @router.post("/orders/{order_id}/cancel")
 async def cancel_shipment(order_id: int, request: Request, db: Session = Depends(get_db),
                           _user: dict = Depends(require_merchant_scope)):
+    _require_integration_enabled()
     tenant_id = resolve_tenant_id(request)
     if _user.get("impersonation"):
         raise HTTPException(403, "oto_cancellation_requires_merchant")
@@ -405,6 +438,12 @@ async def cancel_shipment(order_id: int, request: Request, db: Session = Depends
 async def oto_webhook(environment: Literal["staging", "production"],
                       event_type: Literal["orderStatus", "shipmentError"], request: Request,
                       db: Session = Depends(get_db)):
+    if not oto_integration_enabled():
+        # Switched off: the endpoint does not exist. Nothing is read, parsed or looked up.
+        raise HTTPException(404, "not_found")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > 32_768:
+        raise HTTPException(413, "payload_too_large")
     raw = await request.body()
     if len(raw) > 32_768:
         raise HTTPException(413, "payload_too_large")

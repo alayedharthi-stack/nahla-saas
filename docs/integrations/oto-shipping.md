@@ -4,6 +4,8 @@
 
 The code is dormant until the `0116` migration is reviewed and applied, `OTO_TOKEN_ENC_KEY` is configured, and `OTO_EXTERNAL_EGRESS_ENABLED=1` is set. Production additionally requires `OTO_PRODUCTION_ENABLED=1`. These switches are deliberately independent of existing WhatsApp, Salla, AI, and commerce settings.
 
+`OTO_EXTERNAL_EGRESS_ENABLED=1` is the single activation switch for every OTO surface. Until it is set: every merchant route under `/oto` answers `409 oto_integration_disabled` before any database read (so a deployment without migration `0116` or `OTO_TOKEN_ENC_KEY` stays inert instead of failing with 500s); the public webhook `/oto/webhooks/{environment}/{event_type}` answers `404` without reading the body or the database; the WhatsApp label notice is refused; and the order page keeps the existing internal shipment card — the OTO panel appears only when `GET /oto/availability` reports `enabled: true`. Covered by `tests/test_oto_dormant_by_default.py`.
+
 No Nahlah-specific Marketplace master token, merchant refresh token, or completed commercial activation was found during the October 2026 context review. A successful local build is not an OTO end-to-end test.
 
 ## Merchant flow

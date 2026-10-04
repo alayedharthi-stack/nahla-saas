@@ -20,6 +20,7 @@ import {
 import Badge from '../components/ui/Badge'
 import OrderEditPanel from '../components/orders/OrderEditPanel'
 import OtoShippingPanel from '../components/orders/OtoShippingPanel'
+import { apiCall } from '../api/client'
 import {
   featureRealityApi,
   type NeedsActionLevel,
@@ -105,6 +106,15 @@ export default function OrderDetail() {
   const [shipmentBusy, setShipmentBusy] = useState(false)
   const [labelBusy, setLabelBusy] = useState(false)
   const [shipmentToast, setShipmentToast] = useState<{ ok: boolean; text: string } | null>(null)
+  // OTO is dormant until the deployment switches it on; unknown counts as off,
+  // so the existing shipment card stays in place.
+  const [otoEnabled, setOtoEnabled] = useState(false)
+
+  useEffect(() => {
+    apiCall<{ enabled?: boolean }>('/oto/availability')
+      .then((res) => setOtoEnabled(res?.enabled === true))
+      .catch(() => setOtoEnabled(false))
+  }, [])
 
   const reload = (): Promise<void> => {
     if (!orderId) return Promise.resolve()
@@ -587,11 +597,11 @@ export default function OrderDetail() {
             </div>
           )}
 
-          {(order.source === 'whatsapp' || order.source === 'manual') &&
+          {otoEnabled && (order.source === 'whatsapp' || order.source === 'manual') &&
             <OtoShippingPanel order={order} reload={reload} />}
 
-          {/* Legacy internal shipment details for older orders and store integrations. */}
-          {(order.source !== 'whatsapp' && order.source !== 'manual' || shipment?.provider === 'internal') &&
+          {/* Internal shipment details: every order while OTO is off; with OTO on, store-integration orders and internal shipments. */}
+          {(!otoEnabled || order.source !== 'whatsapp' && order.source !== 'manual' || shipment?.provider === 'internal') &&
           <div className="card p-5 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-slate-900 inline-flex items-center gap-2">
