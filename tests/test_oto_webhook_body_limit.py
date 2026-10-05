@@ -12,6 +12,7 @@ rest of the body. No OTO, WhatsApp or other external call is made.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import threading
@@ -22,6 +23,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request as StarletteRequest
 
 from core.database import get_db
 from oto.order_data import oto_order_id
@@ -51,10 +53,17 @@ class _RecordingDb:
         return _Q()
 
 
-def _app(db) -> FastAPI:
+def _app(db, *, middleware: bool = False) -> FastAPI:
     app = FastAPI()
     app.include_router(oto_shipping.router)
     app.dependency_overrides[get_db] = lambda: db
+    if middleware:  # production wraps the app in BaseHTTPMiddleware layers that never read the body
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        async def _passthrough(request, call_next):
+            return await call_next(request)
+
+        app.add_middleware(BaseHTTPMiddleware, dispatch=_passthrough)
     return app
 
 
@@ -135,8 +144,32 @@ def test_malformed_content_length_is_refused():
     with TestClient(_app(db)) as client:
         response = client.post(URL, content=b"{}", headers={"content-type": "application/json",
                                                            "content-length": "abc"})
-    assert response.status_code in {400, 413}
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid_content_length"
     assert db.lookups == 0
+
+
+def test_non_ascii_digit_content_length_is_refused_not_a_server_error():
+    """``"\u00b2".isdigit()`` is true but ``int("\u00b2")`` raises; only ASCII digits count."""
+    async def receive():  # pragma: no cover - never reached
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": URL, "headers": [(b"content-length", "\u00b2".encode())]}
+    with pytest.raises(oto_shipping.HTTPException) as refused:
+        asyncio.run(oto_shipping._read_bounded_body(StarletteRequest(scope, receive)))
+    assert refused.value.status_code == 400 and refused.value.detail == "invalid_content_length"
+
+
+def test_client_disconnect_mid_body_is_a_400_not_an_unhandled_error():
+    messages = iter([{"type": "http.request", "body": b"{", "more_body": True}, {"type": "http.disconnect"}])
+
+    async def receive():
+        return next(messages)
+
+    scope = {"type": "http", "method": "POST", "path": URL, "headers": []}
+    with pytest.raises(oto_shipping.HTTPException) as refused:
+        asyncio.run(oto_shipping._read_bounded_body(StarletteRequest(scope, receive)))
+    assert refused.value.status_code == 400 and refused.value.detail == "client_disconnected"
 
 
 def test_switched_off_still_answers_404_without_reading(monkeypatch):
@@ -152,12 +185,12 @@ def test_switched_off_still_answers_404_without_reading(monkeypatch):
 # ── real server (uvicorn, raw HTTP/1.1 over loopback) ────────────────────────
 
 @contextmanager
-def _server(http: str):
+def _server(http: str, *, middleware: bool = False):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    config = uvicorn.Config(_app(_RecordingDb()), host="127.0.0.1", port=port, log_level="error",
+    config = uvicorn.Config(_app(_RecordingDb(), middleware=middleware), host="127.0.0.1", port=port, log_level="error",
                             http=http, lifespan="off")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -189,13 +222,15 @@ def _read_response(conn: socket.socket) -> tuple[bytes, bool]:
         return data, True
 
 
+@pytest.mark.parametrize("middleware", [False, True], ids=["bare", "behind_middleware"])
 @pytest.mark.parametrize("http", ["h11", "httptools"])
-def test_real_server_refuses_an_endless_chunked_body_and_closes(http):
+def test_real_server_refuses_an_endless_chunked_body_and_closes(http, middleware):
     """The client keeps streaming; the server answers 413 after ~32 KiB and
-    closes the connection rather than draining an unbounded body."""
+    closes the connection rather than draining an unbounded body — also behind
+    a pass-through BaseHTTPMiddleware, as in production."""
     if http == "httptools":
         pytest.importorskip("httptools")
-    with _server(http) as port:
+    with _server(http, middleware=middleware) as port:
         conn = socket.create_connection(("127.0.0.1", port), timeout=5)
         conn.sendall((f"POST {URL} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
                       "Transfer-Encoding: chunked\r\n\r\n").encode())

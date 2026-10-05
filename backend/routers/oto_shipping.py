@@ -6,6 +6,7 @@ import json
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -123,20 +124,25 @@ async def _read_bounded_body(request: Request, limit: int = WEBHOOK_BODY_LIMIT) 
     byte is read; without one (chunked transfer) the body is read chunk by
     chunk and refused as soon as the running total passes the limit, so an
     oversized body is never buffered whole. A malformed ``Content-Length`` is
-    refused outright. Refusals carry ``Connection: close`` so the server drops
-    the connection instead of draining the rest of an unread body.
+    refused outright (ASCII digits only). Refusals carry ``Connection: close``
+    so the server drops the connection instead of draining the rest of an
+    unread body. A client that disconnects mid-body is answered 400, not an
+    unhandled error.
     """
     declared = request.headers.get("content-length")
     if declared is not None:
-        if not declared.strip().isdigit():
+        if not (declared.isascii() and declared.strip().isdigit()):
             raise HTTPException(400, "invalid_content_length", headers=_CLOSE)
         if int(declared) > limit:
             raise HTTPException(413, "payload_too_large", headers=_CLOSE)
     received = bytearray()
-    async for chunk in request.stream():
-        if len(received) + len(chunk) > limit:
-            raise HTTPException(413, "payload_too_large", headers=_CLOSE)
-        received += chunk
+    try:
+        async for chunk in request.stream():
+            if len(received) + len(chunk) > limit:
+                raise HTTPException(413, "payload_too_large", headers=_CLOSE)
+            received += chunk
+    except ClientDisconnect:
+        raise HTTPException(400, "client_disconnected", headers=_CLOSE) from None
     return bytes(received)
 
 
