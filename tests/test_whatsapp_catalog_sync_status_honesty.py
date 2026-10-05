@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 _BACKEND_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
@@ -307,11 +309,21 @@ _ORCH_PATCHES = (
 )
 
 
-def _run_orchestrator(parent, *, push_result, lookup_id):
-    """One native sync attempt with Graph and the database mocked; returns (result, push_mock, evidence writes)."""
+def _run_orchestrator(parent, *, push_result, lookup_id, lookup_meta=None, salla=False, upsert_result=None,
+                      catalogs=None):
+    """One sync attempt with Graph and the database mocked; returns (result, push_mock, evidence writes).
+
+    Every evidence writer (native upsert, Salla upsert, stale-observation
+    repair) is recorded in *writes* as (writer, kwargs)."""
     from contextlib import ExitStack
 
+    from services.salla_variant_catalog_identity import SallaVariantIdentity
+
     writes = []
+
+    def _recorder(name, result=None):
+        return lambda db, **kw: writes.append((name, kw)) or dict(result or {"ok": True})
+
     with ExitStack() as stack:
         mocks = {name.rsplit(".", 1)[-1]: stack.enter_context(patch(name)) for name in _ORCH_PATCHES}
         stack.enter_context(patch("services.native_meta_sync_orchestrator._stamp_with_lease",
@@ -322,13 +334,31 @@ def _run_orchestrator(parent, *, push_result, lookup_id):
         stack.enter_context(patch("services.native_meta_sync_orchestrator.load_variant_for_push",
                                   return_value=(parent, SimpleNamespace(id=5011))))
         stack.enter_context(patch("services.salla_variant_catalog_identity.upsert_native_publication_membership",
-                                  side_effect=lambda db, **kw: writes.append(kw) or {"ok": True}))
-        mocks["_resolve_connection"].return_value = _conn()
+                                  side_effect=_recorder("native", upsert_result)))
+        stack.enter_context(patch("services.salla_variant_catalog_identity.upsert_variant_membership",
+                                  side_effect=_recorder("salla", upsert_result)))
+        stack.enter_context(patch("services.salla_variant_catalog_identity.replace_stale_observation_after_create",
+                                  side_effect=_recorder("repair")))
+        if salla:
+            ident = SallaVariantIdentity(product_id=501, variant_id=5011, salla_variant_id="881",
+                                         retailer_id="nahla_p_501", is_default=False)
+            stack.enter_context(patch("services.salla_variant_catalog_identity.identity_for_retailer_id",
+                                      return_value=ident))
+            stack.enter_context(patch("services.salla_variant_catalog_identity.ensure_variant_membership_slot",
+                                      return_value={"ok": True, "created": False, "meta_item_id": ""}))
+        if catalogs:
+            # catalogs = (before the POST, after the POST)
+            push_mock = mocks["push_one_meta_catalog_item"]
+            mocks["_resolve_connection"].side_effect = lambda *a, **k: _conn(
+                meta_catalog_id=catalogs[1] if push_mock.called else catalogs[0])
+        else:
+            mocks["_resolve_connection"].return_value = _conn()
         mocks["preview_native_meta_sync"].return_value = {"eligible": True, "fatal_errors": [], "retailer_id": "nahla_p_501"}
         mocks["ensure_native_default_variant"].return_value = (SimpleNamespace(retailer_id="nahla_p_501"), False)
         mocks["push_one_meta_catalog_item"].return_value = push_result
-        mocks["find_meta_catalog_item_by_retailer_id"].return_value = (lookup_id, {"matched": True, "item": {
-            "id": lookup_id, "retailer_id": "nahla_p_501", "price": 32000, "currency": "SAR", "availability": "in stock"}})
+        mocks["find_meta_catalog_item_by_retailer_id"].return_value = (lookup_id, lookup_meta if lookup_meta is not None else {
+            "matched": True, "item": {"id": lookup_id, "retailer_id": "nahla_p_501", "price": 32000, "currency": "SAR",
+                                      "availability": "in stock"}})
         mocks["get_waba_catalog_link_status"].return_value = {"ok": True, "expected_catalog_linked": True}
         mocks["_try_acquire_sync_lock"].return_value = parent
         result = attempt_native_meta_sync(MagicMock(), 9, 501)
@@ -343,7 +373,7 @@ _CREATED = {"ok": True, "action": "create", "meta_product_id": "META-501",
 def test_verified_create_records_evidence_for_the_created_item():
     result, _push, writes = _run_orchestrator(_generic_native_parent(), push_result=_CREATED, lookup_id="META-501")
     assert result["ok"] is True
-    assert [(w["retailer_id"], w["meta_item_id"]) for w in writes] == [("nahla_p_501", "META-501")]
+    assert [(name, w["retailer_id"], w["meta_item_id"]) for name, w in writes] == [("native", "nahla_p_501", "META-501")]
 
 
 def test_lookup_finding_another_item_after_the_post_records_no_evidence():
@@ -378,3 +408,55 @@ def test_lookup_only_verification_never_writes_evidence():
     push.assert_not_called()                          # nothing was POSTed in this attempt
     assert writes == []
     assert result["ok"] is True                       # the verification itself still succeeds
+
+
+_UPDATED = {**_CREATED, "action": "update"}
+
+
+@pytest.mark.parametrize("salla", [False, True])
+@pytest.mark.parametrize("push_result, lookup_id, lookup_meta, label", [
+    (_CREATED, "META-SOMEONE-ELSE", None, "create, lookup returns another item"),
+    (_CREATED, "META-OLD-STALE", None, "create, stale lookup returns the previous item"),
+    (_UPDATED, "META-502", None, "update, item replaced between POST and lookup"),
+    (_CREATED, None, {"matched": False}, "create, lookup returns no row (null id)"),
+    (_CREATED, None, {"matched": False, "error": "missing_graph_id"}, "create, lookup row without an id"),
+    (_CREATED, None, {"matched": False, "error": "ambiguous_graph_rows"}, "create, two Graph rows"),
+    ({**_CREATED, "meta_product_id": None}, "META-501", None, "create response without an id"),
+])
+def test_uncorroborated_publication_never_records_evidence(salla, push_result, lookup_id, lookup_meta, label):
+    parent = _generic_native_parent(**({"source": "salla", "external_id": "910600"} if salla else {}))
+    result, _push, writes = _run_orchestrator(parent, push_result=push_result, lookup_id=lookup_id,
+                                              lookup_meta=lookup_meta, salla=salla)
+    assert writes == [], label
+    assert result["ok"] is False, label
+
+
+@pytest.mark.parametrize("salla", [False, True])
+def test_corroborated_publication_records_evidence_for_native_and_salla(salla):
+    parent = _generic_native_parent(**({"source": "salla", "external_id": "910600"} if salla else {}))
+    for push_result in (_CREATED, _UPDATED):
+        result, _push, writes = _run_orchestrator(parent, push_result=push_result, lookup_id="META-501", salla=salla)
+        assert [(name, w["meta_item_id"]) for name, w in writes] == [("salla" if salla else "native", "META-501")]
+        assert result["ok"] is True
+
+
+@pytest.mark.parametrize("salla", [False, True])
+def test_stale_observation_repair_runs_only_after_a_corroborated_create(salla):
+    parent = _generic_native_parent(**({"source": "salla", "external_id": "910600"} if salla else {}))
+    immutable = {"ok": False, "error": "ambiguous_variant_identity", "reason": "meta_item_id_immutable"}
+    result, _push, writes = _run_orchestrator(parent, push_result=_CREATED, lookup_id="META-501", salla=salla,
+                                              upsert_result=immutable)
+    repair = [kw for name, kw in writes if name == "repair"]
+    assert len(repair) == 1 and result["ok"] is True
+    assert repair[0]["created_meta_item_id"] == repair[0]["corroborated_meta_item_id"] == "META-501"
+    # an update hitting the same refusal never repairs: it fails closed
+    result, _push, writes = _run_orchestrator(parent, push_result=_UPDATED, lookup_id="META-501", salla=salla,
+                                              upsert_result=immutable)
+    assert [name for name, _kw in writes if name == "repair"] == [] and result["ok"] is False
+
+
+def test_salla_evidence_is_refused_when_the_catalog_changed_during_the_attempt():
+    parent = _generic_native_parent(source="salla", external_id="910600")
+    result, _push, writes = _run_orchestrator(parent, push_result=_CREATED, lookup_id="META-501", salla=True,
+                                              catalogs=["CAT-GENERIC-001", "CAT-MOVED"])
+    assert writes == [] and result["ok"] is False and result["error_code"] == "verification_failed"

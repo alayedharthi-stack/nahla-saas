@@ -849,6 +849,23 @@
       ]
     },
     {
+      "id": "catalog_stale_repair_row_lock",
+      "kind": "proof",
+      "module": "backend/tests/test_meta_catalog_stale_repair_lock_pg.py",
+      "origin": "PR #1193 — stale-observation repair under real PostgreSQL concurrency: the repair re-reads the membership row with SELECT … FOR UPDATE and refreshes its session's copy, so newer publication evidence, a remap to another product or a delete committed while it waits is re-read and refused (never overwritten), and two repairs of the same key serialize (the second re-reads and refuses; one row remains). Two real sessions; the wait is confirmed in pg_stat_activity. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]"
+      ]
+    },
+    {
       "id": "catalog_channel_retirements_migration",
       "kind": "proof",
       "module": "backend/tests/test_catalog_channel_retirements_migration_pg.py",

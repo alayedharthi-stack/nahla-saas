@@ -230,7 +230,8 @@ def _publish(session, tid, rid, graph, *, price="250", overrides=None):
         result = push.push_one_meta_catalog_item(session, tid, rid, confirm=True, client=graph,
                                                  payload_overrides=overrides)
         if result.get("ok") and result.get("action") in ("create", "update"):
-            push._stamp_salla_batch_membership(session, tid, rid, str(result.get("meta_product_id") or ""), CATALOG)
+            push._stamp_salla_batch_membership(session, tid, rid, str(result.get("meta_product_id") or ""), CATALOG,
+                                              action=str(result["action"]), client=graph)
             # the orchestrator's success stamp (local state only)
             variant = session.query(ProductVariant).filter_by(tenant_id=tid, retailer_id=rid).first()
             parent = session.get(Product, variant.product_id)
@@ -721,5 +722,359 @@ def test_native_evidence_never_changes_what_capability_readers_see():
         after = load_meta_catalog_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-VIS-1")
         assert (after.product_id, after.variant_id) == (before.product_id, before.variant_id) == (p2.id, None)
         assert _membership(session, tid, "SHOE-VIS-1").provenance == PROVENANCE_NATIVE_PUSH_RECONCILED
+    finally:
+        session.close(); engine.dispose()
+
+
+# ── SF-A: a verified create replaces only a stale reconcile observation ────
+
+class ReplacingGraph(CatalogGraph):
+    """The create POST returns one id, but by the corroborating lookup Graph shows *lookup_item* under that retailer_id."""
+
+    def __init__(self, lookup_item):
+        super().__init__()
+        self.lookup_item = lookup_item
+
+    def post(self, url, data=None, headers=None, params=None):
+        resp = super().post(url, data=data, headers=headers, params=params)
+        body = dict(data or {})
+        if url.rstrip("/").endswith(f"/{CATALOG}/products"):
+            rid = body["retailer_id"]
+            if self.lookup_item is None:
+                self.items.pop(rid, None)                      # not visible yet / gone again
+            elif self.lookup_item == "AMBIGUOUS":
+                self.items[rid]["dup"] = True
+            else:
+                self.items[rid] = {**self.items[rid], "id": self.lookup_item}
+        return resp
+
+    def get(self, url, params=None, headers=None):
+        filt = (params or {}).get("filter")
+        if "/products" in url and filt:
+            rid = json.loads(filt)["retailer_id"]["eq"]
+            item = self.items.get(rid)
+            if item and item.get("dup"):
+                self.gets.append((url, dict(params or {})))
+                row = {"retailer_id": rid, **item}
+                return _Resp(200, {"data": [row, {**row, "id": "META-TWIN"}]})
+        return super().get(url, params=params, headers=headers)
+
+
+def _stale_observation(session, tid, product, variant, rid, *, stale="GONE-1", provenance=PROVENANCE_GRAPH_RECONCILE,
+                       salla_variant_id=None):
+    session.add(MetaCatalogMembership(
+        tenant_id=tid, catalog_id=CATALOG, retailer_id=rid, product_id=product.id,
+        variant_id=variant.id if salla_variant_id else None, salla_variant_id=salla_variant_id, meta_item_id=stale,
+        verified_at=datetime.now(timezone.utc), provenance=provenance,
+    ))
+    session.commit()
+
+
+@pytest.mark.parametrize("kind", ["native", "salla"])
+def test_stale_observation_then_verified_create_update_retire_republish(kind):
+    session, tid, engine = _db()
+    try:
+        if kind == "native":
+            rid = "SHOE-STALE-1"
+            product, variant = _native(session, tid, rid)
+            _stale_observation(session, tid, product, variant, rid)
+        else:
+            product, variant = _salla(session, tid, "910500")
+            rid = "910500-881"
+            _stale_observation(session, tid, product, variant, rid, salla_variant_id="881")
+        graph = CatalogGraph()                                     # GONE-1 is not on Graph: lookup finds nothing
+        created = _publish(session, tid, rid, graph, price="250")
+        assert created["action"] == "create" and created["ok"]
+        mid = created["meta_product_id"]
+        row = _membership(session, tid, rid)
+        assert row.meta_item_id == mid and row.provenance in PUBLICATION_PROVENANCES
+        assert row.product_id == product.id                       # same local referent
+        if kind == "native":
+            assert row.provenance == PROVENANCE_NATIVE_PUSH_RECONCILED and row.variant_id is None
+        updated = _publish(session, tid, rid, graph, price="230")
+        assert updated["action"] == "update" and graph.posts[-1][0].endswith(f"/{mid}")
+        product = session.get(Product, product.id)
+        product.catalog_status = "merchant_hidden"
+        product.merchant_hidden_at = datetime.now(timezone.utc)
+        mark_product_channel_retire_pending(session, product, reason=REASON_MERCHANT_HIDDEN)
+        session.commit()
+        with _token():
+            out = attempt_product_channel_retirement(session, tid, product.id, client=graph)
+        assert out["retired"] == 1 and graph.items[rid]["visibility"] == "staging"
+        republished = _publish(session, tid, rid, graph, price="230", overrides={"visibility": "published"})
+        assert republished["action"] == "update" and graph.items[rid]["visibility"] == "published"
+    finally:
+        session.close(); engine.dispose()
+
+
+@pytest.mark.parametrize("lookup_item, label", [
+    ("META-REPLACED", "replaced between POST and lookup"),
+    (None, "lookup finds no item (stale / not yet visible)"),
+    ("AMBIGUOUS", "lookup returns two rows"),
+])
+def test_uncorroborated_create_never_replaces_the_observation(lookup_item, label):
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-STALE-2")
+        _stale_observation(session, tid, product, variant, "SHOE-STALE-2")
+        graph = ReplacingGraph(lookup_item)
+        with patch.object(push, "preview_meta_variant_payload", return_value=_preview("SHOE-STALE-2", "250")), _token():
+            result = push.push_one_meta_catalog_item(session, tid, "SHOE-STALE-2", confirm=True, client=graph)
+            assert result["action"] == "create" and result["ok"], label
+            with pytest.raises(push.MetaCatalogPushError):
+                push._stamp_salla_batch_membership(session, tid, "SHOE-STALE-2", result["meta_product_id"], CATALOG,
+                                                   action="create", client=graph)
+        session.rollback()
+        row = _membership(session, tid, "SHOE-STALE-2")
+        assert (row.meta_item_id, row.provenance) == ("GONE-1", PROVENANCE_GRAPH_RECONCILE), label
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_repair_refuses_everything_but_a_corroborated_create_over_a_reconcile_observation():
+    from services.salla_variant_catalog_identity import replace_stale_observation_after_create
+
+    session, tid, engine = _db()
+    try:
+        other_tenant = Tenant(name="متجر تجريبي ثانٍ", is_active=True)
+        session.add(other_tenant)
+        session.commit()
+        p, v = _native(session, tid, "SHOE-R-1")
+        _stale_observation(session, tid, p, v, "SHOE-R-1")
+        q, w = _native(session, tid, "SHOE-R-2")
+        _stale_observation(session, tid, q, w, "SHOE-R-2", stale="META-OURS", provenance=PROVENANCE_NATIVE_PUSH)
+        r, x = _native(session, tid, "SHOE-R-3")
+        _stale_observation(session, tid, r, x, "SHOE-R-3", stale="META-HELD")
+        o, ov = _native(session, other_tenant.id, "SHOE-R-1")
+        session.add(MetaCatalogMembership(
+            tenant_id=other_tenant.id, catalog_id=CATALOG, retailer_id="SHOE-R-1", product_id=o.id, variant_id=None,
+            meta_item_id="GONE-OTHER", verified_at=datetime.now(timezone.utc), provenance=PROVENANCE_GRAPH_RECONCILE,
+        ))
+        session.commit()
+
+        def repair(rid, product, created, corroborated, *, catalog=CATALOG, tenant=tid):
+            return replace_stale_observation_after_create(
+                session, tenant_id=tenant, catalog_id=catalog, retailer_id=rid, product_id=product.id, variant_id=None,
+                created_meta_item_id=created, corroborated_meta_item_id=corroborated,
+                publication_provenance=PROVENANCE_NATIVE_PUSH_RECONCILED)
+
+        assert repair("SHOE-R-1", p, "META-NEW", "META-OTHER")["reason"] == "create_not_corroborated"
+        assert repair("SHOE-R-1", p, "META-NEW", "")["reason"] == "create_not_corroborated"
+        assert repair("SHOE-R-1", p, "", "")["reason"] == "create_not_corroborated"
+        assert repair("SHOE-R-2", q, "META-NEW-2", "META-NEW-2")["reason"] == "meta_item_id_immutable"   # publication row
+        assert repair("SHOE-R-1", q, "META-NEW", "META-NEW")["reason"] == "product_id_immutable"        # another product
+        assert repair("SHOE-R-1", p, "META-HELD", "META-HELD")["reason"] == "meta_item_id_owned_other"
+        assert repair("SHOE-R-1", p, "META-NEW", "META-NEW", catalog="CAT-OTHER")["reason"] == "no_observation_to_replace"
+        assert repair("SHOE-UNKNOWN", p, "META-NEW", "META-NEW")["reason"] == "no_observation_to_replace"
+        session.commit()
+        rows = {(m.tenant_id, m.retailer_id): (m.meta_item_id, m.provenance) for m in session.query(MetaCatalogMembership).all()}
+        assert rows[(tid, "SHOE-R-1")] == ("GONE-1", PROVENANCE_GRAPH_RECONCILE)
+        assert rows[(tid, "SHOE-R-2")] == ("META-OURS", PROVENANCE_NATIVE_PUSH)
+        # the corroborated create repairs only this tenant's row, never another tenant's same key
+        assert repair("SHOE-R-1", p, "META-NEW", "META-NEW")["ok"]
+        session.commit()
+        rows = {(m.tenant_id, m.retailer_id): (m.meta_item_id, m.provenance) for m in session.query(MetaCatalogMembership).all()}
+        assert rows[(tid, "SHOE-R-1")] == ("META-NEW", PROVENANCE_NATIVE_PUSH_RECONCILED)
+        assert rows[(other_tenant.id, "SHOE-R-1")] == ("GONE-OTHER", PROVENANCE_GRAPH_RECONCILE)
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_an_update_never_triggers_the_stale_observation_repair():
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-STALE-3")
+        _stale_observation(session, tid, product, variant, "SHOE-STALE-3")
+        graph = CatalogGraph({"SHOE-STALE-3": {"id": "META-LIVE-3", "availability": "in stock"}})
+        with _token(), pytest.raises(push.MetaCatalogPushError):
+            push._stamp_salla_batch_membership(session, tid, "SHOE-STALE-3", "META-LIVE-3", CATALOG,
+                                               action="update", client=graph)
+        session.rollback()
+        assert graph.gets == []                                    # no corroborating lookup for an update
+        assert _membership(session, tid, "SHOE-STALE-3").meta_item_id == "GONE-1"
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_repair_is_skipped_when_the_connection_catalog_changed():
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-STALE-4")
+        _stale_observation(session, tid, product, variant, "SHOE-STALE-4")
+        graph = CatalogGraph({"SHOE-STALE-4": {"id": "META-NEW-4", "availability": "in stock"}})
+        conn = session.query(WhatsAppConnection).filter_by(tenant_id=tid).one()
+        conn.meta_catalog_id = "CAT-MOVED"
+        session.commit()
+        with _token(), pytest.raises(push.MetaCatalogPushError):
+            push._stamp_salla_batch_membership(session, tid, "SHOE-STALE-4", "META-NEW-4", CATALOG,
+                                               action="create", client=graph)
+        session.rollback()
+        assert graph.gets == []
+        assert _membership(session, tid, "SHOE-STALE-4").meta_item_id == "GONE-1"
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_generic_upserts_keep_their_immutable_id_contract():
+    """Only the narrow create repair may replace an id; the generic upserts never do."""
+    from services.salla_variant_catalog_identity import upsert_variant_membership
+
+    session, tid, engine = _db()
+    try:
+        sp, sv = _salla(session, tid, "910800")
+        _stale_observation(session, tid, sp, sv, "910800-881", stale="META-PUB", provenance="salla_variant_push",
+                           salla_variant_id="881")
+        sq, sw = _salla(session, tid, "910801")
+        _stale_observation(session, tid, sq, sw, "910801-881", stale="GONE-S", salla_variant_id="881")
+        np_, nv = _native(session, tid, "SHOE-IMM-1")
+        _stale_observation(session, tid, np_, nv, "SHOE-IMM-1", stale="GONE-N")
+        for product, variant, rid in ((sp, sv, "910800-881"), (sq, sw, "910801-881")):
+            ident = identity_for_retailer_id(product, [variant], rid)
+            out = upsert_variant_membership(session, tenant_id=tid, catalog_id=CATALOG, identity=ident, meta_item_id="META-NEW")
+            assert out["ok"] is False and out["reason"] == "meta_item_id_immutable", rid
+        out = upsert_native_publication_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-IMM-1",
+                                                   product_id=np_.id, variant_id=nv.id, meta_item_id="META-NEW")
+        assert out["ok"] is False and out["reason"] == "meta_item_id_immutable"
+        session.commit()
+        ids = {m.retailer_id: (m.meta_item_id, m.provenance) for m in session.query(MetaCatalogMembership).all()}
+        assert ids == {"910800-881": ("META-PUB", "salla_variant_push"),
+                       "910801-881": ("GONE-S", PROVENANCE_GRAPH_RECONCILE),
+                       "SHOE-IMM-1": ("GONE-N", PROVENANCE_GRAPH_RECONCILE)}
+    finally:
+        session.close(); engine.dispose()
+
+
+def _referent_view(session, tid, rids):
+    """What native catalog-card capability reads: membership_authorizes_send decides on
+    (tenant, catalog, retailer_id, product_id, variant_id) only — never on meta_item_id."""
+    listed = sorted((f.retailer_id, f.product_id, f.variant_id) for f in list_memberships_for_catalog(
+        session, tenant_id=tid, catalog_id=CATALOG))
+    loaded = {}
+    for rid in rids:
+        fact = load_meta_catalog_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id=rid)
+        loaded[rid] = None if fact is None else (fact.product_id, fact.variant_id)
+    return listed, loaded
+
+
+REPAIR_RIDS = ["5566778", "SHOE-STALE-SKU", "nahla_v_905", "SHOE-NULLID", "SHOE-AMB-2", "910700-881"]
+
+
+def _repair_world(*, repaired):
+    """Stale reconcile observations (variant-level, parent-level, nahla_*, null-id, later
+    ambiguous, Salla); Graph now shows the items a verified create made. The repaired world
+    also applies what that create records; the other is reconcile alone."""
+    from services.salla_variant_catalog_identity import replace_stale_observation_after_create
+
+    session, tid, engine = _db()
+    made = {}
+    for i, rid in enumerate(REPAIR_RIDS[:-1]):
+        made[rid] = _native(session, tid, rid, title=f"منتج عام {i}")
+    sp, sv = _salla(session, tid, "910700")
+    made["910700-881"] = (sp, sv)
+    now = datetime.now(timezone.utc)
+    rows = {
+        "5566778": dict(variant=True, stale="GONE-1"),
+        "SHOE-STALE-SKU": dict(variant=False, stale="GONE-2"),
+        "nahla_v_905": dict(variant=False, stale="GONE-3"),
+        "SHOE-NULLID": dict(variant=False, stale=None),
+        "SHOE-AMB-2": dict(variant=True, stale="GONE-5"),
+        "910700-881": dict(variant=True, stale="GONE-6"),
+    }
+    for rid, spec in rows.items():
+        p, v = made[rid]
+        session.add(MetaCatalogMembership(
+            tenant_id=tid, catalog_id=CATALOG, retailer_id=rid, product_id=p.id, variant_id=v.id if spec["variant"] else None,
+            salla_variant_id="881" if rid == "910700-881" else None, meta_item_id=spec["stale"], verified_at=now,
+            provenance=PROVENANCE_GRAPH_RECONCILE,
+        ))
+    session.commit()
+    live = {rid: {"meta_product_id": f"CREATED-{rid}"} for rid in REPAIR_RIDS}
+    if repaired:
+        for rid, spec in rows.items():
+            p, v = made[rid]
+            if spec["stale"] is None:
+                out = upsert_native_publication_membership(
+                    session, tenant_id=tid, catalog_id=CATALOG, retailer_id=rid, product_id=p.id, variant_id=v.id,
+                    meta_item_id=f"CREATED-{rid}")
+            else:
+                salla = rid == "910700-881"
+                out = replace_stale_observation_after_create(
+                    session, tenant_id=tid, catalog_id=CATALOG, retailer_id=rid, product_id=p.id,
+                    variant_id=None if salla else v.id, created_meta_item_id=f"CREATED-{rid}",
+                    corroborated_meta_item_id=f"CREATED-{rid}",
+                    publication_provenance="salla_variant_push" if salla else PROVENANCE_NATIVE_PUSH_RECONCILED,
+                    salla_identity=identity_for_retailer_id(p, [v], rid) if salla else None)
+            assert out["ok"], (rid, out)
+        session.commit()
+    return session, tid, engine, made, live
+
+
+def test_stale_observation_repair_neither_widens_nor_narrows_catalog_card_capability():
+    base = _repair_world(repaired=False)
+    new = _repair_world(repaired=True)
+    try:
+        b_session, b_tid, _be, b_made, b_live = base
+        n_session, n_tid, _ne, n_made, n_live = new
+        # right after the create: the repaired rows keep the observation's referent and visibility
+        assert _referent_view(b_session, b_tid, REPAIR_RIDS) == _referent_view(n_session, n_tid, REPAIR_RIDS)
+        _reconcile(b_session, b_tid, b_live)
+        _reconcile(n_session, n_tid, n_live)
+        assert _referent_view(b_session, b_tid, REPAIR_RIDS) == _referent_view(n_session, n_tid, REPAIR_RIDS)
+        owned = {m.retailer_id for m in n_session.query(MetaCatalogMembership).all() if m.provenance in PUBLICATION_PROVENANCES}
+        assert {"5566778", "SHOE-STALE-SKU", "SHOE-NULLID", "SHOE-AMB-2", "910700-881", "nahla_v_905"} == owned
+        assert not {m.retailer_id for m in b_session.query(MetaCatalogMembership).all()
+                    if m.provenance in PUBLICATION_PROVENANCES}
+        # mappings change: SHOE-AMB-2 becomes ambiguous, SHOE-STALE-SKU's item is replaced on Graph
+        for session, tid, live in ((b_session, b_tid, b_live), (n_session, n_tid, n_live)):
+            _native(session, tid, "SHOE-AMB-2-SIB", title="منتج عام مكرر", meta_retailer_id="SHOE-AMB-2")
+            live["SHOE-STALE-SKU"] = {"meta_product_id": "META-REPLACED"}
+        _reconcile(b_session, b_tid, b_live)
+        _reconcile(n_session, n_tid, n_live)
+        assert _referent_view(b_session, b_tid, REPAIR_RIDS) == _referent_view(n_session, n_tid, REPAIR_RIDS)
+        rows = {m.retailer_id: m for m in n_session.query(MetaCatalogMembership).all()}
+        assert rows["SHOE-AMB-2"].provenance == PROVENANCE_NATIVE_PUSH                      # ownership kept, not visible
+        assert rows["SHOE-STALE-SKU"].provenance == PROVENANCE_GRAPH_RECONCILE             # replaced item: no authority
+        assert rows["SHOE-STALE-SKU"].meta_item_id == "META-REPLACED"
+    finally:
+        for world in (base, new):
+            world[0].close(); world[2].dispose()
+
+
+def test_repair_never_overwrites_membership_changed_since_the_create():
+    from services.salla_variant_catalog_identity import replace_stale_observation_after_create
+
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-RACE-1")
+        _stale_observation(session, tid, product, variant, "SHOE-RACE-1")
+        other = sessionmaker(bind=engine)()
+
+        def repair():
+            return replace_stale_observation_after_create(
+                session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-RACE-1", product_id=product.id,
+                variant_id=variant.id, created_meta_item_id="META-MINE", corroborated_meta_item_id="META-MINE",
+                publication_provenance=PROVENANCE_NATIVE_PUSH_RECONCILED)
+
+        # this session read the stale observation first
+        assert _membership(session, tid, "SHOE-RACE-1").provenance == PROVENANCE_GRAPH_RECONCILE
+        # another writer commits newer publication evidence for the same key
+        row = other.query(MetaCatalogMembership).filter_by(tenant_id=tid, retailer_id="SHOE-RACE-1").one()
+        row.meta_item_id, row.provenance = "META-NEWER", PROVENANCE_NATIVE_PUSH
+        other.commit()
+        assert repair()["reason"] == "meta_item_id_immutable"
+        session.commit()
+        session.expire_all()
+        assert (_membership(session, tid, "SHOE-RACE-1").meta_item_id,
+                _membership(session, tid, "SHOE-RACE-1").provenance) == ("META-NEWER", PROVENANCE_NATIVE_PUSH)
+        # a concurrent reconcile already recorded the created item: nothing stale to replace
+        row = other.query(MetaCatalogMembership).filter_by(tenant_id=tid, retailer_id="SHOE-RACE-1").one()
+        row.meta_item_id, row.provenance = "META-MINE", PROVENANCE_GRAPH_RECONCILE
+        other.commit()
+        assert repair()["reason"] == "no_stale_observation"
+        # the row was deleted meanwhile
+        other.delete(other.query(MetaCatalogMembership).filter_by(tenant_id=tid, retailer_id="SHOE-RACE-1").one())
+        other.commit()
+        assert repair()["reason"] == "no_observation_to_replace"
+        other.close()
     finally:
         session.close(); engine.dispose()

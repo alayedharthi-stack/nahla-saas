@@ -354,7 +354,7 @@ def test_batch_records_publication_membership_only_after_a_real_create_or_update
          patch("services.meta_catalog_readiness.candidate_push_row", return_value={"retailer_id": RID}), \
          patch.object(push, "_prepare_salla_batch_membership_slot", lambda *a, **k: None), \
          patch.object(push, "push_one_meta_catalog_item", lambda *a, **k: next(results)), \
-         patch.object(push, "_stamp_salla_batch_membership", lambda db, tid, rid, mid, cid: calls.append((rid, mid))):
+         patch.object(push, "_stamp_salla_batch_membership", lambda db, tid, rid, mid, cid, **_kw: calls.append((rid, mid))):
         batch = push.push_ready_meta_catalog_batch(object(), 9, confirm=True, stop_on_first_error=False)
     assert batch["summary"]["attempted"] >= 2
     assert calls == [(RID, "META-NEW")]

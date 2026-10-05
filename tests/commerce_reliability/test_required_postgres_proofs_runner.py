@@ -220,6 +220,9 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # The read-only membership readout runs every statement for real
                    # and records a missing retirements table instead of failing.
                    "catalog_q5_membership_readout",
+                   # The stale-observation repair re-reads its row under a lock:
+                   # a newer committed row is refused, two repairs serialize.
+                   "catalog_stale_repair_row_lock",
                    # The catalog channel-retirements migration adopts an existing
                    # table only when its definition matches; anything else fails closed.
                    "catalog_channel_retirements_migration"]
@@ -252,6 +255,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "customer_order_history": ("proof", harness_env),
         "catalog_claim_guard_concurrency": ("proof", harness_env),
         "catalog_q5_membership_readout": ("proof", harness_env),
+        "catalog_stale_repair_row_lock": ("proof", harness_env),
         "catalog_channel_retirements_migration": ("proof", harness_env),
     }
     for suite in manifest["suites"]:

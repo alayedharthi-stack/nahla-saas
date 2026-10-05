@@ -450,6 +450,99 @@ def upsert_native_publication_membership(
     return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
 
 
+PROVENANCE_GRAPH_RECONCILE = "meta_graph_reconcile"
+REASON_STALE_OBSERVATION_REPLACED = "stale_observation_replaced_by_verified_create"
+
+
+def replace_stale_observation_after_create(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    product_id: int,
+    variant_id: Optional[int],
+    created_meta_item_id: str,
+    corroborated_meta_item_id: str,
+    publication_provenance: str,
+    salla_identity: Optional[SallaVariantIdentity] = None,
+) -> Dict[str, Any]:
+    """Record a verified CREATE over a stale reconcile observation for the same key.
+
+    The generic upserts never change an existing ``meta_item_id``. This one
+    narrow repair applies only when every fact below holds, and refuses
+    otherwise:
+
+    * the caller's POST was a successful create and returned
+      *created_meta_item_id* — a create only happens when the pre-POST lookup
+      found no Graph item for this retailer_id in this catalog;
+    * an independent post-POST lookup scoped to the same tenant connection,
+      catalog and retailer_id returned exactly one row whose id
+      (*corroborated_meta_item_id*) equals the created id;
+    * the existing (tenant, catalog, retailer_id) row is a reconcile
+      observation (``meta_graph_reconcile``) — never a slot, never existing
+      publication evidence — bound to the same local product/variant, and its
+      id differs (so it no longer names the item under this retailer_id);
+    * no other row of this tenant and catalog already holds the created id.
+
+    The row then names the created item with *publication_provenance*.
+    """
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    cid = _strip(catalog_id)
+    rid = _strip(retailer_id)
+    created = _strip(created_meta_item_id)
+    corroborated = _strip(corroborated_meta_item_id)
+    refuse = lambda reason: {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": reason}  # noqa: E731
+    if not cid or not rid or not created or created != corroborated:
+        return refuse("create_not_corroborated")
+    # Re-read the row under a row lock (PostgreSQL; a no-op on SQLite),
+    # refreshing any copy this session already holds, so a concurrent writer's
+    # newer evidence is seen and never overwritten.
+    existing = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.retailer_id == rid,
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if existing is None:
+        return refuse("no_observation_to_replace")
+    if _strip(getattr(existing, "provenance", None)) != PROVENANCE_GRAPH_RECONCILE:
+        return refuse("meta_item_id_immutable")
+    stale = _strip(getattr(existing, "meta_item_id", None))
+    if not stale or stale == created:
+        return refuse("no_stale_observation")
+    if salla_identity is not None:
+        conflict = _local_identity_conflict(existing, salla_identity)
+        if conflict:
+            return refuse(conflict)
+    elif int(getattr(existing, "product_id", 0) or 0) != int(product_id or 0) or (
+        existing.variant_id is not None and variant_id is not None and int(existing.variant_id) != int(variant_id)
+    ):
+        return refuse("product_id_immutable")
+    collision = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.meta_item_id == created,
+        )
+        .first()
+    )
+    if collision is not None:
+        return refuse("meta_item_id_owned_other")
+    existing.meta_item_id = created
+    existing.verified_at = datetime.now(timezone.utc)
+    existing.provenance = publication_provenance
+    return {"ok": True, "created": False, "meta_item_id": created,
+            "reason": REASON_STALE_OBSERVATION_REPLACED, "replaced_meta_item_id": stale}
+
+
 def _graph_price_minor(value: Any) -> str:
     """Normalize a Graph price to minor-unit string.
 

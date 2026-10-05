@@ -1416,7 +1416,10 @@ def _attempt_acquired_body(
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
         ensure_variant_membership_slot,
         identity_for_retailer_id,
+        PROVENANCE_NATIVE_PUSH_RECONCILED,
+        PROVENANCE_VARIANT_PUSH,
         is_salla_source,
+        replace_stale_observation_after_create,
         upsert_native_publication_membership,
         upsert_variant_membership,
     )
@@ -1651,13 +1654,24 @@ def _attempt_acquired_body(
         # nothing to Graph, so it never creates or upgrades evidence.
         published_now = (not lookup_only) and str(push_result.get("action") or "") in ("create", "update")
         if published_now:
-            # The item the lookup found must be the item this POST created or
-            # updated; any other id (or none from the POST) proves nothing.
+            # The post-POST lookup (this tenant's connection catalog, this
+            # retailer_id, exactly one Graph row with an id) must return the very
+            # item this POST created (create response id) or updated (its
+            # target id). Graph item ids are global, so only that equality
+            # corroborates the publication; any other id, or none, proves
+            # nothing. Evidence is recorded for the catalog the lookup read.
             posted_id = str(push_result.get("meta_product_id") or "").strip()
             if not posted_id or posted_id != str(meta_item_id).strip():
                 return fail(
                     "verification_failed",
                     "verification_failed: meta_item_id_mismatch after push",
+                    retailer_id=retailer_id,
+                )
+            if salla_parent and salla_catalog_id != catalog_id:
+                # the connection's catalog changed during this attempt
+                return fail(
+                    "verification_failed",
+                    "verification_failed: catalog_changed_during_push",
                     retailer_id=retailer_id,
                 )
             if salla_parent:
@@ -1670,7 +1684,7 @@ def _attempt_acquired_body(
                 bound = upsert_variant_membership(
                     db,
                     tenant_id=int(tenant_id),
-                    catalog_id=salla_catalog_id or catalog_id,
+                    catalog_id=catalog_id,
                     identity=salla_ident,
                     meta_item_id=str(meta_item_id),
                 )
@@ -1687,6 +1701,27 @@ def _attempt_acquired_body(
                     product_id=int(parent.id),
                     variant_id=getattr(pushed_variant, "id", None),
                     meta_item_id=str(meta_item_id),
+                )
+            if (
+                not bound.get("ok")
+                and bound.get("reason") == "meta_item_id_immutable"
+                and str(push_result.get("action") or "") == "create"
+            ):
+                # A verified create over a stale reconcile observation of the
+                # same key (narrow repair; see replace_stale_observation_after_create).
+                bound = replace_stale_observation_after_create(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=(None if salla_parent else getattr(pushed_variant, "id", None)),
+                    created_meta_item_id=posted_id,
+                    corroborated_meta_item_id=str(meta_item_id),
+                    publication_provenance=(
+                        PROVENANCE_VARIANT_PUSH if salla_parent else PROVENANCE_NATIVE_PUSH_RECONCILED
+                    ),
+                    salla_identity=salla_ident if salla_parent else None,
                 )
             if not bound.get("ok"):
                 return fail(

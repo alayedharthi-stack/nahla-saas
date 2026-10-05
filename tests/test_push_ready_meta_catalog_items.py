@@ -34,7 +34,7 @@ EVIDENCE_STAMPS: list = []
 def _record_evidence_stamps():
     EVIDENCE_STAMPS.clear()
     with patch("services.meta_catalog_push._stamp_salla_batch_membership",
-               side_effect=lambda db, tid, rid, mid, cid: EVIDENCE_STAMPS.append((rid, mid))):
+               side_effect=lambda db, tid, rid, mid, cid, **_kw: EVIDENCE_STAMPS.append((rid, mid))):
         yield
 
 

@@ -925,13 +925,19 @@ def _stamp_salla_batch_membership(
     retailer_id: str,
     meta_item_id: str,
     catalog_id: str,
+    *,
+    action: str = "",
+    client: Optional[httpx.Client] = None,
 ) -> None:
     """Publication evidence after a successful create/update POST (Salla and native)."""
+    from core.meta_catalog_membership import PROVENANCE_NATIVE_PUSH_RECONCILED  # noqa: PLC0415
     from services.salla_variant_catalog_identity import (  # noqa: PLC0415
         AmbiguousVariantIdentity,
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        PROVENANCE_VARIANT_PUSH,
         identity_for_retailer_id,
         is_salla_source,
+        replace_stale_observation_after_create,
         upsert_native_publication_membership,
         upsert_variant_membership,
     )
@@ -947,7 +953,9 @@ def _stamp_salla_batch_membership(
     if not cid:
         conn = _resolve_connection(db, tenant_id)
         cid, _token = _resolve_catalog_and_token(conn, require_catalog_readable=False)
-    if not is_salla_source(parent):
+    salla = is_salla_source(parent)
+    ident = None
+    if not salla:
         bound = upsert_native_publication_membership(
             db,
             tenant_id=int(tenant_id),
@@ -971,6 +979,27 @@ def _stamp_salla_batch_membership(
             catalog_id=cid,
             identity=ident,
             meta_item_id=mid,
+        )
+    if not bound.get("ok") and bound.get("reason") == "meta_item_id_immutable" and action == "create":
+        # A verified create over a stale reconcile observation of the same key:
+        # corroborate the created id with a lookup scoped to this tenant's
+        # connection catalog and retailer_id, then apply the narrow repair.
+        conn = _resolve_connection(db, tenant_id)
+        current_cid = str(getattr(conn, "meta_catalog_id", "") or "").strip()
+        live_id, _lookup = (None, {})
+        if current_cid == cid:
+            live_id, _lookup = find_meta_catalog_item_by_retailer_id(conn, cid, retailer_id, client=client)
+        bound = replace_stale_observation_after_create(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            retailer_id=retailer_id,
+            product_id=int(parent.id),
+            variant_id=None if salla else getattr(variant, "id", None),
+            created_meta_item_id=mid,
+            corroborated_meta_item_id=str(live_id or ""),
+            publication_provenance=PROVENANCE_VARIANT_PUSH if salla else PROVENANCE_NATIVE_PUSH_RECONCILED,
+            salla_identity=ident,
         )
     if not bound.get("ok"):
         raise MetaCatalogPushError(
@@ -1072,6 +1101,8 @@ def push_ready_meta_catalog_batch(
                     rid,
                     str(push_result.get("meta_product_id") or ""),
                     str(push_result.get("catalog_id") or ""),
+                    action=str(push_result.get("action") or ""),
+                    client=client,
                 )
         except MetaCatalogPushError as exc:
             push_result = {
