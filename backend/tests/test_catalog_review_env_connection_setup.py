@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from sqlalchemy import JSON, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
@@ -27,6 +28,8 @@ from scripts.operators import catalog_review_env_connection_setup as op  # noqa:
 
 REVIEW_DSN = "postgresql+psycopg2://review_user:s3cret-dsn-password@postgres-catalog-review.railway.internal:5432/railway"
 TOKEN = "EAAG-system-user-token-never-printed-0123456789"
+# A fresh Fernet key per run: the token is encrypted with it, never a stored credential.
+_TEST_ENC_KEY = Fernet.generate_key().decode()
 
 
 def review_env(**overrides):
@@ -38,7 +41,7 @@ def review_env(**overrides):
         "DATABASE_URL": REVIEW_DSN,
         "DASHBOARD_URL": "https://catalog-review.nahlah.ai",
         "NAHLA_CATALOG_REVIEW_WA_TOKEN": TOKEN,
-        "WA_TOKEN_ENC_KEY": "u1RZzcBzs0r5OVljAb8vZ8ZgAJE9Z0jU6Yl9Jf1g3Fk=",
+        "WA_TOKEN_ENC_KEY": _TEST_ENC_KEY,
     }
     env.update(overrides)
     return env
@@ -67,7 +70,7 @@ def session_factory(monkeypatch):
     s.add(Tenant(id=2, name="متجر آخر"))
     s.commit()
     s.close()
-    monkeypatch.setenv("WA_TOKEN_ENC_KEY", "u1RZzcBzs0r5OVljAb8vZ8ZgAJE9Z0jU6Yl9Jf1g3Fk=")
+    monkeypatch.setenv("WA_TOKEN_ENC_KEY", _TEST_ENC_KEY)
     return factory
 
 
