@@ -8,6 +8,7 @@ No full export, no DB writes, no product loops.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -310,6 +311,92 @@ def live_item_publication_evidence(
     return out
 
 
+PENDING_PUBLICATIONS_KEY = "pending_publications"
+
+
+def pending_publication_record(*, product_id: int, catalog_id: str, retailer_id: str, meta_item_id: str) -> Optional[Dict[str, Any]]:
+    """The identity of one successful create POST: its own item id, catalog, retailer_id and product.
+
+    Never authority by itself; see ``corroborate_pending_publication``."""
+    cid, rid, mid = str(catalog_id or "").strip(), str(retailer_id or "").strip(), str(meta_item_id or "").strip()
+    if not (product_id and cid and rid and mid):
+        return None
+    return {"product_id": int(product_id), "catalog_id": cid, "retailer_id": rid, "meta_item_id": mid,
+            "posted_at": datetime.now(timezone.utc).isoformat()}
+
+
+def _pending_publications(sync_meta: Any) -> Dict[str, Any]:
+    pending = (sync_meta or {}).get(PENDING_PUBLICATIONS_KEY) if isinstance(sync_meta, dict) else None
+    return dict(pending) if isinstance(pending, dict) else {}
+
+
+def with_pending_publication(sync_meta: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    pending = _pending_publications(sync_meta)
+    pending[f"{record['catalog_id']}|{record['retailer_id']}"] = dict(record)
+    return pending
+
+
+def without_pending_publications(sync_meta: Any, retailer_ids: Any) -> Dict[str, Any]:
+    drop = {str(r or "").strip() for r in (retailer_ids or [])}
+    return {k: v for k, v in _pending_publications(sync_meta).items()
+            if not (isinstance(v, dict) and str(v.get("retailer_id") or "").strip() in drop)}
+
+
+def corroborate_pending_publication(
+    db: Any,
+    parent: Any,
+    variant: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    live_meta_item_id: str,
+    salla_identity: Any = None,
+) -> Dict[str, Any]:
+    """Turn a recorded successful create into publication evidence once a live lookup proves it.
+
+    *live_meta_item_id* comes from ``find_meta_catalog_item_by_retailer_id``
+    for this tenant's connection catalog and *retailer_id*, which returns an
+    id only for exactly one Graph row that has one. Evidence is written only
+    when the product's recorded attempt names this same product, catalog and
+    retailer_id and its POST returned exactly that id; it is written through
+    the generic upserts, so an established publication is never rebound and
+    a conflicting row refuses. Anything else returns ok=False and writes
+    nothing.
+    """
+    cid, rid, live = str(catalog_id or "").strip(), str(retailer_id or "").strip(), str(live_meta_item_id or "").strip()
+    sync_meta = ((getattr(parent, "extra_metadata", None) or {}).get("sync_meta")
+                 if isinstance(getattr(parent, "extra_metadata", None), dict) else None)
+    record = _pending_publications(sync_meta).get(f"{cid}|{rid}")
+    if not isinstance(record, dict) or not live:
+        return {"ok": False, "reason": "no_pending_publication"}
+    try:
+        same_product = int(record.get("product_id") or 0) == int(getattr(parent, "id", 0) or 0)
+    except (TypeError, ValueError):
+        same_product = False
+    if (not same_product or str(record.get("catalog_id") or "") != cid
+            or str(record.get("retailer_id") or "") != rid):
+        return {"ok": False, "reason": "pending_scope_mismatch"}
+    if str(record.get("meta_item_id") or "").strip() != live:
+        return {"ok": False, "reason": "pending_id_not_corroborated"}
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        upsert_native_publication_membership,
+        upsert_variant_membership,
+    )
+
+    if salla_identity is not None:
+        bound = upsert_variant_membership(db, tenant_id=int(tenant_id), catalog_id=cid, identity=salla_identity,
+                                          meta_item_id=live)
+    else:
+        bound = upsert_native_publication_membership(
+            db, tenant_id=int(tenant_id), catalog_id=cid, retailer_id=rid, product_id=int(parent.id),
+            variant_id=getattr(variant, "id", None), meta_item_id=live)
+    if not bound.get("ok"):
+        return {"ok": False, "reason": str(bound.get("reason") or bound.get("error") or "evidence_refused")}
+    db.flush()
+    return {"ok": True, "reason": "pending_publication_corroborated", "meta_item_id": live}
+
+
 def _ownership_block(result: Dict[str, Any], lookup: Dict[str, Any], meta_product_id: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
     result["action"] = ACTION_BLOCK_OWNERSHIP
     result["error"] = ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
@@ -591,6 +678,7 @@ def push_one_meta_catalog_item(
     )
 
     sellable_salla = False
+    ident = None
     if is_salla_source(parent):
         gate_variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
         ident = None
@@ -635,6 +723,19 @@ def push_one_meta_catalog_item(
             db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
             meta_product_id=str(meta_product_id), parent=parent,
         )
+        if not evidence.get("owned"):
+            # An earlier successful create of this product whose verification
+            # lagged: this scoped, unique lookup may corroborate its recorded id.
+            corroboration = corroborate_pending_publication(
+                db, parent, variant, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+                live_meta_item_id=str(meta_product_id), salla_identity=ident if sellable_salla else None,
+            )
+            result["pending_publication"] = corroboration
+            if corroboration.get("ok"):
+                evidence = live_item_publication_evidence(
+                    db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+                    meta_product_id=str(meta_product_id), parent=parent,
+                )
         result["ownership_evidence"] = evidence
         if not evidence.get("owned"):
             # a retailer_id match without publication evidence is a "match that
@@ -1150,6 +1251,11 @@ __all__ = [
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
     "live_item_publication_evidence",
+    "PENDING_PUBLICATIONS_KEY",
+    "corroborate_pending_publication",
+    "pending_publication_record",
+    "with_pending_publication",
+    "without_pending_publications",
     "PUBLICATION_PROVENANCES",
     "ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED",
     "ACTION_BLOCK_OWNERSHIP",

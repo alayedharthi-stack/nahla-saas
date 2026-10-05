@@ -60,8 +60,9 @@ The inventory distinguishes two kinds of suite:
 | `catalog_stale_repair_row_lock` | proof | `backend/tests/test_meta_catalog_stale_repair_lock_pg.py` | PR #1193, stale-observation repair under real concurrency: the repair re-reads the membership row with `SELECT … FOR UPDATE` and refreshes its session copy, so newer publication evidence, a remap or a delete committed while it waits is re-read and refused, and two repairs of the same key serialize (the second refuses; one row remains). Two real sessions; the wait is confirmed in `pg_stat_activity`. Throw-away database per test, dropped at teardown | 5 |
 | `catalog_channel_retirements_migration` | proof | `backend/tests/test_catalog_channel_retirements_migration_pg.py` | PR #1193, catalog channel-retirements migration: a fresh database gets the table and the revision; a table the startup `create_all` built (current model, and the first model with `catalog_id NOT NULL`, which is relaxed) is adopted; any other table of that name — missing or partial uniqueness or status index, a missing or other-schema tenant foreign key, a missing or extra column, an extra unique or check constraint, a different type (including `CHAR` for `VARCHAR`) or nullability, an unrelated table — makes the upgrade raise with revision and schema unchanged. Throw-away databases cloned from a template at the parent revision, dropped at teardown | 17 |
 
-The integrated branch inventories 340 cases (338 proofs + 2 runner regressions):
-all 321 identifiers from address integration `8f2bd079`, plus the collector's
+The integrated branch inventories 600 cases in 24 suites (598 proofs + 2 runner
+regressions); the suite table above lists each suite's count. The first 340 cases
+(338 proofs + 2 runner regressions) were: all 321 identifiers from address integration `8f2bd079`, plus the collector's
 13, followed by six nullability/constraint-kind controls for PostgreSQL 18
 compatibility. All 334 pre-correction identifiers remain. All 290 earlier
 runtime identifiers and all 31 address identifiers are

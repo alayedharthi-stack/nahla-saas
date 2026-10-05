@@ -24,10 +24,14 @@ from core.catalog import (
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_push import (
+    PENDING_PUBLICATIONS_KEY,
     MetaCatalogPushError,
     find_meta_catalog_item_by_retailer_id,
     load_variant_for_push,
+    pending_publication_record,
     push_one_meta_catalog_item,
+    with_pending_publication,
+    without_pending_publications,
     _resolve_connection,
 )
 from services.meta_catalog_sync_preview import preview_native_meta_sync
@@ -1454,6 +1458,7 @@ def _attempt_acquired_body(
     variant_results: Dict[str, Any] = {}
     expected_map = _expected_payloads_map(parent)
     verified_meta_item_id: Optional[str] = None
+    evidence_written_rids: List[str] = []
     retailer_id = retailer_ids[0]
     content_ok = True
     skipped_push = lookup_only
@@ -1626,6 +1631,24 @@ def _attempt_acquired_body(
                 code = classify_graph_push_failure(push_result, code)
             return fail(code, err_msg, retailer_id=retailer_id)
 
+        if not lookup_only and str(push_result.get("action") or "") == "create":
+            # Keep the identity of this successful create (the POST's own item
+            # id, catalog, retailer_id, product) before verifying it: if the
+            # follow-up lookup does not corroborate it now (read-after-write
+            # lag, an error), a later scoped lookup returning exactly this id
+            # may still prove it (see corroborate_pending_publication). It is
+            # never authority by itself.
+            attempt = pending_publication_record(
+                product_id=int(parent.id),
+                catalog_id=str(push_result.get("catalog_id") or ""),
+                retailer_id=str(retailer_id),
+                meta_item_id=str(push_result.get("meta_product_id") or ""),
+            )
+            if attempt is not None:
+                if not _stamp_with_lease(db, parent, lease, lambda row: _write_sync_meta(
+                        row, **{PENDING_PUBLICATIONS_KEY: with_pending_publication(_read_sync_meta(row), attempt)})):
+                    return _abandon_stale_lease(db)
+
         try:
             conn = _resolve_connection(db, tenant_id)
             catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
@@ -1738,6 +1761,7 @@ def _attempt_acquired_body(
                     f"membership_commit_failed:{type(exc).__name__}"[:200],
                     retailer_id=retailer_id,
                 )
+            evidence_written_rids.append(str(retailer_id))
         if verified_meta_item_id is None:
             verified_meta_item_id = str(meta_item_id)
 
@@ -1808,6 +1832,9 @@ def _attempt_acquired_body(
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
             updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()
@@ -1844,6 +1871,9 @@ def _attempt_acquired_body(
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
             updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()

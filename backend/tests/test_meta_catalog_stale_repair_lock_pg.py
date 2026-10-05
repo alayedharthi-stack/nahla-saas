@@ -172,6 +172,11 @@ def _run_repair_in_thread(engine, ids, created, *, preload=True):
                     s, tenant_id=ids["tenant"], catalog_id=CATALOG, retailer_id=RID, product_id=ids["p1"],
                     variant_id=ids["p1v"], meta_item_id=created)
                 outcome["upsert"] = first.get("reason")
+                # Hold the loaded row so this session keeps its (soon stale) copy in
+                # the identity map: the repair must refresh it, not trust it.
+                outcome["held"] = s.query(MetaCatalogMembership).filter_by(
+                    tenant_id=ids["tenant"], catalog_id=CATALOG, retailer_id=RID).first()
+                outcome["held_before"] = (outcome["held"].meta_item_id, outcome["held"].provenance)
             ready.set()
             outcome["go"].wait(timeout=10)
             t0 = time.monotonic()
@@ -196,7 +201,8 @@ def _run_repair_in_thread(engine, ids, created, *, preload=True):
 def test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it(race_pg, change):
     engine, ids = race_pg
     thread, outcome = _run_repair_in_thread(engine, ids, "META-MINE")
-    assert outcome["upsert"] == "meta_item_id_immutable"          # the stale copy is now in the repair's session
+    assert outcome["upsert"] == "meta_item_id_immutable"
+    assert outcome["held_before"] == ("GONE-1", PROVENANCE_GRAPH_RECONCILE)   # the repair's session holds the stale copy
 
     writer = _session(engine)
     row = writer.execute(text(

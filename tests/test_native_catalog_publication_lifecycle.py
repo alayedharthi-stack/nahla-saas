@@ -1055,8 +1055,9 @@ def test_repair_never_overwrites_membership_changed_since_the_create():
                 variant_id=variant.id, created_meta_item_id="META-MINE", corroborated_meta_item_id="META-MINE",
                 publication_provenance=PROVENANCE_NATIVE_PUSH_RECONCILED)
 
-        # this session read the stale observation first
-        assert _membership(session, tid, "SHOE-RACE-1").provenance == PROVENANCE_GRAPH_RECONCILE
+        # this session read the stale observation first and still holds that copy
+        held = _membership(session, tid, "SHOE-RACE-1")
+        assert held.provenance == PROVENANCE_GRAPH_RECONCILE
         # another writer commits newer publication evidence for the same key
         row = other.query(MetaCatalogMembership).filter_by(tenant_id=tid, retailer_id="SHOE-RACE-1").one()
         row.meta_item_id, row.provenance = "META-NEWER", PROVENANCE_NATIVE_PUSH
@@ -1076,5 +1077,284 @@ def test_repair_never_overwrites_membership_changed_since_the_create():
         other.commit()
         assert repair()["reason"] == "no_observation_to_replace"
         other.close()
+    finally:
+        session.close(); engine.dispose()
+
+
+# ── Read-after-write lag: a verified-later create is recovered, nothing else is ──
+
+class LaggingGraph(CatalogGraph):
+    """The lookup right after a create sees nothing (read-after-write lag); later lookups see the item."""
+
+    def __init__(self, items=None):
+        super().__init__(items)
+        self.lag = 0
+        self.after_create = None          # optional callable(rid) run once the create POST returned
+
+    def post(self, url, data=None, headers=None, params=None):
+        resp = super().post(url, data=data, headers=headers, params=params)
+        if url.rstrip("/").endswith(f"/{CATALOG}/products") and resp.status_code == 200:
+            self.lag = 1
+            if self.after_create:
+                self.after_create(dict(data or {})["retailer_id"])
+        return resp
+
+    def get(self, url, params=None, headers=None):
+        if self.lag and (params or {}).get("filter"):
+            self.lag -= 1
+            self.gets.append((url, dict(params or {})))
+            return _Resp(200, {"data": []})
+        return super().get(url, params=params, headers=headers)
+
+
+def _sync(session, tid, product_id, graph):
+    from services.native_meta_sync_orchestrator import attempt_native_meta_sync
+
+    with _token(), patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                         return_value={"ok": True, "expected_catalog_linked": True}):
+        out = attempt_native_meta_sync(session, tid, product_id, client=graph)
+    session.expire_all()
+    return out
+
+
+def _syncable(product, session):
+    product.extra_metadata = {**(product.extra_metadata or {}), "image_url": "https://cdn.example/item.jpg",
+                              "product_url": "https://store.example/p/item"}
+    product.sync_status = "pending"
+    session.commit()
+    return product
+
+
+def _pending(session, product_id):
+    sm = (session.get(Product, product_id).extra_metadata or {}).get("sync_meta") or {}
+    return sm.get("pending_publications") or {}
+
+
+def _lagged_create(session, tid, product, graph, rid):
+    first = _sync(session, tid, product.id, graph)
+    assert first["ok"] is False and first["error_code"] == "verification_failed"
+    assert _membership(session, tid, rid) is None or _membership(session, tid, rid).provenance not in PUBLICATION_PROVENANCES
+    recorded = _pending(session, product.id)[f"{CATALOG}|{rid}"]
+    assert recorded["meta_item_id"] == graph.items[rid]["id"] and recorded["product_id"] == product.id
+    return recorded["meta_item_id"]
+
+
+@pytest.mark.parametrize("kind", ["native", "salla"])
+def test_create_with_a_lagging_lookup_is_recovered_by_a_corroborating_retry(kind):
+    session, tid, engine = _db()
+    try:
+        if kind == "native":
+            rid = "SHOE-LAG-1"
+            product, _v = _native(session, tid, rid)
+        else:
+            product, _v = _salla(session, tid, "910900")
+            rid = "910900-881"
+        _syncable(product, session)
+        graph = LaggingGraph()
+        mid = _lagged_create(session, tid, product, graph, rid)
+        # retry: the scoped lookup now returns exactly the recorded id
+        second = _sync(session, tid, product.id, graph)
+        assert second["ok"] is True, second
+        row = _membership(session, tid, rid)
+        assert row.meta_item_id == mid and row.provenance in PUBLICATION_PROVENANCES
+        assert _pending(session, product.id) == {}
+        assert [u.rsplit("/", 1)[-1] for u, _ in graph.posts] == ["products", mid]
+        # then the ordinary lifecycle
+        product = session.get(Product, product.id)
+        product.price = "199"
+        session.commit()
+        updated = _publish(session, tid, rid, graph, price="199")
+        assert updated["action"] == "update" and graph.posts[-1][0].endswith(f"/{mid}")
+        product = session.get(Product, product.id)
+        product.catalog_status = "merchant_hidden"
+        product.merchant_hidden_at = datetime.now(timezone.utc)
+        mark_product_channel_retire_pending(session, product, reason=REASON_MERCHANT_HIDDEN)
+        session.commit()
+        with _token():
+            out = attempt_product_channel_retirement(session, tid, product.id, client=graph)
+        assert out["retired"] == 1 and graph.items[rid]["visibility"] == "staging"
+        republished = _publish(session, tid, rid, graph, price="199", overrides={"visibility": "published"})
+        assert republished["action"] == "update" and graph.items[rid]["visibility"] == "published"
+    finally:
+        session.close(); engine.dispose()
+
+
+@pytest.mark.parametrize("case", [
+    "item_replaced_before_the_retry",
+    "two_rows_on_the_retry",
+    "stale_observation_with_another_id",
+    "newer_publication_for_another_item",
+    "record_copied_to_another_product",
+    "connection_moved_to_another_catalog",
+])
+def test_a_recorded_attempt_never_becomes_authority_without_exact_corroboration(case):
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-LAG-2")
+        _syncable(product, session)
+        graph = LaggingGraph()
+        mid = _lagged_create(session, tid, product, graph, "SHOE-LAG-2")
+        posts_before = len(graph.posts)
+        if case == "item_replaced_before_the_retry":
+            graph.items["SHOE-LAG-2"] = {**graph.items["SHOE-LAG-2"], "id": "META-SOMEONE-ELSE"}
+        elif case == "two_rows_on_the_retry":
+            graph.items["SHOE-LAG-2"]["dup"] = True
+            graph.get = ReplacingGraph.get.__get__(graph)
+        elif case == "stale_observation_with_another_id":
+            _stale_observation(session, tid, product, variant, "SHOE-LAG-2", stale="GONE-9")
+        elif case == "newer_publication_for_another_item":
+            _stale_observation(session, tid, product, variant, "SHOE-LAG-2", stale="META-NEWER",
+                               provenance=PROVENANCE_NATIVE_PUSH)
+        elif case == "record_copied_to_another_product":
+            other, _ov = _native(session, tid, "SHOE-LAG-2-OTHER", title="قميص قطني أزرق")
+            moved = session.get(Product, product.id)
+            record = dict(_pending(session, product.id))
+            sm = dict(moved.extra_metadata["sync_meta"])
+            sm.pop("pending_publications")
+            moved.extra_metadata = {**moved.extra_metadata, "sync_meta": sm}
+            other.extra_metadata = {**(other.extra_metadata or {}), "sync_meta": {"pending_publications": record}}
+            session.commit()
+        elif case == "connection_moved_to_another_catalog":
+            conn = session.query(WhatsAppConnection).filter_by(tenant_id=tid).one()
+            conn.meta_catalog_id = "CAT-MOVED"
+            session.commit()
+        before = [(m.retailer_id, m.meta_item_id, m.provenance) for m in session.query(MetaCatalogMembership).all()]
+        if case == "connection_moved_to_another_catalog":
+            # the moved connection reads its own catalog; the attempt was recorded for the old one
+            with patch.object(push, "_resolve_catalog_and_token", lambda conn, **k: ("CAT-MOVED", "tok")), \
+                 patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                       return_value={"ok": True, "expected_catalog_linked": True}):
+                from services.native_meta_sync_orchestrator import attempt_native_meta_sync
+                graph.items_moved = True
+                second = attempt_native_meta_sync(session, tid, product.id, client=graph)
+            session.expire_all()
+        else:
+            second = _sync(session, tid, product.id, graph)
+        assert second["ok"] is False, (case, second)
+        after = [(m.retailer_id, m.meta_item_id, m.provenance) for m in session.query(MetaCatalogMembership).all()]
+        assert after == before, case                                 # nothing recorded, nothing rebound
+        assert len(graph.posts) == posts_before or case == "connection_moved_to_another_catalog", case
+        # no update POST ever went to the item
+        assert not any(u.endswith(f"/{mid}") for u, _ in graph.posts), case
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_a_recorded_attempt_is_tenant_scoped_and_never_retires_on_its_own():
+    session, tid, engine = _db()
+    try:
+        product, _v = _native(session, tid, "SHOE-LAG-3")
+        _syncable(product, session)
+        graph = LaggingGraph()
+        mid = _lagged_create(session, tid, product, graph, "SHOE-LAG-3")
+        # another tenant with the same catalog id and retailer_id has no record of its own
+        other = Tenant(name="متجر تجريبي ثانٍ", is_active=True)
+        session.add(other)
+        session.commit()
+        session.add(WhatsAppConnection(
+            tenant_id=other.id, whatsapp_business_account_id="WABA-X", phone_number_id="PN-X", access_token="EAAB-test",
+            meta_catalog_id=CATALOG, catalog_enabled=True, provider="meta", connection_type="embedded", extra_metadata={}))
+        session.commit()
+        foreign, _fv = _native(session, other.id, "SHOE-LAG-3")
+        _syncable(foreign, session)
+        foreign_result = _sync(session, other.id, foreign.id, graph)
+        assert foreign_result["ok"] is False
+        assert session.query(MetaCatalogMembership).filter_by(tenant_id=other.id).count() == 0
+        # hidden before any corroboration: the record alone never authorizes a withdrawal
+        product = session.get(Product, product.id)
+        product.catalog_status = "merchant_hidden"
+        product.merchant_hidden_at = datetime.now(timezone.utc)
+        product.sync_status = "failed"
+        product.last_synced_at = datetime.now(timezone.utc)
+        mark_product_channel_retire_pending(session, product, reason=REASON_MERCHANT_HIDDEN)
+        session.commit()
+        posts_before = len(graph.posts)
+        with _token():
+            out = attempt_product_channel_retirement(session, tid, product.id, client=graph)
+        assert out["retired"] == 0 and out["error_code"] == "no_publication_evidence"
+        assert len(graph.posts) == posts_before and graph.items["SHOE-LAG-3"]["id"] == mid
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_failed_or_linked_posts_record_no_attempt():
+    session, tid, engine = _db()
+    try:
+        product, _v = _native(session, tid, "SHOE-LAG-4")
+        _syncable(product, session)
+        graph = LaggingGraph()
+        graph.fail_posts = True
+        failed = _sync(session, tid, product.id, graph)
+        assert failed["ok"] is False and _pending(session, product.id) == {}
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_corroboration_refuses_any_record_that_is_not_exactly_this_attempt():
+    session, tid, engine = _db()
+    try:
+        product, variant = _native(session, tid, "SHOE-LAG-5")
+        good = {"product_id": product.id, "catalog_id": CATALOG, "retailer_id": "SHOE-LAG-5", "meta_item_id": "META-L5"}
+        cases = {
+            "another product": {**good, "product_id": product.id + 1000},
+            "another catalog in the record": {**good, "catalog_id": "CAT-OTHER"},
+            "another retailer_id in the record": {**good, "retailer_id": "SHOE-OTHER"},
+            "no item id": {**good, "meta_item_id": ""},
+            "another item id": {**good, "meta_item_id": "META-OTHER"},
+        }
+
+        def attempt(record, *, live="META-L5", key=f"{CATALOG}|SHOE-LAG-5", catalog=CATALOG):
+            row = session.get(Product, product.id)
+            row.extra_metadata = {**(row.extra_metadata or {}), "sync_meta": {"pending_publications": {key: record}}}
+            session.commit()
+            return push.corroborate_pending_publication(
+                session, row, variant, tenant_id=tid, catalog_id=catalog, retailer_id="SHOE-LAG-5",
+                live_meta_item_id=live)
+
+        for label, record in cases.items():
+            assert attempt(record)["ok"] is False, label
+        assert attempt(good, live="")["ok"] is False
+        assert attempt(good, catalog="CAT-OTHER")["ok"] is False                 # recorded for another catalog
+        assert attempt(good, key=f"{CATALOG}|SHOE-OTHER")["ok"] is False         # nothing recorded for this key
+        session.commit()
+        assert session.query(MetaCatalogMembership).count() == 0                # nothing was written
+        assert attempt(good)["ok"] is True                                       # exactly this attempt
+        session.commit()
+        assert _membership(session, tid, "SHOE-LAG-5").meta_item_id == "META-L5"
+    finally:
+        session.close(); engine.dispose()
+
+
+
+def test_repair_refuses_a_salla_observation_bound_to_another_variant_identity():
+    from services.salla_variant_catalog_identity import replace_stale_observation_after_create
+
+    session, tid, engine = _db()
+    try:
+        product, variant = _salla(session, tid, "911000")
+        ident = identity_for_retailer_id(product, [variant], "911000-881")
+        other_variant = ProductVariant(tenant_id=tid, product_id=product.id, salla_variant_id="882",
+                                       retailer_id="911000-882", price="140", currency="SAR", stock_quantity=1, in_stock=True)
+        session.add(other_variant)
+        session.commit()
+        cases = {
+            "another salla_variant_id": dict(variant_id=variant.id, salla_variant_id="999"),
+            "another local variant": dict(variant_id=other_variant.id, salla_variant_id="881"),
+        }
+        for label, binding in cases.items():
+            session.query(MetaCatalogMembership).delete()
+            session.add(MetaCatalogMembership(
+                tenant_id=tid, catalog_id=CATALOG, retailer_id="911000-881", product_id=product.id,
+                meta_item_id="GONE-S1", verified_at=datetime.now(timezone.utc), provenance=PROVENANCE_GRAPH_RECONCILE,
+                **binding))
+            session.commit()
+            out = replace_stale_observation_after_create(
+                session, tenant_id=tid, catalog_id=CATALOG, retailer_id="911000-881", product_id=product.id,
+                variant_id=None, created_meta_item_id="META-S1", corroborated_meta_item_id="META-S1",
+                publication_provenance="salla_variant_push", salla_identity=ident)
+            assert out["ok"] is False, label
+            session.commit()
+            row = _membership(session, tid, "911000-881")
+            assert (row.meta_item_id, row.provenance) == ("GONE-S1", PROVENANCE_GRAPH_RECONCILE), label
     finally:
         session.close(); engine.dispose()
