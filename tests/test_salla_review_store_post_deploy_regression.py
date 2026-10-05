@@ -23,7 +23,7 @@ from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))

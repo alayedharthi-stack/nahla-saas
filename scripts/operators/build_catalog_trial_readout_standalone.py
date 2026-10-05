@@ -12,7 +12,7 @@ Regenerate after editing the service module::
 
     python scripts/operators/build_catalog_trial_readout_standalone.py
 
-``backend/tests/test_catalog_trial_readout.py`` fails when the bundled copy
+``tests/test_catalog_trial_readout.py`` fails when the bundled copy
 drifts from the service module.
 """
 from __future__ import annotations
