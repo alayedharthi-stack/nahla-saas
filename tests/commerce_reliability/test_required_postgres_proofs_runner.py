@@ -214,6 +214,9 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # A customer's order history is counted by the resolver's own
                    # identity match, and a failed read cannot abort the turn.
                    "customer_order_history",
+                   # The catalog channel-retirements migration adopts an existing
+                   # table only when its definition matches; anything else fails closed.
+                   "catalog_channel_retirements_migration",
                    # The catalog review environment refuses any database that does
                    # not carry the persisted marker, before migrations or workers.
                    "catalog_review_environment_guard"]
@@ -244,6 +247,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "campaign_marketing_continuation": ("proof", {"NAHLA_RELIABILITY_PG_ADMIN_DSN": None}),
         "promotion_scoped_read": ("proof", harness_env),
         "customer_order_history": ("proof", harness_env),
+        "catalog_channel_retirements_migration": ("proof", harness_env),
         "catalog_review_environment_guard": ("proof", harness_env),
     }
     for suite in manifest["suites"]:

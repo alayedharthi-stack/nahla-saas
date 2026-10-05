@@ -821,6 +821,35 @@
       ]
     },
     {
+      "id": "catalog_channel_retirements_migration",
+      "kind": "proof",
+      "module": "backend/tests/test_catalog_channel_retirements_migration_pg.py",
+      "origin": "PR #1193 — catalog channel-retirements migration: a fresh database gets the table and the revision; a table built by the startup create_all (current model, and the first model with catalog_id NOT NULL) is adopted; any other table of that name (missing or partial uniqueness or status index, a missing or other-schema tenant foreign key, a missing or extra column, an extra unique or check constraint, a different type including CHAR for VARCHAR, different nullability, an unrelated table) makes the upgrade raise with revision and schema unchanged",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_fresh_database_gets_the_table_and_the_revision",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_create_all_table_is_adopted_unchanged",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_first_model_table_is_adopted_and_catalog_id_relaxed",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[char_instead_of_varchar]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[different_nullability]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[different_type]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_check_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_column]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_unique_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_column]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_status_index]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_tenant_fk]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_unique]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[partial_status_index]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[partial_unique_instead_of_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[tenant_fk_to_another_schema]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[unrelated_table]"
+      ]
+    },
+    {
       "id": "catalog_review_environment_guard",
       "kind": "proof",
       "module": "backend/tests/test_review_environment_guard_pg.py",
