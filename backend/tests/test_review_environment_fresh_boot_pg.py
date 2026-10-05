@@ -11,7 +11,7 @@ without ``alembic_version``, stamps 0016, and the upgrade then fails on columns
 completed cleanly." both times, but the database is not at 0093. This is the
 existing platform bootstrap (``backend/main.py``), not the review guard; the
 runbook therefore requires a separate, approved schema step before the first
-boot, proven by ``test_server_boots_on_a_marked_migrated_database_and_completes_the_bootstrap``.
+boot, proven by ``test_review_provisioning_premigration_then_boot_serves_with_the_complete_schema``.
 
 ``strict=True``: if the bootstrap is ever fixed this test starts passing and the
 run fails until the marker is removed. Not part of the required PostgreSQL

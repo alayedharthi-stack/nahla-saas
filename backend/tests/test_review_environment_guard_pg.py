@@ -337,36 +337,45 @@ def _public_tables(pg, db: str) -> set[str]:
         eng.dispose()
 
 
-def test_server_boots_on_a_marked_migrated_database_and_completes_the_bootstrap(pg, boot_db, tmp_path):
-    """The successful path: the review database is first migrated to the pinned
-    normal bootstrap target (0093, from the bootstrap contract) — the runbook's
-    schema step — then ``uvicorn main:app`` boots on it. The lifespan guard and
-    bootstrap Step 0 both verify isolation, uvicorn serves /alive, the bootstrap
-    upgrade succeeds (rc=0, nothing left to apply), create_all adds the
-    model-only tables and the schedulers stay disabled.
+def test_review_provisioning_premigration_then_boot_serves_with_the_complete_schema(pg, boot_db, tmp_path):
+    """The review provisioning path the runbook prescribes, end to end on a fresh
+    marked database: ``preflight_check.py`` proves isolation, the schema step
+    upgrades to the application heads (``0111`` then ``0113`` from the bootstrap
+    contract — the head set production carries), then ``uvicorn main:app``
+    boots. The lifespan guard and bootstrap Step 0 both verify isolation, the
+    pinned bootstrap upgrade (0093) is a no-op with rc=0, create_all completes,
+    /alive answers, and every column the ORM models declare exists.
 
-    The schema step is required: on an EMPTY database the existing bootstrap
-    races its background ``create_all`` against Alembic 0001, the upgrade fails
-    ("already exists"), and a later boot's 0016 stamp then fails on columns
-    create_all already added — booting alone never reaches 0093 (observed on
-    PostgreSQL 16 and 18; unchanged platform behaviour, documented in the runbook)."""
-    from scripts.operators.bootstrap_migration_contract import build_normal_bootstrap_upgrade_argv
+    The schema step is required and 0093 alone is not enough: on an EMPTY
+    database booting never reaches 0093 (``test_review_environment_fresh_boot_pg``,
+    the same on ``main``), and a database migrated only to 0093 boots but lacks
+    23 model columns that later revisions add to existing tables."""
+    from scripts.operators.bootstrap_migration_contract import (
+        APPLICATION_ALEMBIC_HEAD,
+        NAVIGATION_ALEMBIC_HEAD,
+        build_normal_bootstrap_upgrade_argv,
+    )
+    from database.models import Base
 
-    argv = build_normal_bootstrap_upgrade_argv(python_executable=sys.executable)
-    target = argv[-1]
-    assert target == "0093"
-    migrate = subprocess.run(argv, cwd=str(_REPO / "database"), env=_subprocess_env(pg, boot_db, **_NO_EGRESS),
-                             capture_output=True, text=True, timeout=600)
-    assert migrate.returncode == 0, migrate.stderr[-3000:]
-    assert _scalar(pg["app_url"](boot_db), "SELECT version_num FROM alembic_version") == target
+    bootstrap_target = build_normal_bootstrap_upgrade_argv(python_executable=sys.executable)[-1]
+    assert bootstrap_target == "0093"
+    env = _subprocess_env(pg, boot_db, **_NO_EGRESS)
+    preflight = subprocess.run([sys.executable, str(_REPO / "scripts" / "preflight_check.py")], env=env,
+                               capture_output=True, text=True, timeout=120)
+    assert preflight.returncode == 0 and "isolation verified" in preflight.stdout, preflight.stdout + preflight.stderr
+    for target in (APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD):
+        migrate = subprocess.run([sys.executable, "-m", "alembic", "upgrade", target], cwd=str(_REPO / "database"),
+                                 env=env, capture_output=True, text=True, timeout=600)
+        assert migrate.returncode == 0, migrate.stderr[-3000:]
+    heads = {APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD}
 
     done = "[BOOT/db] Bootstrap completed cleanly."
+    ready = "[BOOT/safe_alters] Database tables ready."
     rc, out, port, proc = _run_server(pg, boot_db, tmp_path / "boot.log", until=done)
     try:
         assert rc is None, f"server exited rc={rc}:\n{out[-3000:]}"
         assert done in out, out[-3000:]
         assert _alive(port) == 200
-        ready = "[BOOT/safe_alters] Database tables ready."
         for _ in range(240):
             if ready in (tmp_path / "boot.log").read_text(errors="replace"):
                 break
@@ -376,14 +385,26 @@ def test_server_boots_on_a_marked_migrated_database_and_completes_the_bootstrap(
         _stop(proc)
     assert out.count("isolation verified") >= 2  # lifespan guard and bootstrap Step 0
     assert "[BOOT/db] Step B: no stamp needed (has_alembic=True" in out
-    assert f"Step C: alembic upgrade {target} OK rc=0" in out, out[-4000:]
+    assert f"Step C: alembic upgrade {bootstrap_target} OK rc=0" in out, out[-4000:]
     assert "Step C FAILED" not in out
     assert ready in out
     assert "Application startup complete" in out and "Application startup failed" not in out
     assert "NAHLA_DISABLE_SCHEDULERS=1" in out
-    assert APP_PASSWORD not in out
-    assert _scalar(pg["app_url"](boot_db), "SELECT version_num FROM alembic_version") == target
-    assert {"tenants", "users", "integrations", "alembic_version"} <= _public_tables(pg, boot_db)
+    assert APP_PASSWORD not in out + preflight.stdout + preflight.stderr
+
+    eng = create_engine(pg["app_url"](boot_db), poolclass=NullPool, future=True)
+    try:
+        with eng.connect() as conn:
+            assert set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) == heads
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(eng)
+        present = set(insp.get_table_names())
+        missing = [t.name for t in Base.metadata.sorted_tables if t.name not in present]
+        missing += [f"{t.name}.{c.name}" for t in Base.metadata.sorted_tables if t.name in present
+                    for c in t.columns if c.name not in {col["name"] for col in insp.get_columns(t.name)}]
+    finally:
+        eng.dispose()
+    assert missing == [], missing
 
 
 def test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker(pg, tmp_path):
