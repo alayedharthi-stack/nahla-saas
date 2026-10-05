@@ -175,6 +175,24 @@ SOURCE_EVENT_AT_KEY = "source_event_at"
 # change the merchant made in the same second as (or just before) our read
 # started still counts as newer and is applied.
 SOURCE_READ_STAMP_SKEW = timedelta(seconds=2)
+# An event time later than now by more than this is not provable: a clock
+# ahead of ours, or a local wall-clock string read as UTC (Asia/Riyadh is
+# three hours ahead), would otherwise make every later read and webhook look
+# older and be discarded until that time passed. Two minutes covers ordinary
+# clock skew between Salla and us; anything beyond it is treated as having no
+# known order (the event triggers a fresh store read, a stored stamp guards
+# nothing).
+SOURCE_EVENT_FUTURE_TOLERANCE = timedelta(minutes=2)
+
+
+def _provable_event_time(stamp: Optional[datetime], now: Optional[datetime] = None) -> Optional[datetime]:
+    """*stamp*, or None when it lies beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE``."""
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    limit = (now or datetime.now(timezone.utc)) + SOURCE_EVENT_FUTURE_TOLERANCE
+    return None if stamp > limit else stamp
 
 
 def source_read_stamp(now: Optional[datetime] = None) -> datetime:
@@ -183,12 +201,16 @@ def source_read_stamp(now: Optional[datetime] = None) -> datetime:
     return base - SOURCE_READ_STAMP_SKEW
 
 
-def source_event_time(payload: Any, envelope_created_at: Any = None) -> Optional[datetime]:
+def source_event_time(
+    payload: Any, envelope_created_at: Any = None, *, now: Optional[datetime] = None,
+) -> Optional[datetime]:
     """Instant the source says this product state belongs to, or None.
 
     Order of trust: the product's own ``updated_at`` (Salla sends it as a
     string or a ``{date, timezone}`` object), then the webhook envelope's
-    ``created_at``. ``None`` means the order of this event cannot be proven.
+    ``created_at``. A time beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE`` is
+    skipped as unprovable. ``None`` means the order of this event cannot be
+    proven.
     """
     from services.salla_datetime import (  # noqa: PLC0415
         parse_salla_datetime_to_utc,
@@ -196,13 +218,14 @@ def source_event_time(payload: Any, envelope_created_at: Any = None) -> Optional
     )
 
     if isinstance(payload, dict):
-        stamp = parse_salla_datetime_to_utc(payload.get("updated_at"))
+        stamp = _provable_event_time(parse_salla_datetime_to_utc(payload.get("updated_at")), now)
         if stamp is not None:
             return stamp
     if envelope_created_at:
         stamp = parse_salla_js_envelope_datetime(envelope_created_at)
         if stamp is None:
             stamp = parse_salla_datetime_to_utc(envelope_created_at)
+        stamp = _provable_event_time(stamp, now)
         if stamp is not None:
             return stamp
     return None
@@ -223,11 +246,17 @@ def _parse_stamp(raw: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def stored_source_event_time(product: Any) -> Optional[datetime]:
+def stored_source_event_time(product: Any, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """The row's ``source_event_at``, or None when absent or unprovable.
+
+    A stored stamp beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE`` (written
+    before future times were refused) protects nothing: treating it as known
+    would discard every correct read and webhook until that time passed.
+    """
     meta = getattr(product, "extra_metadata", None) or {}
     if not isinstance(meta, dict):
         return None
-    return _parse_stamp(meta.get(SOURCE_EVENT_AT_KEY))
+    return _provable_event_time(_parse_stamp(meta.get(SOURCE_EVENT_AT_KEY)), now)
 
 
 def _normalise_product(raw: Any) -> Dict:
@@ -4276,9 +4305,10 @@ class StoreSyncService:
             existing.in_stock      = bool(normalised.get("in_stock", True))
             existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
             if SOURCE_EVENT_AT_KEY not in normalised:
-                prior_stamp = (getattr(existing, "extra_metadata", None) or {}).get(SOURCE_EVENT_AT_KEY)
-                if prior_stamp:
-                    normalised[SOURCE_EVENT_AT_KEY] = prior_stamp
+                # carry the prior stamp forward only while it is provable
+                prior_at = stored_source_event_time(existing)
+                if prior_at is not None:
+                    normalised[SOURCE_EVENT_AT_KEY] = prior_at.isoformat()
             apply_salla_source_metadata(existing, normalised)
             if (existing.source or "").lower() != "manual":
                 existing.source = row_source
