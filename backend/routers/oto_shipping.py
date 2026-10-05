@@ -111,6 +111,35 @@ def _require_integration_enabled() -> None:
         raise HTTPException(409, "oto_integration_disabled")
 
 
+# Signed OTO callbacks are small JSON objects; anything larger is refused.
+WEBHOOK_BODY_LIMIT = 32 * 1024
+_CLOSE = {"Connection": "close"}
+
+
+async def _read_bounded_body(request: Request, limit: int = WEBHOOK_BODY_LIMIT) -> bytes:
+    """Read at most ``limit`` bytes of the request body, streaming.
+
+    A declared ``Content-Length`` above the limit is refused before any body
+    byte is read; without one (chunked transfer) the body is read chunk by
+    chunk and refused as soon as the running total passes the limit, so an
+    oversized body is never buffered whole. A malformed ``Content-Length`` is
+    refused outright. Refusals carry ``Connection: close`` so the server drops
+    the connection instead of draining the rest of an unread body.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        if not declared.strip().isdigit():
+            raise HTTPException(400, "invalid_content_length", headers=_CLOSE)
+        if int(declared) > limit:
+            raise HTTPException(413, "payload_too_large", headers=_CLOSE)
+    received = bytearray()
+    async for chunk in request.stream():
+        if len(received) + len(chunk) > limit:
+            raise HTTPException(413, "payload_too_large", headers=_CLOSE)
+        received += chunk
+    return bytes(received)
+
+
 def _egress_allowed(environment: str, tenant_id: int) -> None:
     from core.acceptance_execution_context import deny_external_egress
 
@@ -441,12 +470,7 @@ async def oto_webhook(environment: Literal["staging", "production"],
     if not oto_integration_enabled():
         # Switched off: the endpoint does not exist. Nothing is read, parsed or looked up.
         raise HTTPException(404, "not_found")
-    declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > 32_768:
-        raise HTTPException(413, "payload_too_large")
-    raw = await request.body()
-    if len(raw) > 32_768:
-        raise HTTPException(413, "payload_too_large")
+    raw = await _read_bounded_body(request)
     try:
         payload: Any = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
