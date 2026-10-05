@@ -107,7 +107,7 @@ def main() -> int:
     parser.add_argument("--candidates", type=int, default=3)
     parser.add_argument("--candidate-ids", default="", help="Comma-separated local product ids chosen by the owner.")
     parser.add_argument("--expected-business-id", default="", help="Business Manager id expected to own the WABA and its catalog.")
-    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only).")
+    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only, stored token as is: never refreshed or saved; refused when expired or rejected).")
     parser.add_argument("--pretty", action="store_true")
     parser.add_argument("--print-ssh-command", action="store_true",
                         help="Print the railway ssh one-liner that ships this file and runs it; do nothing else.")
