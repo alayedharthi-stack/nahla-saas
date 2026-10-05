@@ -30,7 +30,7 @@ Schema preflight (read-only): before any data statement the script reads
 ``information_schema.columns`` for every table it touches and
 ``alembic_version``. A statement whose table or required column is absent
 on this database (e.g. ``catalog_channel_retirements`` before migration
-0116, or a column added after the pinned ``alembic upgrade``) is **skipped
+0118, or a column added after the pinned ``alembic upgrade``) is **skipped
 and recorded** under ``skipped`` with the missing names; optional columns
 are dropped from the SELECT list and listed under
 ``schema_preflight.columns_missing``. Nothing is created or migrated.
@@ -366,7 +366,7 @@ ORDER BY m.catalog_id, m.tenant_id, m.retailer_id""",
         },
         {
             "key": "retirements_for_catalog",
-            "question": "هل سُحب أي عنصر من هذا الكتالوج عبر سجل السحب الدائم؟ (الجدول قد لا يوجد قبل 0116)",
+            "question": "هل سُحب أي عنصر من هذا الكتالوج عبر سجل السحب الدائم؟ (الجدول قد لا يوجد قبل 0118)",
             "requires": {"catalog_channel_retirements": ["tenant_id", "retailer_id"]},
             "optional_missing": {"catalog_channel_retirements": r_missing},
             "sql": f"""
