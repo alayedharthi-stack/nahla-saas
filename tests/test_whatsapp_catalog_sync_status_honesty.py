@@ -261,11 +261,18 @@ def test_republish_after_retirement_sends_visibility_published(resolve_mock, pre
                               "meta": {"http_status": 200, "response": {"success": True}}, "lookup": {"matched": True}}
     lookup_mock.return_value = ("META-501", {"matched": True, "item": {"id": "META-501", "retailer_id": "nahla_p_501",
                                                                         "price": 32000, "currency": "SAR", "availability": "in stock"}})
+    evidence_writes = []
     with patch("services.native_meta_sync_orchestrator._collect_retailer_ids", return_value=["nahla_p_501"]), \
-         patch("services.native_meta_sync_orchestrator.claim_active_meta_item_binding"):
+         patch("services.native_meta_sync_orchestrator.claim_active_meta_item_binding"), \
+         patch("services.native_meta_sync_orchestrator.load_variant_for_push",
+               return_value=(parent, SimpleNamespace(id=5011))), \
+         patch("services.salla_variant_catalog_identity.upsert_native_publication_membership",
+               side_effect=lambda db, **kw: evidence_writes.append(kw) or {"ok": True}):
         result = attempt_native_meta_sync(MagicMock(), 9, 501)
     assert result["ok"] is True
     assert push_mock.call_args.kwargs["payload_overrides"] == {"visibility": "published"}
+    # the successful update POST re-records publication evidence for the live item
+    assert [(w["retailer_id"], w["meta_item_id"], w["variant_id"]) for w in evidence_writes] == [("nahla_p_501", "META-501", 5011)]
     sm = parent.extra_metadata["sync_meta"]
     assert sm["channel_retired_at"] is None and sm["republished_at"]
     assert sm["last_push_at"]

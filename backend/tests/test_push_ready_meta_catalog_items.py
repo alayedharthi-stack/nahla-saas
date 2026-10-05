@@ -7,6 +7,8 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 _BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
@@ -19,6 +21,21 @@ from services.meta_catalog_readiness import (  # noqa: E402
     is_ready_create_in_stock_candidate,
     select_ready_create_push_candidates,
 )
+
+
+
+# MagicMock sessions cannot hold a membership row; the publication-evidence
+# step after each POST is recorded instead (its database behaviour is covered
+# in tests/test_native_catalog_publication_lifecycle.py).
+EVIDENCE_STAMPS: list = []
+
+
+@pytest.fixture(autouse=True)
+def _record_evidence_stamps():
+    EVIDENCE_STAMPS.clear()
+    with patch("services.meta_catalog_push._stamp_salla_batch_membership",
+               side_effect=lambda db, tid, rid, mid, cid: EVIDENCE_STAMPS.append((rid, mid))):
+        yield
 
 
 def _item(
@@ -123,6 +140,7 @@ def test_batch_confirm_pushes_ready_create_only():
     assert push_mock.call_count == 2
     assert batch["summary"]["succeeded"] == 2
     assert batch["summary"]["failed"] == 0
+    assert EVIDENCE_STAMPS == [("88001-1001", "1"), ("88001-1002", "2")]
 
 
 def test_batch_stop_on_first_error():
@@ -164,6 +182,8 @@ def test_batch_continue_on_error():
     assert batch["summary"]["failed"] == 1
     assert batch["summary"]["succeeded"] == 1
     assert batch["summary"]["stopped_on_error"] is False
+    # the failed POST records no publication evidence
+    assert [mid for _rid, mid in EVIDENCE_STAMPS] == ["9"]
 
 
 def test_batch_product_id_filter():

@@ -26,6 +26,7 @@ from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_push import (
     MetaCatalogPushError,
     find_meta_catalog_item_by_retailer_id,
+    load_variant_for_push,
     push_one_meta_catalog_item,
     _resolve_connection,
 )
@@ -1416,6 +1417,7 @@ def _attempt_acquired_body(
         ensure_variant_membership_slot,
         identity_for_retailer_id,
         is_salla_source,
+        upsert_native_publication_membership,
         upsert_variant_membership,
     )
 
@@ -1644,20 +1646,39 @@ def _attempt_acquired_body(
                 retailer_id=retailer_id,
             )
 
-        if salla_parent:
-            if salla_ident is None:
-                return fail(
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
-                    retailer_id=retailer_id,
+        # Publication evidence is written only after a create/update POST
+        # that succeeded in THIS attempt. A lookup-only verification wrote
+        # nothing to Graph, so it never creates or upgrades evidence.
+        published_now = (not lookup_only) and str(push_result.get("action") or "") in ("create", "update")
+        if published_now:
+            if salla_parent:
+                if salla_ident is None:
+                    return fail(
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        retailer_id=retailer_id,
+                    )
+                bound = upsert_variant_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=salla_catalog_id or catalog_id,
+                    identity=salla_ident,
+                    meta_item_id=str(meta_item_id),
                 )
-            bound = upsert_variant_membership(
-                db,
-                tenant_id=int(tenant_id),
-                catalog_id=salla_catalog_id or catalog_id,
-                identity=salla_ident,
-                meta_item_id=str(meta_item_id),
-            )
+            else:
+                try:
+                    _pv_parent, pushed_variant = load_variant_for_push(db, int(tenant_id), retailer_id=str(retailer_id))
+                except MetaCatalogPushError as exc:
+                    return fail(exc.code, exc.code, retailer_id=retailer_id)
+                bound = upsert_native_publication_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=getattr(pushed_variant, "id", None),
+                    meta_item_id=str(meta_item_id),
+                )
             if not bound.get("ok"):
                 return fail(
                     ERROR_AMBIGUOUS_VARIANT_IDENTITY,
@@ -1742,6 +1763,7 @@ def _attempt_acquired_body(
             updates["retire_exhausted"] = False
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()
@@ -1777,6 +1799,7 @@ def _attempt_acquired_body(
             updates["retire_exhausted"] = False
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()

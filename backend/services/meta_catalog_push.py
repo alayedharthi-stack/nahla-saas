@@ -926,11 +926,13 @@ def _stamp_salla_batch_membership(
     meta_item_id: str,
     catalog_id: str,
 ) -> None:
+    """Publication evidence after a successful create/update POST (Salla and native)."""
     from services.salla_variant_catalog_identity import (  # noqa: PLC0415
         AmbiguousVariantIdentity,
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
         identity_for_retailer_id,
         is_salla_source,
+        upsert_native_publication_membership,
         upsert_variant_membership,
     )
 
@@ -941,26 +943,35 @@ def _stamp_salla_batch_membership(
         parent, variant = load_variant_for_push(db, tenant_id, retailer_id=retailer_id)
     except MetaCatalogPushError:
         return
-    if not is_salla_source(parent):
-        return
-    variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
-    try:
-        ident = identity_for_retailer_id(parent, variants, retailer_id)
-    except AmbiguousVariantIdentity:
-        return
-    if ident is None:
-        return
     cid = (catalog_id or "").strip()
     if not cid:
         conn = _resolve_connection(db, tenant_id)
         cid, _token = _resolve_catalog_and_token(conn, require_catalog_readable=False)
-    bound = upsert_variant_membership(
-        db,
-        tenant_id=int(tenant_id),
-        catalog_id=cid,
-        identity=ident,
-        meta_item_id=mid,
-    )
+    if not is_salla_source(parent):
+        bound = upsert_native_publication_membership(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            retailer_id=retailer_id,
+            product_id=int(parent.id),
+            variant_id=getattr(variant, "id", None),
+            meta_item_id=mid,
+        )
+    else:
+        variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+        try:
+            ident = identity_for_retailer_id(parent, variants, retailer_id)
+        except AmbiguousVariantIdentity:
+            return
+        if ident is None:
+            return
+        bound = upsert_variant_membership(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            identity=ident,
+            meta_item_id=mid,
+        )
     if not bound.get("ok"):
         raise MetaCatalogPushError(
             ERROR_AMBIGUOUS_VARIANT_IDENTITY,

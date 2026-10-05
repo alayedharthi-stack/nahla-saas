@@ -18,6 +18,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 ERROR_AMBIGUOUS_VARIANT_IDENTITY = "ambiguous_variant_identity"
 PROVENANCE_VARIANT_PUSH = "salla_variant_push"
+PROVENANCE_NATIVE_PUSH = "native_product_push"
+PROVENANCE_NATIVE_PUSH_RECONCILED = "native_product_push_reconciled"
+# Pre-POST local identity only (no Graph item id): never publication evidence.
+PROVENANCE_VARIANT_SLOT = "salla_variant_slot"
 PROVENANCE_LITERAL_BIND = "literal_retailer_bind"
 
 CLASS_EXACT = "EXACT_LOCAL_IDENTITY"
@@ -234,9 +238,15 @@ def ensure_variant_membership_slot(
     tenant_id: int,
     catalog_id: str,
     identity: SallaVariantIdentity,
-    provenance: str = PROVENANCE_VARIANT_PUSH,
+    provenance: str = PROVENANCE_VARIANT_SLOT,
 ) -> Dict[str, Any]:
-    """Persist local identity before Graph CREATE. ``meta_item_id`` stays empty."""
+    """Persist local identity before Graph CREATE. ``meta_item_id`` stays empty.
+
+    Runs before any Graph write, so it never creates publication evidence: an
+    existing row keeps its provenance and ``meta_item_id`` (a reconcile row
+    stays a reconcile row). Only ``upsert_variant_membership`` after a
+    successful create/update POST writes the publication provenance.
+    """
     from models import MetaCatalogMembership  # noqa: PLC0415
 
     cid = _strip(catalog_id)
@@ -256,8 +266,6 @@ def ensure_variant_membership_slot(
                 "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
                 "reason": conflict,
             }
-        existing.verified_at = now
-        existing.provenance = provenance
         return {
             "ok": True,
             "created": False,
@@ -357,6 +365,85 @@ def upsert_variant_membership(
     if "salla_variant_id" in MetaCatalogMembership.__table__.columns:
         kwargs["salla_variant_id"] = identity.salla_variant_id
     db.add(MetaCatalogMembership(**kwargs))
+    return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
+
+
+def upsert_native_publication_membership(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    product_id: int,
+    variant_id: Optional[int],
+    meta_item_id: str,
+) -> Dict[str, Any]:
+    """Record that a successful create/update POST published *meta_item_id*
+    for a non-Salla row (the native counterpart of ``upsert_variant_membership``).
+
+    Callers run it only after the POST succeeded and a Graph lookup returned
+    the item. Same identity rules: an existing row bound to another local
+    product/variant or to another Graph item id is never rebound.
+    """
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    cid = _strip(catalog_id)
+    rid = _strip(retailer_id)
+    mid = _strip(meta_item_id)
+    pid = int(product_id or 0)
+    vid = int(variant_id or 0) or None
+    if not cid or not rid or not mid or not pid:
+        return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY}
+
+    existing = _find_membership(
+        db, tenant_id=tenant_id, catalog_id=cid, retailer_id=rid,
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        if int(getattr(existing, "product_id", 0) or 0) != pid or (
+            existing.variant_id is not None and vid is not None and int(existing.variant_id) != vid
+        ):
+            return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": "product_id_immutable"}
+        already = _strip(getattr(existing, "meta_item_id", None))
+        if already and already != mid:
+            return {
+                "ok": False,
+                "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                "reason": "meta_item_id_immutable",
+                "existing_meta_item_id": already,
+            }
+        # A row reconcile already mapped stays capability-visible; any other
+        # row records ownership only until reconcile maps it.
+        visible_before = _strip(getattr(existing, "provenance", None)) not in {
+            PROVENANCE_NATIVE_PUSH, PROVENANCE_VARIANT_SLOT,
+        }
+        existing.meta_item_id = mid
+        existing.variant_id = existing.variant_id if existing.variant_id is not None else vid
+        existing.verified_at = now
+        existing.provenance = PROVENANCE_NATIVE_PUSH_RECONCILED if visible_before else PROVENANCE_NATIVE_PUSH
+        return {"ok": True, "created": False, "meta_item_id": mid, "identity_unchanged": bool(already)}
+
+    collision = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.meta_item_id == mid,
+        )
+        .first()
+    )
+    if collision is not None and _strip(collision.retailer_id) != rid:
+        return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": "meta_item_id_owned_other"}
+    db.add(MetaCatalogMembership(
+        tenant_id=int(tenant_id),
+        catalog_id=cid,
+        retailer_id=rid,
+        product_id=pid,
+        variant_id=vid,
+        meta_item_id=mid,
+        verified_at=now,
+        provenance=PROVENANCE_NATIVE_PUSH,
+    ))
     return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
 
 
