@@ -3352,6 +3352,17 @@ async def admin_debug_set_catalog_config(
     if body.meta_catalog_id is not None:
         new_val = body.meta_catalog_id.strip() or None
         if (conn.meta_catalog_id or None) != new_val:
+            if new_val:
+                # Cross-tenant isolation: never adopt an id another
+                # tenant's connection carries (serialised per catalog id).
+                from services.meta_catalog_claim import (  # noqa: PLC0415
+                    CatalogClaimError,
+                    guard_catalog_claim,
+                )
+                try:
+                    guard_catalog_claim(db, int(body.tenant_id), new_val)
+                except CatalogClaimError as exc:
+                    raise HTTPException(status_code=409, detail=exc.detail) from exc
             conn.meta_catalog_id = new_val
             changes["meta_catalog_id"] = {
                 "before": before["meta_catalog_id"],

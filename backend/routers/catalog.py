@@ -373,10 +373,19 @@ def _status_advice(
 def _apply_config_changes(
     conn: WhatsAppConnection,
     patch: CatalogConfigPatch,
+    db: Optional[Session] = None,
 ) -> Dict[str, Any]:
     """Mutate *conn* in place to reflect the patch. Returns a
     dict ``{field: {before, after}}`` listing the actual diffs so
     the caller can audit them. Does NOT commit.
+
+    Cross-tenant isolation: when *db* is given and the patch adopts a
+    new non-empty ``meta_catalog_id``, the id is refused (HTTP 409,
+    ``catalog_claimed_by_other_tenant``) if another tenant's connection
+    already carries it. The check takes a per-catalog PostgreSQL
+    advisory lock (``services.meta_catalog_claim``) so two tenants
+    cannot adopt the same id in two concurrent requests; the caller's
+    commit releases the lock.
 
     Validation:
       * ``catalog_enabled=True`` requires that the resulting
@@ -398,6 +407,22 @@ def _apply_config_changes(
 
     if patch.catalog_enabled is not None:
         after["catalog_enabled"] = bool(patch.catalog_enabled)
+
+    # Isolation: a catalog id already carried by another tenant's
+    # connection is never adopted here (merchant or admin path).
+    if (
+        db is not None
+        and after["meta_catalog_id"]
+        and after["meta_catalog_id"] != before["meta_catalog_id"]
+    ):
+        from services.meta_catalog_claim import (  # noqa: PLC0415
+            CatalogClaimError,
+            guard_catalog_claim,
+        )
+        try:
+            guard_catalog_claim(db, int(conn.tenant_id), after["meta_catalog_id"])
+        except CatalogClaimError as exc:
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
 
     # Validation: enabling requires an id.
     if after["catalog_enabled"] and not after["meta_catalog_id"]:
@@ -773,7 +798,7 @@ async def merchant_catalog_patch(
             ),
         )
 
-    changes = _apply_config_changes(conn, body)
+    changes = _apply_config_changes(conn, body, db=db)
     if changes:
         db.commit()
         db.refresh(conn)
@@ -955,7 +980,7 @@ async def admin_catalog_patch(
             detail=f"WhatsAppConnection not found for tenant_id={body.tenant_id}",
         )
 
-    changes = _apply_config_changes(conn, body)
+    changes = _apply_config_changes(conn, body, db=db)
     if changes:
         db.commit()
         db.refresh(conn)
@@ -1671,17 +1696,34 @@ async def merchant_hide_catalog_product(
     now = datetime.now(timezone.utc)
     p.catalog_status = CATALOG_STATUS_MERCHANT_HIDDEN
     p.merchant_hidden_at = now
+    # A hidden product must stop being sellable on WhatsApp too: request the
+    # channel withdrawal in the same transaction; the drain executes it.
+    from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+        REASON_MERCHANT_HIDDEN,
+        mark_product_channel_retire_pending,
+    )
+
+    retire_requested = mark_product_channel_retire_pending(db, p, reason=REASON_MERCHANT_HIDDEN)
     db.commit()
+    if retire_requested:
+        try:
+            from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
+
+            schedule_whatsapp_catalog_drain(int(tenant_id))
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] retire drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_product_hide",
         tenant_id=tenant_id,
         product_id=product_id,
+        channel_retire_requested=retire_requested,
     )
     return {
         "ok": True,
         "product_id": product_id,
         "catalog_status": CATALOG_STATUS_MERCHANT_HIDDEN,
         "merchant_hidden_at": now.isoformat(),
+        "channel_retire_requested": retire_requested,
     }
 
 
@@ -1709,16 +1751,32 @@ async def merchant_restore_catalog_product(
         raise HTTPException(status_code=400, detail="not_merchant_hidden")
     p.catalog_status = CATALOG_STATUS_ACTIVE
     p.merchant_hidden_at = None
+    # Restored rows re-enter the publish queue (re-publish flips the Graph
+    # item back to ``visibility=published``); nothing is claimed here.
+    republish_queued = False
+    try:
+        republish_queued = bool(mark_native_meta_sync_pending(db, p))
+    except Exception:  # noqa: BLE001
+        logger.exception("[catalog] restore re-queue failed tenant=%s product=%s", tenant_id, product_id)
     db.commit()
+    if republish_queued:
+        try:
+            from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
+
+            schedule_whatsapp_catalog_drain(int(tenant_id))
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] restore drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_product_restore",
         tenant_id=tenant_id,
         product_id=product_id,
+        republish_queued=republish_queued,
     )
     return {
         "ok": True,
         "product_id": product_id,
         "catalog_status": CATALOG_STATUS_ACTIVE,
+        "republish_queued": republish_queued,
     }
 
 
@@ -2534,13 +2592,35 @@ async def merchant_catalog_delete_manual_product(
     if not p:
         raise HTTPException(status_code=404, detail="product_not_found")
     _assert_merchant_editable_or_409(p)
+    # The row disappears, so its channel identities go to the tenant ledger
+    # first (same transaction); the drain withdraws them from Meta.
+    from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+        REASON_MANUAL_DELETED,
+        channel_identities_for_product,
+        enqueue_channel_retirement_ledger,
+    )
+
+    identities = channel_identities_for_product(db, p)
+    ledgered = 0
+    if identities:
+        ledgered = enqueue_channel_retirement_ledger(
+            db, tenant_id, identities, reason=REASON_MANUAL_DELETED,
+        )
     db.delete(p)
     db.commit()
+    if ledgered:
+        try:
+            from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
+
+            schedule_whatsapp_catalog_drain(int(tenant_id))
+        except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the queued work
+            logger.warning("[catalog] delete drain schedule skipped tenant=%s", tenant_id, exc_info=True)
     audit(
         "merchant_catalog_delete_manual_product",
         tenant_id=tenant_id, product_id=int(product_id),
+        channel_retirements=ledgered,
     )
-    return {"deleted": True, "id": int(product_id)}
+    return {"deleted": True, "id": int(product_id), "channel_retirements": ledgered}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2871,6 +2951,41 @@ async def merchant_whatsapp_catalog_sync(
         tenant_id=tenant_id,
         enqueued=result.get("enqueued"),
         eligible=result.get("eligible"),
+    )
+    return result
+
+
+@merchant_router.post("/whatsapp-sync/reconcile")
+async def merchant_whatsapp_catalog_reconcile(
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Read the live Meta catalog once and re-queue drift (no Graph writes).
+
+    Bounded per tenant; the drain performs any resulting pushes only when
+    ``NAHLA_WHATSAPP_CATALOG_AUTO_SYNC=1``. Returns what was read and what
+    was re-queued, never a publish claim.
+    """
+    from services.whatsapp_catalog_reconcile import (  # noqa: PLC0415
+        reconcile_tenant_channel_catalog,
+    )
+    from services.whatsapp_catalog_sync import schedule_whatsapp_catalog_drain  # noqa: PLC0415
+
+    tenant_id = resolve_tenant_id(request)
+    _enforce_catalog_feature(db, tenant_id)
+    result = reconcile_tenant_channel_catalog(db, tenant_id)
+    if result.get("skipped"):
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("requeued") or result.get("retire_requeued"):
+        schedule_whatsapp_catalog_drain(int(tenant_id))
+    audit(
+        "merchant_whatsapp_catalog_reconcile",
+        tenant_id=tenant_id,
+        live_items=result.get("live_items"),
+        requeued=result.get("requeued"),
+        retire_requeued=result.get("retire_requeued"),
+        error=result.get("error"),
     )
     return result
 

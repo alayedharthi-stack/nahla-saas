@@ -39,6 +39,10 @@ class NormalizedProduct(BaseModel):
     options: List[Dict[str, Any]] = []
     # True iff the product has at least one required option group.
     has_required_options: bool = False
+    # Source platform status as the store reports it (Salla: sale | out |
+    # hidden). ``None`` when the adapter did not receive one. Channel publish
+    # eligibility reads it; a hidden source product is never pushed as live.
+    status: Optional[str] = None
 
 
 class OrderItemInput(BaseModel):

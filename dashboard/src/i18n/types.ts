@@ -1936,6 +1936,25 @@ export interface Translations {
       loadFailed:       string
       enqueueFailed:    string
       autoSyncOff:      string
+      linkLinked:       string
+      linkNotLinked:    string
+      linkUnknown:      string
+      linkStale:        string
+      configuredNotProven: string
+      stagesTitle:      string
+      stageSource:      string
+      stageSourceNever: string
+      stagePublish:     string
+      stageLink:        string
+      stageRetirement:  string
+      stageVisibility:  string
+      latencyTitle:     string
+      latencyPlatform:  string
+      latencyChannel:   string
+      latencyWaiting:   string
+      latencyNone:      string
+      failedAction:     string
+      actions: Record<string, string>
     }
     channels: {
       title:              string

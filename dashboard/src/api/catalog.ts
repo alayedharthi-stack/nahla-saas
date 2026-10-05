@@ -299,6 +299,66 @@ export interface ProductPublicationStatus {
   meta_catalog_synced:     boolean
   waba_catalog_linked:     boolean | null
   visible_in_whatsapp:     boolean
+  visibility_evidence?: {
+    provable_via_api: boolean
+    content_verified_in_meta: boolean
+    verified_at: string | null
+    waba_catalog_linked: boolean | null
+    channel_retired: boolean
+    retire_pending: boolean
+  }
+}
+
+export type WhatsappCatalogLinkState = 'linked' | 'not_linked' | 'unknown'
+
+export interface WhatsappCatalogLinkEvidence {
+  state: WhatsappCatalogLinkState
+  evidence_at: string | null
+  evidence_source: string | null
+  catalog_id: string | null
+  waba_id: string | null
+  stale: boolean | null
+}
+
+export type WhatsappCatalogStageState = 'ok' | 'pending' | 'attention' | 'unknown'
+
+export interface WhatsappCatalogLatencyBlock {
+  n: number
+  p50_seconds: number | null
+  p95_seconds: number | null
+  max_seconds: number | null
+}
+
+export interface WhatsappCatalogSyncLatency {
+  platform: WhatsappCatalogLatencyBlock
+  channel: WhatsappCatalogLatencyBlock
+  waiting: WhatsappCatalogLatencyBlock
+  drain_interval_seconds: number
+  note: string
+}
+
+export interface WhatsappCatalogSyncStages {
+  source: { state: WhatsappCatalogStageState; provider: string | null; last_sync_at: string | null; product_count: number | null }
+  nahla: { state: WhatsappCatalogStageState; eligible: number; not_eligible: number }
+  connection: { state: WhatsappCatalogStageState; blocker_code: string | null; action_code: string | null; catalog_id: string | null; waba_id: string | null }
+  publish: { state: WhatsappCatalogStageState; verified_in_meta: number; waiting: number; rejected_or_blocked: number; last_verified_at: string | null; verified_fields: string[] }
+  catalog_link: { state: WhatsappCatalogStageState; evidence_at: string | null; evidence_source: string | null; stale: boolean | null; action_code: string | null }
+  retirement: { state: WhatsappCatalogStageState; pending: number; exhausted: number; refused?: number }
+  whatsapp_visibility: { state: WhatsappCatalogStageState; provable_via_api: boolean; requires: string[] }
+}
+
+export interface WhatsappCatalogRetirement {
+  pending: number
+  exhausted: number
+  retired_products: number
+  ledger_pending: number
+  ledger_exhausted: number
+  refused?: number
+  refused_products?: number
+  ledger_refused?: number
+  ledger_done_total: number
+  last_done_at: string | null
+  last_error: string | null
 }
 
 export type WhatsappCatalogSyncPhase =
@@ -320,13 +380,19 @@ export interface WhatsappCatalogSyncCounts {
   blocked: number
   pending_verification?: number
   skipped_ineligible: number
+  retire_pending?: number
+  retire_exhausted?: number
+  retire_refused?: number
+  retired?: number
 }
 
 export interface WhatsappCatalogSyncFailure {
   product_id: number
   title: string
   sync_status: string
+  error_code?: string
   error_summary: string
+  action_code?: string
 }
 
 export interface WhatsappCatalogSyncStatus {
@@ -341,10 +407,24 @@ export interface WhatsappCatalogSyncStatus {
   last_success_at: string | null
   queue_count?: number
   meta_available_count?: number
+  // True only with Graph-backed evidence that the catalog is connected to the WABA.
   catalog_linked?: boolean
+  // A catalog id is stamped and enabled (configuration, not proof).
+  catalog_configured?: boolean
+  catalog_link?: WhatsappCatalogLinkEvidence
+  retirement?: WhatsappCatalogRetirement
+  latency?: WhatsappCatalogSyncLatency
+  stages?: WhatsappCatalogSyncStages
   failures: WhatsappCatalogSyncFailure[]
   auto_sync_enabled?: boolean
   auto_sync_flag?: string
+  // Limited-trial write scope as it applies to this store only (never other stores' ids).
+  sync_scope?: {
+    active: boolean
+    tenant_in_scope: boolean
+    products_limited: boolean
+    product_ids: number[]
+  }
   verification?: {
     lookup_fields: string[]
     identity_fields?: string[]

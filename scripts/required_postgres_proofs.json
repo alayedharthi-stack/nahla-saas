@@ -819,6 +819,80 @@
         "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_listed_order_is_not_authorized_for_the_details_read",
         "tests/commerce_reliability/test_customer_order_history_pg.py::test_a_failed_history_read_leaves_the_transaction_usable"
       ]
+    },
+    {
+      "id": "catalog_claim_guard_concurrency",
+      "kind": "proof",
+      "module": "backend/tests/test_meta_catalog_claim_guard_pg.py",
+      "origin": "PR #1193 — cross-tenant catalog-claim guard on real PostgreSQL: with the per-catalog advisory lock a second tenant waits for the first and is then refused the catalog id the first committed (only the first tenant holds it); an empty id is a no-op and distinct ids are allowed while a held id is refused. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently",
+        "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids"
+      ]
+    },
+    {
+      "id": "catalog_q5_membership_readout",
+      "kind": "proof",
+      "module": "backend/tests/test_catalog_q5_membership_readout_pg.py",
+      "origin": "PR #1193 — read-only catalog membership readout (q5) on real PostgreSQL: every statement executes on the model schema in a read-only session and no token appears in the output; a missing catalog_channel_retirements table is recorded and skipped while every other statement still runs, and the read-only session does not re-create it. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_catalog_q5_membership_readout_pg.py::test_postgres_every_statement_executes_on_the_model_schema_and_tokens_never_appear",
+        "backend/tests/test_catalog_q5_membership_readout_pg.py::test_postgres_missing_retirements_table_is_recorded_and_the_rest_still_runs"
+      ]
+    },
+    {
+      "id": "catalog_stale_repair_row_lock",
+      "kind": "proof",
+      "module": "backend/tests/test_meta_catalog_stale_repair_lock_pg.py",
+      "origin": "PR #1193 — stale-observation repair under real PostgreSQL concurrency: the repair re-reads the membership row with SELECT … FOR UPDATE and refreshes its session's copy, so newer publication evidence, a remap to another product or a delete committed while it waits is re-read and refused (never overwritten), and two repairs of the same key serialize (the second re-reads and refuses; one row remains). Two real sessions; the wait is confirmed in pg_stat_activity. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]"
+      ]
+    },
+    {
+      "id": "catalog_channel_retirements_migration",
+      "kind": "proof",
+      "module": "backend/tests/test_catalog_channel_retirements_migration_pg.py",
+      "origin": "PR #1193 — catalog channel-retirements migration: a fresh database gets the table and the revision; a table built by the startup create_all (current model, and the first model with catalog_id NOT NULL) is adopted; any other table of that name (missing or partial uniqueness or status index, a missing or other-schema tenant foreign key, a missing or extra column, an extra unique or check constraint, a different type including CHAR for VARCHAR, different nullability, an unrelated table) makes the upgrade raise with revision and schema unchanged",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_fresh_database_gets_the_table_and_the_revision",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_create_all_table_is_adopted_unchanged",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_first_model_table_is_adopted_and_catalog_id_relaxed",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[char_instead_of_varchar]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[different_nullability]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[different_type]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_check_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_column]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[extra_unique_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_column]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_status_index]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_tenant_fk]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[missing_unique]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[partial_status_index]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[partial_unique_instead_of_constraint]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[tenant_fk_to_another_schema]",
+        "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[unrelated_table]"
+      ]
     }
   ]
 }

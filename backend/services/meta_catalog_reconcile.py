@@ -107,8 +107,13 @@ def fetch_meta_catalog_live_products(
     catalog_id: str,
     *,
     client: Optional[httpx.Client] = None,
+    fields: Optional[str] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
-    """Paginate Meta Graph ``/{catalog_id}/products`` (GET) into a retailer_id map."""
+    """Paginate Meta Graph ``/{catalog_id}/products`` (GET) into a retailer_id map.
+
+    ``fields`` widens the read (for example to include ``currency``); the
+    default stays the identity + price + availability set.
+    """
     catalog_id = str(catalog_id or "").strip()
     meta_info: Dict[str, Any] = {
         "catalog_id": catalog_id,
@@ -134,7 +139,7 @@ def fetch_meta_catalog_live_products(
     url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/products"
     headers = {"Authorization": f"Bearer {token}"}
     params: Optional[Dict[str, str]] = {
-        "fields": "id,retailer_id,name,price,availability",
+        "fields": (fields or "id,retailer_id,name,price,availability").strip(),
         "limit": "250",
     }
 
@@ -157,8 +162,12 @@ def fetch_meta_catalog_live_products(
                 "meta_product_id": str(row.get("id") or "").strip() or None,
                 "name": str(row.get("name") or "").strip() or None,
                 "price": row.get("price"),
+                "currency": str(row.get("currency") or "").strip() or None,
                 "availability": str(row.get("availability") or "").strip() or None,
             }
+            for key in ("description", "image_url", "url", "item_group_id", "visibility"):
+                if key in row:
+                    live[rid][key] = str(row.get(key) or "").strip() or None
         meta_info["items"] = len(live)
         return True
 
@@ -388,6 +397,10 @@ def reconcile_meta_catalog_publish_stamps(
         tenant_id=int(tenant_id),
         catalog_id=catalog_id,
         desired=join.desired,
+        live_meta_item_ids={
+            str(rid): str((row or {}).get("meta_product_id") or (row or {}).get("meta_item_id") or "")
+            for rid, row in live.items()
+        },
     )
     report.snapshot_applied = True
     report.memberships_upserted = int(stats.get("upserted") or 0)

@@ -18,6 +18,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 ERROR_AMBIGUOUS_VARIANT_IDENTITY = "ambiguous_variant_identity"
 PROVENANCE_VARIANT_PUSH = "salla_variant_push"
+PROVENANCE_NATIVE_PUSH = "native_product_push"
+PROVENANCE_NATIVE_PUSH_RECONCILED = "native_product_push_reconciled"
+# Pre-POST local identity only (no Graph item id): never publication evidence.
+PROVENANCE_VARIANT_SLOT = "salla_variant_slot"
 PROVENANCE_LITERAL_BIND = "literal_retailer_bind"
 
 CLASS_EXACT = "EXACT_LOCAL_IDENTITY"
@@ -234,9 +238,15 @@ def ensure_variant_membership_slot(
     tenant_id: int,
     catalog_id: str,
     identity: SallaVariantIdentity,
-    provenance: str = PROVENANCE_VARIANT_PUSH,
+    provenance: str = PROVENANCE_VARIANT_SLOT,
 ) -> Dict[str, Any]:
-    """Persist local identity before Graph CREATE. ``meta_item_id`` stays empty."""
+    """Persist local identity before Graph CREATE. ``meta_item_id`` stays empty.
+
+    Runs before any Graph write, so it never creates publication evidence: an
+    existing row keeps its provenance and ``meta_item_id`` (a reconcile row
+    stays a reconcile row). Only ``upsert_variant_membership`` after a
+    successful create/update POST writes the publication provenance.
+    """
     from models import MetaCatalogMembership  # noqa: PLC0415
 
     cid = _strip(catalog_id)
@@ -256,8 +266,6 @@ def ensure_variant_membership_slot(
                 "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
                 "reason": conflict,
             }
-        existing.verified_at = now
-        existing.provenance = provenance
         return {
             "ok": True,
             "created": False,
@@ -358,6 +366,181 @@ def upsert_variant_membership(
         kwargs["salla_variant_id"] = identity.salla_variant_id
     db.add(MetaCatalogMembership(**kwargs))
     return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
+
+
+def upsert_native_publication_membership(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    product_id: int,
+    variant_id: Optional[int],
+    meta_item_id: str,
+) -> Dict[str, Any]:
+    """Record that a successful create/update POST published *meta_item_id*
+    for a non-Salla row (the native counterpart of ``upsert_variant_membership``).
+
+    Callers run it only after the POST succeeded, with the item id that POST
+    created or updated (the orchestrator also requires its post-POST lookup to
+    return that same id; the push batch uses the POST's own id). Same identity
+    rules: an existing row bound to another local product/variant or to another
+    Graph item id is never rebound, and its local referent is never changed.
+    """
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    cid = _strip(catalog_id)
+    rid = _strip(retailer_id)
+    mid = _strip(meta_item_id)
+    pid = int(product_id or 0)
+    vid = int(variant_id or 0) or None
+    if not cid or not rid or not mid or not pid:
+        return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY}
+
+    existing = _find_membership(
+        db, tenant_id=tenant_id, catalog_id=cid, retailer_id=rid,
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        if int(getattr(existing, "product_id", 0) or 0) != pid or (
+            existing.variant_id is not None and vid is not None and int(existing.variant_id) != vid
+        ):
+            return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": "product_id_immutable"}
+        already = _strip(getattr(existing, "meta_item_id", None))
+        if already and already != mid:
+            return {
+                "ok": False,
+                "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                "reason": "meta_item_id_immutable",
+                "existing_meta_item_id": already,
+            }
+        # A row reconcile already mapped stays capability-visible; any other
+        # row records ownership only until reconcile maps it.
+        visible_before = _strip(getattr(existing, "provenance", None)) not in {
+            PROVENANCE_NATIVE_PUSH, PROVENANCE_VARIANT_SLOT,
+        }
+        # The local referent (product, variant) of an existing row is never
+        # changed here: a capability-visible row keeps exactly what it allowed.
+        existing.meta_item_id = mid
+        existing.verified_at = now
+        existing.provenance = PROVENANCE_NATIVE_PUSH_RECONCILED if visible_before else PROVENANCE_NATIVE_PUSH
+        return {"ok": True, "created": False, "meta_item_id": mid, "identity_unchanged": bool(already)}
+
+    collision = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.meta_item_id == mid,
+        )
+        .first()
+    )
+    if collision is not None and _strip(collision.retailer_id) != rid:
+        return {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": "meta_item_id_owned_other"}
+    db.add(MetaCatalogMembership(
+        tenant_id=int(tenant_id),
+        catalog_id=cid,
+        retailer_id=rid,
+        product_id=pid,
+        variant_id=vid,
+        meta_item_id=mid,
+        verified_at=now,
+        provenance=PROVENANCE_NATIVE_PUSH,
+    ))
+    return {"ok": True, "created": True, "meta_item_id": mid, "identity_unchanged": False}
+
+
+PROVENANCE_GRAPH_RECONCILE = "meta_graph_reconcile"
+REASON_STALE_OBSERVATION_REPLACED = "stale_observation_replaced_by_verified_create"
+
+
+def replace_stale_observation_after_create(
+    db: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    product_id: int,
+    variant_id: Optional[int],
+    created_meta_item_id: str,
+    corroborated_meta_item_id: str,
+    publication_provenance: str,
+    salla_identity: Optional[SallaVariantIdentity] = None,
+) -> Dict[str, Any]:
+    """Record a verified CREATE over a stale reconcile observation for the same key.
+
+    The generic upserts never change an existing ``meta_item_id``. This one
+    narrow repair applies only when every fact below holds, and refuses
+    otherwise:
+
+    * the caller's POST was a successful create and returned
+      *created_meta_item_id* — a create only happens when the pre-POST lookup
+      found no Graph item for this retailer_id in this catalog;
+    * an independent post-POST lookup scoped to the same tenant connection,
+      catalog and retailer_id returned exactly one row whose id
+      (*corroborated_meta_item_id*) equals the created id;
+    * the existing (tenant, catalog, retailer_id) row is a reconcile
+      observation (``meta_graph_reconcile``) — never a slot, never existing
+      publication evidence — bound to the same local product/variant, and its
+      id differs (so it no longer names the item under this retailer_id);
+    * no other row of this tenant and catalog already holds the created id.
+
+    The row then names the created item with *publication_provenance*.
+    """
+    from models import MetaCatalogMembership  # noqa: PLC0415
+
+    cid = _strip(catalog_id)
+    rid = _strip(retailer_id)
+    created = _strip(created_meta_item_id)
+    corroborated = _strip(corroborated_meta_item_id)
+    refuse = lambda reason: {"ok": False, "error": ERROR_AMBIGUOUS_VARIANT_IDENTITY, "reason": reason}  # noqa: E731
+    if not cid or not rid or not created or created != corroborated:
+        return refuse("create_not_corroborated")
+    # Re-read the row under a row lock (PostgreSQL; a no-op on SQLite),
+    # refreshing any copy this session already holds, so a concurrent writer's
+    # newer evidence is seen and never overwritten.
+    existing = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.retailer_id == rid,
+        )
+        .with_for_update()
+        .populate_existing()
+        .first()
+    )
+    if existing is None:
+        return refuse("no_observation_to_replace")
+    if _strip(getattr(existing, "provenance", None)) != PROVENANCE_GRAPH_RECONCILE:
+        return refuse("meta_item_id_immutable")
+    stale = _strip(getattr(existing, "meta_item_id", None))
+    if not stale or stale == created:
+        return refuse("no_stale_observation")
+    if salla_identity is not None:
+        conflict = _local_identity_conflict(existing, salla_identity)
+        if conflict:
+            return refuse(conflict)
+    elif int(getattr(existing, "product_id", 0) or 0) != int(product_id or 0) or (
+        existing.variant_id is not None and variant_id is not None and int(existing.variant_id) != int(variant_id)
+    ):
+        return refuse("product_id_immutable")
+    collision = (
+        db.query(MetaCatalogMembership)
+        .filter(
+            MetaCatalogMembership.tenant_id == int(tenant_id),
+            MetaCatalogMembership.catalog_id == cid,
+            MetaCatalogMembership.meta_item_id == created,
+        )
+        .first()
+    )
+    if collision is not None:
+        return refuse("meta_item_id_owned_other")
+    existing.meta_item_id = created
+    existing.verified_at = datetime.now(timezone.utc)
+    existing.provenance = publication_provenance
+    return {"ok": True, "created": False, "meta_item_id": created,
+            "reason": REASON_STALE_OBSERVATION_REPLACED, "replaced_meta_item_id": stale}
 
 
 def _graph_price_minor(value: Any) -> str:
