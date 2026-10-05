@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 os.environ.setdefault("NAHLA_TEST_NO_DB", "1")
