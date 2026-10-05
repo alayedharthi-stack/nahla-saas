@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
+_BACKEND = os.path.join(os.path.dirname(_HERE), "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 

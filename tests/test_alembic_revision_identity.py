@@ -24,7 +24,7 @@ import sys
 import warnings
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if entry not in sys.path:
         sys.path.insert(0, entry)
