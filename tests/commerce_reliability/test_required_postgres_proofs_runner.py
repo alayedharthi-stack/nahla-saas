@@ -225,7 +225,10 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "catalog_stale_repair_row_lock",
                    # The catalog channel-retirements migration adopts an existing
                    # table only when its definition matches; anything else fails closed.
-                   "catalog_channel_retirements_migration"]
+                   "catalog_channel_retirements_migration",
+                   # The catalog review environment refuses any database that does
+                   # not carry the persisted marker, before migrations or workers.
+                   "catalog_review_environment_guard"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -257,6 +260,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "catalog_q5_membership_readout": ("proof", harness_env),
         "catalog_stale_repair_row_lock": ("proof", harness_env),
         "catalog_channel_retirements_migration": ("proof", harness_env),
+        "catalog_review_environment_guard": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

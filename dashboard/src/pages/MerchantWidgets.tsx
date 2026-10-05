@@ -13,7 +13,7 @@ import { widgetsApi, type WidgetItem, type DisplayRules, type SallaInstallResult
 import { apiCall } from '../api/client'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const API_BASE = (import.meta.env.VITE_API_URL as string) || 'https://api.nahlah.ai'
+import { API_BASE } from '../api/client'
 const NAHLA_ORIGINAL_LOGO = `${API_BASE}/merchant/widgets/assets/whatsapp-bee.jpg`
 
 function getTenantId(): string {

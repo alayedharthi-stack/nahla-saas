@@ -6,3 +6,11 @@
 # parameter named "token" in reserve_delivery_recovery; a column reference, not a
 # credential. The line no longer exists on that branch's head.
 c3a49028e25281203694340a4da9355483bc91ff:backend/core/commerce_runtime/ledgers.py:generic-api-key:434
+#
+# PR #1195, commit 520e3767: the generic-api-key rule captured a Fernet key
+# literal used only by backend/tests/test_catalog_review_env_connection_setup.py
+# to encrypt a fake test token (never a deployed WA_TOKEN_ENC_KEY, never used
+# outside that test). The test now generates a fresh key per run with
+# Fernet.generate_key(); the literal no longer exists on that branch's head.
+520e3767cb0916e6ce1453a0d4bc50c448ddac64:backend/tests/test_catalog_review_env_connection_setup.py:generic-api-key:41
+520e3767cb0916e6ce1453a0d4bc50c448ddac64:backend/tests/test_catalog_review_env_connection_setup.py:generic-api-key:70

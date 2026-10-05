@@ -7,6 +7,7 @@ import {
   verifyTwoFactorLogin, bootstrapAuthSession, isAuthenticated, getToken,
 } from '../auth'
 import { useLanguage } from '../i18n/context'
+import { isReviewEnvironment } from '../lib/reviewEnvironment'
 import LegalFooter from '../components/LegalFooter'
 import TrustBlock from '../components/TrustBlock'
 
@@ -523,7 +524,7 @@ export default function Login() {
                     ? (lang === 'ar' ? 'جارٍ…' : 'Pinging…')
                     : (lang === 'ar' ? 'إعادة فحص' : 'Recheck')}
                 </button>
-                {!usingOverride && (
+                {!usingOverride && !isReviewEnvironment() && (
                   <button
                     type="button"
                     onClick={switchToRailway}

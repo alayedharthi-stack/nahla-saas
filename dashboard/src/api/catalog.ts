@@ -11,6 +11,7 @@
  * land here in the same commit.
  */
 import { getToken, getTenantId, logout } from '../auth'
+import { apiErrorLabels } from '../i18n/apiErrorLabels'
 import { apiCall, API_BASE } from './client'
 
 // ── Shared shapes ────────────────────────────────────────────────────
@@ -835,12 +836,12 @@ export const catalogApi = {
         body: form,
       })
     } catch {
-      throw new Error('تعذر رفع الصورة — تحقق من الاتصال بالخادم.')
+      throw new Error(apiErrorLabels().uploadFailed)
     }
 
     if (res.status === 401) {
       logout()
-      throw new Error('انتهت الجلسة — سجّل الدخول مجدداً.')
+      throw new Error(apiErrorLabels().uploadSessionEnded)
     }
 
     const data = await res.json().catch(() => ({}))

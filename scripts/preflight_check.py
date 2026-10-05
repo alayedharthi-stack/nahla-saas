@@ -89,7 +89,57 @@ def _bool_env(name: str, default: str = "false") -> bool:
     )
 
 
+def _review_environment_gate() -> int:
+    """Catalog review environment: refuse to boot unless isolation is proven.
+
+    Runs before the production checks and regardless of ``ENVIRONMENT``.
+    Inert when ``NAHLA_CATALOG_REVIEW_ENV`` is unset. Reads the database
+    marker (one read-only statement) so a wrong binding is caught before
+    uvicorn binds the port and before any migration runs. Never prints the
+    DSN or any secret.
+    """
+    import importlib.util as _ilu  # noqa: PLC0415
+    import sys as _sys  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    # Loaded by file path (no sys.path mutation, no reliance on the ``scripts``
+    # namespace package). Registered in sys.modules before execution because
+    # the module declares dataclasses under ``from __future__ import annotations``.
+    _guard_name = "nahla_review_environment_guard"
+    _guard_path = _Path(__file__).resolve().parents[1] / "backend" / "core" / "review_environment.py"
+    try:
+        _guard = _sys.modules.get(_guard_name)
+        if _guard is None:
+            _spec = _ilu.spec_from_file_location(_guard_name, _guard_path)
+            if _spec is None or _spec.loader is None:
+                raise ImportError("guard module spec unavailable")
+            _guard = _ilu.module_from_spec(_spec)
+            _sys.modules[_guard_name] = _guard
+            _spec.loader.exec_module(_guard)
+        evaluate_review_environment = _guard.evaluate_review_environment
+        format_report = _guard.format_report
+        review_env_enabled = _guard.review_env_enabled
+    except Exception as exc:  # noqa: BLE001 — a missing guard module must fail closed in review mode
+        if (os.environ.get("NAHLA_CATALOG_REVIEW_ENV") or "").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[preflight][review-env][FAIL] guard_unavailable ({type(exc).__name__}) - refusing to boot.")
+            return 1
+        return 0
+    if not review_env_enabled():
+        return 0
+    check = evaluate_review_environment()
+    for line in format_report(check):
+        print(f"[preflight]{line}")
+    if not check.ok:
+        print("[preflight] catalog review environment is NOT isolated - refusing to boot.")
+        return 1
+    return 0
+
+
 def main() -> int:
+    review_rc = _review_environment_gate()
+    if review_rc != 0:
+        return review_rc
+
     env = (os.environ.get("ENVIRONMENT", "") or "").strip().lower()
     if env != "production":
         # Non-prod boots without ceremony — only production deploys are

@@ -893,6 +893,34 @@
         "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[tenant_fk_to_another_schema]",
         "backend/tests/test_catalog_channel_retirements_migration_pg.py::test_incompatible_existing_table_fails_closed_and_changes_nothing[unrelated_table]"
       ]
+    },
+    {
+      "id": "catalog_review_environment_guard",
+      "kind": "proof",
+      "module": "backend/tests/test_review_environment_guard_pg.py",
+      "origin": "PR #1195 — catalog review-environment boot guard: the database marker is proven from pg_db_role_setting (setrole=0, current database) together with the effective value and current_database(); session (options/PGOPTIONS) and role-level forgeries refused; preflight and the app lifespan refuse an unmarked database before any table exists; the review provisioning path (preflight, then the application heads 0111 and 0113, then uvicorn main:app) serves with the pinned bootstrap target 0093 a no-op (Step C rc=0), create_all complete, /alive, and every ORM-declared column present; the catalog schema step (preflight first) adopts the table create_all built after the migration's own definition check, and an unauthenticated call to the merchant catalog path gets 401 (JWT middleware), not a 5xx; and exits on an unmarked database before any bootstrap, create_all or scheduler",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_review_environment_guard_pg.py::test_pg_settings_does_not_list_the_database_level_marker[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_marked_review_database_is_accepted_with_a_real_read[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_explicit_db_name_variable_is_honoured[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_unmarked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_session_forged_marker_via_options_is_refused_by_both_layers[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_session_forged_marker_via_pgoptions_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_role_level_forged_marker_on_unmarked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_role_level_override_on_marked_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_wrong_persisted_marker_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_configured_name_differs_from_connected_database_is_refused[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_wrong_password_is_unreadable_not_accepted[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_preflight_accepts_marked_and_refuses_unmarked_database[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_lifespan_refuses_unmarked_database_and_creates_nothing[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_review_provisioning_premigration_then_boot_serves_with_the_complete_schema[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_review_provisioning_catalog_schema_step_adopts_the_table_create_all_built[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker[server0]"
+      ]
     }
   ]
 }

@@ -13,6 +13,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { API_BASE } from '../api/client'
+import { useLanguage } from '../i18n/context'
 
 type Phase = 'checking' | 'redeeming' | 'success' | 'error'
 
@@ -50,8 +51,10 @@ export default function InviteFlow() {
   const { code }   = useParams<{ code: string }>()
   const navigate   = useNavigate()
   const bootedRef  = useRef(false)
+  const { t, dir } = useLanguage()
+  const copy = t(tr => tr.authFlow)
   const [phase, setPhase]           = useState<Phase>('checking')
-  const [statusText, setStatusText] = useState('جاري التحقق من الدعوة...')
+  const [statusText, setStatusText] = useState(copy.invite.checking)
   const [errorMsg, setErrorMsg]     = useState('')
 
   const enterDashboard = useCallback((dest: string) => {
@@ -78,12 +81,12 @@ export default function InviteFlow() {
     // 2. No live session — redeem the invite code.
     if (!code) {
       setPhase('error')
-      setErrorMsg('رمز الدعوة مفقود أو غير صالح.')
+      setErrorMsg(copy.invite.missingCode)
       return
     }
 
     setPhase('redeeming')
-    setStatusText('جاري تفعيل الدعوة...')
+    setStatusText(copy.invite.redeeming)
 
     try {
       const res = await fetch(`${API_BASE}/api/invite/redeem`, {
@@ -96,18 +99,18 @@ export default function InviteFlow() {
 
       if (!res.ok || !data.access_token) {
         setPhase('error')
-        setErrorMsg(data.detail || 'رمز الدعوة غير صالح أو منتهي الصلاحية.')
+        setErrorMsg(data.detail || copy.invite.invalidCode)
         return
       }
 
       persistJwt(data.access_token, data.store_name)
-      setStatusText(data.is_new ? 'مرحباً! جاري إعداد حسابك...' : `مرحباً بعودتك ${data.store_name ?? ''}`)
+      setStatusText(data.is_new ? copy.invite.welcomeNew : copy.invite.welcomeBack.replace('{store}', data.store_name ?? ''))
       enterDashboard(data.is_new ? '/onboarding' : '/overview')
     } catch {
       setPhase('error')
-      setErrorMsg('تعذر الوصول إلى الخادم. تحقق من اتصالك وحاول مجدداً.')
+      setErrorMsg(copy.invite.serverUnreachable)
     }
-  }, [code, enterDashboard])
+  }, [code, enterDashboard, copy])
 
   useEffect(() => {
     if (bootedRef.current) return
@@ -117,7 +120,7 @@ export default function InviteFlow() {
 
   return (
     <div
-      dir="rtl"
+      dir={dir}
       className="min-h-dvh flex flex-col items-center justify-center px-4 py-8"
       style={{
         fontFamily:      "'Cairo', system-ui, sans-serif",
@@ -128,14 +131,14 @@ export default function InviteFlow() {
       {/* Logo */}
       <div className="flex flex-col items-center mb-8">
         <img
-          src="https://app.nahlah.ai/logo.png"
-          alt="نحلة"
+          src="/logo.png"
+          alt={copy.brand}
           className="w-16 h-16 object-contain mb-3"
           style={{ filter: 'drop-shadow(0 0 14px rgba(245,158,11,0.4))' }}
           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
         />
-        <h1 className="text-2xl font-black text-slate-100">نحلة AI</h1>
-        <p className="text-slate-500 text-sm mt-1">مساعد المبيعات الذكي لمتجرك</p>
+        <h1 className="text-2xl font-black text-slate-100">{copy.brand}</h1>
+        <p className="text-slate-500 text-sm mt-1">{copy.tagline}</p>
       </div>
 
       {/* Card */}
@@ -150,7 +153,7 @@ export default function InviteFlow() {
         {phase === 'error' ? (
           <div className="text-center space-y-4">
             <div className="text-5xl">⚠️</div>
-            <p className="text-white font-semibold">تعذّر تفعيل الدعوة</p>
+            <p className="text-white font-semibold">{copy.invite.failedTitle}</p>
             <p className="text-slate-400 text-sm leading-relaxed">{errorMsg}</p>
             <a
               href="/login"
@@ -161,14 +164,14 @@ export default function InviteFlow() {
                 boxShadow:  '0 4px 18px rgba(245,158,11,0.3)',
               }}
             >
-              تسجيل الدخول يدوياً
+              {copy.invite.loginManually}
             </a>
           </div>
         ) : phase === 'success' ? (
           <div className="text-center space-y-4">
             <div className="text-5xl">✅</div>
             <p className="text-white font-semibold">{statusText}</p>
-            <p className="text-slate-400 text-sm">جاري توجيهك للوحة التحكم...</p>
+            <p className="text-slate-400 text-sm">{copy.invite.redirecting}</p>
           </div>
         ) : (
           <div className="text-center space-y-5">
@@ -186,14 +189,14 @@ export default function InviteFlow() {
             <p className="text-slate-400 text-sm">{statusText}</p>
             {code && (
               <p className="text-slate-600 text-xs font-mono">
-                code: {code.slice(0, 8)}…
+                {copy.invite.codePrefix}: {code.slice(0, 8)}…
               </p>
             )}
           </div>
         )}
       </div>
 
-      <p className="mt-6 text-xs text-slate-700">بأيدي سعودية 100% 🇸🇦</p>
+      <p className="mt-6 text-xs text-slate-700">{t(tr => tr.login.dev)}</p>
     </div>
   )
 }

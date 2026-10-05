@@ -56,7 +56,7 @@ from core.auth import (
     require_admin,
     require_not_support_impersonation,
 )
-from core.config import INVITE_EXPIRE_H
+from core.config import DASHBOARD_URL, INVITE_EXPIRE_H
 from core.database import get_db
 from core.tenant import get_or_create_settings
 from modules.ai.orchestrator.costing import estimate_call_cost
@@ -433,7 +433,9 @@ async def create_invitation(
         raise HTTPException(status_code=503, detail="Auth service unavailable")
     email = body.email.strip().lower()
     token = create_invite_token(email=email)
-    invite_url = f"https://app.nahlah.ai/register?invite={token}"
+    # Environment dashboard (``DASHBOARD_URL``; production default app.nahlah.ai),
+    # so a review / staging deploy never hands out a production link.
+    invite_url = f"{str(DASHBOARD_URL or 'https://app.nahlah.ai').rstrip('/')}/register?invite={token}"
     audit(
         "invitation_created",
         admin=_admin.get("sub"),

@@ -423,6 +423,79 @@ export interface Translations {
     terms:            string
   }
 
+  /** Invite redeem, e-mail verification, set / reset password pages (demo journey) */
+  authFlow: {
+    brand:               string
+    tagline:             string
+    invite: {
+      checking:          string
+      redeeming:         string
+      missingCode:       string
+      invalidCode:       string
+      welcomeNew:        string
+      welcomeBack:       string
+      serverUnreachable: string
+      failedTitle:       string
+      loginManually:     string
+      redirecting:       string
+      codePrefix:        string
+    }
+    verifyEmail: {
+      successTitle:   string
+      successBody:    string
+      invalidTitle:   string
+      invalidBody:    string
+      notFoundTitle:  string
+      notFoundBody:   string
+      pendingTitle:   string
+      pendingBody:    string
+      goToDashboard:  string
+      goToLogin:      string
+      goToRegister:   string
+    }
+    password: {
+      mismatch:           string
+      tooShort:           string
+      serverUnreachable:  string
+      newPasswordLabel:   string
+      passwordLabel:      string
+      confirmLabel:       string
+      minLengthPh:        string
+      confirmPh:          string
+      saving:             string
+      saveBtn:            string
+      backToLogin:        string
+      login:              string
+      forgot:             string
+    }
+    reset: {
+      invalidLink:  string
+      subtitle:     string
+      doneTitle:    string
+      doneBody:     string
+      heading:      string
+      failed:       string
+    }
+    setPassword: {
+      subtitle:        string
+      doneTitle:       string
+      doneBody:        string
+      account:         string
+      explainer:       string
+      explainerTail:   string
+      submitBtn:       string
+      orLogin:         string
+      expiredOrUsed:   string
+      failed:          string
+      usedTitle:       string
+      expiredTitle:    string
+      invalidTitle:    string
+      usedBody:        string
+      expiredBody:     string
+      invalidBody:     string
+    }
+  }
+
   /** Settings page */
   settings: {
     tabs: {
@@ -1955,6 +2028,8 @@ export interface Translations {
       latencyNone:      string
       failedAction:     string
       actions: Record<string, string>
+      /** Readiness blocker_code → label (resolveCatalogBlocker). */
+      blockers: Record<string, string>
     }
     channels: {
       title:              string
@@ -2438,6 +2513,9 @@ export interface Translations {
         metaSyncSyncing:          string
         metaSyncBlocked:          string
         metaSyncStateFailed:      string
+        /** Preview / confirm issue code → label (resolveCatalogIssue). */
+        metaSyncIssues:           Record<string, string>
+        metaSyncIssueFallback:    string
         metaSyncSynced:           string
         metaSyncWabaLinked:       string
         metaSyncWabaUncertain:    string

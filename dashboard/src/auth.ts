@@ -16,6 +16,8 @@ import { setSentryUser, clearSentryUser } from './lib/sentry'
 // getApiBase() re-reads override + env on every call so api/client.ts and
 // auth stay aligned after localStorage changes (still reload after toggling
 // override so existing bundles pick up the new host consistently).
+import { assertReviewApiBase, isReviewEnvironment } from './lib/reviewEnvironment'
+
 const _OVERRIDE_KEY = 'nahla_api_base_override'
 
 /** Temporary production default when no env is set — Railway direct URL. */
@@ -38,6 +40,13 @@ function _envApiBase(): string {
 }
 
 function _readApiBase(): string {
+  // Catalog review environment build: the API base must be explicit and must
+  // not be production. No localStorage override, no production default —
+  // a misconfigured review bundle throws instead of talking to production.
+  if (isReviewEnvironment()) {
+    assertReviewApiBase()
+    return _envApiBase()
+  }
   if (typeof window !== 'undefined') {
     try {
       const ovr = window.localStorage.getItem(_OVERRIDE_KEY)
@@ -49,8 +58,15 @@ function _readApiBase(): string {
 }
 
 if (typeof window !== 'undefined') {
-  // eslint-disable-next-line no-console
-  console.info('[auth] API_BASE (initial) =', _readApiBase())
+  try {
+    // eslint-disable-next-line no-console
+    console.info('[auth] API_BASE (initial) =', _readApiBase())
+  } catch (err) {
+    // Review build misconfigured: main.tsx shows the failure screen; keep the
+    // reason in the console for the operator.
+    // eslint-disable-next-line no-console
+    console.error(String((err as Error)?.message ?? err))
+  }
 }
 
 /** True when localStorage override is active (operator diagnostics panel). */
@@ -66,6 +82,8 @@ export function hasRuntimeApiBaseOverride(): boolean {
 
 /** Runtime API_BASE override — used by the login-page diagnostics panel. */
 export function setApiBaseOverride(url: string | null): void {
+  // The review build never honours a runtime override (it could point at production).
+  if (isReviewEnvironment()) return
   try {
     if (url && /^https?:\/\//.test(url)) {
       window.localStorage.setItem(_OVERRIDE_KEY, url.replace(/\/+$/, ''))

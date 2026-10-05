@@ -3,6 +3,7 @@
 // is automatically attached to every request.
 
 import { getToken, getTenantId, logout, getApiBase, getPlatformAdminSessionToken } from '../auth'
+import { apiErrorLabels } from '../i18n/apiErrorLabels'
 
 const DEFAULT_FETCH_TIMEOUT_MS = 25_000
 
@@ -76,17 +77,18 @@ function classifyNetworkError(error: unknown, timeoutMsForAbortMessage: number =
   const msg = error instanceof Error ? error.message : String(error ?? '')
   const lowered = msg.toLowerCase()
 
+  const labels = apiErrorLabels()
   if (lowered.includes('failed to fetch') || lowered.includes('load failed') || lowered.includes('networkerror')) {
-    return 'تعذر الوصول إلى الخادم. قد يكون السبب CORS أو انقطاع الشبكة أو خطأ مؤقت في API.'
+    return labels.networkUnreachable
   }
   if (
     lowered.includes('abort') ||
     lowered.includes('signal timed out') ||
     (error instanceof DOMException && error.name === 'AbortError')
   ) {
-    return `انتهت مهلة الطلب (${timeoutMsForAbortMessage / 1000}s). تحقق من الخادم أو الشبكة.`
+    return labels.timeout(timeoutMsForAbortMessage / 1000)
   }
-  return msg || 'حدث خطأ غير متوقع أثناء الاتصال بالخادم.'
+  return msg || labels.unexpected
 }
 
 export async function apiCall<T>(path: string, options?: ApiCallOptions): Promise<T> {
@@ -156,7 +158,8 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
         }
       }
       if (parts.length > 0) {
-        msg = `بيانات الطلب غير صالحة — ${parts.join('؛ ')}`
+        const labels = apiErrorLabels()
+        msg = labels.validation(parts.join(labels.validationJoiner))
       }
     } else if (d && typeof d === 'object') {
       if (typeof d.message === 'string' && d.message.trim()) msg = d.message
@@ -217,14 +220,14 @@ export async function apiCall<T>(path: string, options?: ApiCallOptions): Promis
       console.warn('[auth] session invalid / refresh — forcing logout', { code, url, hard: isHardLogout })
       logout()
       window.location.href = '/login'
-      throw new Error('انتهت صلاحية الجلسة — يرجى تسجيل الدخول مجدداً')
+      throw new Error(apiErrorLabels().sessionExpired)
     }
 
     // 401 from a non-auth endpoint with a soft code or no code: keep the
     // session intact, surface as a normal error for the caller to render.
     // eslint-disable-next-line no-console
     console.warn('[auth] 401 on secondary endpoint — keeping session', { code, url })
-    throw buildApiError(body, 'غير مصرح')
+    throw buildApiError(body, apiErrorLabels().unauthorized)
   }
 
   if (!res.ok) {

@@ -582,6 +582,36 @@ async def on_startup() -> None:
     _t_lifespan = _bt.monotonic()
     logger.warning("[BOOT/lifespan] begin — preparing background tasks")
 
+    # ── Catalog review environment: single choke point ────────────────────
+    # In review mode (NAHLA_CATALOG_REVIEW_ENV) the deploy must prove its
+    # isolation — identity, DSN binding, the database identity marker read
+    # with ONE statement, dashboard URL — before anything else in this
+    # lifespan runs: no create_all, no column repairs, no sweeps, no
+    # workers, no HTTP traffic. A failure raises and uvicorn exits
+    # ("Application startup failed"). Outside review mode nothing runs
+    # here (the rule "no DB connection in lifespan" stays intact for
+    # production). The DSN is never logged.
+    try:
+        from core.review_environment import (  # noqa: PLC0415
+            evaluate_review_environment as _eval_review_env,
+            format_report as _format_review_env,
+        )
+        _review_env = _eval_review_env()
+        if _review_env.enabled:
+            for _line in _format_review_env(_review_env):
+                logger.warning("[BOOT/lifespan] %s", _line)
+            if not _review_env.ok:
+                raise RuntimeError(
+                    "catalog review environment isolation failed: "
+                    + ",".join(_review_env.failures)
+                    + " — refusing to start (no migration, repair, worker or request will run)"
+                )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail closed in review mode only
+        if os.environ.get("NAHLA_CATALOG_REVIEW_ENV", "").strip().lower() in ("1", "true", "yes", "on"):
+            raise RuntimeError(f"catalog review environment guard unavailable: {type(exc).__name__}") from exc
+
     # ── Deployment fingerprint (env-only, no subprocess) ──────────────────
     # We deliberately AVOID `git rev-parse HEAD` here: subprocess.check_output
     # is synchronous and on a misbehaving container can stall the event loop
@@ -681,6 +711,34 @@ async def on_startup() -> None:
                 import subprocess
                 import time as _t
                 from sqlalchemy import create_engine, text as _text
+
+                # ── Step 0: catalog review environment isolation ──────────
+                # In review mode the database identity (allowlisted host +
+                # ``nahla.environment`` marker) must be proven BEFORE any
+                # cleanup, stamp, alembic upgrade or create_all. A failure
+                # abandons the whole bootstrap; nothing is written. Inert
+                # outside review mode. Never logs the DSN.
+                try:
+                    from core.review_environment import (  # noqa: PLC0415
+                        evaluate_review_environment,
+                        format_report,
+                    )
+                    _review = evaluate_review_environment()
+                    if _review.enabled:
+                        for _line in format_report(_review):
+                            logger.warning("[BOOT/db] %s", _line)
+                        if not _review.ok:
+                            logger.error(
+                                "[BOOT/db] Step 0: review environment isolation FAILED (%s) — "
+                                "abandoning this bootstrap chain (cleanup/stamp/upgrade). The lifespan "
+                                "guard is the authoritative stop.",
+                                ",".join(_review.failures),
+                            )
+                            return
+                except Exception as exc:  # noqa: BLE001 — fail closed in review mode only
+                    if os.environ.get("NAHLA_CATALOG_REVIEW_ENV", "").strip().lower() in ("1", "true", "yes", "on"):
+                        logger.error("[BOOT/db] Step 0: review environment guard unavailable (%s) — abandoning bootstrap.", exc)
+                        return
 
                 # ── Step A: Salla duplicate cleanup (must run before 0017) ──
                 cleanup = os.path.join(_REPO_ROOT, "scripts", "cleanup_salla_duplicates.py")
@@ -1346,7 +1404,29 @@ async def on_startup() -> None:
     )
     from core.runtime_perf import schedule_with_delay  # noqa: PLC0415
 
+    # Catalog review environment: background workers (store sync, catalog
+    # drains, reconcile, pollers, …) start only when isolation is proven.
+    # The check is static here (identity + DSN binding + dashboard URL);
+    # the database marker is verified by preflight and by the DB bootstrap.
+    _review_workers_blocked = False
+    try:
+        from core.review_environment import evaluate_review_environment as _eval_review  # noqa: PLC0415
+        _review_check = _eval_review(with_database_marker=False)
+        if _review_check.enabled and not _review_check.ok:
+            _review_workers_blocked = True
+            logger.error(
+                "[Scheduler] catalog review environment isolation FAILED (%s) — no background worker will start.",
+                ",".join(_review_check.failures),
+            )
+    except Exception as exc:  # noqa: BLE001 — fail closed in review mode only
+        if os.environ.get("NAHLA_CATALOG_REVIEW_ENV", "").strip().lower() in ("1", "true", "yes", "on"):
+            _review_workers_blocked = True
+            logger.error("[Scheduler] review environment guard unavailable (%s) — no background worker will start.", exc)
+
     def _start(name: str, factory, delay_s: float) -> None:
+        if _review_workers_blocked:
+            logger.warning("[Scheduler] %s NOT queued — review environment isolation not proven.", name)
+            return
         try:
             task = schedule_with_delay(factory, name=name, delay_seconds=delay_s)
             register_background_task(name, task)
