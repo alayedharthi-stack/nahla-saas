@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
@@ -262,9 +263,11 @@ def test_lifespan_refuses_unmarked_database_and_creates_nothing(pg):
 #
 # These boot the production ASGI app (start.sh runs ``uvicorn backend.main:app``
 # from /app after preflight_check.py; here the same module as ``main:app`` from
-# backend/) with schedulers disabled and every outbound HTTP(S) proxy pointed at a closed
-# loopback port, so nothing can leave the machine. Only loopback reaches the
-# throw-away PostgreSQL server.
+# backend/) with schedulers disabled. The subprocess environment carries only
+# PATH, HOME and the review variables (no Sentry, Redis, Meta or provider
+# settings), which is what keeps the boot local; HTTP(S) proxies pointed at a
+# closed loopback port are a second layer for HTTP clients only. Only loopback
+# reaches the throw-away PostgreSQL server.
 
 _NO_EGRESS = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
               "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
@@ -406,6 +409,86 @@ def test_review_provisioning_premigration_then_boot_serves_with_the_complete_sch
     finally:
         eng.dispose()
     assert missing == [], missing
+
+
+def _provision_and_boot(pg, db: str, log_path: Path):
+    """preflight, application heads (0111, 0113), one boot; returns the boot log and the
+    status of one unauthenticated merchant catalog call made while it served."""
+    from scripts.operators.bootstrap_migration_contract import APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD
+
+    env = _subprocess_env(pg, db, **_NO_EGRESS)
+    preflight = subprocess.run([sys.executable, str(_REPO / "scripts" / "preflight_check.py")], env=env,
+                               capture_output=True, text=True, timeout=120)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    for target in (APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD):
+        migrate = subprocess.run([sys.executable, "-m", "alembic", "upgrade", target], cwd=str(_REPO / "database"),
+                                 env=env, capture_output=True, text=True, timeout=600)
+        assert migrate.returncode == 0, migrate.stderr[-3000:]
+    ready = "[BOOT/safe_alters] Database tables ready."
+    rc, out, port, proc = _run_server(pg, db, log_path, until=ready)
+    try:
+        assert rc is None and ready in out, out[-3000:]
+        unauthenticated = None
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            opener.open(f"http://127.0.0.1:{port}/merchant/catalog/status", timeout=5)
+        except urllib.error.HTTPError as exc:
+            unauthenticated = exc.code
+    finally:
+        _stop(proc)
+    return out, unauthenticated
+
+
+def test_review_provisioning_catalog_schema_step_adopts_the_table_create_all_built(pg, boot_db, tmp_path):
+    """Catalog-specific, separate from ORM column parity. After the provisioning
+    path, the ``catalog_channel_retirements`` table the startup create_all built
+    matches the catalog migration's own definition check, and the explicit,
+    owner-approved catalog schema step — preflight first, then
+    ``alembic upgrade <catalog revision>`` — adopts it (rc=0, revision added,
+    table unchanged). The merchant catalog route is mounted and refuses an
+    unauthenticated call (401), not a 5xx. Not covered: any authenticated
+    catalog route, the Meta catalog itself, or the review/provider journey."""
+    import importlib.util
+
+    from scripts.operators.bootstrap_migration_contract import (
+        APPLICATION_ALEMBIC_HEAD,
+        CATALOG_RETIREMENTS_ALEMBIC_HEAD,
+        NAVIGATION_ALEMBIC_HEAD,
+    )
+    from sqlalchemy import inspect as sa_inspect
+
+    out, unauthenticated = _provision_and_boot(pg, boot_db, tmp_path / "boot.log")
+    assert unauthenticated == 401
+    script = next((_REPO / "database" / "migrations" / "versions").glob("*_catalog_channel_retirements.py"))
+    spec = importlib.util.spec_from_file_location("catalog_retirements_migration", script)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    assert migration.revision == CATALOG_RETIREMENTS_ALEMBIC_HEAD
+
+    eng = create_engine(pg["app_url"](boot_db), poolclass=NullPool, future=True)
+    try:
+        assert migration.existing_table_mismatches(sa_inspect(eng)) == []
+        before = sorted((c["name"], str(c["type"]), c["nullable"]) for c in sa_inspect(eng).get_columns(migration.TABLE))
+    finally:
+        eng.dispose()
+
+    env = _subprocess_env(pg, boot_db, **_NO_EGRESS)
+    preflight = subprocess.run([sys.executable, str(_REPO / "scripts" / "preflight_check.py")], env=env,
+                               capture_output=True, text=True, timeout=120)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    step = subprocess.run([sys.executable, "-m", "alembic", "upgrade", CATALOG_RETIREMENTS_ALEMBIC_HEAD],
+                          cwd=str(_REPO / "database"), env=env, capture_output=True, text=True, timeout=600)
+    assert step.returncode == 0, step.stderr[-3000:]
+    eng = create_engine(pg["app_url"](boot_db), poolclass=NullPool, future=True)
+    try:
+        with eng.connect() as conn:
+            assert set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) == {
+                APPLICATION_ALEMBIC_HEAD, NAVIGATION_ALEMBIC_HEAD, CATALOG_RETIREMENTS_ALEMBIC_HEAD}
+        after = sorted((c["name"], str(c["type"]), c["nullable"]) for c in sa_inspect(eng).get_columns(migration.TABLE))
+    finally:
+        eng.dispose()
+    assert after == before
+    assert APP_PASSWORD not in out + preflight.stdout + preflight.stderr + step.stdout + step.stderr
 
 
 def test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker(pg, tmp_path):
