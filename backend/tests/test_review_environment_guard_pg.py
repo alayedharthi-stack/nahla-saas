@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import os
 import secrets
+import socket
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
@@ -253,3 +256,155 @@ def test_lifespan_refuses_unmarked_database_and_creates_nothing(pg):
     tables = _scalar(pg["app_url"](pg["plain"]),
                      "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")
     assert tables == 0
+
+
+# ── end to end: the real server (uvicorn main:app) ───────────────────────────
+#
+# These boot the production entrypoint the way start.sh does (uvicorn main:app),
+# with schedulers disabled and every outbound HTTP(S) proxy pointed at a closed
+# loopback port, so nothing can leave the machine. Only loopback reaches the
+# throw-away PostgreSQL server.
+
+_NO_EGRESS = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+              "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
+              "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _alive(port: int) -> int | None:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/alive", timeout=2) as resp:
+            return resp.status
+    except OSError:  # URLError, refused, reset, timeout: not listening (yet / any more)
+        return None
+
+
+def _run_server(pg, db: str, log_path: Path, *, until: str, timeout: float = 240):
+    """Start ``uvicorn main:app``; return once ``until`` is logged or the process
+    exits. Returns (returncode or None while running, output, port, process)."""
+    port = _free_port()
+    env = _subprocess_env(pg, db, NAHLA_DISABLE_SCHEDULERS="1", PYTHONUNBUFFERED="1",
+                          PYTHONPATH=os.pathsep.join([str(_REPO), str(_REPO / "backend"), str(_REPO / "database")]),
+                          **_NO_EGRESS)
+    log = open(log_path, "w")
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(port)],
+                            cwd=str(_REPO / "backend"), env=env, stdout=log, stderr=subprocess.STDOUT)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        out = log_path.read_text(errors="replace")
+        if until in out or proc.poll() is not None:
+            break
+        time.sleep(0.25)
+    log.flush()
+    return proc.poll(), log_path.read_text(errors="replace"), port, proc
+
+
+def _stop(proc) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+
+
+@pytest.fixture()
+def boot_db(pg):
+    """A fresh database marked like the review database, owned by the test role."""
+    name = f"rv_boot_{secrets.token_hex(4)}"
+    _admin_exec(pg["admin"], f"CREATE DATABASE {name} OWNER {pg['role']}",
+                f"ALTER DATABASE {name} SET nahla.environment = '{MARKER}'")
+    try:
+        yield name
+    finally:
+        _admin_exec(pg["admin"], f"DROP DATABASE IF EXISTS {name} WITH (FORCE)")
+
+
+def _public_tables(pg, db: str) -> set[str]:
+    eng = create_engine(pg["app_url"](db), poolclass=NullPool, future=True)
+    try:
+        with eng.connect() as conn:
+            return set(conn.execute(text(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")).scalars())
+    finally:
+        eng.dispose()
+
+
+def test_server_boots_on_a_marked_migrated_database_and_completes_the_bootstrap(pg, boot_db, tmp_path):
+    """The successful path: the review database is first migrated to the pinned
+    normal bootstrap target (0093, from the bootstrap contract) — the runbook's
+    schema step — then ``uvicorn main:app`` boots on it. The lifespan guard and
+    bootstrap Step 0 both verify isolation, uvicorn serves /alive, the bootstrap
+    upgrade succeeds (rc=0, nothing left to apply), create_all adds the
+    model-only tables and the schedulers stay disabled.
+
+    The schema step is required: on an EMPTY database the existing bootstrap
+    races its background ``create_all`` against Alembic 0001, the upgrade fails
+    ("already exists"), and a later boot's 0016 stamp then fails on columns
+    create_all already added — booting alone never reaches 0093 (observed on
+    PostgreSQL 16 and 18; unchanged platform behaviour, documented in the runbook)."""
+    from scripts.operators.bootstrap_migration_contract import build_normal_bootstrap_upgrade_argv
+
+    argv = build_normal_bootstrap_upgrade_argv(python_executable=sys.executable)
+    target = argv[-1]
+    assert target == "0093"
+    migrate = subprocess.run(argv, cwd=str(_REPO / "database"), env=_subprocess_env(pg, boot_db, **_NO_EGRESS),
+                             capture_output=True, text=True, timeout=600)
+    assert migrate.returncode == 0, migrate.stderr[-3000:]
+    assert _scalar(pg["app_url"](boot_db), "SELECT version_num FROM alembic_version") == target
+
+    done = "[BOOT/db] Bootstrap completed cleanly."
+    rc, out, port, proc = _run_server(pg, boot_db, tmp_path / "boot.log", until=done)
+    try:
+        assert rc is None, f"server exited rc={rc}:\n{out[-3000:]}"
+        assert done in out, out[-3000:]
+        assert _alive(port) == 200
+        ready = "[BOOT/safe_alters] Database tables ready."
+        for _ in range(240):
+            if ready in (tmp_path / "boot.log").read_text(errors="replace"):
+                break
+            time.sleep(0.25)
+        out = (tmp_path / "boot.log").read_text(errors="replace")
+    finally:
+        _stop(proc)
+    assert out.count("isolation verified") >= 2  # lifespan guard and bootstrap Step 0
+    assert "[BOOT/db] Step B: no stamp needed (has_alembic=True" in out
+    assert f"Step C: alembic upgrade {target} OK rc=0" in out, out[-4000:]
+    assert "Step C FAILED" not in out
+    assert ready in out
+    assert "Application startup complete" in out and "Application startup failed" not in out
+    assert "NAHLA_DISABLE_SCHEDULERS=1" in out
+    assert APP_PASSWORD not in out
+    assert _scalar(pg["app_url"](boot_db), "SELECT version_num FROM alembic_version") == target
+    assert {"tenants", "users", "integrations", "alembic_version"} <= _public_tables(pg, boot_db)
+
+
+def test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker(pg, tmp_path):
+    """The failure path through the real server: uvicorn exits with "Application
+    startup failed", never answers /alive, never dispatches the bootstrap,
+    create_all or a scheduler, and the database still has no table."""
+    rc, out, port, proc = _run_server(pg, pg["plain"], tmp_path / "refused.log", until="Application startup failed",
+                                      timeout=120)
+    try:
+        if rc is None:  # the line is printed just before exit
+            proc.wait(timeout=30)
+            rc = proc.returncode
+            out = (tmp_path / "refused.log").read_text(errors="replace")
+    finally:
+        _stop(proc)
+    assert rc not in (None, 0), out[-3000:]
+    assert "Application startup failed" in out
+    assert "catalog review environment isolation failed" in out and re_mod.F_DB_MARKER_MISSING in out
+    for started in ("[BOOT/db] Bootstrap dispatched", "[BOOT/db] Step", "[BOOT/safe_alters]",
+                    "[Startup] NAHLA_DISABLE_SCHEDULERS", "Application startup complete"):
+        assert started not in out, started
+    assert _alive(port) is None
+    assert APP_PASSWORD not in out
+    assert _public_tables(pg, pg["plain"]) == set()

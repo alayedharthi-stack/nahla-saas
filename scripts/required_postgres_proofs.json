@@ -824,7 +824,7 @@
       "id": "catalog_review_environment_guard",
       "kind": "proof",
       "module": "backend/tests/test_review_environment_guard_pg.py",
-      "origin": "PR #1195 — catalog review-environment boot guard: the database marker is proven from pg_db_role_setting (setrole=0, current database) together with the effective value and current_database(); session (options/PGOPTIONS) and role-level forgeries refused; preflight and the app lifespan refuse an unmarked database before any table exists",
+      "origin": "PR #1195 — catalog review-environment boot guard: the database marker is proven from pg_db_role_setting (setrole=0, current database) together with the effective value and current_database(); session (options/PGOPTIONS) and role-level forgeries refused; preflight and the app lifespan refuse an unmarked database before any table exists; the real server (uvicorn main:app) boots on a marked database migrated to the pinned bootstrap target 0093 and completes the bootstrap (Step C rc=0, create_all, /alive), and exits on an unmarked database before any bootstrap, create_all or scheduler",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -842,7 +842,9 @@
         "backend/tests/test_review_environment_guard_pg.py::test_configured_name_differs_from_connected_database_is_refused[server0]",
         "backend/tests/test_review_environment_guard_pg.py::test_wrong_password_is_unreadable_not_accepted[server0]",
         "backend/tests/test_review_environment_guard_pg.py::test_preflight_accepts_marked_and_refuses_unmarked_database[server0]",
-        "backend/tests/test_review_environment_guard_pg.py::test_lifespan_refuses_unmarked_database_and_creates_nothing[server0]"
+        "backend/tests/test_review_environment_guard_pg.py::test_lifespan_refuses_unmarked_database_and_creates_nothing[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_server_boots_on_a_marked_migrated_database_and_completes_the_bootstrap[server0]",
+        "backend/tests/test_review_environment_guard_pg.py::test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker[server0]"
       ]
     }
   ]
