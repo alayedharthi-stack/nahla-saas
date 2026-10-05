@@ -403,6 +403,7 @@ def _empty_sync_counts() -> Dict[str, int]:
         "skipped_ineligible": 0,
         "retire_pending": 0,
         "retire_exhausted": 0,
+        "retire_refused": 0,
         "retired": 0,
     }
 
@@ -440,6 +441,7 @@ _FAILURE_ACTIONS = {
     "meta_push_failed": "wait_retry",
     "lookup_failed": "wait_retry",
     "retire_exhausted": "check_item_in_meta",
+    "retire_ownership_unverified": "check_item_in_meta",
 }
 
 
@@ -544,15 +546,22 @@ def _retirement_snapshot(db: Any, tenant_id: int, counts: Dict[str, int]) -> Dic
             int(tenant_id),
             type(exc).__name__,
         )
-        ledger = {"pending": 0, "exhausted": 0, "done_total": 0, "last_done_at": None, "last_error": None}
+        ledger = {"pending": 0, "exhausted": 0, "refused": 0, "done_total": 0, "last_done_at": None, "last_error": None}
     product_pending = int(counts.get("retire_pending") or 0)
     product_exhausted = int(counts.get("retire_exhausted") or 0)
+    product_refused = int(counts.get("retire_refused") or 0)
+    ledger_refused = int(ledger.get("refused") or 0)
     return {
         "pending": int(ledger["pending"]) + max(0, product_pending - product_exhausted),
         "exhausted": int(ledger["exhausted"]) + product_exhausted,
+        # withdrawal refused: no publication evidence, so nothing was written
+        # and a channel copy may still be live in WhatsApp
+        "refused": ledger_refused + product_refused,
+        "refused_products": product_refused,
         "retired_products": int(counts.get("retired") or 0),
         "ledger_pending": int(ledger["pending"]),
         "ledger_exhausted": int(ledger["exhausted"]),
+        "ledger_refused": ledger_refused,
         "ledger_done_total": int(ledger["done_total"]),
         "last_done_at": ledger.get("last_done_at"),
         "last_error": ledger.get("last_error"),
@@ -716,9 +725,13 @@ def build_sync_stages(
     }
 
     retire_stage = {
-        "state": "attention" if retirement.get("exhausted") else ("pending" if retirement.get("pending") else "ok"),
+        "state": (
+            "attention" if (retirement.get("exhausted") or retirement.get("refused"))
+            else ("pending" if retirement.get("pending") else "ok")
+        ),
         "pending": retirement.get("pending"),
         "exhausted": retirement.get("exhausted"),
+        "refused": retirement.get("refused") or 0,
     }
 
     visibility = {
@@ -795,6 +808,17 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
                             "error_code": "retire_exhausted",
                             "error_summary": str(sm_inel.get("retire_last_error") or "retire_exhausted")[:240],
                             "action_code": failure_action_code("retire_exhausted"),
+                        })
+                elif sm_inel.get("retire_blocked"):
+                    counts["retire_refused"] += 1
+                    if len(failures) < FAILURE_SAMPLE_LIMIT:
+                        failures.append({
+                            "product_id": int(row.id),
+                            "title": str(getattr(row, "title", "") or "")[:120],
+                            "sync_status": "retire_refused",
+                            "error_code": "retire_ownership_unverified",
+                            "error_summary": str(sm_inel.get("retire_blocked"))[:240],
+                            "action_code": failure_action_code("retire_ownership_unverified"),
                         })
                 elif _status_of(row) == "retired":
                     counts["retired"] += 1
@@ -1192,7 +1216,7 @@ def _drain_retirements(
         drain_channel_retirement_ledger,
     )
 
-    summary: Dict[str, Any] = {"products": 0, "retired": 0, "failed": 0, "ledger": None}
+    summary: Dict[str, Any] = {"products": 0, "retired": 0, "refused": 0, "failed": 0, "ledger": None}
     for pid in product_ids:
         try:
             res = attempt_product_channel_retirement(db, tenant_id, pid, client=client)
@@ -1207,7 +1231,9 @@ def _drain_retirements(
                 _invalidate_sync_session(db)
             continue
         summary["products"] += 1
-        if res.get("ok") and not res.get("skipped"):
+        if res.get("refused") or res.get("error_code") == "no_publication_evidence":
+            summary["refused"] += 1
+        elif res.get("ok") and not res.get("skipped"):
             summary["retired"] += 1
         elif not res.get("ok"):
             summary["failed"] += 1

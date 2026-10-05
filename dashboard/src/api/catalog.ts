@@ -343,7 +343,7 @@ export interface WhatsappCatalogSyncStages {
   connection: { state: WhatsappCatalogStageState; blocker_code: string | null; action_code: string | null; catalog_id: string | null; waba_id: string | null }
   publish: { state: WhatsappCatalogStageState; verified_in_meta: number; waiting: number; rejected_or_blocked: number; last_verified_at: string | null; verified_fields: string[] }
   catalog_link: { state: WhatsappCatalogStageState; evidence_at: string | null; evidence_source: string | null; stale: boolean | null; action_code: string | null }
-  retirement: { state: WhatsappCatalogStageState; pending: number; exhausted: number }
+  retirement: { state: WhatsappCatalogStageState; pending: number; exhausted: number; refused?: number }
   whatsapp_visibility: { state: WhatsappCatalogStageState; provable_via_api: boolean; requires: string[] }
 }
 
@@ -353,6 +353,9 @@ export interface WhatsappCatalogRetirement {
   retired_products: number
   ledger_pending: number
   ledger_exhausted: number
+  refused?: number
+  refused_products?: number
+  ledger_refused?: number
   ledger_done_total: number
   last_done_at: string | null
   last_error: string | null
@@ -379,6 +382,7 @@ export interface WhatsappCatalogSyncCounts {
   skipped_ineligible: number
   retire_pending?: number
   retire_exhausted?: number
+  retire_refused?: number
   retired?: number
 }
 

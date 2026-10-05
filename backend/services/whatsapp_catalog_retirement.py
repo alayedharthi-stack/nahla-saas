@@ -453,9 +453,11 @@ def attempt_product_channel_retirement(
                 out["absent"] += 1
             else:
                 out["retired"] += 1
-        elif res.get("action") == "block_ownership_unverified" or res.get("error") == "catalog_not_current":
-            # Not provably ours (or no longer in this tenant's catalog): never
-            # written, never retried.
+        elif res.get("action") == "block_ownership_unverified":
+            # Not provably ours: never written, never retried. (A catalog that
+            # is not the connection's current one is an ordinary failure below:
+            # retried with backoff, and every retry re-checks catalog and
+            # evidence before any write.)
             out["refused"] += 1
         else:
             out["failed"] += 1
@@ -786,8 +788,11 @@ def drain_channel_retirement_ledger(
             else:
                 out["retired"] += 1
             continue
-        if res.get("refused") or res.get("action") == "block_ownership_unverified" or res.get("error") == "catalog_not_current":
-            # No publication evidence for this catalog: never retried, never written.
+        if res.get("refused") or res.get("action") == "block_ownership_unverified":
+            # No publication evidence: never retried, never written. A
+            # ``catalog_not_current`` result falls through to the retry budget
+            # (then ``exhausted``, which reconciliation may reset); each retry
+            # re-checks the current catalog and the evidence before any write.
             row.status = LEDGER_STATUS_REFUSED
             row.last_error = str(res.get("error") or "no_publication_evidence")[:255]
             row.next_attempt_at = None
