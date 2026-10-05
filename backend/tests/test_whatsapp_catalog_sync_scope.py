@@ -213,7 +213,12 @@ def test_only_the_trial_tenant_and_products_reach_graph(monkeypatch):
         # status for an excluded store says so honestly, with no action for the merchant
         st = build_whatsapp_catalog_sync_status(session, other)
         assert st["ready"] is False and st["blocker_code"] == SCOPE_BLOCKER_CODE and st["phase"] == "blocked"
-        assert st["sync_scope"]["active"] is True and st["sync_scope"]["tenant_ids"] == [trial]
+        # caller-scoped: the excluded store learns only that it is out of scope
+        assert st["sync_scope"] == {"active": True, "tenant_in_scope": False, "products_limited": True, "product_ids": []}
+        assert str(trial) not in json.dumps(st["sync_scope"])
+        trial_scope = build_whatsapp_catalog_sync_status(session, trial)["sync_scope"]
+        assert trial_scope == {"active": True, "tenant_in_scope": True, "products_limited": True,
+                               "product_ids": [allowed.id]}
         assert build_whatsapp_catalog_sync_status(session, trial)["ready"] is True
     finally:
         session.close(); engine.dispose()

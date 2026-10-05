@@ -106,7 +106,32 @@ def product_in_sync_scope(tenant_id: int, product_id: Optional[int]) -> bool:
         return False
 
 
+def tenant_scope_status(tenant_id: int) -> Dict[str, object]:
+    """The write scope as it applies to one tenant, for that tenant's own view.
+
+    Never lists other tenants or their products: a merchant sees whether a
+    limited scope is active, whether their store is in it, and, when products
+    are limited, only their own allowed product ids.
+    """
+    tenants = scoped_tenant_ids()
+    products = scoped_product_ids()
+    try:
+        tid = int(tenant_id)
+    except (TypeError, ValueError):
+        tid = None
+    in_scope = tenant_in_sync_scope(tid) if tid is not None else False
+    own_products = sorted(products.get(tid, set())) if (products is not None and tid is not None and in_scope) else []
+    return {
+        "active": tenants is not None,
+        "tenant_in_scope": bool(in_scope),
+        "products_limited": products is not None,
+        "product_ids": own_products,
+    }
+
+
 def scope_description() -> Dict[str, object]:
+    """The full write scope, every tenant and product. Operator use only;
+    never returned to a merchant (see ``tenant_scope_status``)."""
     tenants = scoped_tenant_ids()
     products = scoped_product_ids()
     return {
@@ -128,4 +153,5 @@ __all__ = [
     "scoped_product_ids",
     "scoped_tenant_ids",
     "tenant_in_sync_scope",
+    "tenant_scope_status",
 ]

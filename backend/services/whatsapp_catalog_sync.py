@@ -739,14 +739,15 @@ def build_sync_stages(
     }
 
 
-def _scope_description_safe() -> Dict[str, Any]:
+def _tenant_scope_status_safe(tenant_id: int) -> Dict[str, Any]:
+    """Caller-scoped write scope for the merchant status (no other tenant's ids)."""
     try:
-        from services.whatsapp_catalog_sync_scope import scope_description  # noqa: PLC0415
+        from services.whatsapp_catalog_sync_scope import tenant_scope_status  # noqa: PLC0415
 
-        return scope_description()
+        return tenant_scope_status(tenant_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[WA_CATALOG_SYNC] scope description failed err=%s", type(exc).__name__)
-        return {"active": False, "tenant_ids": [], "product_ids": {}}
+        logger.warning("[WA_CATALOG_SYNC] scope status failed err=%s", type(exc).__name__)
+        return {"active": False, "tenant_in_scope": False, "products_limited": False, "product_ids": []}
 
 
 def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any]:
@@ -907,7 +908,7 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         "failures": failures,
         "auto_sync_enabled": auto_on,
         "auto_sync_flag": _AUTO_SYNC_ENV,
-        "sync_scope": _scope_description_safe(),
+        "sync_scope": _tenant_scope_status_safe(int(tenant_id)),
         "verification": {
             "lookup_fields": list(IDENTITY_LOOKUP_FIELDS) + list(CONTENT_LOOKUP_FIELDS),
             "identity_fields": list(IDENTITY_LOOKUP_FIELDS),

@@ -414,13 +414,12 @@ export interface WhatsappCatalogSyncStatus {
   failures: WhatsappCatalogSyncFailure[]
   auto_sync_enabled?: boolean
   auto_sync_flag?: string
-  // Limited-trial write scope: when active, only the listed tenants/products reach Meta.
+  // Limited-trial write scope as it applies to this store only (never other stores' ids).
   sync_scope?: {
     active: boolean
-    tenant_ids: number[]
-    product_ids: Record<string, number[]>
-    tenant_env?: string
-    product_env?: string
+    tenant_in_scope: boolean
+    products_limited: boolean
+    product_ids: number[]
   }
   verification?: {
     lookup_fields: string[]
