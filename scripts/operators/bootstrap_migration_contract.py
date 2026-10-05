@@ -62,8 +62,8 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
 # so that every merge order of those branches is accepted without editing the
 # topology lines each branch would otherwise rewrite. Each entry is
 # ``(head it adds, head it replaces)``:
-#   0117 OTO merchant connections, a sibling of 0112 (adds a head);
-#   0118 catalog channel retirements, a sibling of 0112 (adds a head);
+#   0117 OTO merchant connections, another child of 0112 (adds a head);
+#   0118 catalog channel retirements, another child of 0112 (adds a head);
 #   0119 payments readiness, the child of 0115 (replaces 0115 as a head).
 # The list is closed: any other extra head, or 0115 beside 0119, is refused.
 # None of these is a bootstrap target: normal bootstrap stays pinned to 0093.
