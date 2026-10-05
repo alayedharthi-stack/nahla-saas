@@ -703,12 +703,36 @@ def push_one_meta_catalog_item(
     return result
 
 
+def retirement_evidence_refusal(
+    evidence: Optional[Dict[str, Any]], *, catalog_id: str, retailer_id: str,
+) -> Optional[str]:
+    """Why *evidence* does not authorize a retirement write, or None.
+
+    Retirement obeys the publish path's rule: only an item this path
+    published may be modified. *evidence* is either the result of
+    ``live_item_publication_evidence`` for the row (a publication-provenance
+    membership for this tenant, catalog and retailer_id) or the ledger copy of
+    that same evidence, taken in the transaction that deleted the row. It must
+    be owned, name a Graph item id, and be for this catalog and retailer_id.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("owned"):
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if not str(evidence.get("meta_product_id") or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if str(evidence.get("catalog_id") or "").strip() != str(catalog_id or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if str(evidence.get("retailer_id") or "").strip() != str(retailer_id or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    return None
+
+
 def retire_meta_catalog_item(
     conn: Any,
     catalog_id: str,
     retailer_id: str,
     meta_item_id: Optional[str] = None,
     *,
+    publication_evidence: Optional[Dict[str, Any]] = None,
     client: Optional[httpx.Client] = None,
 ) -> Dict[str, Any]:
     """Withdraw one live catalog item from the channel without deleting it.
@@ -717,6 +741,13 @@ def retire_meta_catalog_item(
     existing Graph item, then re-reads it. Never issues a Graph DELETE and
     never touches an item whose retailer_id is not in this catalog.
     Returns ``action=absent`` when the item does not exist in Graph.
+
+    Every write requires *publication_evidence* (see
+    ``retirement_evidence_refusal``) for the connection's current catalog, and
+    the live Graph item id must equal the evidenced id. Without it nothing is
+    read or written and the result is ``block_ownership_unverified``, exactly
+    as the publish path refuses to update an item it cannot prove it
+    published.
     """
     rid = str(retailer_id or "").strip()
     cid = str(catalog_id or "").strip() or str(getattr(conn, "meta_catalog_id", "") or "").strip()
@@ -737,6 +768,18 @@ def retire_meta_catalog_item(
     if not cid:
         result["error"] = "catalog_id_missing"
         return result
+    refusal = retirement_evidence_refusal(publication_evidence, catalog_id=cid, retailer_id=rid)
+    if refusal:
+        result["action"] = ACTION_BLOCK_OWNERSHIP
+        result["error"] = refusal
+        result["ownership_evidence"] = publication_evidence if isinstance(publication_evidence, dict) else None
+        return result
+    owned_mid = str(publication_evidence["meta_product_id"]).strip()
+    if str(meta_item_id or "").strip() and str(meta_item_id).strip() != owned_mid:
+        result["error"] = "meta_item_id_mismatch"
+        return result
+    meta_item_id = owned_mid
+    result["meta_product_id"] = owned_mid
     from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, tenant_in_sync_scope  # noqa: PLC0415
 
     if not tenant_in_sync_scope(int(getattr(conn, "tenant_id", 0) or 0)):
@@ -744,9 +787,15 @@ def retire_meta_catalog_item(
         result["error"] = SCOPE_BLOCKER_CODE
         return result
     try:
-        _cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
+        current_cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
     except MetaCatalogPushError as exc:
         result["error"] = exc.code
+        return result
+    if str(current_cid or "").strip() != cid:
+        # The token and the claim guard belong to the connection's current
+        # catalog; an item in a catalog this tenant no longer holds is not
+        # provably ours to modify.
+        result["error"] = "catalog_not_current"
         return result
 
     def _lookup(fields: str) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -1048,6 +1097,7 @@ __all__ = [
     "MetaCatalogPushError",
     "graph_error_code",
     "retire_meta_catalog_item",
+    "retirement_evidence_refusal",
     "RETIRED_AVAILABILITY",
     "RETIRED_VISIBILITY",
     "PUBLISHED_VISIBILITY",

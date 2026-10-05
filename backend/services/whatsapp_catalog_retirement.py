@@ -18,7 +18,12 @@ that WhatsApp shows to customers. This module owns that transition:
 
 The channel write is ``availability=out of stock`` + ``visibility=staging``
 on the existing Graph item, verified by a Graph read. Nothing is deleted on
-Meta; nothing is created. Items this path never published are never touched.
+Meta; nothing is created. Items this path never published are never touched:
+an identity is retired only with the publish path's own publication evidence
+(a ``meta_catalog_memberships`` row with a publication provenance and the
+Graph item id), checked again against the live item before every write. The
+ledger keeps a copy of that evidence for rows that are deleted, because the
+membership row is deleted with the product.
 """
 from __future__ import annotations
 
@@ -149,14 +154,14 @@ def is_channel_copy_owned_by_publish_path(product: Any) -> bool:
 # ── Identities ────────────────────────────────────────────────────────────
 
 def channel_identities_for_product(db: Any, product: Any) -> List[Dict[str, Any]]:
-    """Every Graph identity this path may have published for *product*.
+    """Every Graph identity this path can prove it published for *product*.
 
-    Sources, in order: ``meta_catalog_memberships`` rows (Salla SKUs and
-    literal binds), the product's own ``meta_item_id`` with the retailer ids
-    recorded in ``sync_meta.expected_payloads_by_retailer_id`` (native rows),
-    and ``ProductVariant.retailer_id`` for native variants. Identities are
-    deduplicated by retailer_id. A product that was never published yields
-    an empty list, so nothing on Meta is touched for it.
+    The only accepted proof is the publish path's: a ``meta_catalog_memberships``
+    row for this tenant and product with a publication provenance and a Graph
+    item id. Reconcile-derived memberships, the legacy ``Product.meta_item_id``
+    stamp, ``sync_meta`` expectations and variant retailer ids prove presence or
+    intent, never publication, so they yield no identity and nothing on Meta is
+    touched for them. Identities are deduplicated by (catalog, retailer_id).
     """
     if product is None or not is_channel_copy_owned_by_publish_path(product):
         return []
@@ -164,31 +169,7 @@ def channel_identities_for_product(db: Any, product: Any) -> List[Dict[str, Any]
     product_id = int(getattr(product, "id", 0) or 0)
     if tenant_id <= 0 or product_id <= 0:
         return []
-    sync_meta = _read_sync_meta(product)
-    ever_published = bool(
-        _strip(getattr(product, "meta_item_id", None))
-        or getattr(product, "last_synced_at", None) is not None
-        or sync_meta.get("expected_payloads_by_retailer_id")
-        or _strip(getattr(product, "sync_status", None)).lower()
-        in ("synced", "pending_verification", SYNC_STATUS_RETIRED)
-    )
-    out: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def _add(retailer_id: Any, meta_item_id: Any, catalog_id: Any, source: str) -> None:
-        rid = _strip(retailer_id)
-        if not rid or rid in seen:
-            return
-        seen.add(rid)
-        out.append(
-            {
-                "retailer_id": rid,
-                "meta_item_id": _strip(meta_item_id) or None,
-                "catalog_id": _strip(catalog_id) or None,
-                "product_id": product_id,
-                "source": source,
-            }
-        )
+    from core.meta_catalog_membership import PUBLICATION_PROVENANCES  # noqa: PLC0415
 
     try:
         from models import MetaCatalogMembership  # noqa: PLC0415
@@ -203,63 +184,51 @@ def channel_identities_for_product(db: Any, product: Any) -> List[Dict[str, Any]
         )
     except (SQLAlchemyError, AttributeError, TypeError):
         rows = []
+    out: List[Dict[str, Any]] = []
+    seen: set[tuple] = set()
     for row in rows or []:
-        if _strip(getattr(row, "meta_item_id", None)) or ever_published:
-            _add(
-                getattr(row, "retailer_id", None),
-                getattr(row, "meta_item_id", None),
-                getattr(row, "catalog_id", None),
-                "membership",
-            )
-
-    if not ever_published:
-        return out
-
-    expected = sync_meta.get("expected_payloads_by_retailer_id")
-    if isinstance(expected, dict):
-        for rid in expected.keys():
-            _add(rid, None, None, "expected_payload")
-
-    product_meta_item = _strip(getattr(product, "meta_item_id", None))
-    if product_meta_item and any(item.get("meta_item_id") == product_meta_item for item in out):
-        # A legacy row that mirrors one variant's Graph item on the product
-        # itself: that item is already covered by its membership identity, so
-        # a second, product-level retailer id would only cost the drain an
-        # extra lookup of a retailer id that never existed on Meta.
-        product_meta_item = ""
-    if product_meta_item:
-        from core.catalog import canonical_retailer_id  # noqa: PLC0415
-
-        try:
-            rid = canonical_retailer_id(product, fallback_to_synthetic=True)
-        except Exception:  # noqa: BLE001
-            rid = ""
-        if rid and rid not in seen:
-            _add(rid, product_meta_item, None, "product_meta_item")
-        else:
-            for item in out:
-                if item["retailer_id"] == rid and not item.get("meta_item_id"):
-                    item["meta_item_id"] = product_meta_item
-
-    try:
-        from models import ProductVariant  # noqa: PLC0415
-
-        variants = (
-            db.query(ProductVariant)
-            .filter(
-                ProductVariant.tenant_id == tenant_id,
-                ProductVariant.product_id == product_id,
-            )
-            .all()
+        rid = _strip(getattr(row, "retailer_id", None))
+        mid = _strip(getattr(row, "meta_item_id", None))
+        cid = _strip(getattr(row, "catalog_id", None))
+        prov = _strip(getattr(row, "provenance", None))
+        if not rid or not mid or not cid or prov not in PUBLICATION_PROVENANCES:
+            continue
+        if (cid, rid) in seen:
+            continue
+        seen.add((cid, rid))
+        out.append(
+            {
+                "retailer_id": rid,
+                "meta_item_id": mid,
+                "catalog_id": cid,
+                "product_id": product_id,
+                "source": "membership",
+                "publication_provenance": prov,
+            }
         )
-    except (SQLAlchemyError, AttributeError, TypeError):
-        variants = []
-    from services.salla_variant_catalog_identity import is_salla_source  # noqa: PLC0415
-
-    if not is_salla_source(product):
-        for row in variants or []:
-            _add(getattr(row, "retailer_id", None), None, None, "variant")
     return out
+
+
+def ledger_publication_evidence(row: Any) -> Dict[str, Any]:
+    """The ledger copy of the publication evidence for one deleted identity.
+
+    Ledger rows are written only from ``channel_identities_for_product`` (see
+    ``enqueue_channel_retirement_ledger``), in the transaction that deletes the
+    product and with it the membership row. A row without a Graph item id or a
+    catalog carries no evidence and is never retired.
+    """
+    mid = _strip(getattr(row, "meta_item_id", None))
+    cid = _strip(getattr(row, "catalog_id", None))
+    rid = _strip(getattr(row, "retailer_id", None))
+    owned = bool(mid and cid and rid)
+    return {
+        "owned": owned,
+        "source": "ledger:publication_membership" if owned else None,
+        "meta_product_id": mid or None,
+        "catalog_id": cid or None,
+        "retailer_id": rid,
+        "reasons": [] if owned else ["ledger_row_without_publication_evidence"],
+    }
 
 
 # ── Product-row retirement request ────────────────────────────────────────
@@ -377,6 +346,7 @@ def attempt_product_channel_retirement(
     from services.meta_catalog_push import (  # noqa: PLC0415
         MetaCatalogPushError,
         _resolve_connection,
+        live_item_publication_evidence,
         retire_meta_catalog_item,
     )
 
@@ -388,6 +358,7 @@ def attempt_product_channel_retirement(
         "retired": 0,
         "absent": 0,
         "failed": 0,
+        "refused": 0,
         "skipped": False,
         "error_code": None,
     }
@@ -425,20 +396,42 @@ def attempt_product_channel_retirement(
         conn = _resolve_connection(db, int(tenant_id))
     except MetaCatalogPushError as exc:
         return _stamp_retire_failure(db, product, out, exc.code)
-    default_catalog = _strip(getattr(conn, "meta_catalog_id", None))
-
     identities = channel_identities_for_product(db, product)
     out["identities"] = len(identities)
+    if not identities:
+        # Nothing this path can prove it published: no Graph read or write,
+        # and the row is not marked retired, because nothing was withdrawn.
+        _write_sync_meta(
+            product,
+            retire_pending=False,
+            next_retire_at=None,
+            retire_last_error=None,
+            retire_blocked="no_publication_evidence",
+        )
+        db.commit()
+        out["ok"] = True
+        out["skipped"] = True
+        out["error_code"] = "no_publication_evidence"
+        return out
     errors: List[str] = []
     results: Dict[str, Any] = {}
     for ident in identities:
-        catalog_id = ident.get("catalog_id") or default_catalog
+        catalog_id = ident["catalog_id"]
+        evidence = live_item_publication_evidence(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=catalog_id,
+            retailer_id=ident["retailer_id"],
+            meta_product_id=ident["meta_item_id"],
+            parent=product,
+        )
         try:
             res = retire_meta_catalog_item(
                 conn,
                 catalog_id,
                 ident["retailer_id"],
                 ident.get("meta_item_id"),
+                publication_evidence=evidence,
                 client=client,
             )
         except Exception as exc:  # noqa: BLE001
@@ -460,12 +453,31 @@ def attempt_product_channel_retirement(
                 out["absent"] += 1
             else:
                 out["retired"] += 1
+        elif res.get("action") == "block_ownership_unverified" or res.get("error") == "catalog_not_current":
+            # Not provably ours (or no longer in this tenant's catalog): never
+            # written, never retried.
+            out["refused"] += 1
         else:
             out["failed"] += 1
             errors.append(str(res.get("error") or "retire_failed"))
 
     if out["failed"]:
         return _stamp_retire_failure(db, product, out, errors[0], results=results)
+    if out["refused"]:
+        # Some identity was refused: the row is not reported as retired,
+        # because a channel copy this path cannot prove it owns may remain.
+        _write_sync_meta(
+            product,
+            retire_pending=False,
+            next_retire_at=None,
+            retire_results=results,
+            retire_last_error=None,
+            retire_blocked="no_publication_evidence",
+        )
+        db.commit()
+        out["ok"] = True
+        out["error_code"] = "no_publication_evidence"
+        return out
 
     now = _now().isoformat()
     product.sync_status = SYNC_STATUS_RETIRED
@@ -473,6 +485,7 @@ def attempt_product_channel_retirement(
     _write_sync_meta(
         product,
         retire_pending=False,
+        retire_blocked=None,
         channel_retired_at=now,
         retire_results=results,
         retire_last_error=None,
@@ -539,6 +552,8 @@ def _stamp_retire_failure(
 LEDGER_STATUS_PENDING = "pending"
 LEDGER_STATUS_DONE = "done"
 LEDGER_STATUS_EXHAUSTED = "exhausted"
+# Terminal: the row carries no publication evidence, so it is never retired.
+LEDGER_STATUS_REFUSED = "refused"
 
 
 def _ledger_model():
@@ -562,28 +577,36 @@ def enqueue_channel_retirement_ledger(
     the number of new ledger rows; an existing row for the same retailer_id
     is re-opened as ``pending`` with a fresh budget (duplicates merge).
     Raises when a row cannot be written, so the caller's delete rolls back.
+
+    Only identities that carry the publish path's publication evidence (as
+    returned by ``channel_identities_for_product``: publication provenance,
+    Graph item id and catalog) are recorded; the ledger row is the copy of
+    that evidence that outlives the deleted membership. Anything else is
+    skipped, so nothing unproven is ever queued for a Graph write.
     """
+    from core.meta_catalog_membership import PUBLICATION_PROVENANCES  # noqa: PLC0415
+
     model = _ledger_model()
-    items = [dict(i) for i in identities if _strip((i or {}).get("retailer_id"))]
+    items = [
+        dict(i)
+        for i in identities
+        if _strip((i or {}).get("retailer_id"))
+        and _strip((i or {}).get("meta_item_id"))
+        and _strip((i or {}).get("catalog_id"))
+        and _strip((i or {}).get("publication_provenance")) in PUBLICATION_PROVENANCES
+    ]
     if not items:
         return 0
-    default_catalog = _strip(catalog_id)
-    if not default_catalog:
-        conn = _load_connection(db, tenant_id)
-        default_catalog = _strip(getattr(conn, "meta_catalog_id", None)) if conn is not None else ""
     now = _now()
     added = 0
     for item in items:
         rid = _strip(item.get("retailer_id"))
-        cid = _strip(item.get("catalog_id")) or default_catalog or None
-        # A tenant without a stamped catalog still gets the record (catalog
-        # resolved at drain time); the delete is never refused for it.
+        cid = _strip(item.get("catalog_id"))
         query = db.query(model).filter(
             model.tenant_id == int(tenant_id),
             model.retailer_id == rid,
         )
-        query = query.filter(model.catalog_id == cid) if cid else query.filter(model.catalog_id.is_(None))
-        existing = query.first()
+        existing = query.filter(model.catalog_id == cid).first()
         if existing is not None:
             existing.reason = str(reason)
             existing.status = LEDGER_STATUS_PENDING
@@ -592,8 +615,8 @@ def enqueue_channel_retirement_ledger(
             existing.last_error = None
             existing.updated_at = now
             existing.done_at = None
-            if not _strip(existing.meta_item_id) and _strip(item.get("meta_item_id")):
-                existing.meta_item_id = _strip(item.get("meta_item_id"))
+            # the evidence just read wins: it names the item this path published
+            existing.meta_item_id = _strip(item.get("meta_item_id"))
             if existing.product_id is None and item.get("product_id") is not None:
                 existing.product_id = int(item["product_id"])
             continue
@@ -602,7 +625,7 @@ def enqueue_channel_retirement_ledger(
                 tenant_id=int(tenant_id),
                 catalog_id=cid,
                 retailer_id=rid,
-                meta_item_id=_strip(item.get("meta_item_id")) or None,
+                meta_item_id=_strip(item.get("meta_item_id")),
                 product_id=int(item["product_id"]) if item.get("product_id") is not None else None,
                 reason=str(reason),
                 status=LEDGER_STATUS_PENDING,
@@ -623,6 +646,7 @@ def ledger_snapshot(db: Any, tenant_id: int) -> Dict[str, Any]:
     rows = db.query(model).filter(model.tenant_id == int(tenant_id)).all()
     pending = [r for r in rows if r.status == LEDGER_STATUS_PENDING]
     exhausted = [r for r in rows if r.status == LEDGER_STATUS_EXHAUSTED]
+    refused = [r for r in rows if r.status == LEDGER_STATUS_REFUSED]
     done = [r for r in rows if r.status == LEDGER_STATUS_DONE]
     last_done = max((r.done_at for r in done if r.done_at is not None), default=None)
     last_error = None
@@ -633,6 +657,7 @@ def ledger_snapshot(db: Any, tenant_id: int) -> Dict[str, Any]:
     return {
         "pending": len(pending),
         "exhausted": len(exhausted),
+        "refused": len(refused),
         "done_total": len(done),
         "last_done_at": last_done.isoformat() if last_done is not None else None,
         "last_error": last_error,
@@ -686,7 +711,10 @@ def drain_channel_retirement_ledger(
     from services.meta_catalog_push import retire_meta_catalog_item  # noqa: PLC0415
     from services.whatsapp_catalog_sync_scope import product_in_sync_scope, tenant_in_sync_scope  # noqa: PLC0415
 
-    out: Dict[str, Any] = {"processed": 0, "retired": 0, "absent": 0, "failed": 0, "remaining": 0, "skipped_scope": 0}
+    out: Dict[str, Any] = {
+        "processed": 0, "retired": 0, "absent": 0, "failed": 0, "refused": 0,
+        "remaining": 0, "skipped_scope": 0,
+    }
     if not tenant_in_sync_scope(tenant_id):
         out["skipped_scope"] = 1
         return out
@@ -701,7 +729,6 @@ def drain_channel_retirement_ledger(
         .order_by(model.id.asc())
         .all()
     )
-    default_catalog = _strip(getattr(conn, "meta_catalog_id", None))
     outcomes: Dict[int, Dict[str, Any]] = {}
     observed: Dict[int, tuple] = {}
     for row in rows:
@@ -714,16 +741,17 @@ def drain_channel_retirement_ledger(
             break
         out["processed"] += 1
         observed[int(row.id)] = (int(row.attempts or 0), row.updated_at, row.reason)
-        catalog_for_row = _strip(row.catalog_id) or default_catalog
-        if not catalog_for_row:
-            res = {"ok": False, "error": "catalog_id_missing"}
+        evidence = ledger_publication_evidence(row)
+        if not evidence["owned"]:
+            res = {"ok": False, "error": "no_publication_evidence", "refused": True}
         else:
             try:
                 res = retire_meta_catalog_item(
                     conn,
-                    catalog_for_row,
+                    _strip(row.catalog_id),
                     row.retailer_id,
                     row.meta_item_id,
+                    publication_evidence=evidence,
                     client=client,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -758,6 +786,13 @@ def drain_channel_retirement_ledger(
             else:
                 out["retired"] += 1
             continue
+        if res.get("refused") or res.get("action") == "block_ownership_unverified" or res.get("error") == "catalog_not_current":
+            # No publication evidence for this catalog: never retried, never written.
+            row.status = LEDGER_STATUS_REFUSED
+            row.last_error = str(res.get("error") or "no_publication_evidence")[:255]
+            row.next_attempt_at = None
+            out["refused"] += 1
+            continue
         attempts = int(row.attempts or 0) + 1
         row.attempts = attempts
         row.last_error = str(res.get("error") or "retire_failed")[:255]
@@ -779,6 +814,7 @@ __all__ = [
     "LEDGER_STATUS_DONE",
     "LEDGER_STATUS_EXHAUSTED",
     "LEDGER_STATUS_PENDING",
+    "LEDGER_STATUS_REFUSED",
     "REASON_CATALOG_INACTIVE",
     "REASON_MANUAL_DELETED",
     "REASON_MERCHANT_HIDDEN",
@@ -790,6 +826,7 @@ __all__ = [
     "channel_identities_for_product",
     "drain_channel_retirement_ledger",
     "enqueue_channel_retirement_ledger",
+    "ledger_publication_evidence",
     "is_channel_copy_owned_by_publish_path",
     "ledger_snapshot",
     "load_connection_for_metadata_write",

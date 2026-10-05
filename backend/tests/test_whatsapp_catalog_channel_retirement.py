@@ -245,6 +245,12 @@ def _ledger_rows(session, tenant_id, status=None):
     return q.order_by(CatalogChannelRetirement.id.asc()).all()
 
 
+def _evidence(catalog_id, retailer_id, meta_item_id):
+    """Owned publication evidence, the shape ``live_item_publication_evidence`` returns."""
+    return {"owned": True, "source": "membership:salla_variant_push", "meta_product_id": meta_item_id,
+            "catalog_id": catalog_id, "retailer_id": retailer_id, "reasons": []}
+
+
 _READY = patch(
     "services.whatsapp_catalog_sync.get_entitlements",
     lambda *a, **k: SimpleNamespace(has_feature=lambda key: key == "meta_catalog_sync"),
@@ -257,7 +263,9 @@ def test_retire_sets_out_of_stock_and_staging_then_verifies():
     graph = FakeGraph({"700100-591001": {"id": "META-1", "price": "249.00 SAR", "currency": "SAR", "availability": "in stock"}})
     conn = SimpleNamespace(tenant_id=9, meta_catalog_id="CAT-GENERIC-001", access_token="EAAB-test", extra_metadata={})
     with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
-        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1", client=graph)
+        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1",
+                                       publication_evidence=_evidence("CAT-GENERIC-001", "700100-591001", "META-1"),
+                                       client=graph)
     assert res["ok"] is True and res["verified"] is True
     assert res["action"] == "retire_update"
     assert len(graph.posts) == 1
@@ -271,7 +279,9 @@ def test_retire_falls_back_when_visibility_param_rejected():
     graph = FakeGraph({"700100-591001": {"id": "META-1", "availability": "in stock"}}, reject_visibility=True)
     conn = SimpleNamespace(tenant_id=9, meta_catalog_id="CAT-GENERIC-001", access_token="EAAB-test", extra_metadata={})
     with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
-        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1", client=graph)
+        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1",
+                                       publication_evidence=_evidence("CAT-GENERIC-001", "700100-591001", "META-1"),
+                                       client=graph)
     assert res["ok"] is True
     assert res["visibility_applied"] is False
     assert graph.posts[-1][1] == {"availability": RETIRED_AVAILABILITY}
@@ -281,7 +291,9 @@ def test_retire_absent_item_makes_no_write():
     graph = FakeGraph({})
     conn = SimpleNamespace(tenant_id=9, meta_catalog_id="CAT-GENERIC-001", access_token="EAAB-test", extra_metadata={})
     with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
-        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", None, client=graph)
+        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", None,
+                                       publication_evidence=_evidence("CAT-GENERIC-001", "700100-591001", "META-1"),
+                                       client=graph)
     assert res["ok"] is True and res["action"] == "absent"
     assert graph.posts == []
 
@@ -290,7 +302,9 @@ def test_retire_refuses_mismatched_meta_item_id():
     graph = FakeGraph({"700100-591001": {"id": "META-OTHER", "availability": "in stock"}})
     conn = SimpleNamespace(tenant_id=9, meta_catalog_id="CAT-GENERIC-001", access_token="EAAB-test", extra_metadata={})
     with patch("services.meta_catalog_push._resolve_catalog_and_token", return_value=("CAT-GENERIC-001", "tok")):
-        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1", client=graph)
+        res = retire_meta_catalog_item(conn, "CAT-GENERIC-001", "700100-591001", "META-1",
+                                       publication_evidence=_evidence("CAT-GENERIC-001", "700100-591001", "META-1"),
+                                       client=graph)
     assert res["ok"] is False and res["error"] == "meta_item_id_mismatch"
     assert graph.posts == []
 
@@ -452,7 +466,8 @@ def test_ledger_has_no_cap_every_identity_of_a_deleted_product_is_recorded():
     session, t_a, _t_b, engine = _make_db()
     try:
         identities = [
-            {"retailer_id": f"9{i:05d}-1", "meta_item_id": f"META-{i}", "catalog_id": "CAT-GENERIC-001", "product_id": 1000 + i}
+            {"retailer_id": f"9{i:05d}-1", "meta_item_id": f"META-{i}", "catalog_id": "CAT-GENERIC-001",
+             "product_id": 1000 + i, "publication_provenance": "salla_variant_push"}
             for i in range(620)
         ]
         added = enqueue_channel_retirement_ledger(session, t_a, identities, reason=REASON_SOURCE_DELETED)
@@ -615,14 +630,15 @@ def test_imported_meta_rows_are_never_retired_by_this_path():
         session.close(); engine.dispose()
 
 
-def test_native_identities_use_product_meta_item():
+def test_native_rows_without_publication_evidence_yield_no_identity():
+    """B1: the legacy product stamp and sync_meta expectations are not
+    publication evidence (the publish path refuses to update on them), so a
+    native row without a publication membership has nothing to retire."""
     session, t_a, _t_b, engine = _make_db()
     try:
         product = _native_product(session, t_a)
-        ids = channel_identities_for_product(session, product)
-        assert len(ids) == 1
-        assert ids[0]["retailer_id"] == "nahla_p_native"
-        assert ids[0]["meta_item_id"] == "META-NATIVE-1"
+        assert product.meta_item_id == "META-NATIVE-1"
+        assert channel_identities_for_product(session, product) == []
     finally:
         session.close(); engine.dispose()
 
@@ -685,8 +701,9 @@ def test_rehide_after_exhausted_or_restore_starts_a_fresh_retirement_budget():
 
 
 def test_delete_without_a_stamped_catalog_is_still_recorded_and_drained_later():
-    """A tenant whose catalog id was cleared can still delete products; the
-    retirement row keeps catalog NULL and the drain resolves it later."""
+    """A tenant whose connection catalog id was cleared can still delete
+    products; the retirement row keeps the catalog of its publication evidence
+    and the drain completes once the connection is stamped again."""
     session, t_a, _t_b, engine = _make_db()
     try:
         product = _salla_product(session, t_a, ext="830100")
@@ -694,13 +711,11 @@ def test_delete_without_a_stamped_catalog_is_still_recorded_and_drained_later():
         conn.meta_catalog_id = None
         session.commit()
         ids = channel_identities_for_product(session, product)
-        for i in ids:
-            i["catalog_id"] = None
         assert enqueue_channel_retirement_ledger(session, t_a, ids, reason=REASON_SOURCE_DELETED) == 1
         session.delete(product); session.commit()
         row = _ledger_rows(session, t_a)[0]
-        assert row.catalog_id is None and row.status == LEDGER_STATUS_PENDING
-        # without a catalog the drain records the reason and backs off (no Graph call)
+        assert row.catalog_id == "CAT-GENERIC-001" and row.status == LEDGER_STATUS_PENDING
+        # without a connection catalog the drain records the reason and backs off (no Graph call)
         graph = FakeGraph({})
         out = drain_channel_retirement_ledger(session, t_a, client=graph)
         assert out["failed"] == 1 and graph.posts == [] and graph.gets == []
