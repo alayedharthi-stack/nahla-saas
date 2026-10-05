@@ -604,14 +604,56 @@ def _candidate_payloads(db: Any, tid: int, chosen_ids: List[int]) -> Dict[str, A
     }
 
 
+SALLA_READ_REFUSED_INTEGRATION_DISABLED = "salla_read_refused_integration_disabled"
+SALLA_READ_REFUSED_NEEDS_REAUTH = "salla_read_refused_integration_needs_reauth"
+
+
+def _readonly_salla_adapter(db: Any, tid: int) -> tuple[Any, Optional[str]]:
+    """Build the tenant's Salla adapter with SELECTs only.
+
+    The store-sync path (``registry.get_adapter``) canonicalises duplicate
+    Salla rows on read — it disables the losers, annotates the winner and
+    commits. The readout must not write, so it selects the same winner with
+    the registry's ranking, writes nothing, and passes the stored expiry so a
+    token that is already expired is refused before any request.
+    """
+    from models import Integration  # noqa: PLC0415
+    from store_adapters.salla_adapter import SallaAdapter  # noqa: PLC0415
+    from store_integration.registry import _score_integration  # noqa: PLC0415
+
+    rows = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == int(tid), Integration.provider == "salla")
+        .order_by(Integration.id.asc())
+        .all()
+    )
+    if not rows:
+        return None, "adapter_unavailable"
+    winner = max(rows, key=_score_integration)
+    cfg = dict(winner.config or {})
+    if cfg.get("needs_reauth"):
+        return None, SALLA_READ_REFUSED_NEEDS_REAUTH
+    if not winner.enabled:
+        return None, SALLA_READ_REFUSED_INTEGRATION_DISABLED
+    expires = cfg.get("expires_at") or cfg.get("token_expires_at")
+    return SallaAdapter(
+        api_key=str(cfg.get("api_key") or ""),
+        store_id=str(cfg.get("store_id") or ""),
+        refresh_token=str(cfg.get("refresh_token") or ""),
+        tenant_id=int(tid),
+        integration_id=winner.id,
+        expires_at=str(expires) if expires else None,
+    ), None
+
+
 def _resolve_salla_adapter(db: Any, tid: int, adapter: Any) -> tuple[Any, Optional[str]]:
     if adapter is None:
         try:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-
-            adapter = StoreSyncService(db, tid)._get_adapter()
+            adapter, err = _readonly_salla_adapter(db, tid)
         except Exception as exc:  # noqa: BLE001
             return None, f"adapter_unavailable:{type(exc).__name__}"
+        if err:
+            return None, err
     if adapter is None or not str(getattr(adapter, "platform", "salla") or "salla").lower() == "salla":
         return None, "adapter_unavailable"
     return adapter, None
