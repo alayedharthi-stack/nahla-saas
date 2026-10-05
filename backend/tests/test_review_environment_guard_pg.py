@@ -345,7 +345,7 @@ def test_review_provisioning_premigration_then_boot_serves_with_the_complete_sch
     """The review provisioning path the runbook prescribes, end to end on a fresh
     marked database: ``preflight_check.py`` proves isolation, the schema step
     upgrades to the application heads (``0111`` then ``0113`` from the bootstrap
-    contract — the head set production carries), then ``uvicorn main:app``
+    contract), then ``uvicorn main:app``
     boots. The lifespan guard and bootstrap Step 0 both verify isolation, the
     pinned bootstrap upgrade (0093) is a no-op with rc=0, create_all completes,
     /alive answers, and every column the ORM models declare exists.
@@ -445,8 +445,9 @@ def test_review_provisioning_catalog_schema_step_adopts_the_table_create_all_bui
     matches the catalog migration's own definition check, and the explicit,
     owner-approved catalog schema step — preflight first, then
     ``alembic upgrade <catalog revision>`` — adopts it (rc=0, revision added,
-    table unchanged). The merchant catalog route is mounted and refuses an
-    unauthenticated call (401), not a 5xx. Not covered: any authenticated
+    table unchanged). An unauthenticated call to the merchant catalog path gets
+    401 from the JWT middleware, not a 5xx (this does not prove the route itself
+    is mounted). Not covered: any authenticated
     catalog route, the Meta catalog itself, or the review/provider journey."""
     import importlib.util
 
