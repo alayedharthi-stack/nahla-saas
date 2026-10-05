@@ -252,6 +252,7 @@ def test_expired_token_blocks_without_consuming_retry_budget(resolve_mock, previ
 def test_republish_after_retirement_sends_visibility_published(resolve_mock, preview_mock, ensure_mock, push_mock, lookup_mock, _waba, lock_mock, _stamp):
     parent = _generic_native_parent()
     parent.extra_metadata["sync_meta"]["channel_retired_at"] = datetime.now(timezone.utc).isoformat()
+    parent.extra_metadata["sync_meta"]["retire_blocked"] = "no_publication_evidence"
     lock_mock.return_value = parent
     resolve_mock.return_value = _conn()
     preview_mock.return_value = {"eligible": True, "fatal_errors": [], "retailer_id": "nahla_p_501"}
@@ -276,6 +277,7 @@ def test_republish_after_retirement_sends_visibility_published(resolve_mock, pre
     sm = parent.extra_metadata["sync_meta"]
     assert sm["channel_retired_at"] is None and sm["republished_at"]
     assert sm["last_push_at"]
+    assert sm["retire_blocked"] is None             # the earlier refusal no longer describes the row
 
 
 def test_exhausted_failed_row_is_requeued_only_after_connection_changes():
@@ -290,3 +292,89 @@ def test_exhausted_failed_row_is_requeued_only_after_connection_changes():
     assert _failed_requeue_after_connection_change(db, row, "1|CAT|cccc|bbbb") is True
     assert row.sync_status == "pending"
     assert row.extra_metadata["sync_meta"]["retry_count"] == 0
+
+
+# ── Publication evidence is written only for the item this attempt's POST published ──
+
+_ORCH_PATCHES = (
+    "services.native_meta_sync_orchestrator._resolve_connection",
+    "services.native_meta_sync_orchestrator.preview_native_meta_sync",
+    "services.meta_catalog_sync_confirm.ensure_native_default_variant",
+    "services.native_meta_sync_orchestrator.push_one_meta_catalog_item",
+    "services.native_meta_sync_orchestrator.find_meta_catalog_item_by_retailer_id",
+    "services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+    "services.native_meta_sync_orchestrator._try_acquire_sync_lock",
+)
+
+
+def _run_orchestrator(parent, *, push_result, lookup_id):
+    """One native sync attempt with Graph and the database mocked; returns (result, push_mock, evidence writes)."""
+    from contextlib import ExitStack
+
+    writes = []
+    with ExitStack() as stack:
+        mocks = {name.rsplit(".", 1)[-1]: stack.enter_context(patch(name)) for name in _ORCH_PATCHES}
+        stack.enter_context(patch("services.native_meta_sync_orchestrator._stamp_with_lease",
+                                  side_effect=lambda db, p, lease, fn: (fn(p) or True)))
+        stack.enter_context(patch("services.native_meta_sync_orchestrator._collect_retailer_ids",
+                                  return_value=["nahla_p_501"]))
+        stack.enter_context(patch("services.native_meta_sync_orchestrator.claim_active_meta_item_binding"))
+        stack.enter_context(patch("services.native_meta_sync_orchestrator.load_variant_for_push",
+                                  return_value=(parent, SimpleNamespace(id=5011))))
+        stack.enter_context(patch("services.salla_variant_catalog_identity.upsert_native_publication_membership",
+                                  side_effect=lambda db, **kw: writes.append(kw) or {"ok": True}))
+        mocks["_resolve_connection"].return_value = _conn()
+        mocks["preview_native_meta_sync"].return_value = {"eligible": True, "fatal_errors": [], "retailer_id": "nahla_p_501"}
+        mocks["ensure_native_default_variant"].return_value = (SimpleNamespace(retailer_id="nahla_p_501"), False)
+        mocks["push_one_meta_catalog_item"].return_value = push_result
+        mocks["find_meta_catalog_item_by_retailer_id"].return_value = (lookup_id, {"matched": True, "item": {
+            "id": lookup_id, "retailer_id": "nahla_p_501", "price": 32000, "currency": "SAR", "availability": "in stock"}})
+        mocks["get_waba_catalog_link_status"].return_value = {"ok": True, "expected_catalog_linked": True}
+        mocks["_try_acquire_sync_lock"].return_value = parent
+        result = attempt_native_meta_sync(MagicMock(), 9, 501)
+        return result, mocks["push_one_meta_catalog_item"], writes
+
+
+_CREATED = {"ok": True, "action": "create", "meta_product_id": "META-501",
+            "payload": {"price": 32000, "currency": "SAR", "availability": "in stock"},
+            "meta": {"http_status": 200, "response": {"id": "META-501"}}, "lookup": {}}
+
+
+def test_verified_create_records_evidence_for_the_created_item():
+    result, _push, writes = _run_orchestrator(_generic_native_parent(), push_result=_CREATED, lookup_id="META-501")
+    assert result["ok"] is True
+    assert [(w["retailer_id"], w["meta_item_id"]) for w in writes] == [("nahla_p_501", "META-501")]
+
+
+def test_lookup_finding_another_item_after_the_post_records_no_evidence():
+    parent = _generic_native_parent()
+    result, _push, writes = _run_orchestrator(parent, push_result=_CREATED, lookup_id="META-SOMEONE-ELSE")
+    assert writes == []
+    assert result["ok"] is False and result["error_code"] == "verification_failed"
+    assert parent.meta_item_id is None
+
+
+def test_a_post_without_an_item_id_records_no_evidence():
+    no_id = {**_CREATED, "meta_product_id": None}
+    result, _push, writes = _run_orchestrator(_generic_native_parent(), push_result=no_id, lookup_id="META-501")
+    assert writes == [] and result["ok"] is False
+
+
+def test_a_failed_post_records_no_evidence():
+    failed = {"ok": False, "action": "create", "error": "meta_http_error", "meta": {"http_status": 400, "response": {}},
+              "payload": {}, "lookup": {}}
+    result, _push, writes = _run_orchestrator(_generic_native_parent(), push_result=failed, lookup_id="META-501")
+    assert writes == [] and result["ok"] is False
+
+
+def test_lookup_only_verification_never_writes_evidence():
+    payload = {"price": 32000, "currency": "SAR", "availability": "in stock"}
+    parent = _generic_native_parent()
+    parent.extra_metadata["sync_meta"].update({
+        "dirty": False, "content_generation": 3, "expected_content_generation": 3,
+        "expected_payloads_by_retailer_id": {"nahla_p_501": payload},
+    })
+    result, push, writes = _run_orchestrator(parent, push_result=_CREATED, lookup_id="META-501")
+    push.assert_not_called()                          # nothing was POSTed in this attempt
+    assert writes == []
+    assert result["ok"] is True                       # the verification itself still succeeds

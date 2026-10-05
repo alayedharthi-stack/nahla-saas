@@ -662,3 +662,64 @@ def test_catalog_not_current_is_retried_and_written_only_once_the_catalog_is_cur
         assert graph.posts[-1][0].endswith(f"/{mid}") and graph.items["SHOE-MOVE-1"]["availability"] == "out of stock"
     finally:
         session.close(); engine.dispose()
+
+
+def test_product_withdrawal_in_a_catalog_that_is_not_current_is_retried_not_refused():
+    session, tid, engine = _db()
+    try:
+        product, _v = _native(session, tid, "SHOE-MOVE-2")
+        graph = CatalogGraph()
+        mid = _publish(session, tid, "SHOE-MOVE-2", graph)["meta_product_id"]
+        product = session.get(Product, product.id)
+        product.catalog_status = "merchant_hidden"
+        product.merchant_hidden_at = datetime.now(timezone.utc)
+        mark_product_channel_retire_pending(session, product, reason=REASON_MERCHANT_HIDDEN)
+        session.commit()
+        posts_before = len(graph.posts)
+        with patch.object(push, "_resolve_catalog_and_token", lambda conn, **k: ("CAT-SOMEONE-ELSE", "tok")):
+            first = attempt_product_channel_retirement(session, tid, product.id, client=graph)
+        session.expire_all()
+        meta = session.get(Product, product.id).extra_metadata["sync_meta"]
+        assert len(graph.posts) == posts_before
+        assert first["refused"] == 0 and first["failed"] == 1
+        assert meta["retire_pending"] is True and not meta.get("retire_blocked")
+        row = session.get(Product, product.id)
+        row.extra_metadata = {**row.extra_metadata, "sync_meta": {**meta, "next_retire_at": None}}
+        session.commit()
+        with _token():
+            second = attempt_product_channel_retirement(session, tid, product.id, client=graph)
+        assert second["retired"] == 1
+        assert graph.posts[-1][0].endswith(f"/{mid}")
+    finally:
+        session.close(); engine.dispose()
+
+
+def test_native_evidence_never_changes_what_capability_readers_see():
+    session, tid, engine = _db()
+    try:
+        # ownership-only row: a second verified update keeps it invisible
+        p1, v1 = _native(session, tid, "SHOE-OWN-1")
+        for _ in range(2):
+            assert upsert_native_publication_membership(
+                session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-OWN-1", product_id=p1.id,
+                variant_id=v1.id, meta_item_id="META-OWN-1")["ok"]
+            session.commit()
+            assert _membership(session, tid, "SHOE-OWN-1").provenance == PROVENANCE_NATIVE_PUSH
+            assert load_meta_catalog_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-OWN-1") is None
+        # a reconcile row (parent-level, no Graph id) stays visible with the same local referent
+        p2, v2 = _native(session, tid, "SHOE-VIS-1")
+        session.add(MetaCatalogMembership(
+            tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-VIS-1", product_id=p2.id, variant_id=None,
+            meta_item_id=None, verified_at=datetime.now(timezone.utc), provenance=PROVENANCE_GRAPH_RECONCILE,
+        ))
+        session.commit()
+        before = load_meta_catalog_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-VIS-1")
+        assert upsert_native_publication_membership(
+            session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-VIS-1", product_id=p2.id,
+            variant_id=v2.id, meta_item_id="META-VIS-1")["ok"]
+        session.commit()
+        after = load_meta_catalog_membership(session, tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-VIS-1")
+        assert (after.product_id, after.variant_id) == (before.product_id, before.variant_id) == (p2.id, None)
+        assert _membership(session, tid, "SHOE-VIS-1").provenance == PROVENANCE_NATIVE_PUSH_RECONCILED
+    finally:
+        session.close(); engine.dispose()

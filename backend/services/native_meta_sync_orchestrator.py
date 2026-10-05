@@ -1651,6 +1651,15 @@ def _attempt_acquired_body(
         # nothing to Graph, so it never creates or upgrades evidence.
         published_now = (not lookup_only) and str(push_result.get("action") or "") in ("create", "update")
         if published_now:
+            # The item the lookup found must be the item this POST created or
+            # updated; any other id (or none from the POST) proves nothing.
+            posted_id = str(push_result.get("meta_product_id") or "").strip()
+            if not posted_id or posted_id != str(meta_item_id).strip():
+                return fail(
+                    "verification_failed",
+                    "verification_failed: meta_item_id_mismatch after push",
+                    retailer_id=retailer_id,
+                )
             if salla_parent:
                 if salla_ident is None:
                     return fail(

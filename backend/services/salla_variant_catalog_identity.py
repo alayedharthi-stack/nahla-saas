@@ -381,9 +381,11 @@ def upsert_native_publication_membership(
     """Record that a successful create/update POST published *meta_item_id*
     for a non-Salla row (the native counterpart of ``upsert_variant_membership``).
 
-    Callers run it only after the POST succeeded and a Graph lookup returned
-    the item. Same identity rules: an existing row bound to another local
-    product/variant or to another Graph item id is never rebound.
+    Callers run it only after the POST succeeded, with the item id that POST
+    created or updated (the orchestrator also requires its post-POST lookup to
+    return that same id; the push batch uses the POST's own id). Same identity
+    rules: an existing row bound to another local product/variant or to another
+    Graph item id is never rebound, and its local referent is never changed.
     """
     from models import MetaCatalogMembership  # noqa: PLC0415
 
@@ -417,8 +419,9 @@ def upsert_native_publication_membership(
         visible_before = _strip(getattr(existing, "provenance", None)) not in {
             PROVENANCE_NATIVE_PUSH, PROVENANCE_VARIANT_SLOT,
         }
+        # The local referent (product, variant) of an existing row is never
+        # changed here: a capability-visible row keeps exactly what it allowed.
         existing.meta_item_id = mid
-        existing.variant_id = existing.variant_id if existing.variant_id is not None else vid
         existing.verified_at = now
         existing.provenance = PROVENANCE_NATIVE_PUSH_RECONCILED if visible_before else PROVENANCE_NATIVE_PUSH
         return {"ok": True, "created": False, "meta_item_id": mid, "identity_unchanged": bool(already)}
