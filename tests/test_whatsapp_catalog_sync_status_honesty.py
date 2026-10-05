@@ -460,3 +460,16 @@ def test_salla_evidence_is_refused_when_the_catalog_changed_during_the_attempt()
     result, _push, writes = _run_orchestrator(parent, push_result=_CREATED, lookup_id="META-501", salla=True,
                                               catalogs=["CAT-GENERIC-001", "CAT-MOVED"])
     assert writes == [] and result["ok"] is False and result["error_code"] == "verification_failed"
+
+
+
+@pytest.mark.parametrize("action", ["link_canonical_sibling", "skip_existing"])
+def test_a_linked_or_existing_item_records_no_attempt_and_no_evidence(action):
+    parent = _generic_native_parent()
+    linked = {"ok": True, "action": action, "meta_product_id": "META-SIBLING", "catalog_id": "CAT-GENERIC-001",
+              "payload": {}, "meta": {"http_status": None},
+              "lookup": {"identity_class": "EXISTING_CANONICAL_SIBLING", "sibling_retailer_id": "nahla_p_500",
+                         "reason": "canonical_sibling"}}
+    _result, _push, writes = _run_orchestrator(parent, push_result=linked, lookup_id="META-SIBLING")
+    assert writes == []
+    assert "pending_publications" not in parent.extra_metadata["sync_meta"]

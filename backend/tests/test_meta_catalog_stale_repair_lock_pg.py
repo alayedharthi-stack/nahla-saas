@@ -173,8 +173,12 @@ def _run_repair_in_thread(engine, ids, created, *, preload=True):
                     variant_id=ids["p1v"], meta_item_id=created)
                 outcome["upsert"] = first.get("reason")
                 # Hold the loaded row so this session keeps its (soon stale) copy in
-                # the identity map: the repair must refresh it, not trust it.
-                outcome["held"] = s.query(MetaCatalogMembership).filter_by(
+                # the identity map: the repair must refresh it, not trust it. It
+                # must be the class the repair queries (``models``): in this test
+                # layout ``database.models`` maps a separate class.
+                import models as service_models  # noqa: PLC0415
+
+                outcome["held"] = s.query(service_models.MetaCatalogMembership).filter_by(
                     tenant_id=ids["tenant"], catalog_id=CATALOG, retailer_id=RID).first()
                 outcome["held_before"] = (outcome["held"].meta_item_id, outcome["held"].provenance)
             ready.set()

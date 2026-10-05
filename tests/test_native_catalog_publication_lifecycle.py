@@ -1055,8 +1055,13 @@ def test_repair_never_overwrites_membership_changed_since_the_create():
                 variant_id=variant.id, created_meta_item_id="META-MINE", corroborated_meta_item_id="META-MINE",
                 publication_provenance=PROVENANCE_NATIVE_PUSH_RECONCILED)
 
-        # this session read the stale observation first and still holds that copy
-        held = _membership(session, tid, "SHOE-RACE-1")
+        # this session read the stale observation first and still holds that copy,
+        # through the class the repair queries (``models``; ``database.models``
+        # maps a separate class in this layout)
+        import models as service_models
+
+        held = session.query(service_models.MetaCatalogMembership).filter_by(
+            tenant_id=tid, catalog_id=CATALOG, retailer_id="SHOE-RACE-1").one()
         assert held.provenance == PROVENANCE_GRAPH_RECONCILE
         # another writer commits newer publication evidence for the same key
         row = other.query(MetaCatalogMembership).filter_by(tenant_id=tid, retailer_id="SHOE-RACE-1").one()
@@ -1157,6 +1162,11 @@ def test_create_with_a_lagging_lookup_is_recovered_by_a_corroborating_retry(kind
         assert second["ok"] is True, second
         row = _membership(session, tid, rid)
         assert row.meta_item_id == mid and row.provenance in PUBLICATION_PROVENANCES
+        if kind == "salla":
+            # Salla evidence is the variant identity's own row, never a native row
+            assert (row.provenance, row.salla_variant_id, row.variant_id) == ("salla_variant_push", "881", _v.id)
+        else:
+            assert row.provenance == PROVENANCE_NATIVE_PUSH
         assert _pending(session, product.id) == {}
         assert [u.rsplit("/", 1)[-1] for u, _ in graph.posts] == ["products", mid]
         # then the ordinary lifecycle
@@ -1277,7 +1287,7 @@ def test_a_recorded_attempt_is_tenant_scoped_and_never_retires_on_its_own():
         session.close(); engine.dispose()
 
 
-def test_failed_or_linked_posts_record_no_attempt():
+def test_failed_posts_record_no_attempt():
     session, tid, engine = _db()
     try:
         product, _v = _native(session, tid, "SHOE-LAG-4")
@@ -1356,5 +1366,55 @@ def test_repair_refuses_a_salla_observation_bound_to_another_variant_identity():
             session.commit()
             row = _membership(session, tid, "911000-881")
             assert (row.meta_item_id, row.provenance) == ("GONE-S1", PROVENANCE_GRAPH_RECONCILE), label
+    finally:
+        session.close(); engine.dispose()
+
+
+
+@pytest.mark.parametrize("kind", ["native", "salla"])
+def test_a_create_whose_lookup_shows_another_item_never_gains_authority_over_it(kind):
+    """The POST created X, but the lookup right after (and every later one) shows Y
+    under the retailer_id: only X was ever recorded, so Y is never adopted."""
+    session, tid, engine = _db()
+    try:
+        if kind == "native":
+            rid = "SHOE-LAG-6"
+            product, _v = _native(session, tid, rid)
+        else:
+            product, _v = _salla(session, tid, "911100")
+            rid = "911100-881"
+        _syncable(product, session)
+        graph = ReplacingGraph("META-FOREIGN-Y")
+        first = _sync(session, tid, product.id, graph)
+        assert first["ok"] is False and first["error_code"] == "verification_failed"
+        recorded = _pending(session, product.id)[f"{CATALOG}|{rid}"]["meta_item_id"]
+        assert recorded != "META-FOREIGN-Y"                                   # the POST's own id
+        posts_before = len(graph.posts)
+        second = _sync(session, tid, product.id, graph)
+        assert second["ok"] is False
+        row = _membership(session, tid, rid)
+        assert row is None or row.provenance not in PUBLICATION_PROVENANCES
+        assert len(graph.posts) == posts_before                              # no update POST to Y (or X)
+    finally:
+        session.close(); engine.dispose()
+
+
+
+def test_corroborated_salla_evidence_is_the_variant_row_even_when_the_update_post_fails():
+    """Corroboration itself writes the Salla variant identity's own evidence row,
+    independent of what the following update POST does."""
+    session, tid, engine = _db()
+    try:
+        product, variant = _salla(session, tid, "911200")
+        rid = "911200-881"
+        _syncable(product, session)
+        graph = LaggingGraph()
+        mid = _lagged_create(session, tid, product, graph, rid)
+        graph.fail_posts = True                                            # the update POST is rejected
+        second = _sync(session, tid, product.id, graph)
+        assert second["ok"] is False
+        row = _membership(session, tid, rid)
+        assert (row.meta_item_id, row.provenance, row.salla_variant_id, row.variant_id) == (
+            mid, "salla_variant_push", "881", variant.id)
     finally:
         session.close(); engine.dispose()

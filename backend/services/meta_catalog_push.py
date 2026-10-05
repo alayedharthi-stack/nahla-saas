@@ -8,8 +8,8 @@ No full export, no DB writes, no product loops.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -362,7 +362,9 @@ def corroborate_pending_publication(
     retailer_id and its POST returned exactly that id; it is written through
     the generic upserts, so an established publication is never rebound and
     a conflicting row refuses. Anything else returns ok=False and writes
-    nothing.
+    nothing. The orchestrator clears the record once evidence exists; when the
+    push batch corroborates instead, the record stays (inert: it can only
+    re-prove the same global item id in the same scope).
     """
     cid, rid, live = str(catalog_id or "").strip(), str(retailer_id or "").strip(), str(live_meta_item_id or "").strip()
     sync_meta = ((getattr(parent, "extra_metadata", None) or {}).get("sync_meta")
