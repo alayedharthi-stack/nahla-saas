@@ -2256,7 +2256,7 @@ const ar: Translations = {
       stageSourceNever: 'المتجر (سلة): لم تُسجَّل مزامنة بعد',
       stagePublish:     'Meta: مطابق {verified} · ينتظر {waiting} · مرفوض/محجوب {rejected}',
       stageLink:        'ربط الكتالوج بواتساب',
-      stageRetirement:  'سحب من القناة: ينتظر {pending} · تعذّر {exhausted}',
+      stageRetirement:  'سحب من القناة: ينتظر {pending} · تعذّر {exhausted} · لم يُسحب لعدم ثبوت الملكية {refused}',
       stageVisibility:  'ظهور المنتج داخل واتساب لا يمكن إثباته عبر الواجهة البرمجية؛ تحقق منه في تطبيق واتساب',
       latencyTitle:     'زمن الانتقال المقاس',
       latencyPlatform:  'داخل نحلة (من التعديل إلى الإرسال): وسيط {p50} ث · أقصى {max} ث',

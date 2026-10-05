@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -310,6 +311,94 @@ def live_item_publication_evidence(
     return out
 
 
+PENDING_PUBLICATIONS_KEY = "pending_publications"
+
+
+def pending_publication_record(*, product_id: int, catalog_id: str, retailer_id: str, meta_item_id: str) -> Optional[Dict[str, Any]]:
+    """The identity of one successful create POST: its own item id, catalog, retailer_id and product.
+
+    Never authority by itself; see ``corroborate_pending_publication``."""
+    cid, rid, mid = str(catalog_id or "").strip(), str(retailer_id or "").strip(), str(meta_item_id or "").strip()
+    if not (product_id and cid and rid and mid):
+        return None
+    return {"product_id": int(product_id), "catalog_id": cid, "retailer_id": rid, "meta_item_id": mid,
+            "posted_at": datetime.now(timezone.utc).isoformat()}
+
+
+def _pending_publications(sync_meta: Any) -> Dict[str, Any]:
+    pending = (sync_meta or {}).get(PENDING_PUBLICATIONS_KEY) if isinstance(sync_meta, dict) else None
+    return dict(pending) if isinstance(pending, dict) else {}
+
+
+def with_pending_publication(sync_meta: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    pending = _pending_publications(sync_meta)
+    pending[f"{record['catalog_id']}|{record['retailer_id']}"] = dict(record)
+    return pending
+
+
+def without_pending_publications(sync_meta: Any, retailer_ids: Any) -> Dict[str, Any]:
+    drop = {str(r or "").strip() for r in (retailer_ids or [])}
+    return {k: v for k, v in _pending_publications(sync_meta).items()
+            if not (isinstance(v, dict) and str(v.get("retailer_id") or "").strip() in drop)}
+
+
+def corroborate_pending_publication(
+    db: Any,
+    parent: Any,
+    variant: Any,
+    *,
+    tenant_id: int,
+    catalog_id: str,
+    retailer_id: str,
+    live_meta_item_id: str,
+    salla_identity: Any = None,
+) -> Dict[str, Any]:
+    """Turn a recorded successful create into publication evidence once a live lookup proves it.
+
+    *live_meta_item_id* comes from ``find_meta_catalog_item_by_retailer_id``
+    for this tenant's connection catalog and *retailer_id*, which returns an
+    id only for exactly one Graph row that has one. Evidence is written only
+    when the product's recorded attempt names this same product, catalog and
+    retailer_id and its POST returned exactly that id; it is written through
+    the generic upserts, so an established publication is never rebound and
+    a conflicting row refuses. Anything else returns ok=False and writes
+    nothing. The orchestrator clears the record once evidence exists; when the
+    push batch corroborates instead, the record stays (inert: it can only
+    re-prove the same global item id in the same scope).
+    """
+    cid, rid, live = str(catalog_id or "").strip(), str(retailer_id or "").strip(), str(live_meta_item_id or "").strip()
+    sync_meta = ((getattr(parent, "extra_metadata", None) or {}).get("sync_meta")
+                 if isinstance(getattr(parent, "extra_metadata", None), dict) else None)
+    record = _pending_publications(sync_meta).get(f"{cid}|{rid}")
+    if not isinstance(record, dict) or not live:
+        return {"ok": False, "reason": "no_pending_publication"}
+    try:
+        same_product = int(record.get("product_id") or 0) == int(getattr(parent, "id", 0) or 0)
+    except (TypeError, ValueError):
+        same_product = False
+    if (not same_product or str(record.get("catalog_id") or "") != cid
+            or str(record.get("retailer_id") or "") != rid):
+        return {"ok": False, "reason": "pending_scope_mismatch"}
+    if str(record.get("meta_item_id") or "").strip() != live:
+        return {"ok": False, "reason": "pending_id_not_corroborated"}
+    from services.salla_variant_catalog_identity import (  # noqa: PLC0415
+        upsert_native_publication_membership,
+        upsert_variant_membership,
+    )
+
+    if salla_identity is not None:
+        bound = upsert_variant_membership(db, tenant_id=int(tenant_id), catalog_id=cid, identity=salla_identity,
+                                          meta_item_id=live)
+    else:
+        bound = upsert_native_publication_membership(
+            db, tenant_id=int(tenant_id), catalog_id=cid, retailer_id=rid, product_id=int(parent.id),
+            variant_id=getattr(variant, "id", None), meta_item_id=live)
+    if not bound.get("ok"):
+        return {"ok": False, "reason": str(bound.get("reason") or bound.get("error") or "evidence_refused")}
+    db.flush()
+    return {"ok": True, "reason": "pending_publication_corroborated", "meta_item_id": live}
+
+
 def _ownership_block(result: Dict[str, Any], lookup: Dict[str, Any], meta_product_id: str, evidence: Dict[str, Any]) -> Dict[str, Any]:
     result["action"] = ACTION_BLOCK_OWNERSHIP
     result["error"] = ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
@@ -591,6 +680,7 @@ def push_one_meta_catalog_item(
     )
 
     sellable_salla = False
+    ident = None
     if is_salla_source(parent):
         gate_variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
         ident = None
@@ -635,6 +725,19 @@ def push_one_meta_catalog_item(
             db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
             meta_product_id=str(meta_product_id), parent=parent,
         )
+        if not evidence.get("owned"):
+            # An earlier successful create of this product whose verification
+            # lagged: this scoped, unique lookup may corroborate its recorded id.
+            corroboration = corroborate_pending_publication(
+                db, parent, variant, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+                live_meta_item_id=str(meta_product_id), salla_identity=ident if sellable_salla else None,
+            )
+            result["pending_publication"] = corroboration
+            if corroboration.get("ok"):
+                evidence = live_item_publication_evidence(
+                    db, tenant_id=int(tenant_id), catalog_id=catalog_id, retailer_id=rid,
+                    meta_product_id=str(meta_product_id), parent=parent,
+                )
         result["ownership_evidence"] = evidence
         if not evidence.get("owned"):
             # a retailer_id match without publication evidence is a "match that
@@ -703,12 +806,36 @@ def push_one_meta_catalog_item(
     return result
 
 
+def retirement_evidence_refusal(
+    evidence: Optional[Dict[str, Any]], *, catalog_id: str, retailer_id: str,
+) -> Optional[str]:
+    """Why *evidence* does not authorize a retirement write, or None.
+
+    Retirement obeys the publish path's rule: only an item this path
+    published may be modified. *evidence* is either the result of
+    ``live_item_publication_evidence`` for the row (a publication-provenance
+    membership for this tenant, catalog and retailer_id) or the ledger copy of
+    that same evidence, taken in the transaction that deleted the row. It must
+    be owned, name a Graph item id, and be for this catalog and retailer_id.
+    """
+    if not isinstance(evidence, dict) or not evidence.get("owned"):
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if not str(evidence.get("meta_product_id") or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if str(evidence.get("catalog_id") or "").strip() != str(catalog_id or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    if str(evidence.get("retailer_id") or "").strip() != str(retailer_id or "").strip():
+        return ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED
+    return None
+
+
 def retire_meta_catalog_item(
     conn: Any,
     catalog_id: str,
     retailer_id: str,
     meta_item_id: Optional[str] = None,
     *,
+    publication_evidence: Optional[Dict[str, Any]] = None,
     client: Optional[httpx.Client] = None,
 ) -> Dict[str, Any]:
     """Withdraw one live catalog item from the channel without deleting it.
@@ -717,6 +844,13 @@ def retire_meta_catalog_item(
     existing Graph item, then re-reads it. Never issues a Graph DELETE and
     never touches an item whose retailer_id is not in this catalog.
     Returns ``action=absent`` when the item does not exist in Graph.
+
+    Every write requires *publication_evidence* (see
+    ``retirement_evidence_refusal``) for the connection's current catalog, and
+    the live Graph item id must equal the evidenced id. Without it nothing is
+    read or written and the result is ``block_ownership_unverified``, exactly
+    as the publish path refuses to update an item it cannot prove it
+    published.
     """
     rid = str(retailer_id or "").strip()
     cid = str(catalog_id or "").strip() or str(getattr(conn, "meta_catalog_id", "") or "").strip()
@@ -737,6 +871,18 @@ def retire_meta_catalog_item(
     if not cid:
         result["error"] = "catalog_id_missing"
         return result
+    refusal = retirement_evidence_refusal(publication_evidence, catalog_id=cid, retailer_id=rid)
+    if refusal:
+        result["action"] = ACTION_BLOCK_OWNERSHIP
+        result["error"] = refusal
+        result["ownership_evidence"] = publication_evidence if isinstance(publication_evidence, dict) else None
+        return result
+    owned_mid = str(publication_evidence["meta_product_id"]).strip()
+    if str(meta_item_id or "").strip() and str(meta_item_id).strip() != owned_mid:
+        result["error"] = "meta_item_id_mismatch"
+        return result
+    meta_item_id = owned_mid
+    result["meta_product_id"] = owned_mid
     from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, tenant_in_sync_scope  # noqa: PLC0415
 
     if not tenant_in_sync_scope(int(getattr(conn, "tenant_id", 0) or 0)):
@@ -744,9 +890,15 @@ def retire_meta_catalog_item(
         result["error"] = SCOPE_BLOCKER_CODE
         return result
     try:
-        _cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
+        current_cid, token = _resolve_catalog_and_token(conn, require_catalog_readable=True)
     except MetaCatalogPushError as exc:
         result["error"] = exc.code
+        return result
+    if str(current_cid or "").strip() != cid:
+        # The token and the claim guard belong to the connection's current
+        # catalog; an item in a catalog this tenant no longer holds is not
+        # provably ours to modify.
+        result["error"] = "catalog_not_current"
         return result
 
     def _lookup(fields: str) -> Tuple[Optional[str], Dict[str, Any]]:
@@ -876,12 +1028,20 @@ def _stamp_salla_batch_membership(
     retailer_id: str,
     meta_item_id: str,
     catalog_id: str,
+    *,
+    action: str = "",
+    client: Optional[httpx.Client] = None,
 ) -> None:
+    """Publication evidence after a successful create/update POST (Salla and native)."""
+    from core.meta_catalog_membership import PROVENANCE_NATIVE_PUSH_RECONCILED  # noqa: PLC0415
     from services.salla_variant_catalog_identity import (  # noqa: PLC0415
         AmbiguousVariantIdentity,
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+        PROVENANCE_VARIANT_PUSH,
         identity_for_retailer_id,
         is_salla_source,
+        replace_stale_observation_after_create,
+        upsert_native_publication_membership,
         upsert_variant_membership,
     )
 
@@ -892,26 +1052,58 @@ def _stamp_salla_batch_membership(
         parent, variant = load_variant_for_push(db, tenant_id, retailer_id=retailer_id)
     except MetaCatalogPushError:
         return
-    if not is_salla_source(parent):
-        return
-    variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
-    try:
-        ident = identity_for_retailer_id(parent, variants, retailer_id)
-    except AmbiguousVariantIdentity:
-        return
-    if ident is None:
-        return
     cid = (catalog_id or "").strip()
     if not cid:
         conn = _resolve_connection(db, tenant_id)
         cid, _token = _resolve_catalog_and_token(conn, require_catalog_readable=False)
-    bound = upsert_variant_membership(
-        db,
-        tenant_id=int(tenant_id),
-        catalog_id=cid,
-        identity=ident,
-        meta_item_id=mid,
-    )
+    salla = is_salla_source(parent)
+    ident = None
+    if not salla:
+        bound = upsert_native_publication_membership(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            retailer_id=retailer_id,
+            product_id=int(parent.id),
+            variant_id=getattr(variant, "id", None),
+            meta_item_id=mid,
+        )
+    else:
+        variants = _parent_variants_for_gate(db, parent, variant, tenant_id)
+        try:
+            ident = identity_for_retailer_id(parent, variants, retailer_id)
+        except AmbiguousVariantIdentity:
+            return
+        if ident is None:
+            return
+        bound = upsert_variant_membership(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            identity=ident,
+            meta_item_id=mid,
+        )
+    if not bound.get("ok") and bound.get("reason") == "meta_item_id_immutable" and action == "create":
+        # A verified create over a stale reconcile observation of the same key:
+        # corroborate the created id with a lookup scoped to this tenant's
+        # connection catalog and retailer_id, then apply the narrow repair.
+        conn = _resolve_connection(db, tenant_id)
+        current_cid = str(getattr(conn, "meta_catalog_id", "") or "").strip()
+        live_id, _lookup = (None, {})
+        if current_cid == cid:
+            live_id, _lookup = find_meta_catalog_item_by_retailer_id(conn, cid, retailer_id, client=client)
+        bound = replace_stale_observation_after_create(
+            db,
+            tenant_id=int(tenant_id),
+            catalog_id=cid,
+            retailer_id=retailer_id,
+            product_id=int(parent.id),
+            variant_id=None if salla else getattr(variant, "id", None),
+            created_meta_item_id=mid,
+            corroborated_meta_item_id=str(live_id or ""),
+            publication_provenance=PROVENANCE_VARIANT_PUSH if salla else PROVENANCE_NATIVE_PUSH_RECONCILED,
+            salla_identity=ident,
+        )
     if not bound.get("ok"):
         raise MetaCatalogPushError(
             ERROR_AMBIGUOUS_VARIANT_IDENTITY,
@@ -1012,6 +1204,8 @@ def push_ready_meta_catalog_batch(
                     rid,
                     str(push_result.get("meta_product_id") or ""),
                     str(push_result.get("catalog_id") or ""),
+                    action=str(push_result.get("action") or ""),
+                    client=client,
                 )
         except MetaCatalogPushError as exc:
             push_result = {
@@ -1048,6 +1242,7 @@ __all__ = [
     "MetaCatalogPushError",
     "graph_error_code",
     "retire_meta_catalog_item",
+    "retirement_evidence_refusal",
     "RETIRED_AVAILABILITY",
     "RETIRED_VISIBILITY",
     "PUBLISHED_VISIBILITY",
@@ -1058,6 +1253,11 @@ __all__ = [
     "push_one_meta_catalog_item",
     "push_ready_meta_catalog_batch",
     "live_item_publication_evidence",
+    "PENDING_PUBLICATIONS_KEY",
+    "corroborate_pending_publication",
+    "pending_publication_record",
+    "with_pending_publication",
+    "without_pending_publications",
     "PUBLICATION_PROVENANCES",
     "ERROR_LIVE_MATCH_OWNERSHIP_UNVERIFIED",
     "ACTION_BLOCK_OWNERSHIP",

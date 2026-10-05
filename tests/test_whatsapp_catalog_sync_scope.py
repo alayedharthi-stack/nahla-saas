@@ -21,7 +21,7 @@ from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -213,7 +213,12 @@ def test_only_the_trial_tenant_and_products_reach_graph(monkeypatch):
         # status for an excluded store says so honestly, with no action for the merchant
         st = build_whatsapp_catalog_sync_status(session, other)
         assert st["ready"] is False and st["blocker_code"] == SCOPE_BLOCKER_CODE and st["phase"] == "blocked"
-        assert st["sync_scope"]["active"] is True and st["sync_scope"]["tenant_ids"] == [trial]
+        # caller-scoped: the excluded store learns only that it is out of scope
+        assert st["sync_scope"] == {"active": True, "tenant_in_scope": False, "products_limited": True, "product_ids": []}
+        assert str(trial) not in json.dumps(st["sync_scope"])
+        trial_scope = build_whatsapp_catalog_sync_status(session, trial)["sync_scope"]
+        assert trial_scope == {"active": True, "tenant_in_scope": True, "products_limited": True,
+                               "product_ids": [allowed.id]}
         assert build_whatsapp_catalog_sync_status(session, trial)["ready"] is True
     finally:
         session.close(); engine.dispose()
@@ -237,7 +242,8 @@ def test_every_write_entry_point_refuses_out_of_scope_tenants(monkeypatch):
         foreign = _salla_row(session, other, "300100")
         foreign_hidden = _salla_row(session, other, "300200", hidden=True)
         enqueue_channel_retirement_ledger(session, other, [{"retailer_id": "300300-1", "meta_item_id": "META-300300-1",
-                                                            "catalog_id": "CAT-OTHER", "product_id": 999}],
+                                                            "catalog_id": "CAT-OTHER", "product_id": 999,
+                                                            "publication_provenance": "salla_variant_push"}],
                                           reason=REASON_SOURCE_DELETED)
         session.commit()
         monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_AUTO_SYNC", "1")
@@ -255,7 +261,10 @@ def test_every_write_entry_point_refuses_out_of_scope_tenants(monkeypatch):
             res = push_one_meta_catalog_item(session, other, "300100-1", confirm=True, client=graph)
             assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
             # 3. raw retirement helper
-            res = retire_meta_catalog_item(conn_other, "CAT-OTHER", "300200-1", "META-300200-1", client=graph)
+            res = retire_meta_catalog_item(conn_other, "CAT-OTHER", "300200-1", "META-300200-1",
+                                           publication_evidence={"owned": True, "meta_product_id": "META-300200-1",
+                                                                 "catalog_id": "CAT-OTHER", "retailer_id": "300200-1"},
+                                           client=graph)
             assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
             # 4. product retirement + 5. ledger drain
             res = attempt_product_channel_retirement(session, other, foreign_hidden.id, client=graph)
@@ -372,7 +381,8 @@ def test_proposed_tenant_35_trial_scope_refuses_tenants_1_33_and_every_other_ten
         for tid in (1, 2, 33):
             enqueue_channel_retirement_ledger(
                 session, tid,
-                [{"retailer_id": f"{tid}00300-1", "meta_item_id": f"META-{tid}00300-1", "catalog_id": f"CAT-{tid}", "product_id": 999}],
+                [{"retailer_id": f"{tid}00300-1", "meta_item_id": f"META-{tid}00300-1", "catalog_id": f"CAT-{tid}", "product_id": 999,
+                  "publication_provenance": "salla_variant_push"}],
                 reason=REASON_SOURCE_DELETED,
             )
         session.commit()
@@ -407,7 +417,10 @@ def test_proposed_tenant_35_trial_scope_refuses_tenants_1_33_and_every_other_ten
                 assert res["skipped"] is True and res["error_code"] == SCOPE_BLOCKER_CODE
                 res = push_one_meta_catalog_item(session, tid, f"{tid}00100-1", confirm=True, client=graph)
                 assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
-                res = retire_meta_catalog_item(conn, f"CAT-{tid}", f"{tid}00200-1", f"META-{tid}00200-1", client=graph)
+                res = retire_meta_catalog_item(conn, f"CAT-{tid}", f"{tid}00200-1", f"META-{tid}00200-1",
+                                               publication_evidence={"owned": True, "meta_product_id": f"META-{tid}00200-1",
+                                                                     "catalog_id": f"CAT-{tid}", "retailer_id": f"{tid}00200-1"},
+                                               client=graph)
                 assert res["ok"] is False and res["error"] == SCOPE_BLOCKER_CODE
                 res = attempt_product_channel_retirement(session, tid, foreign_hidden[tid].id, client=graph)
                 assert res["skipped"] is True and res["error_code"] == SCOPE_BLOCKER_CODE

@@ -15,12 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -354,7 +353,7 @@ def test_batch_records_publication_membership_only_after_a_real_create_or_update
          patch("services.meta_catalog_readiness.candidate_push_row", return_value={"retailer_id": RID}), \
          patch.object(push, "_prepare_salla_batch_membership_slot", lambda *a, **k: None), \
          patch.object(push, "push_one_meta_catalog_item", lambda *a, **k: next(results)), \
-         patch.object(push, "_stamp_salla_batch_membership", lambda db, tid, rid, mid, cid: calls.append((rid, mid))):
+         patch.object(push, "_stamp_salla_batch_membership", lambda db, tid, rid, mid, cid, **_kw: calls.append((rid, mid))):
         batch = push.push_ready_meta_catalog_batch(object(), 9, confirm=True, stop_on_first_error=False)
     assert batch["summary"]["attempted"] >= 2
     assert calls == [(RID, "META-NEW")]

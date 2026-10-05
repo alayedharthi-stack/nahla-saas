@@ -28,6 +28,23 @@ from services.native_meta_sync_orchestrator import (  # noqa: E402
 )
 from services.product_publication_status import build_product_publication_status  # noqa: E402
 
+# These tests drive the orchestrator through MagicMock sessions, which cannot
+# hold a membership row. The publication-evidence writer itself is exercised
+# against a real database in
+# tests/test_native_catalog_publication_lifecycle.py; here every call to it
+# is recorded so a test can assert when evidence is (and is not) written.
+EVIDENCE_WRITES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _record_publication_evidence():
+    EVIDENCE_WRITES.clear()
+    with patch("services.native_meta_sync_orchestrator.load_variant_for_push",
+               side_effect=lambda db, tid, retailer_id: (None, SimpleNamespace(id=7001))), \
+         patch("services.salla_variant_catalog_identity.upsert_native_publication_membership",
+               side_effect=lambda db, **kw: EVIDENCE_WRITES.append(kw) or {"ok": True}):
+        yield
+
 
 def _generic_native_parent(**overrides):
     meta = {
@@ -158,6 +175,8 @@ def test_successful_sync_requires_post_push_lookup(
     assert parent.sync_status == "synced"
     assert parent.meta_item_id == "META-501"
     assert parent.sync_error is None
+    # the successful POST, verified by the lookup, records publication evidence
+    assert [(w["retailer_id"], w["meta_item_id"]) for w in EVIDENCE_WRITES] == [("nahla_p_501", "META-501")]
     assert parent.last_synced_at is not None
     push_mock.assert_called_once()
     lookup_mock.assert_called_once()

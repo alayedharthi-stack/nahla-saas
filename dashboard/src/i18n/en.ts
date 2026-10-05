@@ -2252,7 +2252,7 @@ const en: Translations = {
       stageSourceNever: 'Store (Salla): no sync recorded yet',
       stagePublish:     'Meta: matched {verified} · waiting {waiting} · rejected/blocked {rejected}',
       stageLink:        'Catalog ↔ WhatsApp connection',
-      stageRetirement:  'Channel withdrawals: pending {pending} · failed {exhausted}',
+      stageRetirement:  'Channel withdrawals: pending {pending} · failed {exhausted} · not withdrawn, ownership unproven {refused}',
       stageVisibility:  'Product display inside WhatsApp cannot be proven through the API; check it in the WhatsApp app',
       latencyTitle:     'Measured latency',
       latencyPlatform:  'Inside Nahla (edit → push): p50 {p50}s · max {max}s',

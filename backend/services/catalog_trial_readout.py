@@ -14,6 +14,11 @@ product list from explicit criteria and the exact scope environment.
 Guarantees:
 - No database write, no Graph POST. Graph reads happen only with
   ``include_graph=True`` and only GET endpoints are used.
+- Salla reads (``include_salla``) never go through the adapter's request
+  helper, which may refresh the access token and save it (or mark the
+  integration for re-authorisation). They use the stored access token as is;
+  when it is expired or Salla rejects it, the read is refused with a clear
+  code instead of refreshing anything.
 - No secret leaves the process: tokens are never placed in the result
   (only their *source* label), and the result is scrubbed for any value
   equal to a token that was read.
@@ -599,28 +604,137 @@ def _candidate_payloads(db: Any, tid: int, chosen_ids: List[int]) -> Dict[str, A
     }
 
 
+SALLA_READ_REFUSED_INTEGRATION_DISABLED = "salla_read_refused_integration_disabled"
+SALLA_READ_REFUSED_NEEDS_REAUTH = "salla_read_refused_integration_needs_reauth"
+
+
+def _readonly_salla_adapter(db: Any, tid: int) -> tuple[Any, Optional[str]]:
+    """Build the tenant's Salla adapter with SELECTs only.
+
+    The store-sync path (``registry.get_adapter``) canonicalises duplicate
+    Salla rows on read — it disables the losers, annotates the winner and
+    commits. The readout must not write, so it selects the same winner with
+    the registry's ranking, writes nothing, and passes the stored expiry so a
+    token that is already expired is refused before any request.
+    """
+    from models import Integration  # noqa: PLC0415
+    from store_adapters.salla_adapter import SallaAdapter  # noqa: PLC0415
+    from store_integration.registry import _score_integration  # noqa: PLC0415
+
+    rows = (
+        db.query(Integration)
+        .filter(Integration.tenant_id == int(tid), Integration.provider == "salla")
+        .order_by(Integration.id.asc())
+        .all()
+    )
+    if not rows:
+        return None, "adapter_unavailable"
+    winner = max(rows, key=_score_integration)
+    cfg = dict(winner.config or {})
+    if cfg.get("needs_reauth"):
+        return None, SALLA_READ_REFUSED_NEEDS_REAUTH
+    if not winner.enabled:
+        return None, SALLA_READ_REFUSED_INTEGRATION_DISABLED
+    expires = cfg.get("expires_at") or cfg.get("token_expires_at")
+    return SallaAdapter(
+        api_key=str(cfg.get("api_key") or ""),
+        store_id=str(cfg.get("store_id") or ""),
+        refresh_token=str(cfg.get("refresh_token") or ""),
+        tenant_id=int(tid),
+        integration_id=winner.id,
+        expires_at=str(expires) if expires else None,
+    ), None
+
+
 def _resolve_salla_adapter(db: Any, tid: int, adapter: Any) -> tuple[Any, Optional[str]]:
     if adapter is None:
         try:
-            from services.store_sync import StoreSyncService  # noqa: PLC0415
-
-            adapter = StoreSyncService(db, tid)._get_adapter()
+            adapter, err = _readonly_salla_adapter(db, tid)
         except Exception as exc:  # noqa: BLE001
             return None, f"adapter_unavailable:{type(exc).__name__}"
-    if adapter is None or not hasattr(adapter, "_get"):
+        if err:
+            return None, err
+    if adapter is None or not str(getattr(adapter, "platform", "salla") or "salla").lower() == "salla":
         return None, "adapter_unavailable"
     return adapter, None
 
 
+class SallaReadRefused(RuntimeError):
+    """A Salla read that could only proceed by changing stored credentials."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+SALLA_READ_REFUSED_TOKEN_MISSING = "salla_read_refused_access_token_missing"
+SALLA_READ_REFUSED_TOKEN_EXPIRED = "salla_read_refused_token_expired_refresh_required"
+SALLA_READ_REFUSED_TOKEN_REJECTED = "salla_read_refused_token_rejected_refresh_required"
+
+
+def _salla_read_refusal(adapter: Any, now: Optional[datetime] = None) -> Optional[str]:
+    """Why a read with the stored token cannot proceed without a mutation, or None."""
+    if not str(getattr(adapter, "api_key", "") or "").strip():
+        return SALLA_READ_REFUSED_TOKEN_MISSING
+    raw = str(getattr(adapter, "_expires_at", "") or "").strip()
+    if raw:
+        try:
+            exp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp <= (now or datetime.now(timezone.utc)):
+            return SALLA_READ_REFUSED_TOKEN_EXPIRED
+    return None
+
+
+async def _salla_http_get(url: str, headers: Dict[str, str], params: Optional[Dict[str, Any]] = None) -> Any:
+    import httpx  # noqa: PLC0415
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        return await client.get(url, headers=headers, params=params or {})
+
+
+async def _salla_readonly_get(adapter: Any, path: str) -> Dict[str, Any]:
+    """One Salla GET with the stored token; never refreshes, saves or invalidates it."""
+    from core.acceptance_execution_context import deny_external_egress  # noqa: PLC0415
+    from store_adapters.salla_adapter import SALLA_API_BASE  # noqa: PLC0415
+
+    refusal = _salla_read_refusal(adapter)
+    if refusal:
+        raise SallaReadRefused(refusal)
+    deny_external_egress(egress_kind="salla_integration", operation="get",
+                         tenant_id=getattr(adapter, "_tenant_id", None))
+    headers = {"Authorization": f"Bearer {adapter.api_key}", "Accept": "application/json"}
+    resp = await _salla_http_get(f"{SALLA_API_BASE}{path}", headers)
+    if resp.status_code == 401:
+        raise SallaReadRefused(SALLA_READ_REFUSED_TOKEN_REJECTED)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _salla_product_read(adapter: Any, ext: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """GET /products/{ext} and its variants through the tenant's own adapter (read only)."""
+    """GET /products/{ext} and its variants with the stored token (read only).
+
+    Never uses the adapter's request helper (``_get``), so the token is not
+    refreshed, saved or invalidated by this read. ``SallaReadRefused`` when the
+    read could only proceed with such a change.
+    """
     import asyncio  # noqa: PLC0415
 
     async def _read():
-        raw = await adapter._get(f"/products/{ext}")
+        raw = await _salla_readonly_get(adapter, f"/products/{ext}")
         data = raw.get("data") if isinstance(raw, dict) else None
-        variants = await adapter.get_raw_variants(ext) if hasattr(adapter, "get_raw_variants") else []
-        return (data if isinstance(data, dict) else {}), [v for v in (variants or []) if isinstance(v, dict)]
+        try:
+            vraw = await _salla_readonly_get(adapter, f"/products/{ext}/variants")
+        except SallaReadRefused:
+            raise
+        except Exception:  # noqa: silent-ok — same contract as get_raw_variants: a variant read error yields no variants
+            vraw = {}
+        variants = vraw.get("data") if isinstance(vraw, dict) else None
+        variants = variants if isinstance(variants, list) else []
+        return (data if isinstance(data, dict) else {}), [v for v in variants if isinstance(v, dict)]
 
     return asyncio.run(_read())
 
@@ -681,6 +795,9 @@ def _candidate_salla_crosscheck(
         ext = p["external_id"]
         try:
             data, variants = _salla_product_read(adapter, ext)
+        except SallaReadRefused as exc:
+            out["products"].append({"product_id": pid, "external_id": ext, "error": exc.code})
+            continue
         except Exception as exc:  # noqa: BLE001
             out["products"].append({"product_id": pid, "external_id": ext, "error": type(exc).__name__})
             continue
@@ -762,6 +879,9 @@ def _salla_check(db: Any, tid: int, anomalous: List[Dict[str, Any]], *, adapter:
             continue
         try:
             data, variants = _read(ext)
+        except SallaReadRefused as exc:
+            out["checked"].append({"product_id": p["product_id"], "external_id": ext, "error": exc.code})
+            continue
         except Exception as exc:  # noqa: BLE001
             out["checked"].append({"product_id": p["product_id"], "external_id": ext, "error": type(exc).__name__})
             continue

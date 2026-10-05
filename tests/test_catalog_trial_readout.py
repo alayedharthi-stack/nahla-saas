@@ -16,7 +16,7 @@ from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 for p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -560,6 +560,31 @@ def test_graph_section_reads_waba_catalogs_without_a_stamped_id_and_reports_perm
         session.close(); engine.dispose()
 
 
+def _route_salla_reads(monkeypatch, fake):
+    """Serve the readout's refresh-free Salla GETs from *fake* (no network)."""
+    import services.catalog_trial_readout as readout
+
+    class _Resp:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            return None
+
+    async def _http_get(url, headers, params=None):
+        assert headers["Authorization"] == f"Bearer {fake.api_key}"
+        path = url.split("/admin/v2", 1)[1]
+        if path.endswith("/variants"):
+            return _Resp({"data": await fake.get_raw_variants(path.split("/")[2])})
+        return _Resp(await fake._get(path))
+
+    monkeypatch.setattr(readout, "_salla_http_get", _http_get)
+
+
 @_ENT
 @_READY
 def test_salla_recheck_locates_the_stock_inconsistency(monkeypatch):
@@ -577,6 +602,8 @@ def test_salla_recheck_locates_the_stock_inconsistency(monkeypatch):
 
         class FakeSalla:
             calls = []
+            api_key = "salla-read-token"
+            _expires_at = None
 
             async def _get(self, path, params=None):
                 self.calls.append(path)
@@ -591,6 +618,7 @@ def test_salla_recheck_locates_the_stock_inconsistency(monkeypatch):
                 return [{"id": 1, "quantity": 3}]
 
         fake = FakeSalla()
+        _route_salla_reads(monkeypatch, fake)
         report = build_catalog_trial_readout(session, tid, include_salla=True, salla_adapter=fake)
         checked = {c["external_id"]: c for c in report["salla_check"]["checked"]}
         assert checked["600186"]["verdict"] == "salla_parent_quantity_inconsistent_with_its_variants"
@@ -745,6 +773,8 @@ def test_candidate_salla_crosscheck_compares_every_chosen_variant_with_salla(mon
 
         class FakeSalla:
             calls = []
+            api_key = "salla-read-token"
+            _expires_at = None
 
             async def _get(self, path, params=None):
                 self.calls.append(path)
@@ -767,6 +797,7 @@ def test_candidate_salla_crosscheck_compares_every_chosen_variant_with_salla(mon
                         {"id": 2, "price": "180.00", "quantity": 1, "name": "41"}]
 
         fake = FakeSalla()
+        _route_salla_reads(monkeypatch, fake)
         report = build_catalog_trial_readout(session, tid, include_salla=True, salla_adapter=fake,
                                              candidate_ids=[dress.id, shoe.id], candidate_count=2)
         cc = report["candidate_salla_crosscheck"]

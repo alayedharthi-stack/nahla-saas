@@ -48,7 +48,7 @@ def main() -> int:
     parser.add_argument("--candidates", type=int, default=3, help="How many trial products to propose.")
     parser.add_argument("--candidate-ids", default="", help="Comma-separated local product ids chosen by the owner; evaluated instead of the automatic pick.")
     parser.add_argument("--expected-business-id", default="", help="Business Manager id expected to own the WABA and its catalog.")
-    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only).")
+    parser.add_argument("--include-salla", action="store_true", help="Re-read anomalous products from Salla (GET only, stored token as is: never refreshed or saved; refused when expired or rejected).")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON.")
     args = parser.parse_args()
 

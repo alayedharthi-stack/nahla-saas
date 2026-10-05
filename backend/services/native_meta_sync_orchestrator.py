@@ -24,9 +24,14 @@ from core.catalog import (
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_push import (
+    PENDING_PUBLICATIONS_KEY,
     MetaCatalogPushError,
     find_meta_catalog_item_by_retailer_id,
+    load_variant_for_push,
+    pending_publication_record,
     push_one_meta_catalog_item,
+    with_pending_publication,
+    without_pending_publications,
     _resolve_connection,
 )
 from services.meta_catalog_sync_preview import preview_native_meta_sync
@@ -1415,7 +1420,11 @@ def _attempt_acquired_body(
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
         ensure_variant_membership_slot,
         identity_for_retailer_id,
+        PROVENANCE_NATIVE_PUSH_RECONCILED,
+        PROVENANCE_VARIANT_PUSH,
         is_salla_source,
+        replace_stale_observation_after_create,
+        upsert_native_publication_membership,
         upsert_variant_membership,
     )
 
@@ -1449,6 +1458,7 @@ def _attempt_acquired_body(
     variant_results: Dict[str, Any] = {}
     expected_map = _expected_payloads_map(parent)
     verified_meta_item_id: Optional[str] = None
+    evidence_written_rids: List[str] = []
     retailer_id = retailer_ids[0]
     content_ok = True
     skipped_push = lookup_only
@@ -1621,6 +1631,24 @@ def _attempt_acquired_body(
                 code = classify_graph_push_failure(push_result, code)
             return fail(code, err_msg, retailer_id=retailer_id)
 
+        if not lookup_only and str(push_result.get("action") or "") == "create":
+            # Keep the identity of this successful create (the POST's own item
+            # id, catalog, retailer_id, product) before verifying it: if the
+            # follow-up lookup does not corroborate it now (read-after-write
+            # lag, an error), a later scoped lookup returning exactly this id
+            # may still prove it (see corroborate_pending_publication). It is
+            # never authority by itself.
+            attempt = pending_publication_record(
+                product_id=int(parent.id),
+                catalog_id=str(push_result.get("catalog_id") or ""),
+                retailer_id=str(retailer_id),
+                meta_item_id=str(push_result.get("meta_product_id") or ""),
+            )
+            if attempt is not None:
+                if not _stamp_with_lease(db, parent, lease, lambda row: _write_sync_meta(
+                        row, **{PENDING_PUBLICATIONS_KEY: with_pending_publication(_read_sync_meta(row), attempt)})):
+                    return _abandon_stale_lease(db)
+
         try:
             conn = _resolve_connection(db, tenant_id)
             catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
@@ -1644,20 +1672,80 @@ def _attempt_acquired_body(
                 retailer_id=retailer_id,
             )
 
-        if salla_parent:
-            if salla_ident is None:
+        # Publication evidence is written only after a create/update POST
+        # that succeeded in THIS attempt. A lookup-only verification wrote
+        # nothing to Graph, so it never creates or upgrades evidence.
+        published_now = (not lookup_only) and str(push_result.get("action") or "") in ("create", "update")
+        if published_now:
+            # The post-POST lookup (this tenant's connection catalog, this
+            # retailer_id, exactly one Graph row with an id) must return the very
+            # item this POST created (create response id) or updated (its
+            # target id). Graph item ids are global, so only that equality
+            # corroborates the publication; any other id, or none, proves
+            # nothing. Evidence is recorded for the catalog the lookup read.
+            posted_id = str(push_result.get("meta_product_id") or "").strip()
+            if not posted_id or posted_id != str(meta_item_id).strip():
                 return fail(
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    "verification_failed",
+                    "verification_failed: meta_item_id_mismatch after push",
                     retailer_id=retailer_id,
                 )
-            bound = upsert_variant_membership(
-                db,
-                tenant_id=int(tenant_id),
-                catalog_id=salla_catalog_id or catalog_id,
-                identity=salla_ident,
-                meta_item_id=str(meta_item_id),
-            )
+            if salla_parent and salla_catalog_id != catalog_id:
+                # the connection's catalog changed during this attempt
+                return fail(
+                    "verification_failed",
+                    "verification_failed: catalog_changed_during_push",
+                    retailer_id=retailer_id,
+                )
+            if salla_parent:
+                if salla_ident is None:
+                    return fail(
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        retailer_id=retailer_id,
+                    )
+                bound = upsert_variant_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    identity=salla_ident,
+                    meta_item_id=str(meta_item_id),
+                )
+            else:
+                try:
+                    _pv_parent, pushed_variant = load_variant_for_push(db, int(tenant_id), retailer_id=str(retailer_id))
+                except MetaCatalogPushError as exc:
+                    return fail(exc.code, exc.code, retailer_id=retailer_id)
+                bound = upsert_native_publication_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=getattr(pushed_variant, "id", None),
+                    meta_item_id=str(meta_item_id),
+                )
+            if (
+                not bound.get("ok")
+                and bound.get("reason") == "meta_item_id_immutable"
+                and str(push_result.get("action") or "") == "create"
+            ):
+                # A verified create over a stale reconcile observation of the
+                # same key (narrow repair; see replace_stale_observation_after_create).
+                bound = replace_stale_observation_after_create(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=(None if salla_parent else getattr(pushed_variant, "id", None)),
+                    created_meta_item_id=posted_id,
+                    corroborated_meta_item_id=str(meta_item_id),
+                    publication_provenance=(
+                        PROVENANCE_VARIANT_PUSH if salla_parent else PROVENANCE_NATIVE_PUSH_RECONCILED
+                    ),
+                    salla_identity=salla_ident if salla_parent else None,
+                )
             if not bound.get("ok"):
                 return fail(
                     ERROR_AMBIGUOUS_VARIANT_IDENTITY,
@@ -1673,6 +1761,7 @@ def _attempt_acquired_body(
                     f"membership_commit_failed:{type(exc).__name__}"[:200],
                     retailer_id=retailer_id,
                 )
+            evidence_written_rids.append(str(retailer_id))
         if verified_meta_item_id is None:
             verified_meta_item_id = str(meta_item_id)
 
@@ -1742,6 +1831,10 @@ def _attempt_acquired_body(
             updates["retire_exhausted"] = False
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()
@@ -1777,6 +1870,10 @@ def _attempt_acquired_body(
             updates["retire_exhausted"] = False
             updates["retire_attempts"] = 0
             updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
         if republished_after_retirement and not skipped_push:
             updates["channel_retired_at"] = None
             updates["republished_at"] = _now().isoformat()

@@ -344,7 +344,7 @@ export interface WhatsappCatalogSyncStages {
   connection: { state: WhatsappCatalogStageState; blocker_code: string | null; action_code: string | null; catalog_id: string | null; waba_id: string | null }
   publish: { state: WhatsappCatalogStageState; verified_in_meta: number; waiting: number; rejected_or_blocked: number; last_verified_at: string | null; verified_fields: string[] }
   catalog_link: { state: WhatsappCatalogStageState; evidence_at: string | null; evidence_source: string | null; stale: boolean | null; action_code: string | null }
-  retirement: { state: WhatsappCatalogStageState; pending: number; exhausted: number }
+  retirement: { state: WhatsappCatalogStageState; pending: number; exhausted: number; refused?: number }
   whatsapp_visibility: { state: WhatsappCatalogStageState; provable_via_api: boolean; requires: string[] }
 }
 
@@ -354,6 +354,9 @@ export interface WhatsappCatalogRetirement {
   retired_products: number
   ledger_pending: number
   ledger_exhausted: number
+  refused?: number
+  refused_products?: number
+  ledger_refused?: number
   ledger_done_total: number
   last_done_at: string | null
   last_error: string | null
@@ -380,6 +383,7 @@ export interface WhatsappCatalogSyncCounts {
   skipped_ineligible: number
   retire_pending?: number
   retire_exhausted?: number
+  retire_refused?: number
   retired?: number
 }
 
@@ -415,13 +419,12 @@ export interface WhatsappCatalogSyncStatus {
   failures: WhatsappCatalogSyncFailure[]
   auto_sync_enabled?: boolean
   auto_sync_flag?: string
-  // Limited-trial write scope: when active, only the listed tenants/products reach Meta.
+  // Limited-trial write scope as it applies to this store only (never other stores' ids).
   sync_scope?: {
     active: boolean
-    tenant_ids: number[]
-    product_ids: Record<string, number[]>
-    tenant_env?: string
-    product_env?: string
+    tenant_in_scope: boolean
+    products_limited: boolean
+    product_ids: number[]
   }
   verification?: {
     lookup_fields: string[]

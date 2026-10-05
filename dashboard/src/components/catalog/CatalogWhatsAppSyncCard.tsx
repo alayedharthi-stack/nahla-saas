@@ -278,11 +278,13 @@ export default function CatalogWhatsAppSyncCard() {
               .replace('{waiting}', fmtCount(status.stages.publish.waiting, lang))
               .replace('{rejected}', fmtCount(status.stages.publish.rejected_or_blocked, lang))}
           </dd>
-          {(status.stages.retirement.pending > 0 || status.stages.retirement.exhausted > 0) && (
+          {(status.stages.retirement.pending > 0 || status.stages.retirement.exhausted > 0
+            || (status.stages.retirement.refused ?? 0) > 0) && (
             <dd>
               {copy.stageRetirement
                 .replace('{pending}', fmtCount(status.stages.retirement.pending, lang))
-                .replace('{exhausted}', fmtCount(status.stages.retirement.exhausted, lang))}
+                .replace('{exhausted}', fmtCount(status.stages.retirement.exhausted, lang))
+                .replace('{refused}', fmtCount(status.stages.retirement.refused ?? 0, lang))}
             </dd>
           )}
           <dd>{copy.stageVisibility}</dd>

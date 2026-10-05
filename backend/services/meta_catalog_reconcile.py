@@ -397,6 +397,10 @@ def reconcile_meta_catalog_publish_stamps(
         tenant_id=int(tenant_id),
         catalog_id=catalog_id,
         desired=join.desired,
+        live_meta_item_ids={
+            str(rid): str((row or {}).get("meta_product_id") or (row or {}).get("meta_item_id") or "")
+            for rid, row in live.items()
+        },
     )
     report.snapshot_applied = True
     report.memberships_upserted = int(stats.get("upserted") or 0)

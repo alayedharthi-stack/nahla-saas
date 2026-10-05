@@ -9,7 +9,7 @@ from typing import Any, List, Optional
 from unittest.mock import MagicMock, patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
+_BACKEND = os.path.join(os.path.dirname(_HERE), "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
@@ -140,6 +140,10 @@ def test_legacy_default_skipped_not_blocked():
 
 
 def test_fatal_missing_image_and_url():
+    # No stored product URL, and a merchant SKU that cannot form the Nahla
+    # public product path ("/" is refused by is_valid_public_retailer_id), so
+    # no URL can be resolved at all. (A publishable SKU gets the approved
+    # native public URL instead — see the next test.)
     parent = _Parent(
         id=60,
         tenant_id=9,
@@ -152,7 +156,7 @@ def test_fatal_missing_image_and_url():
         id=300,
         tenant_id=9,
         product_id=60,
-        retailer_id="77001-1001",
+        retailer_id="77001/1001",
         image_url=None,
     )
     elig = _eligibility_from(parent, variant, has_real_variants=True)
@@ -163,6 +167,30 @@ def test_fatal_missing_image_and_url():
     assert "missing_image_url" in item.reasons
     assert "missing_url" in item.reasons
     assert item.payload_preview is None
+
+
+def test_missing_stored_url_falls_back_to_the_native_public_url():
+    """Since the native public product URL (core.native_product_public_url,
+    merged in #1125) a publishable retailer_id without a stored URL gets the
+    platform URL; only the missing image still blocks."""
+    from core.native_product_public_url import build_native_product_public_url
+
+    parent = _Parent(
+        id=61,
+        tenant_id=9,
+        title="حذاء رياضي أبيض",
+        meta_retailer_id="77001",
+        extra_metadata={"product_url": None, "url": None},
+    )
+    parent.extra_metadata.pop("image_url", None)
+    variant = _Variant(id=301, tenant_id=9, product_id=61, retailer_id="77001-1001", image_url=None)
+    elig = _eligibility_from(parent, variant, has_real_variants=True)
+    item = eligibility_to_readiness_item(
+        elig, parent=parent, variant=variant, has_real_variants=True,
+    )
+    assert item.status == "blocked"
+    assert item.reasons == ["missing_image_url"]
+    assert build_native_product_public_url("77001-1001")
 
 
 def test_out_of_stock_classified_warn_by_default():
