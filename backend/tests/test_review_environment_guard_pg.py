@@ -260,8 +260,9 @@ def test_lifespan_refuses_unmarked_database_and_creates_nothing(pg):
 
 # ── end to end: the real server (uvicorn main:app) ───────────────────────────
 #
-# These boot the production entrypoint the way start.sh does (uvicorn main:app),
-# with schedulers disabled and every outbound HTTP(S) proxy pointed at a closed
+# These boot the production ASGI app (start.sh runs ``uvicorn backend.main:app``
+# from /app after preflight_check.py; here the same module as ``main:app`` from
+# backend/) with schedulers disabled and every outbound HTTP(S) proxy pointed at a closed
 # loopback port, so nothing can leave the machine. Only loopback reaches the
 # throw-away PostgreSQL server.
 
@@ -347,7 +348,7 @@ def test_review_provisioning_premigration_then_boot_serves_with_the_complete_sch
     /alive answers, and every column the ORM models declare exists.
 
     The schema step is required and 0093 alone is not enough: on an EMPTY
-    database booting never reaches 0093 (``test_review_environment_fresh_boot_pg``,
+    database booting did not reach 0093 in any observed run (``test_review_environment_fresh_boot_pg``,
     the same on ``main``), and a database migrated only to 0093 boots but lacks
     23 model columns that later revisions add to existing tables."""
     from scripts.operators.bootstrap_migration_contract import (
