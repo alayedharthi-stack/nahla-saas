@@ -2,7 +2,7 @@
 
 Three branches each add one dormant revision next to the payments topology
 ``{0092, 0111, 0114, 0115}``: OTO connections ``0117`` and catalog channel
-retirements ``0118`` (both siblings of ``0112``), and payments readiness
+retirements ``0118`` (both further children of ``0112``), and payments readiness
 ``0119`` (the child of ``0115``, so it replaces ``0115`` as a head). The
 bootstrap contract enumerates every subset, so the checkout's real heads are
 accepted whichever of those branches are present and in whatever order they
@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if entry not in sys.path:
         sys.path.insert(0, entry)
@@ -113,7 +113,7 @@ def test_this_checkout_heads_are_the_payments_topology_plus_declared_siblings() 
         if rev is None:
             continue
         # A sibling that exists is a head of this checkout, and one that
-        # replaces a head is that head's only child.
+        # replaces a head revises it, so the replaced id is no longer a head.
         assert added in heads, added
         if replaced is not None:
             assert rev.down_revision == replaced, (added, rev.down_revision)
