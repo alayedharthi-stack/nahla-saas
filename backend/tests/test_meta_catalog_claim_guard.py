@@ -3,8 +3,9 @@
 A Commerce Manager catalog id carried by one tenant's WhatsApp connection must
 never be adopted by another tenant through the merchant PATCH, the admin PATCH
 or the admin-debug POST — and two tenants must not adopt the same id in two
-concurrent requests (PostgreSQL advisory lock per catalog id, verified on a real
-PostgreSQL when WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is set).
+concurrent requests (PostgreSQL advisory lock per catalog id, proven on real
+PostgreSQL in ``backend/tests/test_meta_catalog_claim_guard_pg.py``, a required
+PostgreSQL proof).
 
 Generic merchants only (متجر تجريبي عام / متجر آخر); no production ids.
 """
@@ -14,14 +15,12 @@ import asyncio
 import inspect
 import os
 import sys
-import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import JSON, create_engine, event, text
+from sqlalchemy import JSON, create_engine, event
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
@@ -187,103 +186,3 @@ def test_admin_debug_catalog_config_refuses_another_tenants_catalog():
     ))
     assert _conn(session, newcomer).meta_catalog_id == CATALOG_FRESH
     assert isinstance(out, dict)
-
-
-# ── real PostgreSQL: two tenants race for the same id ───────────────────────
-
-
-def _pg_url():
-    url = (os.getenv("WA_CATALOG_SYNC_PG_TEST_DATABASE_URL") or "").strip()
-    if not url.startswith(("postgresql://", "postgresql+psycopg2://")):
-        if (os.getenv("WA_CATALOG_SYNC_PG_REQUIRED") or "").strip() == "1":
-            pytest.fail("WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required")
-        pytest.skip("WA_CATALOG_SYNC_PG_TEST_DATABASE_URL not set; PostgreSQL concurrency case skipped")
-    return url
-
-
-@pytest.fixture
-def claim_pg():
-    from sqlalchemy.pool import NullPool  # noqa: PLC0415
-
-    url = _pg_url()
-    schema = f"claim_guard_itest_{os.getpid()}"
-    admin = create_engine(url, poolclass=NullPool, pool_pre_ping=True)
-    try:
-        with admin.connect() as c:
-            c.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"PostgreSQL unavailable: {exc}")
-    with admin.begin() as c:
-        c.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        c.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-    def engine():
-        return create_engine(url, poolclass=NullPool, connect_args={"options": f"-c search_path={schema}"})
-
-    e = engine()
-    Base.metadata.create_all(e, tables=[Tenant.__table__, WhatsAppConnection.__table__])
-    with e.begin() as c:
-        c.execute(text("INSERT INTO tenants (id, name, is_active, is_platform_tenant) VALUES (35, 'متجر تجريبي عام', true, false), (47, 'متجر آخر', true, false)"))
-        c.execute(text("INSERT INTO whatsapp_connections (tenant_id, status, provider) VALUES (35, 'connected', 'meta'), (47, 'connected', 'meta')"))
-    yield engine
-    with admin.begin() as c:
-        c.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-
-
-def test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently(claim_pg):
-    cid = "CAT-RACE-7003"
-    a_locked = threading.Event()
-    b_waiting = threading.Event()
-    outcome = {}
-
-    def tenant_a():
-        s = sessionmaker(bind=claim_pg())()
-        try:
-            guard_catalog_claim(s, 35, cid)          # takes the per-catalog lock
-            s.execute(text("UPDATE whatsapp_connections SET meta_catalog_id = :c WHERE tenant_id = 35"), {"c": cid})
-            a_locked.set()
-            b_waiting.wait(timeout=10)
-            time.sleep(0.6)                          # B is blocked on the lock during this window
-            s.commit()                               # releases the lock; B's check now sees A's row
-            outcome["a"] = "committed"
-        except Exception as exc:  # noqa: BLE001
-            s.rollback(); outcome["a"] = f"error:{exc}"
-        finally:
-            s.close()
-
-    def tenant_b():
-        s = sessionmaker(bind=claim_pg())()
-        a_locked.wait(timeout=10)
-        b_waiting.set()
-        t0 = time.monotonic()
-        try:
-            guard_catalog_claim(s, 47, cid)
-            s.execute(text("UPDATE whatsapp_connections SET meta_catalog_id = :c WHERE tenant_id = 47"), {"c": cid})
-            s.commit(); outcome["b"] = "committed"
-        except CatalogClaimError as exc:
-            s.rollback(); outcome["b"] = exc.code
-        finally:
-            outcome["b_waited"] = time.monotonic() - t0
-            s.close()
-
-    ta, tb = threading.Thread(target=tenant_a), threading.Thread(target=tenant_b)
-    ta.start(); tb.start(); ta.join(timeout=30); tb.join(timeout=30)
-
-    assert outcome["a"] == "committed"
-    assert outcome["b"] == ERROR_CATALOG_CLAIMED_BY_OTHER_TENANT
-    assert outcome["b_waited"] >= 0.4, outcome          # B really waited on A's lock, it did not race past the check
-    with claim_pg().connect() as c:
-        rows = c.execute(text("SELECT tenant_id FROM whatsapp_connections WHERE meta_catalog_id = :c ORDER BY tenant_id"), {"c": cid}).fetchall()
-    assert [r[0] for r in rows] == [35]
-
-
-def test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids(claim_pg):
-    s = sessionmaker(bind=claim_pg())()
-    guard_catalog_claim(s, 35, "")
-    guard_catalog_claim(s, 35, "CAT-X-1")
-    s.execute(text("UPDATE whatsapp_connections SET meta_catalog_id = 'CAT-X-1' WHERE tenant_id = 35"))
-    s.commit()
-    guard_catalog_claim(s, 47, "CAT-X-2")
-    with pytest.raises(CatalogClaimError):
-        guard_catalog_claim(s, 47, "CAT-X-1")
-    s.rollback(); s.close()

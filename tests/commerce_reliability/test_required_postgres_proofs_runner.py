@@ -214,6 +214,12 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # A customer's order history is counted by the resolver's own
                    # identity match, and a failed read cannot abort the turn.
                    "customer_order_history",
+                   # Two tenants racing for one catalog id: the advisory lock makes
+                   # the second wait and refuses it the id the first committed.
+                   "catalog_claim_guard_concurrency",
+                   # The read-only membership readout runs every statement for real
+                   # and records a missing retirements table instead of failing.
+                   "catalog_q5_membership_readout",
                    # The catalog channel-retirements migration adopts an existing
                    # table only when its definition matches; anything else fails closed.
                    "catalog_channel_retirements_migration"]
@@ -244,6 +250,8 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "campaign_marketing_continuation": ("proof", {"NAHLA_RELIABILITY_PG_ADMIN_DSN": None}),
         "promotion_scoped_read": ("proof", harness_env),
         "customer_order_history": ("proof", harness_env),
+        "catalog_claim_guard_concurrency": ("proof", harness_env),
+        "catalog_q5_membership_readout": ("proof", harness_env),
         "catalog_channel_retirements_migration": ("proof", harness_env),
     }
     for suite in manifest["suites"]:

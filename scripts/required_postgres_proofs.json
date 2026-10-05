@@ -821,6 +821,34 @@
       ]
     },
     {
+      "id": "catalog_claim_guard_concurrency",
+      "kind": "proof",
+      "module": "backend/tests/test_meta_catalog_claim_guard_pg.py",
+      "origin": "PR #1193 — cross-tenant catalog-claim guard on real PostgreSQL: with the per-catalog advisory lock a second tenant waits for the first and is then refused the catalog id the first committed (only the first tenant holds it); an empty id is a no-op and distinct ids are allowed while a held id is refused. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently",
+        "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids"
+      ]
+    },
+    {
+      "id": "catalog_q5_membership_readout",
+      "kind": "proof",
+      "module": "backend/tests/test_catalog_q5_membership_readout_pg.py",
+      "origin": "PR #1193 — read-only catalog membership readout (q5) on real PostgreSQL: every statement executes on the model schema in a read-only session and no token appears in the output; a missing catalog_channel_retirements table is recorded and skipped while every other statement still runs, and the read-only session does not re-create it. Throw-away database per test, dropped at teardown",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_catalog_q5_membership_readout_pg.py::test_postgres_every_statement_executes_on_the_model_schema_and_tokens_never_appear",
+        "backend/tests/test_catalog_q5_membership_readout_pg.py::test_postgres_missing_retirements_table_is_recorded_and_the_rest_still_runs"
+      ]
+    },
+    {
       "id": "catalog_channel_retirements_migration",
       "kind": "proof",
       "module": "backend/tests/test_catalog_channel_retirements_migration_pg.py",
