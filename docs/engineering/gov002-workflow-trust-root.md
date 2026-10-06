@@ -118,3 +118,11 @@ semantic runtime is `GOVERNANCE_CORE_CHANGE` plus the semantic finding.
 What a unit test cannot prove: GitHub still *invokes* that scanner after HEAD
 deletes the workflow or guts `constitution-compliance`. That property is the
 external GitHub configuration above.
+
+## Post-merge activation probe
+
+Harmless documentation-only change after #924 merged. Purpose: prove GitHub
+runs `.github/workflows/gov002-intelligence-non-interference.yml` from BASE
+via `pull_request_target` as `gov002-trusted-base-scanner`. No scanner,
+workflow, runtime, or exception-registry change.
+
