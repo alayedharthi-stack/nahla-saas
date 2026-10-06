@@ -41,6 +41,8 @@ from services.commerce_v2_phase_2_7b_environment import (  # noqa: E402
 from services.commerce_v2_phase_2_7b_faults import knowledge_fault  # noqa: E402
 from services.commerce_v2_phase_2_7b_knowledge_acceptance import (  # noqa: E402
     KNOWLEDGE_CONTRACT_VERSION_V2,
+    KNOWLEDGE_CONTRACT_VERSIONS,
+    KNOWLEDGE_CONTRACT_VERSIONS_WITH_BINDINGS,
     create_knowledge_acceptance_run,
     execute_knowledge_acceptance_run,
     knowledge_run_status,
@@ -119,7 +121,7 @@ def command_run(args: argparse.Namespace) -> int:
         # Prove every fixture the matrix needs resolves through the real
         # lookup before a single case is spent.
         _emit("P27B_FIXTURES", verify_acceptance_fixtures(db, tenant_id))
-        if matrix.contract_version == KNOWLEDGE_CONTRACT_VERSION_V2:
+        if matrix.contract_version in KNOWLEDGE_CONTRACT_VERSIONS_WITH_BINDINGS:
             _emit("P27B_BINDINGS", verify_case_bindings(db, tenant_id, matrix))
         alias = matrix.required_aliases[0]
         conversation_id = int(sorted(environment["conversations"].values())[0])
@@ -134,6 +136,10 @@ def command_run(args: argparse.Namespace) -> int:
                     "case_id": case.case_id,
                     "contract_version": matrix.contract_version,
                     "expected_tools": list(case.expected.get("expected_tools") or []),
+                    # The internal channel classifies a complete fallback as
+                    # expected only when the case itself says so; v3 scores
+                    # any other fallback as an unexpected runtime failure.
+                    "expected_outcome": str(case.expected.get("expected_outcome") or ""),
                 },
                 batch_id=f"p27b:{args.run_id}"[:64],
             )
@@ -249,12 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     create = sub.add_parser("create")
     create.add_argument("--commit", required=True)
-    create.add_argument("--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2)
+    create.add_argument(
+        "--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2, choices=KNOWLEDGE_CONTRACT_VERSIONS
+    )
     create.set_defaults(func=command_create)
 
     run = sub.add_parser("run")
     run.add_argument("--run-id", dest="run_id", required=True)
-    run.add_argument("--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2)
+    run.add_argument(
+        "--contract", default=KNOWLEDGE_CONTRACT_VERSION_V2, choices=KNOWLEDGE_CONTRACT_VERSIONS
+    )
     run.set_defaults(func=command_run)
 
     status = sub.add_parser("status")
