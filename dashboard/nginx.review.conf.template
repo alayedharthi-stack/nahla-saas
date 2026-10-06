@@ -1,0 +1,41 @@
+server {
+    listen       ${PORT};
+    root         /usr/share/nginx/html;
+    index        index.html;
+
+    # ── Embedded iframe support (CRITICAL for Salla/Zid) ────────────────────────
+    # Salla loads our app inside an iframe at https://s.salla.sa/embedded/...
+    # CSP frame-ancestors supersedes X-Frame-Options in modern browsers.
+    # We allow Salla, Zid, and our own origin only.
+    #
+    # IMPORTANT: DO NOT also send `X-Frame-Options` — it would block framing.
+    add_header Content-Security-Policy
+        "frame-ancestors 'self' https://*.salla.sa https://salla.sa https://*.salla.dev https://*.zid.sa https://zid.sa"
+        always;
+
+    # Railway / Cloudflare may inject X-Frame-Options — suppress it.
+    add_header X-Frame-Options "" always;
+
+    # ── Static assets — long cache ──────────────────────────────────────────────
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header Content-Security-Policy
+            "frame-ancestors 'self' https://*.salla.sa https://salla.sa https://*.salla.dev https://*.zid.sa https://zid.sa"
+            always;
+        add_header X-Frame-Options "" always;
+    }
+
+    # ── React SPA — all paths fall back to index.html ───────────────────────────
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+        add_header Content-Security-Policy
+            "frame-ancestors 'self' https://*.salla.sa https://salla.sa https://*.salla.dev https://*.zid.sa https://zid.sa"
+            always;
+        add_header X-Frame-Options "" always;
+    }
+}

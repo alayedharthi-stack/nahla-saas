@@ -1,0 +1,29 @@
+# Review-only dashboard image; existing production build files stay unchanged.
+FROM node:20-alpine AS builder
+WORKDIR /app
+
+# Vite embeds these values at build time. The existing review guard validates the API host.
+ARG VITE_API_BASE
+ARG VITE_API_URL
+ARG VITE_NAHLA_CATALOG_REVIEW_ENV=1
+ENV VITE_API_BASE=$VITE_API_BASE
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_NAHLA_CATALOG_REVIEW_ENV=$VITE_NAHLA_CATALOG_REVIEW_ENV
+COPY package.json ./
+RUN npm install
+COPY . .
+RUN test "$VITE_NAHLA_CATALOG_REVIEW_ENV" = "1" && npm run build
+
+FROM nginx:1.25-alpine AS runner
+ENV PORT=3000
+# Substitute only PORT; preserve nginx variables such as $uri.
+ENV NGINX_ENVSUBST_FILTER=^PORT$
+RUN rm -rf /usr/share/nginx/html/*
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.review.conf.template /etc/nginx/templates/default.conf.template
+# Validate a resolved config at build time. The image entrypoint resolves it again at runtime.
+RUN sed -i 's/\r//' /etc/nginx/templates/default.conf.template \
+    && envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf \
+    && nginx -t
+EXPOSE 3000
+CMD ["nginx", "-g", "daemon off;"]
