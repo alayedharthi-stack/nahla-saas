@@ -821,6 +821,21 @@ def test_a_text_only_turn_says_the_model_never_asked_for_either_shape():
     assert fields["choices_outcome"] == "not_requested" and fields["card_outcome"] == "not_requested"
 
 
+def test_a_list_selected_by_policy_without_a_model_selector_is_visible_in_the_turn_summary():
+    """The live browsing defect must be distinguishable from a text decision."""
+    report = _accepted(choices="not_requested", card="not_requested", shape="list",
+                       shape_reason="multiple_candidates_no_focus")
+    fields = report.as_log_fields()
+    assert fields["presentation_shape"] == "list"
+    assert fields["presentation_reason"] == "multiple_candidates_no_focus"
+    assert fields["choices_outcome"] == "not_requested" and report.choice_rows == 0
+
+
+def test_a_turn_without_an_accepted_reply_does_not_claim_a_presentation_decision():
+    report = _run_turn_boundary([("verification_failed", {"problems": ["invalid_reply"]})])
+    assert report.presentation_shape is None and report.presentation_reason is None
+
+
 def test_a_withheld_card_is_told_apart_from_a_card_never_asked_for():
     """The distinction the production summaries could not make."""
     from core.commerce_runtime import reply_card as rcard
