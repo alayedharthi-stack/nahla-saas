@@ -690,7 +690,9 @@ class CatalogConsentBinding:
     is_catalog_consent_binding: bool = True
 
     def token_for(self, catalog_id: str) -> str:
-        if str(catalog_id or "").strip() != self.meta_catalog_id:
+        """The consent token, only for exactly the approved (non-empty) catalog."""
+        bound = str(self.meta_catalog_id or "").strip()
+        if not bound or str(catalog_id or "").strip() != bound:
             raise CatalogConsentInactive("catalog_not_authorized")
         return self.access_token
 

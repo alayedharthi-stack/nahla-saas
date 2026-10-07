@@ -346,6 +346,119 @@ def test_detached_persisted_connection_is_unknown_governance_and_fails_closed(wo
     assert _select_graph_token(transient)["token"] == w.merchant_token
 
 
+@pytest.mark.parametrize("catalog_identity", [None, "", "   "])
+def test_catalog_less_whatsapp_connection_is_governed_by_a_stored_consent(world, catalog_identity):
+    """With a stored consent the consent is the tenant's catalog: a WhatsApp
+    connection that never had a catalog of its own gets no WhatsApp/platform
+    token and no WABA/phone call (central coverage rule)."""
+    from models import WhatsAppConnection as ServiceConnection
+    from services.meta_catalog_access import _consent_governed_connection, catalog_token_candidates
+    from services.meta_catalog_consent import consent_governs_catalog
+    from services.meta_catalog_import import _select_graph_token
+    from services.meta_catalog_linking import get_waba_catalog_link_status
+    from services.meta_commerce_settings import _resolve_connection as commerce_connection
+
+    w = world  # read_access_token and _fetch_waba_product_catalogs raise if touched
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    conn.meta_catalog_id = catalog_identity
+    w.session.commit()
+    assert consent_governs_catalog(w.session, w.tid, conn) is True
+    assert _consent_governed_connection(conn) is True
+    assert catalog_token_candidates(conn) == []
+    pick = _select_graph_token(conn)
+    assert pick["token"] is None and pick["token_source"] == "catalog_consent_governed"
+    assert get_waba_catalog_link_status(w.session, w.tid)["error"] == "catalog_consent_governed"
+    assert commerce_connection(w.session, w.tid)[1]["error"] == "catalog_consent_governed"
+    w.session.expunge(conn)  # detached: governance unknown, fail closed
+    assert _consent_governed_connection(conn) is True and catalog_token_candidates(conn) == []
+    assert not w.graph.calls and not w.probes
+
+
+@pytest.mark.parametrize("catalog_identity", [None, "", "   "])
+def test_catalog_less_whatsapp_connection_without_consent_keeps_legacy_tokens(world, monkeypatch, catalog_identity):
+    import services.meta_catalog_import as importer
+    from models import WhatsAppConnection as ServiceConnection
+    from services.meta_catalog_access import _consent_governed_connection, catalog_token_candidates
+    from services.meta_catalog_import import _select_graph_token
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token
+
+    w = world
+    w.session.query(MetaCatalogAuthorization).delete()
+    w.session.commit()
+    monkeypatch.setattr(importer, "read_access_token", read_access_token)
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    conn.meta_catalog_id = catalog_identity
+    w.session.commit()
+    assert _consent_governed_connection(conn) is False
+    assert _select_graph_token(conn)["token"] == w.merchant_token
+    assert [c["token"] for c in catalog_token_candidates(conn)] == [w.merchant_token, w.platform_token]
+
+
+def _selector_world(monkeypatch, bound):
+    import httpx
+
+    import services.meta_catalog_access as access
+    import services.meta_catalog_import as importer
+    from services.meta_catalog_consent import CatalogConsentBinding
+
+    def _raise(*_a, **_k):
+        raise AssertionError("WhatsApp token path touched for a consent binding")
+
+    monkeypatch.setattr(importer, "read_access_token", _raise)
+    monkeypatch.setattr(access, "WA_TOKEN", "EAAP" + secrets.token_hex(20))
+    calls = []
+
+    def _handler(request):
+        calls.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={"id": request.url.path.rsplit("/", 1)[-1], "name": "n", "product_count": 1,
+                                         "business": {"id": BUSINESS}})
+
+    token = "EAAC" + secrets.token_hex(20)
+    binding = CatalogConsentBinding(tenant_id=7, meta_catalog_id=bound, business_id=BUSINESS,
+                                    catalog_enabled=True, access_token=token)
+    return binding, token, calls, httpx.Client(transport=httpx.MockTransport(_handler))
+
+
+@pytest.mark.parametrize("bound, requested", [
+    (CATALOG, "880000000000999"),  # another catalog
+    ("", CATALOG),                 # empty bound asset
+    ("   ", CATALOG),
+])
+def test_shared_catalog_selector_refuses_any_catalog_but_the_bound_one(monkeypatch, bound, requested):
+    """select_catalog_graph_token must fence a consent binding to its approved
+    catalog before any token is handed out or any provider call is made."""
+    from services.meta_catalog_access import (
+        ERROR_CATALOG_NOT_AUTHORIZED,
+        catalog_token_candidates,
+        select_catalog_graph_token,
+    )
+    from services.meta_catalog_consent import CatalogConsentInactive
+
+    binding, token, calls, client = _selector_world(monkeypatch, bound)
+    out = select_catalog_graph_token(binding, requested, client=client)
+    assert out["error"] == ERROR_CATALOG_NOT_AUTHORIZED
+    assert out["token"] is None and out["catalog_readable"] is False and out["probes"] == []
+    assert token not in json.dumps(out)
+    assert calls == []
+    with pytest.raises(CatalogConsentInactive):
+        binding.token_for(requested)
+    if not bound.strip():
+        assert catalog_token_candidates(binding) == []
+        with pytest.raises(CatalogConsentInactive):
+            binding.token_for(bound)
+
+
+def test_shared_catalog_selector_serves_the_bound_catalog_with_the_consent_token_only(monkeypatch):
+    from services.meta_catalog_access import select_catalog_graph_token
+
+    binding, token, calls, client = _selector_world(monkeypatch, CATALOG)
+    out = select_catalog_graph_token(binding, CATALOG, client=client)
+    assert out["error"] is None and out["catalog_readable"] is True
+    assert out["token"] == token and out["token_source"] == "merchant_catalog_consent"
+    assert [path.rsplit("/", 1)[-1] for path, _auth in calls] == [CATALOG]
+    assert all(auth == f"Bearer {token}" for _path, auth in calls)
+
+
 def test_without_consent_the_existing_whatsapp_path_is_unchanged(world, monkeypatch):
     import services.meta_catalog_import as importer
     from models import WhatsAppConnection as ServiceConnection
