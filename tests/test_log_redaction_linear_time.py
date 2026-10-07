@@ -47,6 +47,20 @@ cases = {
     "target_bracket": "/[/" * n,
     "target_eq_query": "/=/" * n + "?code=" + code,
     "target_mixed_query": "/=/,/;/(/[/" * (n // 4) + "?sta%74e=" + code,
+    # Auth-scheme markers run first; they must stay linear too and must
+    # never be consumed ahead of their credential by a later value pass.
+    "bearer_run": "Bearer " * n,
+    "auth_header_run": "Authorization: " * n,
+    "encoded_bearer": "co%64e=Bearer " * (n // 4) + code,
+    "target_bearer": "/p?code=Bearer " * (n // 4) + code,
+    "url_bearer": "https://h.example/p?code=Bearer " + code,
+    "bearer_chain": "Bearer " * n + code,
+    "header_chain": "Authorization: " * n + code,
+    "cookie_chain": "Cookie: " * n + code,
+    "glued_header_chain": "Authorization:" * n + " " + code,
+    "mixed_marker_chain": "Bearer x=Authorization: Cookie: " * (n // 4) + code,
+    "marker_url_chain": "Bearer https://h.example/p?a;" * (n // 4) + " Bearer " + code,
+    "key_url_chain": "secret=https://h.example/p?a;" * (n // 4) + " code=" + code,
 }
 times = {}
 for name, text in cases.items():
@@ -59,7 +73,9 @@ for name, text in cases.items():
     _before_breadcrumb({"data": {"http.query": text}}, {})
     times[name] = time.perf_counter() - t
     if name in ("pct_run_eq", "pct_key_chain", "slash_pct_query", "secret_run", "enc_key_run", "spaces", "query",
-                "target_eq_query", "target_mixed_query"):
+                "target_eq_query", "target_mixed_query", "encoded_bearer", "target_bearer", "url_bearer",
+                "bearer_chain", "header_chain", "cookie_chain", "glued_header_chain", "mixed_marker_chain",
+                "marker_url_chain", "key_url_chain"):
         assert code not in out, name
 print(json.dumps(times))
 """

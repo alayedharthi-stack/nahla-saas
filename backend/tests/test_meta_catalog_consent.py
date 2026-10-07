@@ -1180,3 +1180,60 @@ def test_sentry_redacts_percent_encoded_keys_in_query_string_and_breadcrumbs(wor
     crumb = _before_breadcrumb({"type": "http", "data": {"http.query": raw}}, {})
     _no_secret_in(json.dumps(crumb), world)
     assert "tenant=7" in crumb["data"]["http.query"]
+
+
+# ── auth-scheme markers survive no earlier value pass ───────────────────────
+
+# Marker chains: same-marker recursion and mixed chains, where a
+# non-overlapping scan would take the inner marker as the outer credential.
+_AUTH_MARKER_CHAINS = (
+    "Bearer {v}", "Authorization: {v}", "Cookie: {v}", "Proxy-Authorization: {v}", "Set-Cookie: {v}",
+    "Bearer Bearer {v}", "Authorization: Authorization: {v}", "Cookie: Cookie: {v}",
+    "Authorization:Authorization: {v}", "Bearer x=Bearer {v}", "Bearer x=Authorization: {v}",
+    "Authorization: x=Bearer {v}", "Cookie: Bearer x=Cookie: {v}", "Authorization: Bearer Bearer {v}",
+    "Cookie: \"{v}\"", "Bearer Authorization= Cookie: \"{v}\"",
+    # A marker's value that is itself a sensitive key: the key pass still sees it.
+    "Cookie: secret=  {v}", "Authorization: x_token:  {v}",
+)
+# Contexts whose own value pass could otherwise consume the first marker.
+_AUTH_MARKER_CONTEXTS = (
+    "{c}", "co%64e={c}", "x%={c}", "a%zz={c}", "q=1&co%64e={c}", "sta%74e={c}", "code={c}",
+    "/p?code={c}", "/p?co%64e={c}", "https://h.example/p?code={c}", "https://h.example/p?state={c}",
+    "{\"code\": \"{c}\"}", "secret={c}&x=1",
+)
+
+
+def test_auth_marker_after_a_redacted_key_never_leaves_its_credential(world):
+    """A URL / request-target / encoded-key / plain-key pass must not consume
+    ``Bearer`` or ``Authorization:`` and leave the credential after it."""
+    from core.log_redaction import (SecretRedactingFilter, redact_raw_query, redact_secrets,
+                                    redacted_query_preview)
+    from core.observability_sentry import _before_breadcrumb, _before_send
+
+    shapes = [ctx.replace("{c}", chain) for ctx in _AUTH_MARKER_CONTEXTS for chain in _AUTH_MARKER_CHAINS]
+    assert len(shapes) == len(_AUTH_MARKER_CONTEXTS) * len(_AUTH_MARKER_CHAINS)
+    for shape in shapes:
+        value = secrets.token_urlsafe(24)
+        world.secrets.append(value)
+        text = shape.replace("{v}", value)
+        _no_secret_in(redact_secrets(text), world)
+        _no_secret_in(redacted_query_preview(text, limit=4096), world)
+        _no_secret_in(redact_secrets(redact_raw_query(text)), world)
+        record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                                   ("203.0.113.9:443", "GET", text, "1.1", 302), None)
+        assert SecretRedactingFilter().filter(record)
+        _no_secret_in(record.getMessage(), world)
+        plain = logging.LogRecord("httpx", logging.INFO, __file__, 1, "%s", (text,), None)
+        assert SecretRedactingFilter().filter(plain)
+        _no_secret_in(plain.getMessage(), world)
+        event = {
+            "request": {"url": f"https://{API_HOST}{CALLBACK_PATH}?{text}", "query_string": text},
+            "message": text, "logentry": {"message": text, "params": [text]},
+            "exception": {"values": [{"type": "ValueError", "value": text}]},
+            "extra": {"detail": text},
+            "breadcrumbs": {"values": [{"type": "http", "data": {"http.query": text, "url": text}},
+                                       {"category": "log", "message": text}]},
+        }
+        _no_secret_in(json.dumps(_before_send(event, {})), world)
+        crumb = _before_breadcrumb({"type": "http", "message": text, "data": {"http.query": text, "url": text}}, {})
+        _no_secret_in(json.dumps(crumb), world)

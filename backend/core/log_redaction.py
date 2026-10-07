@@ -97,11 +97,18 @@ def is_sensitive_key(key: Any) -> bool:
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-_BEARER = re.compile(r"(Bearer\s+)[^\s\"',;]+", re.IGNORECASE)
-_AUTH_HEADER = re.compile(
-    r"((?:Authorization|Proxy-Authorization|Cookie|Set-Cookie)\s*[:=]\s*)(?!Bearer\b)([^\s\"',;]+)",
-    re.IGNORECASE,
+# Auth-scheme markers. Each marker's credential is the token right after it
+# (``Bearer <cred>``; ``Authorization: <cred>`` unless that is itself a
+# ``Bearer`` marker), after an optional opening quote. Found with a zero-width
+# lookahead so every marker start in the unchanged text is seen, including
+# overlapping ones (``Proxy-Authorization`` / ``Authorization``). See
+# ``_auth_marker_spans``.
+_BEARER_MARKER = re.compile(r"(?=(Bearer\s+[\"']?))", re.IGNORECASE)
+_AUTH_HEADER_MARKER = re.compile(
+    r"(?=((?:Authorization|Set-Cookie|Cookie)\s*[:=]\s*[\"']?))", re.IGNORECASE,
 )
+_AUTH_VALUE = re.compile(r"[^\s\"',;]+")
+_BEARER_WORD = re.compile(r"Bearer\b", re.IGNORECASE)
 # ``key=value``, ``key: value``, ``"key": "value"`` fragments in free text (JSON,
 # query strings, bare request paths such as uvicorn's access log).
 # One flat key token (no alternation of unbounded runs), starting only at a
@@ -126,35 +133,83 @@ def _kv_key_is_sensitive(key: str) -> bool:
     return k.endswith("token") or k in _KV_EXACT_KEYS or any(f in k for f in _KV_KEY_FRAGMENTS)
 
 
-def _redact_kv(text: str) -> str:
-    """Redact the value of every sensitive ``key=value`` / ``key: value`` fragment.
+# A credential value that holds a URL extends over the whole URL (and any
+# value characters right after it): ``;`` and ``,`` inside a URL query do not
+# end it. The URL pass would otherwise normalize them away later.
+_VALUE_URL = re.compile(r"https?://", re.IGNORECASE)
+_VALUE_URL_BODY = re.compile(r"[^\s\"'<>]*")
+_VALUE_TAIL = re.compile(r"[^\s\"',;]*")
+
+
+def _extend_over_url(text: str, scan_start: int, end: int) -> int:
+    # The last URL in the token reaches furthest: an earlier one's body stops
+    # at the first ``<`` / ``>`` before it, or ends where the last one does.
+    url = None
+    for url in _VALUE_URL.finditer(text, scan_start, end):
+        pass
+    if url is None:
+        return end
+    url_end = _VALUE_URL_BODY.match(text, url.end()).end()
+    if url_end <= end:
+        return end
+    return _VALUE_TAIL.match(text, url_end).end()
+
+
+def _kv_spans(text: str) -> list:
+    """Value spans of every sensitive ``key=value`` / ``key: value`` fragment.
 
     A forward scan: each key token is matched once at a token boundary (flat
     character class, no alternation of unbounded runs), so the cost is linear
-    in the input. Only a sensitive key consumes its value; a non-sensitive key
-    consumes just itself and its separator, so it can never swallow a
-    following sensitive pair. The sensitivity rule is the former
+    in the input. Every key token is examined, including one inside another
+    key's value, so a value can never swallow a following sensitive pair.
+    The sensitivity rule is the former
     alternation's: a key ending with ``token``; containing a
     secret/password/api-key/authorization/cookie or encryption-key fragment;
     or exactly ``code``, ``state`` or ``appsecret_proof``.
     """
-    out = []
+    spans = []
     pos = 0
+    covered = 0  # end of the last value span
     while True:
         m = _KV_KEY.search(text, pos)
         if m is None:
-            break
-        if _kv_key_is_sensitive(m.group(1)):
+            return spans
+        # Keys inside a redacted value are still examined (``Cookie: secret=
+        # <cred>``); a value starting inside the last span ends no later than
+        # it, so it is not rescanned and the pass stays linear.
+        if m.end() >= covered and _kv_key_is_sensitive(m.group(1)):
             value = _KV_VALUE.match(text, m.end())
             if value is not None:
-                out.append(text[pos:m.end()])
-                out.append(REDACTED)
-                pos = value.end()
-                continue
-        out.append(text[pos:m.end()])
+                covered = _extend_over_url(text, m.start(), value.end())
+                spans.append((value.start(), covered))
         pos = m.end()
+
+
+def _replace_spans(text: str, spans: list) -> str:
+    """Replace the union of ``spans`` (found on the unchanged ``text``) with REDACTED."""
+    if not spans:
+        return text
+    merged = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    out = []
+    pos = 0
+    for start, end in merged:
+        out.append(text[pos:start])
+        out.append(REDACTED)
+        pos = end
     out.append(text[pos:])
     return "".join(out)
+
+
+def _redact_kv(text: str) -> str:
+    """Redact the value of every sensitive ``key=value`` / ``key: value`` fragment."""
+    return _replace_spans(text, _kv_spans(text))
 
 
 # Meta Graph user / page / system-user tokens start with ``EAA``.
@@ -163,6 +218,57 @@ _META_TOKEN = re.compile(r"\bEAA[A-Za-z0-9]{20,}")
 # appears, e.g. as the value of a local named ``key``. Over-matching another
 # 32-byte base64 value only redacts more; it never reveals anything.
 _FERNET_KEY = re.compile(r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{43}=(?![A-Za-z0-9_\-=])")
+
+
+def _auth_value_end(text: str, value_start: int) -> int:
+    """End of the credential token at ``value_start`` (``value_start`` if none).
+
+    A token holding a URL extends over the whole URL (and any token
+    characters right after it): ``;`` and ``,`` inside a URL query do not end
+    the credential.
+    """
+    value = _AUTH_VALUE.match(text, value_start)
+    if value is None:
+        return value_start
+    return _extend_over_url(text, value_start, value.end())
+
+
+def _auth_marker_spans(text: str) -> list:
+    """``Bearer <credential>`` and ``Authorization: <credential>`` style values.
+
+    Every marker start in the unchanged text redacts the token after it, even
+    when that marker sits inside another marker's token (``Bearer Bearer
+    <cred>``, ``Bearer x=Authorization: <cred>``, ``Cookie: Cookie: <cred>``):
+    a non-overlapping substitution would consume the inner marker as the outer
+    credential and leave ``<cred>``. Markers are visited in text order; a
+    marker whose value would start inside an already-redacted token is covered
+    by it (its value ends no later), so every character is scanned a bounded
+    number of times and the pass is linear.
+    """
+    lowered = text.lower()
+    if "bearer" not in lowered and "authorization" not in lowered and "cookie" not in lowered:
+        return []
+    markers = [(m.start(), m.end(1), False) for m in _BEARER_MARKER.finditer(text)]
+    markers += [(m.start(), m.end(1), True) for m in _AUTH_HEADER_MARKER.finditer(text)]
+    markers.sort()
+    spans = []
+    pos = 0  # end of the last redacted token (or 0)
+    for _start, value_start, is_header in markers:
+        if value_start < pos:
+            continue  # inside a redacted token, which already covers this value
+        if is_header and _BEARER_WORD.match(text, value_start):
+            continue  # ``Authorization: Bearer <cred>`` — the Bearer marker's job
+        end = _auth_value_end(text, value_start)
+        if end == value_start:
+            continue
+        spans.append((value_start, end))
+        pos = end
+    return spans
+
+
+def _redact_markers_and_keys(text: str) -> str:
+    """Auth-marker and plain-key values, found on the unchanged text, replaced as one union."""
+    return _replace_spans(text, _auth_marker_spans(text) + _kv_spans(text))
 
 
 def _redact_query(query: str) -> str:
@@ -201,6 +307,10 @@ def redact_raw_query(query: str) -> str:
     """
     if not query:
         return query
+    # Auth markers and plain keys first, as in ``redact_secrets``: replacing a
+    # sensitive pair up to ``&`` must not consume a ``Bearer`` marker or key
+    # whose credential runs past it.
+    query = _redact_markers_and_keys(query)
     pairs = []
     for part in query.split("&"):
         key, sep, _value = part.partition("=")
@@ -273,8 +383,10 @@ def _redact_bare_targets(text: str) -> str:
 # quantifiers) and a start only at a token boundary, so a scan is linear in
 # the input length even for adversarial ``%ab%ab…`` runs.
 _ENCODED_KEY_CHARS = "A-Za-z0-9_.\\-+%"
-_ENCODED_KEY = re.compile(rf"(?<![{_ENCODED_KEY_CHARS}])([{_ENCODED_KEY_CHARS}]+)=")
-_ENCODED_VALUE = re.compile(r"[^\s\"'&,;]*")
+_ENCODED_KEY = re.compile(rf"(?<![{_ENCODED_KEY_CHARS}])([{_ENCODED_KEY_CHARS}]+)=[\"']?")
+# Same value rule as ``_KV_VALUE``: an auth-scheme word is left for the
+# header passes instead of being consumed ahead of its credential.
+_ENCODED_VALUE = re.compile(r"(?!(?:Bearer|Basic|Digest)\b)[^\s\"'&,;]+", re.IGNORECASE)
 _MALFORMED_PCT = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
@@ -300,10 +412,11 @@ def _redact_encoded_kv(text: str) -> str:
             break
         if _encoded_key_redacts(m.group(1)):
             value = _ENCODED_VALUE.match(text, m.end())
-            out.append(text[pos:m.end()])
-            out.append(REDACTED)
-            pos = value.end() if value is not None else m.end()
-            continue
+            if value is not None:
+                out.append(text[pos:m.end()])
+                out.append(REDACTED)
+                pos = value.end()
+                continue
         out.append(text[pos:m.end()])
         pos = m.end()
     out.append(text[pos:])
@@ -318,12 +431,19 @@ def redact_secrets(text: Any) -> str:
         out = str(text)
         if not out:
             return out
+        # Auth-scheme markers and plain keys first, both found on the
+        # unchanged text and replaced as one union of spans: a pass that
+        # rewrote the text earlier (URL, request-target, encoded-key, or one
+        # of these two) could consume a ``Bearer`` / ``Authorization:``
+        # marker or a ``secret=`` key and leave the credential after it.
+        # The URL, request-target and encoded-key passes then only redact more.
+        out = _redact_markers_and_keys(out)
         out = _redact_urls(out)
+        # URL normalization can turn ``?code#…`` into ``?code=…``; the plain
+        # key pass runs again over the normalized text.
+        out = _redact_kv(out)
         out = _redact_bare_targets(out)
         out = _redact_encoded_kv(out)
-        out = _BEARER.sub(r"\1" + REDACTED, out)
-        out = _AUTH_HEADER.sub(r"\1" + REDACTED, out)
-        out = _redact_kv(out)
         out = _META_TOKEN.sub(REDACTED, out)
         out = _FERNET_KEY.sub(REDACTED, out)
         return out
