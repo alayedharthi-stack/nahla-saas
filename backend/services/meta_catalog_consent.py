@@ -441,8 +441,12 @@ async def verify_access(
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
-_TABLE_SEEN: Dict[Tuple[int, str], float] = {}
+# (present, monotonic time of the successful inspection) per engine. Both
+# answers expire, so a schema change (0120 applied, or downgraded under a
+# running process) is noticed without a restart.
+_TABLE_SEEN: Dict[Tuple[int, str], Tuple[bool, float]] = {}
 _NEGATIVE_TTL = 60.0
+_POSITIVE_TTL = 300.0
 
 
 SCHEMA_PRESENT = "present"
@@ -460,8 +464,8 @@ def authorization_schema_state(db: Any) -> str:
     * A caller that is not a SQLAlchemy session (a lightweight test double, a
       non-DB caller) has no consent schema: ``absent``.
     * A real session/engine whose inspection succeeds: ``present`` or
-      ``absent`` (absent is the pre-0120 legacy state). Present is cached per
-      engine; absent for a short while.
+      ``absent`` (absent is the pre-0120 legacy state). Both are cached per
+      engine for a bounded time (present longer than absent).
     * A real session/engine whose bind or inspection *fails*: ``unknown`` —
       never cached and never read as absence, so callers fail closed.
     """
@@ -479,17 +483,17 @@ def authorization_schema_state(db: Any) -> str:
     engine = getattr(bind, "engine", bind)
     key = (id(engine), str(getattr(engine, "url", "")))
     seen = _TABLE_SEEN.get(key)
-    if seen == float("inf"):
-        return SCHEMA_PRESENT
-    if seen is not None and time.monotonic() - seen < _NEGATIVE_TTL:
-        return SCHEMA_ABSENT
+    if seen is not None:
+        cached_present, at = seen
+        if time.monotonic() - at < (_POSITIVE_TTL if cached_present else _NEGATIVE_TTL):
+            return SCHEMA_PRESENT if cached_present else SCHEMA_ABSENT
     try:
         present = TABLE_NAME in inspect(bind).get_table_names()
     except Exception as exc:  # noqa: BLE001
         logger.warning("[META_CATALOG_CONSENT] schema inspect failed kind=%s — treated as unknown",
                        type(exc).__name__)
         return SCHEMA_UNKNOWN
-    _TABLE_SEEN[key] = float("inf") if present else time.monotonic()
+    _TABLE_SEEN[key] = (present, time.monotonic())
     return SCHEMA_PRESENT if present else SCHEMA_ABSENT
 
 
@@ -728,7 +732,9 @@ def consent_governs_catalog(db: Any, tenant_id: int, conn: Any) -> bool:
     Same coverage rule as ``load_catalog_consent_binding``; used to keep the
     catalog-only path free of WhatsApp/WABA probes even when the consent is
     currently unusable. An unknown schema state counts as governed (fail
-    closed).
+    closed). The row's status is deliberately ignored: disabling the feature
+    or removing the approval never restores the WhatsApp fallback; recovery
+    is a separate explicit operator action (catalog review runbook §6.1).
     """
     try:
         row = _authorization_row(db, tenant_id)

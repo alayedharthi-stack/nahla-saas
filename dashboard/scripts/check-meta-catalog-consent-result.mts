@@ -66,6 +66,25 @@ assert('card derives the banner from resolveConsentBanner', card.includes('resol
 assert('card never trusts the fragment for success', !/result\s*===\s*'connected'/.test(card))
 assert('card accepts only Meta dialog URLs', card.includes("META_DIALOG_ORIGIN = 'https://www.facebook.com'"))
 
+// Result banners never claim storage state they cannot prove: a storage or
+// generic failure can follow a committed row or a lost commit acknowledgment,
+// and an earlier authorization may still exist. Those codes say the save
+// could not be confirmed and point to the fresh status instead.
+for (const [lang, banned, refresh] of [
+  ['en', 'Nothing was stored', 'Refresh the status'],
+  ['ar', 'لم يُحفظ أي شيء', 'حدّث الحالة'],
+] as const) {
+  const src = readFileSync(new URL(`../src/i18n/${lang}.ts`, import.meta.url), 'utf8')
+  const start = src.indexOf('    metaConsent: {')
+  const block = src.slice(start, src.indexOf('    whatsappSync: {', start))
+  assert(`${lang}: metaConsent block found`, start >= 0 && block.includes('results: {'))
+  assert(`${lang}: no unproven "nothing stored" claim`, !block.includes(banned))
+  for (const key of ['storage_unavailable', 'persist_unverified', 'error']) {
+    const line = block.split('\n').find((l) => l.trimStart().startsWith(`${key}:`)) ?? ''
+    assert(`${lang}: ${key} points to a status refresh`, line.includes(refresh), line.trim())
+  }
+}
+
 if (failed) {
   console.error(`\n${failed} check(s) failed`)
   process.exit(1)

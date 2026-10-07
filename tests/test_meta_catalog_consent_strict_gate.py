@@ -18,7 +18,7 @@ from scripts.check_junit_clean import evaluate_junit_report
 
 _REPO = Path(__file__).resolve().parents[1]
 MODULE = "backend/tests/test_meta_catalog_consent.py"
-MIN_CASES = 100
+MIN_CASES = 111  # the exact current count: removing a case must be deliberate
 
 
 def _env() -> dict:

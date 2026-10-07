@@ -1237,3 +1237,87 @@ def test_auth_marker_after_a_redacted_key_never_leaves_its_credential(world):
         _no_secret_in(json.dumps(_before_send(event, {})), world)
         crumb = _before_breadcrumb({"type": "http", "message": text, "data": {"http.query": text, "url": text}}, {})
         _no_secret_in(json.dumps(crumb), world)
+
+
+# ── previously surviving mutants (N4) ────────────────────────────────────────
+
+def test_persist_read_back_mismatch_is_unverified_never_connected(world, monkeypatch):
+    """The committed row must read back as exactly the verified grant before
+    the callback may report success (a skipped read-back would say connected)."""
+    monkeypatch.setattr(consent, "_decrypt", lambda _stored: "read-back-differs")
+    state = _start(world)
+    assert _result(_callback(world, code=_code(world), state=state)[1]) == "persist_unverified"
+
+
+@pytest.mark.parametrize("dedicated", ["missing", "invalid"])
+def test_encrypt_refuses_any_key_but_the_dedicated_one(world, monkeypatch, dedicated):
+    """``wa_token_crypto`` falls back to TOTP_ENC_KEY / a JWT-derived key in
+    dev; the consent token is only ever encrypted with WA_TOKEN_ENC_KEY."""
+    if dedicated == "missing":
+        monkeypatch.delenv("WA_TOKEN_ENC_KEY", raising=False)
+    else:
+        monkeypatch.setenv("WA_TOKEN_ENC_KEY", "not-a-fernet-key")
+    monkeypatch.setenv("TOTP_ENC_KEY", Fernet.generate_key().decode())
+    with pytest.raises(consent.ConsentError) as exc:
+        consent._encrypt("EAA" + secrets.token_hex(24))
+    assert exc.value.code == consent.C_ENCRYPTION_UNAVAILABLE
+
+
+def test_consent_nonce_is_stored_under_its_own_purpose(world):
+    nonce = secrets.token_urlsafe(16)
+    with world.factory() as s:
+        nonce_mod.persist_catalog_consent_nonce(
+            s, nonce=nonce, tenant_id=TENANT, redirect_uri=REDIRECT, catalog_id=CATALOG,
+            business_id=BUSINESS, expires_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+        s.commit()
+        modes = {row.connection_mode for row in s.query(WhatsAppOAuthNonce).all()}
+    assert modes == {nonce_mod.CATALOG_CONSENT_NONCE_PURPOSE} == {"meta_catalog_consent"}
+    assert not modes & nonce_mod.ALLOWED_CONNECTION_MODES
+
+
+def test_dashboard_return_url_refuses_production_hosts_on_its_own():
+    """Independent of the review-environment guard: a production dashboard is
+    never a consent return target."""
+    from core.meta_catalog_consent_config import _PRODUCTION_HOSTS, dashboard_return_url
+
+    assert _PRODUCTION_HOSTS
+    for host in sorted(_PRODUCTION_HOSTS):
+        assert dashboard_return_url({"DASHBOARD_URL": f"https://{host}"}) is None
+    assert dashboard_return_url({"DASHBOARD_URL": "https://review.example.org"}) == "https://review.example.org/catalog"
+
+
+def test_consent_governs_only_its_own_catalog(world):
+    """A stored consent governs the WhatsApp connection on the same catalog
+    (or with none); another catalog's WhatsApp path is untouched."""
+    now = datetime.now(timezone.utc)
+    with world.factory() as s:
+        s.add(MetaCatalogAuthorization(
+            tenant_id=TENANT, catalog_id=CATALOG, business_id=BUSINESS, meta_app_id=APP_ID, meta_user_id=USER_ID,
+            access_token_enc="enc1:placeholder", granted_scopes=["catalog_management", "business_management"],
+            status="active", verified_at=now, created_at=now, updated_at=now))
+        s.commit()
+        consent._TABLE_SEEN.clear()
+        same = WhatsAppConnection(tenant_id=TENANT, meta_catalog_id=CATALOG)
+        other = WhatsAppConnection(tenant_id=TENANT, meta_catalog_id=OTHER_CATALOG)
+        assert consent.consent_governs_catalog(s, TENANT, same) is True
+        assert consent.consent_governs_catalog(s, TENANT, None) is True
+        assert consent.consent_governs_catalog(s, TENANT, other) is False
+        assert consent.consent_governs_catalog(s, OTHER_TENANT, same) is False
+
+
+def test_cached_schema_presence_expires_after_a_downgrade(world, monkeypatch):
+    """A positive schema answer is cached for a bounded time only: once the
+    table is gone (0120 downgraded under a running process) the next
+    inspection reports it absent instead of querying a missing table forever."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(consent.time, "monotonic", lambda: clock["t"])
+    consent._TABLE_SEEN.clear()
+    with world.factory() as s:
+        assert consent.authorization_schema_state(s) == consent.SCHEMA_PRESENT
+    MetaCatalogAuthorization.__table__.drop(world.engine)
+    clock["t"] += consent._POSITIVE_TTL - 1
+    with world.factory() as s:
+        assert consent.authorization_schema_state(s) == consent.SCHEMA_PRESENT  # still within the window
+    clock["t"] += 2
+    with world.factory() as s:
+        assert consent.authorization_schema_state(s) == consent.SCHEMA_ABSENT
