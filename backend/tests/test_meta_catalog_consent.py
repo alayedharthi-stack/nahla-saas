@@ -1315,9 +1315,246 @@ def test_cached_schema_presence_expires_after_a_downgrade(world, monkeypatch):
     with world.factory() as s:
         assert consent.authorization_schema_state(s) == consent.SCHEMA_PRESENT
     MetaCatalogAuthorization.__table__.drop(world.engine)
-    clock["t"] += consent._POSITIVE_TTL - 1
+    clock["t"] += 299  # a fixed bound: presence is cached for at most five minutes
     with world.factory() as s:
         assert consent.authorization_schema_state(s) == consent.SCHEMA_PRESENT  # still within the window
     clock["t"] += 2
     with world.factory() as s:
         assert consent.authorization_schema_state(s) == consent.SCHEMA_ABSENT
+
+
+# ── further mutation gaps (final review) ─────────────────────────────────────
+
+def _forged_state(**overrides) -> str:
+    """A correctly signed consent state whose payload differs from sign_state's."""
+    iat = int(time.time())
+    payload = {"v": consent.STATE_VERSION, "p": consent.PURPOSE, "t": TENANT, "n": secrets.token_urlsafe(16),
+               "iat": iat, "exp": iat + consent.STATE_TTL_SECONDS, "ru": REDIRECT, "c": CATALOG, "b": BUSINESS,
+               "a": APP_ID}
+    payload.update(overrides)
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return f"{consent._b64(body)}.{consent._b64(consent._state_mac(body))}"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"p": "embedded"},                                             # another purpose under the same key
+    {"exp": int(time.time()) + 10 * consent.STATE_TTL_SECONDS},    # lifetime other than the fixed TTL
+    {"c": ""}, {"b": ""}, {"a": ""}, {"ru": ""}, {"n": ""},        # a missing binding field
+])
+def test_signed_state_with_wrong_purpose_lifetime_or_missing_binding_is_refused(world, overrides):
+    assert consent.verify_state(_forged_state()).tenant_id == TENANT  # the forge itself is valid
+    with pytest.raises(consent.ConsentError) as exc:
+        consent.verify_state(_forged_state(**overrides))
+    assert exc.value.code == consent.C_INVALID_STATE
+
+
+def test_encrypt_refuses_output_that_is_not_an_enc1_round_trip(world, monkeypatch):
+    import core.wa_token_crypto as crypto
+
+    monkeypatch.setattr(crypto, "encrypt_access_token", lambda plain: plain)  # would store plaintext
+    with pytest.raises(consent.ConsentError) as exc:
+        consent._encrypt("EAA" + secrets.token_hex(24))
+    assert exc.value.code == consent.C_ENCRYPTION_UNAVAILABLE
+
+
+def test_decrypt_never_returns_a_value_that_was_not_stored_encrypted(world):
+    plain = "EAA" + secrets.token_hex(24)
+    assert consent._decrypt(plain) is None
+    assert consent._decrypt(consent._encrypt(plain)) == plain
+
+
+def test_non_active_row_status_is_inactive_before_anything_else(world):
+    class _Row:
+        status = "revoked"
+
+    assert consent._row_inactive_reason(_Row(), datetime.now(timezone.utc)) == "authorization_inactive"
+
+
+def test_callback_for_a_deleted_tenant_reports_tenant_missing(world):
+    state = _start(world)
+    with world.factory() as s:
+        s.query(Tenant).filter(Tenant.id == TENANT).delete()
+        s.commit()
+    assert _result(_callback(world, code=_code(world), state=state)[1]) == "tenant_missing"
+    assert _rows(world) == []
+
+
+def test_finish_never_reflects_an_unknown_code():
+    location = router_mod._finish(RETURN, "<script>x</script>").headers["location"]
+    assert location == RETURN + "#meta_catalog_consent=error"
+
+
+@pytest.mark.parametrize("url", [
+    "https://review.example.org:8443/merchant/catalog/meta-consent/callback",
+    "https://user:pw@review.example.org/merchant/catalog/meta-consent/callback",
+    "https://user@review.example.org/merchant/catalog/meta-consent/callback",
+])
+def test_callback_uri_with_a_port_or_credentials_is_refused(url):
+    from core.meta_catalog_consent_config import canonical_redirect_uri, dashboard_return_url
+
+    assert canonical_redirect_uri({"META_CATALOG_CONSENT_REDIRECT_URI": url}) is None
+    origin = url.split("/merchant/")[0]
+    assert dashboard_return_url({"DASHBOARD_URL": origin}) is None
+
+
+def _consent_nonce(world, *, expires_in: timedelta) -> str:
+    nonce = secrets.token_urlsafe(16)
+    with world.factory() as s:
+        nonce_mod.persist_catalog_consent_nonce(
+            s, nonce=nonce, tenant_id=TENANT, redirect_uri=REDIRECT, catalog_id=CATALOG,
+            business_id=BUSINESS, expires_at=datetime.now(timezone.utc) + expires_in)
+        s.commit()
+    return nonce
+
+
+def test_consent_nonce_consume_requires_its_purpose_and_an_unexpired_row(world):
+    kwargs = {"tenant_id": TENANT, "redirect_uri": REDIRECT, "catalog_id": CATALOG, "business_id": BUSINESS}
+    relabelled = _consent_nonce(world, expires_in=timedelta(minutes=5))
+    with world.factory() as s:
+        s.query(WhatsAppOAuthNonce).update({WhatsAppOAuthNonce.connection_mode: "embedded"})
+        s.commit()
+    with pytest.raises(nonce_mod.NonceRejected):
+        nonce_mod.consume_catalog_consent_nonce(nonce=relabelled, **kwargs)
+    expired = _consent_nonce(world, expires_in=timedelta(minutes=-1))
+    with pytest.raises(nonce_mod.NonceRejected):
+        nonce_mod.consume_catalog_consent_nonce(nonce=expired, **kwargs)
+
+
+def test_catalog_binding_fingerprint_is_domain_separated_from_the_redirect_fingerprint(world):
+    joined = "\n".join([REDIRECT, CATALOG, BUSINESS])
+    assert nonce_mod.catalog_consent_binding_fingerprint(REDIRECT, CATALOG, BUSINESS) != \
+        nonce_mod.fingerprint_redirect_uri(joined)
+
+
+def test_push_with_a_binding_probes_readability_with_the_consent_token(world, monkeypatch):
+    from services import meta_catalog_push as push
+
+    token = "EAAC" + secrets.token_hex(20)
+    binding = consent.CatalogConsentBinding(tenant_id=TENANT, meta_catalog_id=CATALOG, business_id=BUSINESS,
+                                            catalog_enabled=True, access_token=token)
+    seen = []
+
+    def _probe(tok, catalog_id, client=None):
+        seen.append((tok, catalog_id))
+        return {"ok": False, "error": "meta_http_error"}
+
+    monkeypatch.setattr(push, "probe_catalog_readable", _probe)
+    with pytest.raises(push.MetaCatalogPushError) as exc:
+        push._resolve_catalog_and_token(binding, require_catalog_readable=True)
+    assert exc.value.code == "catalog_permission_denied" and seen == [(token, CATALOG)]
+    assert push._resolve_catalog_and_token(binding, require_catalog_readable=False) == (CATALOG, token)
+    assert len(seen) == 1
+
+
+def _migration_0120():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "database/migrations/versions/0120_meta_catalog_authorizations.py"
+    spec = importlib.util.spec_from_file_location("migration_0120_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _InspectorWithExtras:
+    """A real inspector plus one injected drift (check constraint or partial unique index)."""
+
+    def __init__(self, real, *, checks=(), extra_indexes=()):
+        self._real, self._checks, self._extra = real, list(checks), list(extra_indexes)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def get_check_constraints(self, table):
+        return list(self._real.get_check_constraints(table)) + self._checks
+
+    def get_indexes(self, table):
+        return list(self._real.get_indexes(table)) + self._extra
+
+
+def test_0120_adoption_refuses_a_check_constraint_or_partial_unique_index(world):
+    """Offline complement to the PG drift proofs: adoption of a pre-existing
+    table is refused when it carries constraints this revision never creates."""
+    from sqlalchemy import inspect as sa_inspect
+
+    migration = _migration_0120()
+    real = sa_inspect(world.engine)
+    baseline = set(migration.existing_table_mismatches(real))
+    with_check = set(migration.existing_table_mismatches(
+        _InspectorWithExtras(real, checks=[{"name": "ck_extra", "sqltext": "status <> ''"}])))
+    assert with_check - baseline == {"unexpected check constraint"}
+    partial = {"name": "ux_partial", "column_names": ["business_id"], "unique": True,
+               "dialect_options": {"postgresql_where": "status = 'active'"}}
+    with_partial = set(migration.existing_table_mismatches(_InspectorWithExtras(real, extra_indexes=[partial])))
+    assert "partial unique index present" in with_partial - baseline
+
+
+@pytest.mark.parametrize("shape", [
+    "Bearer https://h.example/p?a;{v}",         # a credential holding a URL extends over the whole URL
+    "secret=https://h.example/p?a;{v}",
+    ")https://h.example/p?code#{v}",            # URL normalization exposes a key; the key pass runs again
+    "https://h.example/p?sta%74etoken {v}",
+])
+def test_redaction_keeps_every_base_redaction(world, shape):
+    """Shapes the pre-PR redactor removed: the reordered pipeline must too."""
+    from core.log_redaction import redact_secrets
+
+    value = secrets.token_urlsafe(18)
+    world.secrets.append(value)
+    _no_secret_in(redact_secrets(shape.replace("{v}", value)), world)
+
+
+def test_raw_query_redacts_a_bearer_credential_that_runs_past_an_ampersand(world):
+    """The marker pass runs before the per-pair split, so a sensitive pair
+    replaced up to ``&`` never leaves the rest of a Bearer credential."""
+    from core.log_redaction import redact_raw_query
+
+    first, rest = secrets.token_urlsafe(12), secrets.token_urlsafe(12)
+    world.secrets += [first, rest]
+    _no_secret_in(redact_raw_query(f"code=Bearer {first}&{rest}"), world)
+
+
+@pytest.mark.parametrize("boundary", ['"', "'", "(", "[", "=", ",", ";", " ", ""])
+def test_bare_target_after_any_boundary_fails_closed_on_an_undecodable_query(world, boundary):
+    """A request target quoted or bracketed in a log line is still a target:
+    an undecodable query key redacts the whole query."""
+    from core.log_redaction import redact_secrets
+
+    value = secrets.token_urlsafe(12).replace("-", "x").replace("_", "y")
+    world.secrets.append(value)
+    _no_secret_in(redact_secrets(f"{boundary}/p?{value}%ff%fe=1"), world)
+
+
+def test_raw_preview_redacts_before_truncating_unkeyed_credentials(world):
+    """Truncating first would cut a Fernet key or Meta token below its
+    pattern length and leak the prefix."""
+    from core.log_redaction import redacted_query_preview
+
+    fernet = Fernet.generate_key().decode()
+    meta = "EAA" + secrets.token_hex(24)
+    world.secrets += [fernet[:16], meta[:18]]
+    _no_secret_in(redacted_query_preview(f"k={secrets.token_hex(2)}&x {fernet}", limit=30), world)
+    _no_secret_in(redacted_query_preview(f"x {meta}", limit=22), world)
+
+
+def test_header_credential_containing_an_ampersand_is_redacted_whole(world):
+    from core.log_redaction import redact_secrets
+
+    first, rest = secrets.token_urlsafe(12), secrets.token_urlsafe(12)
+    world.secrets += [first, rest]
+    for header in ("Authorization: ", "Proxy-Authorization: ", "Cookie: ", "Set-Cookie: "):
+        _no_secret_in(redact_secrets(f"{header}{first}&{rest}"), world)
+
+
+def test_sentry_scrubs_thread_stack_frames_too(world):
+    """Thread stacktraces carry the same frame variables as exceptions."""
+    from core.observability_sentry import _before_send
+
+    secret_local, token_local = secrets.token_urlsafe(20), "EAA" + secrets.token_hex(24)
+    world.secrets += [secret_local, token_local]
+    event = {"threads": {"values": [{"stacktrace": {"frames": [
+        {"module": "services.meta_catalog_consent", "function": "exchange_code", "vars": {"code": secret_local}},
+        {"module": "services.catalog_misc", "function": "f", "vars": {"access_token": token_local, "n": 3}},
+    ]}}]}}
+    out = _before_send(event, {})
+    _no_secret_in(json.dumps(out), world)
