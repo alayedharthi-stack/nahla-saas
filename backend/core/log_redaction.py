@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, Iterable, Mapping, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 REDACTED = "REDACTED"
 REDACTED_RECORD = "[REDACTED_LOG_RECORD]"
@@ -74,7 +74,10 @@ _EXACT_SENSITIVE_KEYS = frozenset({
 # Any key *containing* one of these fragments is treated as a secret
 # (``x-api-key``, ``app_secret``, ``proxy-authorization`` …).
 _SENSITIVE_KEY_FRAGMENTS = ("secret", "password", "passwd", "api_key", "apikey", "api-key",
-                            "authorization", "cookie")
+                            "authorization", "cookie",
+                            # Encryption keys (``WA_TOKEN_ENC_KEY``, ``TOTP_ENC_KEY``,
+                            # ``wa_key``-style locals are caught by value below).
+                            "enc_key", "encryption_key", "fernet_key", "signing_key", "private_key")
 # ``token`` is a secret only when it is the whole key or its last word
 # (``fb_exchange_token``, ``hub.verify_token``, ``input_token``): usage
 # counters (``input_tokens``) and status fields (``token_status``,
@@ -105,12 +108,17 @@ _KV = re.compile(
     r"((?<![A-Za-z0-9_.\-])"
     r"(?:[A-Za-z0-9_.\-]*token"
     r"|[A-Za-z0-9_.\-]*(?:secret|password|passwd|api[_\-]?key|authorization|cookie)[A-Za-z0-9_.\-]*"
+    r"|[A-Za-z0-9_.\-]*(?:enc_key|encryption_key|fernet_key|signing_key|private_key)[A-Za-z0-9_.\-]*"
     r"|code|state|appsecret_proof)"
     r"[\"']?\s*[=:]\s*[\"']?)(?!(?:Bearer|Basic|Digest)\b)([^\s\"'&,;]+)",
     re.IGNORECASE,
 )
 # Meta Graph user / page / system-user tokens start with ``EAA``.
 _META_TOKEN = re.compile(r"\bEAA[A-Za-z0-9]{20,}")
+# A Fernet key (32 bytes, url-safe base64 with one ``=`` pad) wherever it
+# appears, e.g. as the value of a local named ``key``. Over-matching another
+# 32-byte base64 value only redacts more; it never reveals anything.
+_FERNET_KEY = re.compile(r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{43}=(?![A-Za-z0-9_\-=])")
 
 
 def _redact_query(query: str) -> str:
@@ -139,6 +147,39 @@ def _redact_urls(text: str) -> str:
     return _URL_RE.sub(lambda m: _redact_one_url(m.group(0)), text)
 
 
+def redact_raw_query(query: str) -> str:
+    """Redact a raw (still percent-encoded) query string by its *decoded* keys.
+
+    ``co%64e=…`` / ``STATE=…`` / ``access%5Ftoken=…`` are the same parameters a
+    web framework decodes, so they are matched after decoding while every
+    other pair keeps its original bytes. A key that cannot be decoded makes
+    the whole query ``REDACTED`` (fail closed).
+    """
+    if not query:
+        return query
+    pairs = []
+    for part in query.split("&"):
+        key, sep, _value = part.partition("=")
+        try:
+            decoded = unquote_plus(key, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return REDACTED
+        if sep and is_sensitive_key(decoded.strip()):
+            pairs.append(f"{key}={REDACTED}")
+        else:
+            pairs.append(part)
+    return "&".join(pairs)
+
+
+# A bare request target (``/path?query``) as uvicorn's access log and raw
+# diagnostics print it — no scheme or host, so ``_URL_RE`` does not see it.
+_BARE_TARGET = re.compile(r"(?<![\w:/.@])(/[^\s\"'<>?#]*)\?([^\s\"'<>#]*)")
+
+
+def _redact_bare_targets(text: str) -> str:
+    return _BARE_TARGET.sub(lambda m: f"{m.group(1)}?{redact_raw_query(m.group(2))}", text)
+
+
 def redact_secrets(text: Any) -> str:
     """Remove credentials from free text. Never raises; fails closed."""
     if text is None:
@@ -148,10 +189,12 @@ def redact_secrets(text: Any) -> str:
         if not out:
             return out
         out = _redact_urls(out)
+        out = _redact_bare_targets(out)
         out = _BEARER.sub(r"\1" + REDACTED, out)
         out = _AUTH_HEADER.sub(r"\1" + REDACTED, out)
         out = _KV.sub(r"\1" + REDACTED, out)
         out = _META_TOKEN.sub(REDACTED, out)
+        out = _FERNET_KEY.sub(REDACTED, out)
         return out
     except Exception:  # noqa: BLE001 — a failing redactor must not leak the input
         return REDACTED_RECORD
@@ -190,7 +233,7 @@ def redacted_query_preview(query: Any, *, limit: int = 80) -> str:
         text = bytes(query).decode("latin-1")
     else:
         text = repr(query) if not isinstance(query, str) else query
-    return redact_secrets(text)[: max(0, int(limit))]
+    return redact_secrets(redact_raw_query(text))[: max(0, int(limit))]
 
 
 def redact_exception(exc: BaseException) -> str:
@@ -300,6 +343,7 @@ __all__ = [
     "is_sensitive_key",
     "redact_exception",
     "redact_secrets",
+    "redact_raw_query",
     "redact_value",
     "redacted_query_preview",
 ]

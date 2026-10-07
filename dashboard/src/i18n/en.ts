@@ -2234,6 +2234,7 @@ const en: Translations = {
       loadFailed: 'Could not load the catalog connection status.',
       startFailed: 'Could not start the Meta connection.',
       reconnect: 'Reconnect',
+      notConfirmed: 'The connection is not confirmed by the server. Do not rely on it until access shows as active for the approved catalog.',
       results: {
         connected: 'Meta access to the approved catalog was verified and stored encrypted.',
         denied: 'Consent was cancelled or declined in Meta. Nothing was stored.',

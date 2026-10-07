@@ -2001,6 +2001,8 @@ export interface Translations {
       loadFailed:     string
       startFailed:    string
       reconnect:      string
+      /** Success hint not confirmed by the fresh server status. */
+      notConfirmed:   string
       /** Callback result code (URL fragment) → label. */
       results: Record<string, string>
     }

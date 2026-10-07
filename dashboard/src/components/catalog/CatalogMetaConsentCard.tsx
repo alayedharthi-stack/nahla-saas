@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { catalogApi, type MetaCatalogConsentStatus } from '../../api/catalog'
 import { useLanguage } from '../../i18n/context'
 import type { Lang } from '../../i18n/types'
+import { resolveConsentBanner } from '../../lib/metaCatalogConsentResult'
 
 /**
  * Catalog-only Meta consent (catalog_management + business_management).
@@ -11,7 +12,10 @@ import type { Lang } from '../../i18n/types'
  * The consent URL comes from the authenticated POST — the session token never
  * enters a URL — and the browser only ever navigates to Meta's own dialog.
  * After Meta, the backend returns to /catalog with a fixed result code in the
- * fragment; it is read once, mapped to a fixed label and removed.
+ * fragment; it is read once and removed. The fragment is only a hint: success
+ * is claimed only when the fresh authenticated status shows an active
+ * authorization for exactly the approved catalog and business
+ * (``resolveConsentBanner``).
  */
 
 const RESULT_PARAM = 'meta_catalog_consent'
@@ -105,8 +109,11 @@ export default function CatalogMetaConsentCard() {
     }
   }, [busy])
 
-  const resultLabel = result ? (copy.results[result] ?? copy.results.error) : null
-  const resultOk = result === 'connected'
+  const banner = resolveConsentBanner(result, status, loadError, new Set(Object.keys(copy.results)))
+  const resultLabel = banner
+    ? (banner.key === 'notConfirmed' ? copy.notConfirmed : (copy.results[banner.key] ?? copy.results.error))
+    : null
+  const resultOk = banner?.tone === 'ok'
 
   // Nothing to show outside an enabled environment, unless a result came back.
   if (!status?.available && !resultLabel && !loadError) return null

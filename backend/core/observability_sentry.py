@@ -105,12 +105,59 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     return request
 
 
+# Frames whose local variables routinely hold OAuth codes, state, tokens,
+# app secrets or encryption keys. Their variables are withheld entirely
+# rather than redacted by name: the stack trace (function, file, line) stays.
+_WITHHELD_FRAME_MODULES = (
+    "services.meta_catalog_consent",
+    "routers.meta_catalog_consent",
+    "core.meta_catalog_consent_config",
+    "core.whatsapp_oauth_nonce",
+    "core.wa_token_crypto",
+    "core.totp_crypto",
+    "core.secrets",
+    "core.config",
+    "core.review_environment",
+    "routers.whatsapp_embedded",
+    "services.meta_oauth_redirect",
+    "services.whatsapp_platform.wa_connection_secrets",
+    "services.whatsapp_platform.token_manager",
+    "cryptography",
+)
+_WITHHELD_FRAME_FILES = tuple(
+    "/" + m.replace(".", "/") + ext for m in _WITHHELD_FRAME_MODULES for ext in (".py", "/")
+)
+# Generic local names that hold key material or one-time secrets in any frame.
+_SENSITIVE_LOCAL_NAMES = frozenset({
+    "key", "raw_key", "dev_key", "wa_key", "totp_key", "seed", "plain", "plaintext",
+    "nonce", "signature", "sig", "body_b64", "sig_b64", "proof",
+})
+
+
+def _withheld_frame(frame: Dict[str, Any]) -> bool:
+    module = str(frame.get("module") or "")
+    if any(module == m or module.startswith(m + ".") for m in _WITHHELD_FRAME_MODULES):
+        return True
+    paths = " ".join(str(frame.get(k) or "") for k in ("abs_path", "filename")).replace("\\", "/")
+    return any(marker in paths for marker in _WITHHELD_FRAME_FILES)
+
+
 def _scrub_frames(frames: Any) -> None:
     from core.log_redaction import redact_value  # noqa: PLC0415
 
     for frame in frames or []:
-        if isinstance(frame, dict) and frame.get("vars"):
-            frame["vars"] = redact_value(frame["vars"])
+        if not isinstance(frame, dict) or not frame.get("vars"):
+            continue
+        if _withheld_frame(frame):
+            frame["vars"] = {"[withheld]": "sensitive frame"}
+            continue
+        variables = frame["vars"]
+        if isinstance(variables, dict):
+            variables = {
+                k: ("[scrubbed]" if str(k).strip().lower() in _SENSITIVE_LOCAL_NAMES else v)
+                for k, v in variables.items()
+            }
+        frame["vars"] = redact_value(variables)
 
 
 def _scrub_event(event: Dict[str, Any]) -> Dict[str, Any]:

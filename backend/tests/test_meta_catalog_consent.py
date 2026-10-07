@@ -368,15 +368,14 @@ def test_start_fails_closed_without_nonce_table(world):
 
 
 def test_entitlement_and_sync_scope_are_enforced(world, monkeypatch):
-    monkeypatch.setenv("NAHLA_WHATSAPP_CATALOG_SYNC_TENANT_IDS", str(OTHER_TENANT))
     import services.whatsapp_catalog_sync_scope as scope_mod
 
-    if hasattr(scope_mod, "_reset_cache_for_tests"):
-        scope_mod._reset_cache_for_tests()
+    monkeypatch.setenv(scope_mod.TENANT_SCOPE_ENV, str(OTHER_TENANT))
+    assert not scope_mod.tenant_in_sync_scope(TENANT)
     resp = world.client.post("/merchant/catalog/meta-consent/start", headers=_jwt())
-    if scope_mod.tenant_in_sync_scope(TENANT):
-        pytest.skip("sync scope variable name differs in this checkout")
     assert resp.status_code == 409 and resp.json()["detail"]["reason"] == "sync_scope_excluded"
+    with world.factory() as s:
+        assert s.query(WhatsAppOAuthNonce).count() == 0
 
 
 # ── state integrity ──────────────────────────────────────────────────────────
@@ -1034,3 +1033,130 @@ def test_sentry_init_registers_every_scrub_hook(monkeypatch):
     assert captured["before_send_transaction"] is sentry_mod._before_send
     assert captured["before_breadcrumb"] is sentry_mod._before_breadcrumb
     assert captured["send_default_pii"] is False
+
+
+# ── independent review round: app identity, key redaction, encoded keys ────
+
+def test_stored_consent_for_another_app_fails_closed_before_decryption(world, monkeypatch):
+    import services.meta_catalog_access as access
+    from services.meta_catalog_push import MetaCatalogPushError, _resolve_connection
+    from services.whatsapp_platform.wa_connection_secrets import store_access_token
+
+    _connect(world)
+    merchant = "EAA" + secrets.token_hex(20)
+    platform = "EAA" + secrets.token_hex(20)
+    world.secrets += [merchant, platform]
+    monkeypatch.setattr(access, "WA_TOKEN", platform)
+    with world.factory() as s:
+        conn = WhatsAppConnection(tenant_id=TENANT, meta_catalog_id=CATALOG, catalog_enabled=True, provider="meta")
+        store_access_token(conn, merchant)
+        s.add(conn)
+        s.commit()
+    monkeypatch.setenv("META_APP_ID", "600000000000009")
+
+    def _no_decrypt(_stored):
+        raise AssertionError("token decrypted for a consent issued to another app")
+
+    monkeypatch.setattr(consent, "_decrypt", _no_decrypt)
+    with world.factory() as s:
+        with pytest.raises(MetaCatalogPushError) as exc:
+            _resolve_connection(s, TENANT)
+    assert exc.value.code == "catalog_consent_inactive"
+    assert exc.value.detail == {"reason": "app_changed"}
+    body = world.client.get("/merchant/catalog/meta-consent/status", headers=_jwt()).json()
+    assert body["authorization"]["state"] == "inactive"
+    assert body["authorization"]["inactive_reason"] == "app_changed"
+    assert world.graph.paths().count("oauth/access_token") == 2  # only the original consent
+
+
+def test_encryption_key_names_and_values_never_escape_redaction(world):
+    from core.log_redaction import SecretRedactingFilter, is_sensitive_key, redact_secrets
+
+    key = Fernet.generate_key().decode()
+    totp = Fernet.generate_key().decode()
+    world.secrets += [key, totp]
+    for name in ("WA_TOKEN_ENC_KEY", "TOTP_ENC_KEY", "wa_token_enc_key", "ENCRYPTION_KEY", "fernet_key"):
+        assert is_sensitive_key(name), name
+    for text in (f"WA_TOKEN_ENC_KEY={key}", f"{{'WA_TOKEN_ENC_KEY': '{key}', 'TOTP_ENC_KEY': '{totp}'}}",
+                 f"key={key}", f"loaded {key} ok", f'"wa_token_enc_key": "{key}"'):
+        _no_secret_in(redact_secrets(text), world)
+    record = logging.LogRecord("nahla", logging.WARNING, __file__, 1, "env %s key %s",
+                               ({"WA_TOKEN_ENC_KEY": key}, key), None)
+    assert SecretRedactingFilter().filter(record)
+    _no_secret_in(record.getMessage(), world)
+
+
+def _frame(module: str, variables: Dict[str, Any]) -> Dict[str, Any]:
+    return {"function": "f", "module": module, "filename": module.replace(".", "/") + ".py",
+            "abs_path": "/app/backend/" + module.replace(".", "/") + ".py", "vars": variables}
+
+
+def test_sentry_withholds_sensitive_frames_and_redacts_key_locals_elsewhere(world):
+    from core.observability_sentry import _before_send
+
+    key = Fernet.generate_key().decode()
+    code = secrets.token_urlsafe(30)
+    world.secrets += [key, code]
+    frames = [
+        _frame("services.meta_catalog_consent", {"tenant_id": "1", "nonce": "x", "anything": code}),
+        _frame("routers.meta_catalog_consent", {"parsed": f"ConsentState(n={code})"}),
+        _frame("core.wa_token_crypto", {"wa_key": key}),
+        _frame("services.unrelated_module", {"key": key, "e": {"WA_TOKEN_ENC_KEY": key},
+                                             "e_repr": f"{{'WA_TOKEN_ENC_KEY': '{key}'}}",
+                                             "tenant_id": "7", "attempt": "2"}),
+    ]
+    event = {"exception": {"values": [{"type": "RuntimeError", "value": "x",
+                                       "stacktrace": {"frames": frames}}]}}
+    out = _before_send(event, {})
+    _no_secret_in(json.dumps(out), world)
+    out_frames = out["exception"]["values"][0]["stacktrace"]["frames"]
+    for f in out_frames[:3]:
+        assert f["vars"] == {"[withheld]": "sensitive frame"}
+    assert out_frames[3]["vars"]["tenant_id"] == "7" and out_frames[3]["vars"]["attempt"] == "2"
+    assert out_frames[3]["vars"]["key"] == "[scrubbed]"
+    assert out_frames[3]["function"] == "f" and out_frames[0]["module"] == "services.meta_catalog_consent"
+
+
+_ENCODED_KEY_CASES = [
+    ("co%64e", "code"), ("sta%74e", "state"), ("%63%6F%64%65", "code"), ("CODE", "code"), ("State", "state"),
+    ("ACCESS_TOKEN", "access_token"), ("access%5Ftoken", "access_token"), ("Client%5FSecret", "client_secret"),
+    ("input+token", None), ("fb_exchange_%74oken", "fb_exchange_token"), ("TOKEN", "token"),
+]
+
+
+def _encoded_query(world) -> str:
+    parts = []
+    for raw_key, _decoded in _ENCODED_KEY_CASES:
+        value = secrets.token_urlsafe(24)
+        if _decoded:
+            world.secrets.append(value)
+        parts.append(f"{raw_key}={value}")
+    parts.append("tenant=7")
+    return "&".join(parts)
+
+
+def test_uvicorn_access_line_redacts_percent_encoded_and_mixed_case_keys(world):
+    from core.log_redaction import SecretRedactingFilter
+
+    query = _encoded_query(world)
+    args = ("203.0.113.9:443", "GET", f"{CALLBACK_PATH}?{query}", "1.1", 302)
+    record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', args, None)
+    assert SecretRedactingFilter().filter(record)
+    assert isinstance(record.args, tuple) and len(record.args) == 5 and record.args[4] == 302
+    line = record.getMessage()
+    _no_secret_in(line, world)
+    assert CALLBACK_PATH in line and "tenant=7" in line
+
+
+def test_raw_query_preview_redacts_encoded_keys_and_fails_closed_on_malformed(world):
+    from core.log_redaction import redact_raw_query, redacted_query_preview
+
+    query = _encoded_query(world)
+    for raw in (query, query.encode("latin-1")):
+        _no_secret_in(redacted_query_preview(raw, limit=4096), world)
+        _no_secret_in(redacted_query_preview(raw, limit=80), world)
+    malformed_value = secrets.token_urlsafe(24)
+    world.secrets.append(malformed_value)
+    assert redact_raw_query(f"co%ffde={malformed_value}&x=1") == "REDACTED"
+    _no_secret_in(redacted_query_preview(f"co%ffde={malformed_value}".encode()), world)
+    assert redact_raw_query("tenant=7&page=2") == "tenant=7&page=2"

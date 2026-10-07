@@ -103,6 +103,21 @@ def probe_catalog_readable(
         return result
 
 
+def _consent_governed_connection(conn: Any) -> bool:
+    """A session-bound WhatsApp connection whose catalog a stored consent governs."""
+    from sqlalchemy.orm import object_session  # noqa: PLC0415
+
+    from services.meta_catalog_consent import consent_governs_catalog  # noqa: PLC0415
+
+    try:
+        session = object_session(conn)
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — non-ORM stand-ins carry no consent context
+        return False
+    if session is None or not str(getattr(conn, "meta_catalog_id", "") or "").strip():
+        return False
+    return consent_governs_catalog(session, int(getattr(conn, "tenant_id", 0) or 0), conn)
+
+
 def catalog_token_candidates(conn: Any) -> List[Dict[str, Any]]:
     """Ordered unique Graph tokens to try against a catalog object."""
     if getattr(conn, "is_catalog_consent_binding", False):
@@ -110,6 +125,10 @@ def catalog_token_candidates(conn: Any) -> List[Dict[str, Any]]:
         # merchant token and no platform WA_TOKEN fallback.
         raw = str(getattr(conn, "access_token", "") or "").strip()
         return [{"token": raw, "token_source": "merchant_catalog_consent"}] if raw else []
+    if _consent_governed_connection(conn):
+        # The catalog is governed by a catalog-only consent: no WhatsApp
+        # merchant or platform token may serve it (fail closed).
+        return []
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 

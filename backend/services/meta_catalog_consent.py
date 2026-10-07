@@ -576,10 +576,20 @@ def _aware(value: Optional[datetime]) -> Optional[datetime]:
 
 
 def _row_inactive_reason(row: Any, now: datetime) -> Optional[str]:
+    """Why a stored authorization must not be used; None when usable.
+
+    Evaluated before the token is ever decrypted or sent anywhere.
+    """
+    from core.meta_catalog_consent_config import meta_app_credentials  # noqa: PLC0415
+
     if str(row.status or "") != STATUS_ACTIVE:
         return "authorization_inactive"
     if not runtime_consent_enabled():
         return "consent_disabled"
+    current_app_id, _secret = meta_app_credentials()
+    if not current_app_id or str(row.meta_app_id or "") != current_app_id:
+        # A consent issued for another (e.g. previous) Meta app is never reused.
+        return "app_changed"
     approval = approval_for_tenant(int(row.tenant_id))
     if approval is None or approval.catalog_id != row.catalog_id or approval.business_id != row.business_id:
         return "approval_changed"
@@ -653,6 +663,47 @@ def is_consent_binding(conn: Any) -> bool:
     return isinstance(conn, CatalogConsentBinding)
 
 
+def _authorization_row(db: Any, tenant_id: int) -> Any:
+    from models import MetaCatalogAuthorization  # noqa: PLC0415
+
+    if not authorization_table_exists(db):
+        return None
+    return (
+        db.query(MetaCatalogAuthorization)
+        .filter(MetaCatalogAuthorization.tenant_id == int(tenant_id))
+        .first()
+    )
+
+
+def consent_governs_catalog(db: Any, tenant_id: int, conn: Any) -> bool:
+    """True when a stored consent (active or not) owns this tenant's catalog work.
+
+    Same coverage rule as ``load_catalog_consent_binding``; used to keep the
+    catalog-only path free of WhatsApp/WABA probes even when the consent is
+    currently unusable.
+    """
+    row = _authorization_row(db, tenant_id)
+    if row is None:
+        return False
+    conn_catalog = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
+    return not conn_catalog or conn_catalog == row.catalog_id
+
+
+def _tenant_gate_reason(db: Any, tenant_id: int) -> Optional[str]:
+    """Entitlement and sync scope, re-checked before every consent-backed operation."""
+    from core.plan_entitlements import get_entitlements  # noqa: PLC0415
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    try:
+        if not get_entitlements(db, int(tenant_id), strict_lookup=True).has_feature("meta_catalog_sync"):
+            return "entitlement_missing"
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — an unreadable entitlement fails closed as missing
+        return "entitlement_missing"
+    if not tenant_in_sync_scope(int(tenant_id)):
+        return "sync_scope_excluded"
+    return None
+
+
 def load_catalog_consent_binding(db: Any, tenant_id: int, conn: Any) -> Optional[CatalogConsentBinding]:
     """The consent binding for this tenant's catalog work, or None to keep the old path.
 
@@ -662,21 +713,13 @@ def load_catalog_consent_binding(db: Any, tenant_id: int, conn: Any) -> Optional
     disabled, no longer approved or unreadable, raises CatalogConsentInactive:
     the approved catalog is never served by a WhatsApp or platform token.
     """
-    from models import MetaCatalogAuthorization  # noqa: PLC0415
-
-    if not authorization_table_exists(db):
-        return None
-    row = (
-        db.query(MetaCatalogAuthorization)
-        .filter(MetaCatalogAuthorization.tenant_id == int(tenant_id))
-        .first()
-    )
+    row = _authorization_row(db, tenant_id)
     if row is None:
         return None
     conn_catalog = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
     if conn_catalog and conn_catalog != row.catalog_id:
         return None
-    reason = _row_inactive_reason(row, datetime.now(timezone.utc))
+    reason = _row_inactive_reason(row, datetime.now(timezone.utc)) or _tenant_gate_reason(db, tenant_id)
     if reason:
         raise CatalogConsentInactive(reason)
     token = _decrypt(row.access_token_enc)
@@ -705,6 +748,7 @@ __all__ = [
     "VerifiedConsent",
     "authorization_summary",
     "authorization_table_exists",
+    "consent_governs_catalog",
     "build_authorize_url",
     "exchange_code",
     "is_consent_binding",
