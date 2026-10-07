@@ -182,6 +182,17 @@ def _resolve_catalog_and_token(
                 )
         return catalog_id, token
 
+    from services.meta_catalog_access import _consent_governed_connection  # noqa: PLC0415
+
+    if _consent_governed_connection(conn):
+        # A stored consent governs (or may govern) this catalog: a WhatsApp
+        # connection's credentials are never read for it.
+        raise MetaCatalogPushError(
+            "catalog_consent_inactive",
+            "Catalog consent governs this catalog",
+            detail={"reason": "consent_governed"},
+        )
+
     if not require_catalog_readable:
         token_info = _select_graph_token(conn) or {}
         token = str(token_info.get("token") or "").strip()

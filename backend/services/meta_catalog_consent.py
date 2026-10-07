@@ -445,34 +445,57 @@ _TABLE_SEEN: Dict[Tuple[int, str], float] = {}
 _NEGATIVE_TTL = 60.0
 
 
-def authorization_table_exists(db: Any) -> bool:
-    """Whether the table exists on this bind (positive answers cached per engine)."""
+SCHEMA_PRESENT = "present"
+SCHEMA_ABSENT = "absent"
+SCHEMA_UNKNOWN = "unknown"
+
+
+class ConsentSchemaUnknown(Exception):
+    """Inspecting a real database for the consent table failed: governance is unknown."""
+
+
+def authorization_schema_state(db: Any) -> str:
+    """``present`` / ``absent`` / ``unknown`` for ``meta_catalog_authorizations``.
+
+    * A caller that is not a SQLAlchemy session (a lightweight test double, a
+      non-DB caller) has no consent schema: ``absent``.
+    * A real session/engine whose inspection succeeds: ``present`` or
+      ``absent`` (absent is the pre-0120 legacy state). Present is cached per
+      engine; absent for a short while.
+    * A real session/engine whose bind or inspection *fails*: ``unknown`` —
+      never cached and never read as absence, so callers fail closed.
+    """
     from sqlalchemy import inspect  # noqa: PLC0415
+    from sqlalchemy.orm import Session  # noqa: PLC0415
 
     get_bind = getattr(db, "get_bind", None)
     if get_bind is None:
-        # Not a SQLAlchemy session (a test double or a non-DB caller): there is
-        # no consent table to consult. Consent entry points treat False as
-        # storage_unavailable, so this never enables the consent path.
-        return False
+        return SCHEMA_ABSENT
     try:
         bind = get_bind()
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — unbound session: no consent schema to consult
-        return False
+    except Exception:  # noqa: BLE001
+        # A real Session without a bind cannot prove anything; a stand-in can.
+        return SCHEMA_UNKNOWN if isinstance(db, Session) else SCHEMA_ABSENT
     engine = getattr(bind, "engine", bind)
     key = (id(engine), str(getattr(engine, "url", "")))
     seen = _TABLE_SEEN.get(key)
     if seen == float("inf"):
-        return True
+        return SCHEMA_PRESENT
     if seen is not None and time.monotonic() - seen < _NEGATIVE_TTL:
-        return False
+        return SCHEMA_ABSENT
     try:
         present = TABLE_NAME in inspect(bind).get_table_names()
-    except Exception:  # noqa: BLE001
-        logger.warning("[META_CATALOG_CONSENT] schema inspect failed")
-        present = False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[META_CATALOG_CONSENT] schema inspect failed kind=%s — treated as unknown",
+                       type(exc).__name__)
+        return SCHEMA_UNKNOWN
     _TABLE_SEEN[key] = float("inf") if present else time.monotonic()
-    return present
+    return SCHEMA_PRESENT if present else SCHEMA_ABSENT
+
+
+def authorization_table_exists(db: Any) -> bool:
+    """True only when inspection proved the table exists (unknown is not existence)."""
+    return authorization_schema_state(db) == SCHEMA_PRESENT
 
 
 def _encrypt(token: str) -> str:
@@ -673,9 +696,13 @@ def is_consent_binding(conn: Any) -> bool:
 
 
 def _authorization_row(db: Any, tenant_id: int) -> Any:
+    """The tenant's stored consent, None when proven absent; raises when unknown."""
     from models import MetaCatalogAuthorization  # noqa: PLC0415
 
-    if not authorization_table_exists(db):
+    state = authorization_schema_state(db)
+    if state == SCHEMA_UNKNOWN:
+        raise ConsentSchemaUnknown("consent_state_unknown")
+    if state == SCHEMA_ABSENT:
         return None
     return (
         db.query(MetaCatalogAuthorization)
@@ -685,8 +712,14 @@ def _authorization_row(db: Any, tenant_id: int) -> Any:
 
 
 def consent_row_exists(db: Any, tenant_id: int) -> bool:
-    """Whether this tenant has any stored consent. Touches no WhatsApp table."""
-    return _authorization_row(db, tenant_id) is not None
+    """Whether this tenant has any stored consent. Touches no WhatsApp table.
+
+    Unknown schema state counts as "yes" so callers take the fail-closed branch.
+    """
+    try:
+        return _authorization_row(db, tenant_id) is not None
+    except ConsentSchemaUnknown:
+        return True
 
 
 def consent_governs_catalog(db: Any, tenant_id: int, conn: Any) -> bool:
@@ -694,9 +727,13 @@ def consent_governs_catalog(db: Any, tenant_id: int, conn: Any) -> bool:
 
     Same coverage rule as ``load_catalog_consent_binding``; used to keep the
     catalog-only path free of WhatsApp/WABA probes even when the consent is
-    currently unusable.
+    currently unusable. An unknown schema state counts as governed (fail
+    closed).
     """
-    row = _authorization_row(db, tenant_id)
+    try:
+        row = _authorization_row(db, tenant_id)
+    except ConsentSchemaUnknown:
+        return True
     if row is None:
         return False
     conn_catalog = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
@@ -727,7 +764,12 @@ def load_catalog_consent_binding(db: Any, tenant_id: int, conn: Any) -> Optional
     disabled, no longer approved or unreadable, raises CatalogConsentInactive:
     the approved catalog is never served by a WhatsApp or platform token.
     """
-    row = _authorization_row(db, tenant_id)
+    try:
+        row = _authorization_row(db, tenant_id)
+    except ConsentSchemaUnknown:
+        # Whether a consent governs this catalog cannot be proven: never fall
+        # back to a WhatsApp or platform token.
+        raise CatalogConsentInactive("consent_state_unknown") from None
     if row is None:
         return None
     conn_catalog = str(getattr(conn, "meta_catalog_id", "") or "").strip() if conn is not None else ""
@@ -761,6 +803,7 @@ __all__ = [
     "TOKEN_SOURCE",
     "VerifiedConsent",
     "authorization_summary",
+    "authorization_schema_state",
     "authorization_table_exists",
     "consent_governs_catalog",
     "consent_row_exists",

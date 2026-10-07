@@ -34,6 +34,7 @@ logger = logging.getLogger("nahla.meta_catalog_claim")
 
 ERROR_CATALOG_CLAIMED_BY_OTHER_TENANT = "catalog_claimed_by_other_tenant"
 ERROR_CATALOG_CLAIM_LOCK_FAILED = "catalog_claim_lock_failed"
+ERROR_CATALOG_CLAIM_STATE_UNKNOWN = "catalog_claim_state_unknown"
 
 # Shared with services.meta_catalog_onboarding._CATALOG_CLAIM_LOCK_KEY so the
 # automatic onboarding path and the manual PATCH paths serialise together.
@@ -96,9 +97,21 @@ def other_tenants_claiming(db: Any, tenant_id: int, catalog_id: str) -> List[int
     tenants = {int(r[0]) for r in rows if r and r[0] is not None}
     # A verified catalog-only consent (``meta_catalog_authorizations``) claims
     # its catalog exactly like a WhatsApp connection binding does.
-    from services.meta_catalog_consent import authorization_table_exists  # noqa: PLC0415
+    from services.meta_catalog_consent import (  # noqa: PLC0415
+        SCHEMA_PRESENT,
+        SCHEMA_UNKNOWN,
+        authorization_schema_state,
+    )
 
-    if authorization_table_exists(db):
+    consent_schema = authorization_schema_state(db)
+    if consent_schema == SCHEMA_UNKNOWN:
+        # Whether another tenant's consent claims this catalog cannot be
+        # proven: refuse rather than read an inspection failure as "no claim".
+        raise CatalogClaimError(
+            ERROR_CATALOG_CLAIM_STATE_UNKNOWN,
+            {"error": ERROR_CATALOG_CLAIM_STATE_UNKNOWN, "catalog_id": cid},
+        )
+    if consent_schema == SCHEMA_PRESENT:
         consent_rows = db.execute(
             text(
                 "SELECT tenant_id FROM meta_catalog_authorizations "
@@ -146,6 +159,7 @@ __all__ = [
     "CatalogClaimError",
     "ERROR_CATALOG_CLAIMED_BY_OTHER_TENANT",
     "ERROR_CATALOG_CLAIM_LOCK_FAILED",
+    "ERROR_CATALOG_CLAIM_STATE_UNKNOWN",
     "acquire_catalog_claim_lock",
     "guard_catalog_claim",
     "is_postgres",

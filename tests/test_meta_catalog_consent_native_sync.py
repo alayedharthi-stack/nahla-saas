@@ -395,3 +395,68 @@ def test_catalog_import_probe_without_consent_keeps_the_legacy_token_path(world,
     diag = importer.build_graph_import_diagnostics(conn, tenant_id=w.tid, run_preflight=False)
     assert diag["result_code"] != importer.GRAPH_RESULT_CATALOG_CONSENT_GOVERNED
     assert (diag["token_selection"] or {}).get("token_source") == "merchant_meta_oauth"
+
+
+def test_schema_inspection_failure_is_unknown_and_fails_closed_everywhere(world, monkeypatch):
+    """Fault injection on a real SQLAlchemy session: inspection failure is never "no consent"."""
+    import sqlalchemy
+
+    from models import WhatsAppConnection as ServiceConnection
+    from routers.meta_catalog_consent import _entitlement_and_scope_code
+    from services import meta_catalog_consent as consent
+    from services.meta_catalog_access import catalog_token_candidates
+    from services.meta_catalog_claim import (
+        ERROR_CATALOG_CLAIM_STATE_UNKNOWN,
+        CatalogClaimError,
+        guard_catalog_claim,
+    )
+    from services.meta_catalog_import import (
+        GRAPH_RESULT_CATALOG_CONSENT_GOVERNED,
+        MetaCatalogImportError,
+        build_graph_import_diagnostics,
+        import_from_meta,
+    )
+    from services.meta_catalog_push import MetaCatalogPushError, _resolve_catalog_and_token, _resolve_connection
+    from services.native_meta_sync_orchestrator import _waba_link_status_for_push
+
+    w = world
+
+    def _broken_inspect(*_a, **_k):
+        raise RuntimeError("synthetic schema metadata unavailable")
+
+    consent._TABLE_SEEN.clear()
+    monkeypatch.setattr(sqlalchemy, "inspect", _broken_inspect)
+    assert consent.authorization_schema_state(w.session) == consent.SCHEMA_UNKNOWN
+    assert consent._TABLE_SEEN == {}  # an unknown answer is never cached
+
+    with pytest.raises(MetaCatalogPushError) as exc:
+        _resolve_connection(w.session, w.tid)
+    assert exc.value.code == "catalog_consent_inactive" and exc.value.detail == {"reason": "consent_state_unknown"}
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    for readable in (False, True):
+        with pytest.raises(MetaCatalogPushError) as exc:
+            _resolve_catalog_and_token(conn, require_catalog_readable=readable)
+        assert exc.value.code == "catalog_consent_inactive"
+    assert catalog_token_candidates(conn) == []
+    assert build_graph_import_diagnostics(conn, tenant_id=w.tid)["result_code"] == GRAPH_RESULT_CATALOG_CONSENT_GOVERNED
+    with pytest.raises(MetaCatalogImportError):
+        import_from_meta(w.session, w.tid)
+    assert _waba_link_status_for_push(w.session, w.tid)["error"] == "catalog_consent_waba_not_probed"
+    with pytest.raises(CatalogClaimError) as claim:
+        guard_catalog_claim(w.session, w.tid + 1, "880000000000077")
+    assert claim.value.code == ERROR_CATALOG_CLAIM_STATE_UNKNOWN
+    assert _entitlement_and_scope_code(w.session, w.tid) == "storage_unavailable"
+    assert w.graph.calls == [] and w.probes == []
+
+
+def test_unbound_real_session_is_unknown_but_lightweight_doubles_stay_absent():
+    from sqlalchemy.orm import Session
+
+    from services import meta_catalog_consent as consent
+
+    class _Db:
+        pass
+
+    assert consent.authorization_schema_state(_Db()) == consent.SCHEMA_ABSENT
+    assert consent.authorization_schema_state(Session()) == consent.SCHEMA_UNKNOWN
+    assert consent.consent_row_exists(_Db(), 1) is False
