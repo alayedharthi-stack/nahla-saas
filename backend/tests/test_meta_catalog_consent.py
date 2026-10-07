@@ -1647,3 +1647,81 @@ def test_integrity_error_reports_a_claim_only_with_evidence(world, monkeypatch, 
     state = _start(world)
     expected = "catalog_claimed_by_other_tenant" if other_tenant_holds_catalog else "storage_unavailable"
     assert _result(_callback(world, code=_code(world), state=state)[1]) == expected
+
+
+# ── re-review B1′ / S-a / base-order guarantee / CON3 ───────────────────────
+
+_URL_EDGE_SHAPES = (
+    "https://h.example/cb?;access_token=abc<{v}",              # punctuated sensitive key, value past '<'
+    "https://h.example/cb?,client_secret=x<{v}",
+    "GET https://h.example/cb?x;access_token=abc<{v} 200",
+    "https://h.example/cb?secret:access_token=x>{v}",
+    "GET https://api.example/login?next=https://dash.example/cb?state={v} 302",  # nested OAuth return URL
+    "https://h.example/p?a=b;access_token={v}",
+    "https://h.example/p?x=1,token={v}",
+    "https://a.b/?https://a.b/?code={v}",
+    "http://x/y?state=next=access_token=#&{v}k=",
+    "https://h.example/cb?Authorization:k=,{v}",
+)
+
+
+def test_url_edge_shapes_never_leak_through_any_entry_point(world):
+    from core.log_redaction import SecretRedactingFilter, redact_secrets
+    from core.observability_sentry import _before_breadcrumb, _before_send
+
+    for shape in _URL_EDGE_SHAPES:
+        value = secrets.token_urlsafe(18)
+        world.secrets.append(value)
+        text = shape.replace("{v}", value)
+        _no_secret_in(redact_secrets(text), world)
+        record = logging.LogRecord("httpx", logging.INFO, __file__, 1, "HTTP Request: %s", (text,), None)
+        assert SecretRedactingFilter().filter(record)
+        _no_secret_in(record.getMessage(), world)
+        _no_secret_in(json.dumps(_before_breadcrumb({"type": "http", "data": {"url": text}}, {})), world)
+        event = {"request": {"url": text}, "transaction": text, "culprit": text,
+                 "exception": {"values": [{"type": "HTTPError", "value": text}]}}
+        _no_secret_in(json.dumps(_before_send(event, {})), world)
+
+
+@pytest.mark.parametrize("text", [
+    "https://h.example/cb?;access_token=abc<{v}", "Authorization: k=,{v}", "x https://a.b/?code={v}#frag",
+    "Cookie: a=1; Bearer {v}", "https://h.example/cb?Proxy-Authorization:cookie:#%3A<&https://h.example/cb?{v}",
+    "secret={v} tenant=7 https://h.example/p?tenant=7&page=2",
+])
+def test_redacted_output_keeps_no_token_the_pre_pr_order_removes(world, text):
+    """By construction: every credential-like token left in the output is one
+    the pre-PR order (URLs first, then Bearer/header, then keys) also left."""
+    from core import log_redaction as lr
+
+    value = secrets.token_urlsafe(18).replace("-", "x").replace("_", "y")
+    text = text.replace("{v}", value)
+    reference_tokens = set(lr._TOKEN_RUN.findall(lr._redact_in_base_order(text)))
+    out = lr.redact_secrets(text)
+    assert set(lr._TOKEN_RUN.findall(out)) <= reference_tokens | {lr.REDACTED}
+    if "tenant=7" in text and value not in lr._redact_in_base_order(text):
+        assert "tenant=7" in out and value not in out  # non-secret context survives
+
+
+def test_claim_recheck_failure_is_reported_as_storage_not_another_store(world, monkeypatch):
+    """CON3: when ownership cannot be re-checked after an integrity error, the
+    merchant is never told the catalog belongs to another store."""
+    import services.meta_catalog_claim as claim
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+
+    monkeypatch.setattr(claim, "guard_catalog_claim", lambda *_a, **_k: None)
+
+    def _recheck_fails(*_a, **_k):
+        raise RuntimeError("synthetic ownership lookup failure")
+
+    monkeypatch.setattr(claim, "other_tenants_claiming", _recheck_fails)
+    real_flush = Session.flush
+
+    def _flush(self, *args, **kwargs):
+        if any(isinstance(obj, MetaCatalogAuthorization) for obj in self.new):
+            raise IntegrityError("INSERT", {}, Exception("synthetic constraint"))
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", _flush)
+    state = _start(world)
+    assert _result(_callback(world, code=_code(world), state=state)[1]) == "storage_unavailable"
