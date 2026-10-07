@@ -1160,3 +1160,23 @@ def test_raw_query_preview_redacts_encoded_keys_and_fails_closed_on_malformed(wo
     assert redact_raw_query(f"co%ffde={malformed_value}&x=1") == "REDACTED"
     _no_secret_in(redacted_query_preview(f"co%ffde={malformed_value}".encode()), world)
     assert redact_raw_query("tenant=7&page=2") == "tenant=7&page=2"
+
+
+def test_sentry_redacts_percent_encoded_keys_in_query_string_and_breadcrumbs(world):
+    from core.observability_sentry import _before_breadcrumb, _before_send
+
+    query = _encoded_query(world)
+    bad_value = secrets.token_urlsafe(24)
+    world.secrets.append(bad_value)
+    raw = f"{query}&co%zzde={bad_value}"
+    event = {
+        "request": {"url": f"https://{API_HOST}{CALLBACK_PATH}", "query_string": raw},
+        "breadcrumbs": {"values": [{"type": "http", "data": {"http.query": raw, "url": f"{CALLBACK_PATH}?{raw}"}},
+                                   {"category": "query", "message": raw}]},
+    }
+    out = _before_send(event, {})
+    _no_secret_in(json.dumps(out), world)
+    assert "tenant=7" in out["request"]["query_string"]
+    crumb = _before_breadcrumb({"type": "http", "data": {"http.query": raw}}, {})
+    _no_secret_in(json.dumps(crumb), world)
+    assert "tenant=7" in crumb["data"]["http.query"]

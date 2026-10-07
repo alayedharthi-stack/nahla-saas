@@ -449,7 +449,16 @@ def authorization_table_exists(db: Any) -> bool:
     """Whether the table exists on this bind (positive answers cached per engine)."""
     from sqlalchemy import inspect  # noqa: PLC0415
 
-    bind = db.get_bind()
+    get_bind = getattr(db, "get_bind", None)
+    if get_bind is None:
+        # Not a SQLAlchemy session (a test double or a non-DB caller): there is
+        # no consent table to consult. Consent entry points treat False as
+        # storage_unavailable, so this never enables the consent path.
+        return False
+    try:
+        bind = get_bind()
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unbound session: no consent schema to consult
+        return False
     engine = getattr(bind, "engine", bind)
     key = (id(engine), str(getattr(engine, "url", "")))
     seen = _TABLE_SEEN.get(key)

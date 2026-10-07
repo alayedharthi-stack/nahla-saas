@@ -818,6 +818,15 @@ GRAPH_RESULT_CONNECTION_MISSING        = "connection_missing"
 GRAPH_RESULT_META_HTTP_ERROR           = "meta_http_error"
 GRAPH_RESULT_TRANSPORT_ERROR           = "transport_error"
 GRAPH_RESULT_UNSUPPORTED_CATALOG_EDGE  = "unsupported_catalog_edge"
+# The connection's catalog is governed by a stored catalog-only Meta consent:
+# WhatsApp merchant and platform tokens are never used for it here.
+GRAPH_RESULT_CATALOG_CONSENT_GOVERNED  = "catalog_consent_governed"
+
+
+def _catalog_consent_governed(conn: Any) -> bool:
+    from services.meta_catalog_access import _consent_governed_connection  # noqa: PLC0415
+
+    return _consent_governed_connection(conn)
 
 
 def _looks_like_meta_graph_token(token: str) -> bool:
@@ -1107,6 +1116,22 @@ def build_graph_import_diagnostics(
         }
 
     catalog_id = (getattr(conn, "meta_catalog_id", None) or "").strip()
+    if catalog_id and _catalog_consent_governed(conn):
+        # Checked before any credential is read or any Graph call is made.
+        return {
+            "provider":                None,
+            "connection_type":         None,
+            "meta_catalog_id_present": True,
+            "meta_catalog_id":         catalog_id,
+            "token_selection":         None,
+            "preflight":               None,
+            "products_probe":          None,
+            "result_code":             GRAPH_RESULT_CATALOG_CONSENT_GOVERNED,
+            "action_required": (
+                "This catalog is managed through the catalog-only Meta consent; "
+                "WhatsApp and platform tokens are not used for it."
+            ),
+        }
     token_pick = _select_graph_token(conn)
     safe_pick = sanitize_token_pick(token_pick)
     provider = safe_pick.get("provider")
@@ -1443,6 +1468,15 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
             "catalog_id_missing",
             "Meta Catalog ID is not configured on the WhatsApp connection.",
             detail={"hint": "WhatsAppConnection.meta_catalog_id is empty"},
+        )
+    if _catalog_consent_governed(conn):
+        # A stored catalog-only consent governs this catalog: no WhatsApp or
+        # platform credential is read and nothing is fetched from Meta.
+        raise MetaCatalogImportError(
+            GRAPH_RESULT_CATALOG_CONSENT_GOVERNED,
+            "This catalog is managed through the catalog-only Meta consent; "
+            "importing it with a WhatsApp or platform token is refused.",
+            detail={"catalog_id": catalog_id, "result_code": GRAPH_RESULT_CATALOG_CONSENT_GOVERNED},
         )
     # ── Graph token selection (May 2026 #19e) ─────────────────
     # NOT a simple ``conn.access_token`` read anymore — for

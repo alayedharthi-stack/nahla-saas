@@ -44,6 +44,13 @@ for (const [name, status] of [
   const b = resolveConsentBanner('connected', status as never, false, known)
   assert(`crafted connected + ${name} → not confirmed`, b?.tone === 'warn' && b.key === 'notConfirmed', JSON.stringify(b))
 }
+const activeButUnavailable = { ...active, available: false, reason: 'entitlement_missing' }
+const unavailableBanner = resolveConsentBanner('connected', activeButUnavailable as never, false, known)
+assert('connected + active row but available=false → not confirmed',
+  unavailableBanner?.tone === 'warn' && unavailableBanner.key === 'notConfirmed')
+const staleActive = resolveConsentBanner('connected', active, true, known)
+assert('connected + stale active status but fresh read failed → not confirmed',
+  staleActive?.tone === 'warn' && staleActive.key === 'notConfirmed')
 const failedStatus = resolveConsentBanner('connected', null, true, known)
 assert('connected + status read failed → not confirmed', failedStatus?.tone === 'warn' && failedStatus.key === 'notConfirmed')
 assert('connected + status still loading → nothing shown yet', resolveConsentBanner('connected', null, false, known) === null)

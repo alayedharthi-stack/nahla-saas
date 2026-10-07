@@ -90,7 +90,9 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(query, (bytes, bytearray)):
         query = query.decode("latin-1")
     if isinstance(query, str) and query:
-        request["query_string"] = redact_secrets(query)
+        from core.log_redaction import redact_raw_query  # noqa: PLC0415
+
+        request["query_string"] = redact_secrets(redact_raw_query(query))
     elif query:
         request["query_string"] = redact_value(query)
 

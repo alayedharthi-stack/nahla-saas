@@ -180,6 +180,29 @@ def _redact_bare_targets(text: str) -> str:
     return _BARE_TARGET.sub(lambda m: f"{m.group(1)}?{redact_raw_query(m.group(2))}", text)
 
 
+# ``key=value`` fragments whose key carries percent-encoding (``co%64e=…``,
+# ``access%5Ftoken=…``) anywhere in free text — bare query strings, breadcrumb
+# fields, request ``query_string``. Plain keys are handled by ``_KV``.
+_ENCODED_KV = re.compile(
+    r"(?<![A-Za-z0-9_.\-%+])((?:[A-Za-z0-9_.\-+]|%[0-9A-Fa-f]{0,2})*%(?:[A-Za-z0-9_.\-+]|%[0-9A-Fa-f]{0,2})*)"
+    r"=([^\s\"'&,;]*)"
+)
+
+
+def _redact_encoded_kv(text: str) -> str:
+    def _one(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        try:
+            decoded = unquote_plus(key, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            return f"{key}={REDACTED}"  # undecodable key: fail closed
+        if is_sensitive_key(decoded.strip()) or re.search(r"%[0-9A-Fa-f]?(?![0-9A-Fa-f])", key):
+            return f"{key}={REDACTED}"
+        return match.group(0)
+
+    return _ENCODED_KV.sub(_one, text)
+
+
 def redact_secrets(text: Any) -> str:
     """Remove credentials from free text. Never raises; fails closed."""
     if text is None:
@@ -190,6 +213,7 @@ def redact_secrets(text: Any) -> str:
             return out
         out = _redact_urls(out)
         out = _redact_bare_targets(out)
+        out = _redact_encoded_kv(out)
         out = _BEARER.sub(r"\1" + REDACTED, out)
         out = _AUTH_HEADER.sub(r"\1" + REDACTED, out)
         out = _KV.sub(r"\1" + REDACTED, out)

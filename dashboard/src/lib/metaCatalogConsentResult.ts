@@ -15,7 +15,9 @@ export type ConsentBanner =
   | { tone: 'warn'; key: string }
 
 export function confirmedActiveAuthorization(status: MetaCatalogConsentStatus | null | undefined): boolean {
-  if (!status || !status.approved) return false
+  // Current availability must hold too: an active row alone never overrides
+  // a failed environment, entitlement, scope or schema check.
+  if (!status || status.available !== true || !status.approved) return false
   const auth = status.authorization
   return (
     !!auth
@@ -42,7 +44,7 @@ export function resolveConsentBanner(
 ): ConsentBanner | null {
   if (!hint) return null
   if (hint === 'connected') {
-    if (confirmedActiveAuthorization(status)) return { tone: 'ok', key: 'connected' }
+    if (!statusFailed && confirmedActiveAuthorization(status)) return { tone: 'ok', key: 'connected' }
     if (!status && !statusFailed) return null
     return { tone: 'warn', key: 'notConfirmed' }
   }

@@ -348,3 +348,50 @@ def test_without_consent_the_waba_wrapper_queries_nothing_new():
         session.close()
         engine.dispose()
         consent._TABLE_SEEN.clear()
+
+
+@pytest.mark.parametrize("status", ["active", "revoked"])
+def test_catalog_import_and_probe_refuse_a_consent_governed_catalog(world, monkeypatch, status):
+    import httpx
+
+    from models import WhatsAppConnection as ServiceConnection
+    from services.meta_catalog_import import (
+        GRAPH_RESULT_CATALOG_CONSENT_GOVERNED,
+        MetaCatalogImportError,
+        build_graph_import_diagnostics,
+        import_from_meta,
+    )
+
+    w = world
+    row = w.session.query(MetaCatalogAuthorization).one()
+    row.status = status
+    w.session.commit()
+
+    def _no_network(*_a, **_k):
+        raise AssertionError("provider read on a consent-governed catalog")
+
+    monkeypatch.setattr(httpx, "Client", _no_network)
+    monkeypatch.setattr(httpx, "get", _no_network)
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    diag = build_graph_import_diagnostics(conn, tenant_id=w.tid, run_preflight=True)
+    assert diag["result_code"] == GRAPH_RESULT_CATALOG_CONSENT_GOVERNED and diag["token_selection"] is None
+    with pytest.raises(MetaCatalogImportError) as exc:
+        import_from_meta(w.session, w.tid)
+    assert exc.value.code == GRAPH_RESULT_CATALOG_CONSENT_GOVERNED
+    text = json.dumps(diag) + str(exc.value) + json.dumps(getattr(exc.value, "detail", {}) or {})
+    assert w.merchant_token not in text and w.platform_token not in text
+
+
+def test_catalog_import_probe_without_consent_keeps_the_legacy_token_path(world, monkeypatch):
+    import services.meta_catalog_import as importer
+    from models import WhatsAppConnection as ServiceConnection
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token
+
+    w = world
+    w.session.query(MetaCatalogAuthorization).delete()
+    w.session.commit()
+    monkeypatch.setattr(importer, "read_access_token", read_access_token)
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    diag = importer.build_graph_import_diagnostics(conn, tenant_id=w.tid, run_preflight=False)
+    assert diag["result_code"] != importer.GRAPH_RESULT_CATALOG_CONSENT_GOVERNED
+    assert (diag["token_selection"] or {}).get("token_source") == "merchant_meta_oauth"
