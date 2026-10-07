@@ -35,7 +35,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Iterable, Mapping, Optional
+from bisect import bisect_right
+from typing import Any, Iterable, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 REDACTED = "REDACTED"
@@ -107,7 +108,10 @@ _BEARER_MARKER = re.compile(r"(?=(Bearer\s+[\"']?))", re.IGNORECASE)
 _AUTH_HEADER_MARKER = re.compile(
     r"(?=((?:Authorization|Set-Cookie|Cookie)\s*[:=]\s*[\"']?))", re.IGNORECASE,
 )
-_AUTH_VALUE = re.compile(r"[^\s\"',;]+")
+# A header-style credential continues across ``,`` / ``;`` separators
+# (``Authorization: k=,<cred>``, ``Cookie: a=1; b=2``, Digest parameters).
+# Each repetition must consume a separator, so matching stays linear.
+_AUTH_VALUE = re.compile(r"[^\s\"',;]+(?:[,;]\s*[^\s\"',;]+)*")
 _BEARER_WORD = re.compile(r"Bearer\b", re.IGNORECASE)
 # ``key=value``, ``key: value``, ``"key": "value"`` fragments in free text (JSON,
 # query strings, bare request paths such as uvicorn's access log).
@@ -266,18 +270,63 @@ def _auth_marker_spans(text: str) -> list:
     return spans
 
 
-def _redact_markers_and_keys(text: str) -> str:
-    """Auth-marker and plain-key values, found on the unchanged text, replaced as one union."""
-    return _replace_spans(text, _auth_marker_spans(text) + _kv_spans(text))
+def _redact_markers_and_keys(text: str, *, outside_urls: bool = False) -> str:
+    """Auth-marker and plain-key values, found on the unchanged text, replaced as one union.
+
+    With ``outside_urls`` only values that start outside an absolute URL are
+    replaced: inside a URL the URL pass runs first (it parses the query and
+    fragment) and this pass then runs again over the normalized text, in the
+    pre-PR order, so a value pass can never break a URL's structure first.
+    """
+    spans = _auth_marker_spans(text) + _kv_spans(text)
+    if outside_urls and spans:
+        urls = [(m.start(), m.end()) for m in _URL_RE.finditer(text)]
+        if urls:
+            starts = [start for start, _end in urls]
+            kept = []
+            for span in spans:
+                i = bisect_right(starts, span[0]) - 1
+                if i >= 0 and urls[i][0] < span[0] < urls[i][1]:
+                    continue  # the value starts inside a URL (a URL value itself is kept)
+                kept.append(span)
+            spans = kept
+    return _replace_spans(text, spans)
+
+
+# A query key a URL parser can legitimately print back: plain name characters.
+_PLAIN_QUERY_KEY = re.compile(r"[A-Za-z0-9_.\-\[\]]*")
+
+
+def _redact_query_pairs(query: str) -> Tuple[str, bool]:
+    """(redacted query, whether any pair was redacted).
+
+    An earlier pass may already have redacted inside this query: a pair whose
+    key holds ``REDACTED`` (or a sensitive key with separator characters) is
+    dropped whole together with everything after it, and a value holding
+    ``REDACTED`` is replaced whole.
+    """
+    if not query:
+        return query, False
+    pairs = []
+    redacted = False
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        sensitive = is_sensitive_key(key)
+        if REDACTED in key or (sensitive and not _PLAIN_QUERY_KEY.fullmatch(key)):
+            # Credential text may be inside what parses as the key, and a
+            # header-style credential can run on across ``&``: nothing after
+            # this pair is kept.
+            pairs.append((REDACTED, ""))
+            return urlencode(pairs), True
+        elif sensitive or REDACTED in value:
+            pairs.append((key, REDACTED))
+            redacted = True
+        else:
+            pairs.append((key, value))
+    return urlencode(pairs), redacted
 
 
 def _redact_query(query: str) -> str:
-    if not query:
-        return query
-    pairs = []
-    for key, value in parse_qsl(query, keep_blank_values=True):
-        pairs.append((key, REDACTED if is_sensitive_key(key) else value))
-    return urlencode(pairs)
+    return _redact_query_pairs(query)[0]
 
 
 def _redact_one_url(raw: str) -> str:
@@ -287,8 +336,16 @@ def _redact_one_url(raw: str) -> str:
         netloc = parts.netloc
         if "@" in netloc:  # user:password@host — never keep credentials
             netloc = f"{REDACTED}@{netloc.rsplit('@', 1)[1]}"
-        fragment = _redact_query(parts.fragment) if "=" in parts.fragment else parts.fragment
-        return urlunsplit((parts.scheme, netloc, parts.path, _redact_query(parts.query), fragment))
+        query, query_redacted = _redact_query_pairs(parts.query)
+        if query_redacted and parts.fragment:
+            # A redacted query value may run on past ``#`` (a credential holding
+            # ``#``); the fragment is not kept next to it.
+            fragment = REDACTED
+        elif "=" in parts.fragment or REDACTED in parts.fragment:
+            fragment = _redact_query(parts.fragment)
+        else:
+            fragment = parts.fragment
+        return urlunsplit((parts.scheme, netloc, parts.path, query, fragment))
     except Exception:  # noqa: BLE001 — fail closed: drop the whole URL
         return REDACTED_URL
 
@@ -313,12 +370,18 @@ def redact_raw_query(query: str) -> str:
     query = _redact_markers_and_keys(query)
     pairs = []
     for part in query.split("&"):
-        key, sep, _value = part.partition("=")
+        key, sep, value = part.partition("=")
         try:
-            decoded = unquote_plus(key, errors="strict")
+            decoded = unquote_plus(key, errors="strict").strip()
         except (UnicodeDecodeError, ValueError):
             return REDACTED
-        if sep and is_sensitive_key(decoded.strip()):
+        sensitive = is_sensitive_key(decoded)
+        if REDACTED in key or (sensitive and not _PLAIN_QUERY_KEY.fullmatch(decoded)):
+            # Same rule as the URL query: credential text may be inside the
+            # key, and a header-style credential can run on across ``&``.
+            pairs.append(REDACTED)
+            break
+        if sep and (sensitive or REDACTED in value):
             pairs.append(f"{key}={REDACTED}")
         else:
             pairs.append(part)
@@ -436,12 +499,16 @@ def redact_secrets(text: Any) -> str:
         # rewrote the text earlier (URL, request-target, encoded-key, or one
         # of these two) could consume a ``Bearer`` / ``Authorization:``
         # marker or a ``secret=`` key and leave the credential after it.
-        # The URL, request-target and encoded-key passes then only redact more.
-        out = _redact_markers_and_keys(out)
+        # Values that start inside an absolute URL are left to the URL pass
+        # and the second marker/key pass, in the pre-PR order. The
+        # request-target and encoded-key passes then only redact more.
+        out = _redact_markers_and_keys(out, outside_urls=True)
         out = _redact_urls(out)
-        # URL normalization can turn ``?code#…`` into ``?code=…``; the plain
-        # key pass runs again over the normalized text.
-        out = _redact_kv(out)
+        # URL normalization can turn ``?code#…`` into ``?code=…`` or
+        # ``Authorization:k=,…`` into ``Authorization=…&…``; the marker and key
+        # passes run again over the normalized text, as the pre-PR pipeline
+        # (URLs first, then markers and keys) did.
+        out = _redact_markers_and_keys(out)
         out = _redact_bare_targets(out)
         out = _redact_encoded_kv(out)
         out = _META_TOKEN.sub(REDACTED, out)

@@ -1558,3 +1558,92 @@ def test_sentry_scrubs_thread_stack_frames_too(world):
     ]}}]}}
     out = _before_send(event, {})
     _no_secret_in(json.dumps(out), world)
+
+
+# ── final review B1 / transaction field / S2 ─────────────────────────────────
+
+_COLON_KEY_SHAPES = (
+    "Authorization:k=,{v}", "Authorization: k=,{v}", "Authorization:k=;{v}", "Cookie:k=,{v}", "Cookie:sid=1,{v}",
+    "cookie:a=b;{v}", "Set-Cookie:k=,{v}", "code=Bearer k=,{v}", "secret:x=,{v}",
+)
+_COLON_KEY_CONTEXTS = (
+    "https://h.example/cb?{s}", "https://h.example/cb?x=1&{s}", "https://h.example/cb#{s}", "/p?{s}",
+)
+
+
+def test_marker_or_key_with_a_separator_inside_a_url_never_leaks(world):
+    """B1: an earlier pass must never move credential text into a query key
+    that a URL parser prints back (``?Authorization:k=,<cred>``)."""
+    from core.log_redaction import (SecretRedactingFilter, redact_raw_query, redact_secrets,
+                                    redacted_query_preview)
+    from core.observability_sentry import _before_breadcrumb, _before_send
+
+    for shape in _COLON_KEY_SHAPES:
+        for ctx in _COLON_KEY_CONTEXTS:
+            for value in (secrets.token_urlsafe(18), Fernet.generate_key().decode()):
+                world.secrets.append(value)
+                url = ctx.replace("{s}", shape.replace("{v}", value))
+                query = url.split("?", 1)[-1]
+                _no_secret_in(redact_secrets(url), world)
+                _no_secret_in(redacted_query_preview(url, limit=4096), world)
+                _no_secret_in(redact_secrets(redact_raw_query(query)), world)
+                record = logging.LogRecord("httpx", logging.INFO, __file__, 1, 'HTTP Request: %s %s "%s"',
+                                           ("GET", url, "HTTP/1.1 200 OK"), None)
+                assert SecretRedactingFilter().filter(record)
+                _no_secret_in(record.getMessage(), world)
+                _no_secret_in(json.dumps(_before_breadcrumb({"type": "http", "data": {"url": url}}, {})), world)
+                event = {"request": {"url": url, "query_string": query},
+                         "exception": {"values": [{"type": "HTTPError", "value": url}]}}
+                _no_secret_in(json.dumps(_before_send(event, {})), world)
+                _no_secret_in(json.dumps(_before_send({"type": "transaction", "transaction": url}, {})), world)
+
+
+def test_sentry_scrubs_transaction_culprit_and_tags(world):
+    """Performance events reuse before_send; their transaction name (and an
+    error's culprit) can be the request URL with its query."""
+    from core.observability_sentry import _before_send
+
+    value = secrets.token_urlsafe(24)
+    world.secrets.append(value)
+    url = f"https://{API_HOST}{CALLBACK_PATH}?co%64e={value}&tenant=7"
+    out = _before_send({"type": "transaction", "transaction": url, "culprit": url, "tags": {"url": url},
+                        "request": {"url": url}}, {})
+    _no_secret_in(json.dumps(out), world)
+    assert out["transaction"].startswith(f"https://{API_HOST}{CALLBACK_PATH}")
+
+
+def test_claim_lock_failure_is_a_storage_failure_not_another_store(world, monkeypatch):
+    """S2: only proven ownership by another tenant may say so."""
+    import services.meta_catalog_claim as claim
+
+    def _lock_failed(_db, _catalog_id):
+        raise claim.CatalogClaimError(claim.ERROR_CATALOG_CLAIM_LOCK_FAILED, {})
+
+    monkeypatch.setattr(claim, "acquire_catalog_claim_lock", _lock_failed)
+    state = _start(world)
+    assert _result(_callback(world, code=_code(world), state=state)[1]) == "storage_unavailable"
+    assert _rows(world) == []
+
+
+@pytest.mark.parametrize("other_tenant_holds_catalog", [False, True])
+def test_integrity_error_reports_a_claim_only_with_evidence(world, monkeypatch, other_tenant_holds_catalog):
+    import services.meta_catalog_claim as claim
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+
+    if other_tenant_holds_catalog:
+        with world.factory() as s:
+            s.add(WhatsAppConnection(tenant_id=OTHER_TENANT, meta_catalog_id=CATALOG))
+            s.commit()
+    monkeypatch.setattr(claim, "guard_catalog_claim", lambda *_a, **_k: None)  # the race window
+    real_flush = Session.flush
+
+    def _flush(self, *args, **kwargs):
+        if any(isinstance(obj, MetaCatalogAuthorization) for obj in self.new):
+            raise IntegrityError("INSERT", {}, Exception("synthetic constraint"))
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", _flush)
+    state = _start(world)
+    expected = "catalog_claimed_by_other_tenant" if other_tenant_holds_catalog else "storage_unavailable"
+    assert _result(_callback(world, code=_code(world), state=state)[1]) == expected

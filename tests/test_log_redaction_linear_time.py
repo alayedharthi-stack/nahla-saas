@@ -61,6 +61,11 @@ cases = {
     "mixed_marker_chain": "Bearer x=Authorization: Cookie: " * (n // 4) + code,
     "marker_url_chain": "Bearer https://h.example/p?a;" * (n // 4) + " Bearer " + code,
     "key_url_chain": "secret=https://h.example/p?a;" * (n // 4) + " code=" + code,
+    # Header values continue across ``,``/``;``; colon keys inside URLs.
+    "header_separator_chain": "Authorization: " + "a, " * n + code,
+    "cookie_separator_chain": "Cookie: " + "a=1; " * n + code,
+    "url_colon_key_chain": "https://h.example/cb?" + "Authorization:k=," * (n // 2) + code,
+    "url_fragment_colon_chain": "https://h.example/cb#" + "cookie:a=b;" * (n // 2) + code,
 }
 times = {}
 for name, text in cases.items():
@@ -75,7 +80,8 @@ for name, text in cases.items():
     if name in ("pct_run_eq", "pct_key_chain", "slash_pct_query", "secret_run", "enc_key_run", "spaces", "query",
                 "target_eq_query", "target_mixed_query", "encoded_bearer", "target_bearer", "url_bearer",
                 "bearer_chain", "header_chain", "cookie_chain", "glued_header_chain", "mixed_marker_chain",
-                "marker_url_chain", "key_url_chain"):
+                "marker_url_chain", "key_url_chain", "header_separator_chain", "cookie_separator_chain",
+                "url_colon_key_chain", "url_fragment_colon_chain"):
         assert code not in out, name
 print(json.dumps(times))
 """

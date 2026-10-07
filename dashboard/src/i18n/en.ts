@@ -2218,7 +2218,7 @@ const en: Translations = {
     },
     metaConsent: {
       title: 'Connect Meta catalog',
-      description: 'Gives Nahla management access to the approved catalog only (catalog management + business management). It does not connect WhatsApp or send messages.',
+      description: 'Connects the approved catalog through Meta (catalog management + business management). Meta grants business management for the whole business and catalog management for the catalogs you select; Nahla uses this access only for the approved catalog. It does not connect WhatsApp or send messages.',
       button: 'Connect Meta catalog',
       connecting: 'Redirecting to Meta…',
       approvedLine: 'Approved catalog: {catalog} — business: {business}',

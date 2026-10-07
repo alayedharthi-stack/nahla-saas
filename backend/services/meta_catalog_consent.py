@@ -253,8 +253,11 @@ def _appsecret_proof(token: str, app_secret: str) -> str:
 async def _graph_get(path: str, params: Dict[str, Any], *, token: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
     """GET graph.facebook.com/<version>/<path>. Returns (http_status, json body or {}).
 
-    Never raises for HTTP errors; transport errors raise ConsentError. The
-    user token travels in the Authorization header, never in the URL.
+    Never raises for HTTP errors; transport errors raise ConsentError. With
+    ``token`` the user token travels in the Authorization header. Graph's
+    ``debug_token`` (``input_token``) and the long-lived exchange
+    (``fb_exchange_token``) take it as a query parameter by protocol; those
+    URLs are redacted wherever they are logged (httpx log filter, Sentry).
     """
     url = f"https://graph.facebook.com/{_graph_version()}/{path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -529,6 +532,17 @@ def _decrypt(stored: str) -> Optional[str]:
         return None
 
 
+def _catalog_held_by_other_tenant(db: Any, approval: CatalogApproval) -> bool:
+    """True only when another tenant provably holds the approved catalog."""
+    from services.meta_catalog_claim import other_tenants_claiming  # noqa: PLC0415
+
+    try:
+        return bool(other_tenants_claiming(db, approval.tenant_id, approval.catalog_id))
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unknown ownership is reported as a storage failure, never as a claim
+        db.rollback()
+        return False
+
+
 def persist_authorization(
     db: Any,
     *,
@@ -545,7 +559,11 @@ def persist_authorization(
     from sqlalchemy.exc import IntegrityError  # noqa: PLC0415
 
     from models import MetaCatalogAuthorization  # noqa: PLC0415
-    from services.meta_catalog_claim import CatalogClaimError, guard_catalog_claim  # noqa: PLC0415
+    from services.meta_catalog_claim import (  # noqa: PLC0415
+        ERROR_CATALOG_CLAIMED_BY_OTHER_TENANT,
+        CatalogClaimError,
+        guard_catalog_claim,
+    )
 
     stamp = now or datetime.now(timezone.utc)
     if not authorization_table_exists(db):
@@ -575,12 +593,21 @@ def persist_authorization(
         row.updated_at = stamp
         db.flush()
         db.commit()
-    except CatalogClaimError:
+    except CatalogClaimError as exc:
         db.rollback()
-        raise ConsentError(C_CATALOG_CLAIMED) from None
+        # Only proven ownership by another tenant is reported as such; a lock
+        # failure or an unknown claim state is a storage failure.
+        if exc.code == ERROR_CATALOG_CLAIMED_BY_OTHER_TENANT:
+            raise ConsentError(C_CATALOG_CLAIMED) from None
+        raise ConsentError(C_STORAGE_UNAVAILABLE) from None
     except IntegrityError:
         db.rollback()
-        raise ConsentError(C_CATALOG_CLAIMED) from None
+        # A unique-constraint race with another tenant's claim, or any other
+        # integrity failure (e.g. a missing tenant row): re-check before
+        # telling the merchant the catalog belongs to another store.
+        if _catalog_held_by_other_tenant(db, approval):
+            raise ConsentError(C_CATALOG_CLAIMED) from None
+        raise ConsentError(C_STORAGE_UNAVAILABLE) from None
     except ConsentError:
         db.rollback()
         raise

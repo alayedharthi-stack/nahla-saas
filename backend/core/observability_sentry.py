@@ -193,9 +193,12 @@ def _scrub_event(event: Dict[str, Any]) -> Dict[str, Any]:
                 logentry[key] = redact_secrets(logentry[key])
         if logentry.get("params") is not None:
             logentry["params"] = redact_value(logentry["params"])
-    if isinstance(event.get("message"), str):
-        event["message"] = redact_secrets(event["message"])
-    for key in ("extra", "contexts"):
+    # ``transaction`` (also the name of performance events, which reuse this
+    # hook) and ``culprit`` can be a request URL with its query string.
+    for key in ("message", "transaction", "culprit"):
+        if isinstance(event.get(key), str):
+            event[key] = redact_secrets(event[key])
+    for key in ("extra", "contexts", "tags"):
         if event.get(key):
             event[key] = redact_value(event[key])
     for span in event.get("spans") or []:

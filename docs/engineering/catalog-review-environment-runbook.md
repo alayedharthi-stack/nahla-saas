@@ -128,3 +128,5 @@ cd dashboard && npm run check:review-env-api-base
 2. قراءة الصف المعني فقط (دون قيمة الرمز): `SELECT tenant_id, catalog_id, business_id, status, verified_at FROM meta_catalog_authorizations WHERE tenant_id = :tenant AND catalog_id = :catalog;`
 3. بموافقة صريحة: إما إعادة الربط من `/catalog` (يستبدل الصف بعد التحقق الكامل)، أو حذف ذلك الصف وحده داخل معاملة: `DELETE FROM meta_catalog_authorizations WHERE tenant_id = :tenant AND catalog_id = :catalog;` ثم التحقق بأن عدد الصفوف المحذوفة 1 قبل `COMMIT`.
 4. بعد الحذف فقط يعود مسار واتساب السابق لذلك الكتالوج كما كان قبل الموافقة؛ يُسجَّل الإجراء ومن وافق عليه.
+
+**تحذير الرجوع عن الهجرة:** `alembic downgrade` لما قبل `0120` يحذف جدول `meta_catalog_authorizations` بكل صفوفه، فتسقط كل الموافقات المخزنة ويعود مسار واتساب لكل كتالوج كان محكومًا بموافقة. هذا ليس إجراء استرداد؛ لا يُنفَّذ إلا بقرار صريح من المالك وبعد نسخ الصفوف المعنية (دون قيم الرموز) للتوثيق.

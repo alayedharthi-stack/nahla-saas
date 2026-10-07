@@ -79,6 +79,13 @@ for (const [lang, banned, refresh] of [
   const block = src.slice(start, src.indexOf('    whatsappSync: {', start))
   assert(`${lang}: metaConsent block found`, start >= 0 && block.includes('results: {'))
   assert(`${lang}: no unproven "nothing stored" claim`, !block.includes(banned))
+  // Meta does not restrict the token to one catalog; the copy must not imply
+  // it does, and must say the single-catalog limit is Nahla's.
+  const description = block.split('\n').find((l) => l.trimStart().startsWith('description:')) ?? ''
+  assert(`${lang}: description discloses the business-wide grant`,
+    lang === 'en' ? description.includes('whole business') && description.includes('Nahla uses this access only for the approved catalog')
+                  : description.includes('النشاط التجاري كله') && description.includes('للكتالوج المعتمد فقط'),
+    description.trim())
   for (const key of ['storage_unavailable', 'persist_unverified', 'error']) {
     const line = block.split('\n').find((l) => l.trimStart().startsWith(`${key}:`)) ?? ''
     assert(`${lang}: ${key} points to a status refresh`, line.includes(refresh), line.trim())
