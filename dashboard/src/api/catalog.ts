@@ -753,6 +753,34 @@ export interface MetaSyncConfirmResponse {
 
 // ── Merchant surface ─────────────────────────────────────────────────
 
+
+// ── Catalog-only Meta consent (catalog_management + business_management) ──
+
+export type MetaCatalogConsentState = 'none' | 'active' | 'expired' | 'inactive'
+
+export interface MetaCatalogConsentAuthorization {
+  state: MetaCatalogConsentState
+  inactive_reason?: string | null
+  catalog_id?: string
+  business_id?: string
+  granted_scopes?: string[]
+  verified_at?: string | null
+  token_expires_at?: string | null
+}
+
+export interface MetaCatalogConsentStatus {
+  available: boolean
+  reason: string | null
+  requested_scopes: string[]
+  authorization: MetaCatalogConsentAuthorization
+  approved?: { catalog_id: string; business_id: string }
+}
+
+export interface MetaCatalogConsentStart {
+  authorize_url: string
+  expires_in: number
+}
+
 export const catalogApi = {
   status(): Promise<CatalogStatus> {
     return apiCall<CatalogStatus>('/merchant/catalog/status')
@@ -886,6 +914,12 @@ export const catalogApi = {
       `/merchant/catalog/products/${id}/meta-sync/retry`,
       { method: 'POST' },
     )
+  },
+  metaConsentStatus(): Promise<MetaCatalogConsentStatus> {
+    return apiCall<MetaCatalogConsentStatus>('/merchant/catalog/meta-consent/status')
+  },
+  metaConsentStart(): Promise<MetaCatalogConsentStart> {
+    return apiCall<MetaCatalogConsentStart>('/merchant/catalog/meta-consent/start', { method: 'POST' })
   },
   whatsappSyncStatus(): Promise<WhatsappCatalogSyncStatus> {
     return apiCall<WhatsappCatalogSyncStatus>('/merchant/catalog/whatsapp-sync/status')

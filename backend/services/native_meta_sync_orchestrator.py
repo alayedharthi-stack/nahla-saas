@@ -1245,6 +1245,34 @@ def _mark_synced(
     )
 
 
+def _waba_link_status_for_push(db: Any, tenant_id: int) -> Dict[str, Any]:
+    """WhatsApp linkage for the publish stamp.
+
+    When a catalog-only Meta consent governs this tenant's catalog, no WABA
+    or phone endpoint is called and no WhatsApp/platform token is used: the
+    linkage is recorded as unknown (never linked). Otherwise the existing
+    read-only WABA probe runs exactly as before.
+    """
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from services.meta_catalog_consent import consent_governs_catalog, consent_row_exists  # noqa: PLC0415
+    from services.meta_catalog_linking import LINK_STATUS_UNKNOWN  # noqa: PLC0415
+
+    # Without a stored consent nothing extra is queried: the existing call
+    # sequence (and every schema it already supports) is unchanged.
+    if not consent_row_exists(db, tenant_id):
+        return get_waba_catalog_link_status(db, tenant_id)
+    conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == int(tenant_id)).first()
+    if consent_governs_catalog(db, tenant_id, conn):
+        return {
+            "ok": False,
+            "connected": False,
+            "expected_catalog_linked": None,
+            "link_status": LINK_STATUS_UNKNOWN,
+            "error": "catalog_consent_waba_not_probed",
+        }
+    return get_waba_catalog_link_status(db, tenant_id)
+
+
 def _waba_linked_flag(waba_status: Dict[str, Any]) -> Optional[bool]:
     if not waba_status:
         return None
@@ -1548,7 +1576,7 @@ def _attempt_acquired_body(
                     retailer_id=retailer_id,
                     reason=str(lookup_block.get("reason") or ""),
                 )
-            waba_status = get_waba_catalog_link_status(db, tenant_id)
+            waba_status = _waba_link_status_for_push(db, tenant_id)
             waba_linked = _waba_linked_flag(waba_status)
             already = str(getattr(parent, "meta_item_id", None) or "").strip()
             if (not salla_parent) and already and already != bound_id:
@@ -1780,7 +1808,7 @@ def _attempt_acquired_body(
         if comparison.get("outcome") != "matched":
             content_ok = False
 
-    waba_status = get_waba_catalog_link_status(db, tenant_id)
+    waba_status = _waba_link_status_for_push(db, tenant_id)
     waba_linked = _waba_linked_flag(waba_status)
 
     pushed_payload = last_push.get("payload") if isinstance(last_push.get("payload"), dict) else None

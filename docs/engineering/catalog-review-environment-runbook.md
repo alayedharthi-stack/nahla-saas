@@ -109,3 +109,24 @@ cd dashboard && npm run check:review-env-api-base
 6. تنفيذ الرحلة كاملة وتوثيقها في تقرير الكتالوج §7.10 قبل أي حديث عن التصوير.
 
 **ممنوع طوال ذلك:** أي مسّ بالإنتاج أو Tenant 1/33/35/67 أو الوكيل أو الرقم أو coexistence؛ لا تعديل لإعداد Meta الإنتاجي؛ لا كتابة حية خارج كتالوج الاختبار.
+
+---
+
+## 6. ربط كتالوج Meta بموافقة «الكتالوج فقط» (PR #1197 — كود فقط؛ غير مُسجَّل وغير مُطبَّق)
+
+- **المتغيرات (أسماء فقط):** `NAHLA_META_CATALOG_CONSENT_ENABLED`، `META_CATALOG_CONSENT_CONFIG_ID`، `META_CATALOG_CONSENT_REDIRECT_URI`، `META_CATALOG_CONSENT_APPROVED_ASSETS` (`tenant:catalog:business` مفصولة بفواصل)، مع `META_APP_ID`/`META_APP_SECRET` و`WA_TOKEN_ENC_KEY` المخصص و`DASHBOARD_URL` لبيئة المراجعة. كلها مطفأة افتراضيًا؛ أي نقص يُغلق المسار.
+- **المسارات:** `GET /merchant/catalog/meta-consent/status`، `POST /merchant/catalog/meta-consent/start`، `GET /merchant/catalog/meta-consent/callback` (الوحيد المستثنى من JWT، بالمسار الحرفي). عنوان الرجوع: `https://<نطاق API المراجعة>/merchant/catalog/meta-consent/callback` حرفيًا، ثم العودة الثابتة إلى `https://<نطاق لوحة المراجعة>/catalog`.
+- **الهجرة:** `0120` (`meta_catalog_authorizations`) خطوة مشغّل صريحة بموافقة بعد `preflight_check.py`، ولا يطبّقها الإقلاع.
+
+### 6.1 الاسترداد بعد موافقة مخزنة (إجراء مشغّل صريح ومنفصل)
+
+صفّ الموافقة المخزن يحكم كتالوجه **عمدًا** حتى لو أُطفئت الميزة أو أُزيل الاعتماد أو تغيّر التطبيق أو انتهت الصلاحية: تبقى مسارات واتساب لذلك الكتالوج مغلقة (`catalog_consent_inactive` / `catalog_consent_governed`) ولا يعود أي رمز واتساب أو رمز منصة تلقائيًا. لا يوجد إلغاء أو حذف تلقائي في الكود.
+
+الاسترداد قرار للمالك ثم إجراء مشغّل منفصل على قاعدة المراجعة وحدها:
+
+1. `scripts/preflight_check.py` بمتغيرات خدمة المراجعة نفسها لإثبات أن DSN يشير إلى القاعدة المعلَّمة.
+2. قراءة الصف المعني فقط (دون قيمة الرمز): `SELECT tenant_id, catalog_id, business_id, status, verified_at FROM meta_catalog_authorizations WHERE tenant_id = :tenant AND catalog_id = :catalog;`
+3. بموافقة صريحة: إما إعادة الربط من `/catalog` (يستبدل الصف بعد التحقق الكامل)، أو حذف ذلك الصف وحده داخل معاملة: `DELETE FROM meta_catalog_authorizations WHERE tenant_id = :tenant AND catalog_id = :catalog;` ثم التحقق بأن عدد الصفوف المحذوفة 1 قبل `COMMIT`.
+4. بعد الحذف فقط يعود مسار واتساب السابق لذلك الكتالوج كما كان قبل الموافقة؛ يُسجَّل الإجراء ومن وافق عليه.
+
+**تحذير الرجوع عن الهجرة:** `alembic downgrade` لما قبل `0120` يحذف جدول `meta_catalog_authorizations` بكل صفوفه، فتسقط كل الموافقات المخزنة ويعود مسار واتساب لكل كتالوج كان محكومًا بموافقة. هذا ليس إجراء استرداد؛ لا يُنفَّذ إلا بقرار صريح من المالك وبعد نسخ الصفوف المعنية (دون قيم الرموز) للتوثيق.

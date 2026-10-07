@@ -228,7 +228,10 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "catalog_channel_retirements_migration",
                    # The catalog review environment refuses any database that does
                    # not carry the persisted marker, before migrations or workers.
-                   "catalog_review_environment_guard"]
+                   "catalog_review_environment_guard",
+                   # Catalog-only Meta consent: migration 0120, pre-0120 compatibility,
+                   # single-use nonce and one-tenant-per-catalog under concurrency.
+                   "catalog_meta_consent"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -261,6 +264,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "catalog_stale_repair_row_lock": ("proof", harness_env),
         "catalog_channel_retirements_migration": ("proof", harness_env),
         "catalog_review_environment_guard": ("proof", harness_env),
+        "catalog_meta_consent": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

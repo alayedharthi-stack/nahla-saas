@@ -921,6 +921,29 @@
         "backend/tests/test_review_environment_guard_pg.py::test_review_provisioning_catalog_schema_step_adopts_the_table_create_all_built[server0]",
         "backend/tests/test_review_environment_guard_pg.py::test_server_refuses_an_unmarked_database_before_any_bootstrap_or_worker[server0]"
       ]
+    },
+    {
+      "id": "catalog_meta_consent",
+      "kind": "proof",
+      "module": "backend/tests/test_meta_catalog_consent_pg.py",
+      "origin": "Catalog-only Meta consent (catalog_management + business_management): migration 0120 creates meta_catalog_authorizations, adopts an identical create_all table unchanged, refuses drifted tables without change and downgrades by dropping only that table; on a pre-0120 database with the feature disabled the existing catalog claim and connection paths keep working with no aborted transaction, while consent enabled on a pre-0120 database fails closed; the catalog-consent nonce is consumed exactly once under concurrency and never by a WhatsApp embedded/coexistence consume; two tenants persisting one catalog concurrently leave exactly one encrypted row; the full callback stores one encrypted authorization, writes no WhatsApp connection, and concurrent replays of one state yield exactly one success and one token exchange",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_meta_catalog_consent_pg.py::test_fresh_database_gets_the_table_and_downgrade_removes_only_it",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_create_all_table_is_adopted_unchanged",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[extra_column]",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[token_nullable]",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[extra_check]",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_consent_enabled_on_pre_0120_database_fails_closed",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_catalog_nonce_is_consumed_exactly_once_under_concurrency",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_two_tenants_persisting_one_catalog_concurrently_one_wins",
+        "backend/tests/test_meta_catalog_consent_pg.py::test_full_callback_on_postgres_and_concurrent_replay"
+      ]
     }
   ]
 }
