@@ -166,6 +166,7 @@ JWT_PUBLIC_PREFIXES = (
                                         # (gated inside the handler via ENABLE_ADMIN_DEBUG
                                         # + optional ADMIN_DEBUG_SECRET)
     "/webhook",
+    "/oto/webhooks/",                  # OTO HMAC-verified callbacks; merchant APIs stay JWT-only
     "/auth",
     "/oauth",                           # Salla/WhatsApp OAuth callbacks
     "/integrations/salla/",             # Salla success/error landing HTML pages (public)
@@ -262,6 +263,7 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/debug/")    # TEMPORARY: token-gated debug surface
             or path.startswith("/admin/debug/")  # TEMPORARY: env-flag-gated admin recovery
             or path.startswith("/webhook")
+            or path.startswith("/oto/webhooks/")
             or path.startswith("/auth")
             or path.startswith("/api/salla/diag/")  # public diagnostic
         ):
