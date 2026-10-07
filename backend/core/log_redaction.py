@@ -104,15 +104,59 @@ _AUTH_HEADER = re.compile(
 )
 # ``key=value``, ``key: value``, ``"key": "value"`` fragments in free text (JSON,
 # query strings, bare request paths such as uvicorn's access log).
-_KV = re.compile(
-    r"((?<![A-Za-z0-9_.\-])"
-    r"(?:[A-Za-z0-9_.\-]*token"
-    r"|[A-Za-z0-9_.\-]*(?:secret|password|passwd|api[_\-]?key|authorization|cookie)[A-Za-z0-9_.\-]*"
-    r"|[A-Za-z0-9_.\-]*(?:enc_key|encryption_key|fernet_key|signing_key|private_key)[A-Za-z0-9_.\-]*"
-    r"|code|state|appsecret_proof)"
-    r"[\"']?\s*[=:]\s*[\"']?)(?!(?:Bearer|Basic|Digest)\b)([^\s\"'&,;]+)",
+# One flat key token (no alternation of unbounded runs), starting only at a
+# token boundary, then a callback that decides sensitivity: linear in the
+# input length. The rule is exactly the former alternation's: a key that ends
+# with ``token``; contains a secret/password/api-key/authorization/cookie or
+# encryption-key fragment; or is ``code``, ``state`` or ``appsecret_proof``.
+_KV_KEY = re.compile(
+    r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]+)([\"']?\s*[=:]\s*[\"']?)",
     re.IGNORECASE,
 )
+_KV_VALUE = re.compile(r"(?!(?:Bearer|Basic|Digest)\b)[^\s\"'&,;]+", re.IGNORECASE)
+_KV_KEY_FRAGMENTS = (
+    "secret", "password", "passwd", "apikey", "api_key", "api-key", "authorization", "cookie",
+    "enc_key", "encryption_key", "fernet_key", "signing_key", "private_key",
+)
+_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof"})
+
+
+def _kv_key_is_sensitive(key: str) -> bool:
+    k = key.lower()
+    return k.endswith("token") or k in _KV_EXACT_KEYS or any(f in k for f in _KV_KEY_FRAGMENTS)
+
+
+def _redact_kv(text: str) -> str:
+    """Redact the value of every sensitive ``key=value`` / ``key: value`` fragment.
+
+    A forward scan: each key token is matched once at a token boundary (flat
+    character class, no alternation of unbounded runs), so the cost is linear
+    in the input. Only a sensitive key consumes its value; a non-sensitive key
+    consumes just itself and its separator, so it can never swallow a
+    following sensitive pair. The sensitivity rule is the former
+    alternation's: a key ending with ``token``; containing a
+    secret/password/api-key/authorization/cookie or encryption-key fragment;
+    or exactly ``code``, ``state`` or ``appsecret_proof``.
+    """
+    out = []
+    pos = 0
+    while True:
+        m = _KV_KEY.search(text, pos)
+        if m is None:
+            break
+        if _kv_key_is_sensitive(m.group(1)):
+            value = _KV_VALUE.match(text, m.end())
+            if value is not None:
+                out.append(text[pos:m.end()])
+                out.append(REDACTED)
+                pos = value.end()
+                continue
+        out.append(text[pos:m.end()])
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 # Meta Graph user / page / system-user tokens start with ``EAA``.
 _META_TOKEN = re.compile(r"\bEAA[A-Za-z0-9]{20,}")
 # A Fernet key (32 bytes, url-safe base64 with one ``=`` pad) wherever it
@@ -173,7 +217,9 @@ def redact_raw_query(query: str) -> str:
 
 # A bare request target (``/path?query``) as uvicorn's access log and raw
 # diagnostics print it — no scheme or host, so ``_URL_RE`` does not see it.
-_BARE_TARGET = re.compile(r"(?<![\w:/.@])(/[^\s\"'<>?#]*)\?([^\s\"'<>#]*)")
+# Starts only at a token boundary (start, whitespace, quote, bracket, ``=``,
+# ``,`` or ``;``), so each token is scanned once: linear on any input.
+_BARE_TARGET = re.compile(r"(?<![^\s\"'(\[=,;])(/[^\s\"'<>?#]*)\?([^\s\"'<>#]*)")
 
 
 def _redact_bare_targets(text: str) -> str:
@@ -183,24 +229,46 @@ def _redact_bare_targets(text: str) -> str:
 # ``key=value`` fragments whose key carries percent-encoding (``co%64e=…``,
 # ``access%5Ftoken=…``) anywhere in free text — bare query strings, breadcrumb
 # fields, request ``query_string``. Plain keys are handled by ``_KV``.
-_ENCODED_KV = re.compile(
-    r"(?<![A-Za-z0-9_.\-%+])((?:[A-Za-z0-9_.\-+]|%[0-9A-Fa-f]{0,2})*%(?:[A-Za-z0-9_.\-+]|%[0-9A-Fa-f]{0,2})*)"
-    r"=([^\s\"'&,;]*)"
-)
+#
+# One flat character class for the key (no nested or alternating
+# quantifiers) and a start only at a token boundary, so a scan is linear in
+# the input length even for adversarial ``%ab%ab…`` runs.
+_ENCODED_KEY_CHARS = "A-Za-z0-9_.\\-+%"
+_ENCODED_KEY = re.compile(rf"(?<![{_ENCODED_KEY_CHARS}])([{_ENCODED_KEY_CHARS}]+)=")
+_ENCODED_VALUE = re.compile(r"[^\s\"'&,;]*")
+_MALFORMED_PCT = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _encoded_key_redacts(key: str) -> bool:
+    if "%" not in key and "+" not in key:
+        return False  # plain keys are _redact_kv's job
+    if _MALFORMED_PCT.search(key):
+        return True  # malformed escape: fail closed
+    try:
+        decoded = unquote_plus(key, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return True  # undecodable key: fail closed
+    return is_sensitive_key(decoded.strip())
 
 
 def _redact_encoded_kv(text: str) -> str:
-    def _one(match: "re.Match[str]") -> str:
-        key = match.group(1)
-        try:
-            decoded = unquote_plus(key, errors="strict")
-        except (UnicodeDecodeError, ValueError):
-            return f"{key}={REDACTED}"  # undecodable key: fail closed
-        if is_sensitive_key(decoded.strip()) or re.search(r"%[0-9A-Fa-f]?(?![0-9A-Fa-f])", key):
-            return f"{key}={REDACTED}"
-        return match.group(0)
-
-    return _ENCODED_KV.sub(_one, text)
+    """Forward scan; only a key that redacts consumes its value (linear)."""
+    out = []
+    pos = 0
+    while True:
+        m = _ENCODED_KEY.search(text, pos)
+        if m is None:
+            break
+        if _encoded_key_redacts(m.group(1)):
+            value = _ENCODED_VALUE.match(text, m.end())
+            out.append(text[pos:m.end()])
+            out.append(REDACTED)
+            pos = value.end() if value is not None else m.end()
+            continue
+        out.append(text[pos:m.end()])
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def redact_secrets(text: Any) -> str:
@@ -216,7 +284,7 @@ def redact_secrets(text: Any) -> str:
         out = _redact_encoded_kv(out)
         out = _BEARER.sub(r"\1" + REDACTED, out)
         out = _AUTH_HEADER.sub(r"\1" + REDACTED, out)
-        out = _KV.sub(r"\1" + REDACTED, out)
+        out = _redact_kv(out)
         out = _META_TOKEN.sub(REDACTED, out)
         out = _FERNET_KEY.sub(REDACTED, out)
         return out
