@@ -243,7 +243,8 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
 
     if missing:
         primary = (
-            "missing_waba_id" if "waba_id" in missing
+            "catalog_consent_governed" if token_source == "catalog_consent_governed"
+            else "missing_waba_id" if "waba_id" in missing
             else "missing_catalog_id" if "meta_catalog_id" in missing
             else "missing_graph_token"
         )

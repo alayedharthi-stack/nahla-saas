@@ -806,6 +806,7 @@ def is_unsupported_catalog_edge_error(meta_err: Optional[Dict[str, Any]]) -> boo
 _TOKEN_SOURCE_MERCHANT_OAUTH  = "merchant_meta_oauth"
 _TOKEN_SOURCE_PLATFORM_SYSTEM = "platform_system_user"
 _TOKEN_SOURCE_NONE            = "none"
+_TOKEN_SOURCE_CATALOG_CONSENT_GOVERNED = "catalog_consent_governed"
 
 # Closed result codes for diagnostics / API (never include token values).
 GRAPH_RESULT_OK                        = "ok"
@@ -1280,6 +1281,25 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
         }
     provider     = str(getattr(conn, "provider", "") or "").lower()
     connection_t = str(getattr(conn, "connection_type", "") or "").lower()
+    from services.meta_catalog_access import _consent_governed_connection  # noqa: PLC0415
+
+    if _consent_governed_connection(conn):
+        # A catalog-only consent governs this catalog: no WhatsApp merchant or
+        # platform token may serve it, so every WhatsApp-token Graph caller
+        # (WABA link status, commerce settings, onboarding, reconnect,
+        # readout) fails closed without calling Graph.
+        return {
+            "token":           None,
+            "token_source":    _TOKEN_SOURCE_CATALOG_CONSENT_GOVERNED,
+            "provider":        provider,
+            "connection_type": connection_t,
+            "token_tail":      "<none>",
+            "token_len":       0,
+            "considered":      [{
+                "source": _TOKEN_SOURCE_CATALOG_CONSENT_GOVERNED,
+                "reason": "catalog governed by a catalog-only consent; WhatsApp tokens are not used",
+            }],
+        }
     plain_token  = read_access_token(conn)
 
     considered: List[Dict[str, Any]] = []

@@ -104,17 +104,25 @@ def probe_catalog_readable(
 
 
 def _consent_governed_connection(conn: Any) -> bool:
-    """A session-bound WhatsApp connection whose catalog a stored consent governs."""
-    from sqlalchemy.orm import object_session  # noqa: PLC0415
+    """A WhatsApp connection whose catalog a stored consent governs (or may).
+
+    Session-bound rows are checked against the database. A persisted row that
+    has left its session (detached) cannot be checked, so its governance is
+    unknown and it is treated as governed (fail closed). Objects that were
+    never persisted and non-ORM stand-ins carry no consent context.
+    """
+    from sqlalchemy.orm.state import InstanceState  # noqa: PLC0415
 
     from services.meta_catalog_consent import consent_governs_catalog  # noqa: PLC0415
 
-    try:
-        session = object_session(conn)
-    except Exception:  # noqa: BLE001  # noqa: silent-ok — non-ORM stand-ins carry no consent context
+    if not str(getattr(conn, "meta_catalog_id", "") or "").strip():
         return False
-    if session is None or not str(getattr(conn, "meta_catalog_id", "") or "").strip():
-        return False
+    state = getattr(conn, "_sa_instance_state", None)
+    if not isinstance(state, InstanceState):
+        return False  # non-ORM stand-in
+    session = state.session
+    if session is None:
+        return bool(state.detached)
     return consent_governs_catalog(session, int(getattr(conn, "tenant_id", 0) or 0), conn)
 
 

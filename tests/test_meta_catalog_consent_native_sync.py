@@ -304,6 +304,48 @@ def test_whatsapp_token_pickers_never_serve_a_consent_governed_catalog(world):
     assert select_catalog_graph_token(conn, CATALOG)["token"] is None
 
 
+def test_whatsapp_mode_waba_and_commerce_settings_fail_closed_on_a_governed_catalog(world):
+    """Existing WhatsApp-mode readers (WABA link status, commerce settings and
+    every other ``_select_graph_token`` caller) get no WhatsApp token for a
+    consent-governed catalog: no WABA/phone Graph call, a precise reason."""
+    from models import WhatsAppConnection as ServiceConnection
+    from services.meta_catalog_import import _select_graph_token
+    from services.meta_catalog_linking import get_waba_catalog_link_status
+    from services.meta_commerce_settings import _resolve_connection as commerce_connection
+
+    w = world  # read_access_token and _fetch_waba_product_catalogs raise if touched
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    pick = _select_graph_token(conn)
+    assert pick["token"] is None and pick["token_source"] == "catalog_consent_governed"
+    link = get_waba_catalog_link_status(w.session, w.tid)
+    assert link["ok"] is False and link["error"] == "catalog_consent_governed"
+    assert link.get("connected") is not True
+    _conn, payload = commerce_connection(w.session, w.tid)
+    assert payload["ok"] is False and payload["error"] == "catalog_consent_governed"
+    assert "token" not in payload
+    assert not w.graph.calls and not w.probes
+
+
+def test_detached_persisted_connection_is_unknown_governance_and_fails_closed(world, monkeypatch):
+    import services.meta_catalog_import as importer
+    from models import WhatsAppConnection as ServiceConnection
+    from services.meta_catalog_access import catalog_token_candidates
+    from services.meta_catalog_import import _select_graph_token
+    from services.whatsapp_platform.wa_connection_secrets import read_access_token
+
+    w = world
+    monkeypatch.setattr(importer, "read_access_token", read_access_token)
+    conn = w.session.query(ServiceConnection).filter_by(tenant_id=w.tid).one()
+    w.session.expunge(conn)
+    assert catalog_token_candidates(conn) == []
+    assert _select_graph_token(conn)["token"] is None
+    # A never-persisted object (tests, previews) carries no consent context:
+    # the legacy picker is unchanged for it.
+    transient = ServiceConnection(tenant_id=w.tid, meta_catalog_id="880000000000777", provider="meta",
+                                  access_token=w.merchant_token, whatsapp_business_account_id="WABA-GENERIC-2")
+    assert _select_graph_token(transient)["token"] == w.merchant_token
+
+
 def test_without_consent_the_existing_whatsapp_path_is_unchanged(world, monkeypatch):
     import services.meta_catalog_import as importer
     from models import WhatsAppConnection as ServiceConnection
