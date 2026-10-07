@@ -217,13 +217,52 @@ def redact_raw_query(query: str) -> str:
 
 # A bare request target (``/path?query``) as uvicorn's access log and raw
 # diagnostics print it — no scheme or host, so ``_URL_RE`` does not see it.
-# Starts only at a token boundary (start, whitespace, quote, bracket, ``=``,
-# ``,`` or ``;``), so each token is scanned once: linear on any input.
-_BARE_TARGET = re.compile(r"(?<![^\s\"'(\[=,;])(/[^\s\"'<>?#]*)\?([^\s\"'<>#]*)")
+#
+# Same matches as the regex ``(?<![^\s"'(\[=,;])(/[^\s"'<>?#]*)\?([^\s"'<>#]*)``
+# but found by one forward pass: a regex restarts its path scan at every
+# boundary character inside a path (``/=/=/…``), which is quadratic.
+_TARGET_STOP = frozenset("\"'<>#")  # also any whitespace
+_TARGET_START_BOUNDARY = frozenset("\"'([=,;")  # also any whitespace or start of text
 
 
 def _redact_bare_targets(text: str) -> str:
-    return _BARE_TARGET.sub(lambda m: f"{m.group(1)}?{redact_raw_query(m.group(2))}", text)
+    if "/" not in text or "?" not in text:
+        return text
+    out = []
+    n = len(text)
+    i = 0
+    while i < n:
+        # A segment: a maximal run of characters a path or query may contain.
+        if text[i].isspace() or text[i] in _TARGET_STOP:
+            j = i
+            while j < n and (text[j].isspace() or text[j] in _TARGET_STOP):
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+        j = i
+        last_q = -1
+        while j < n and not (text[j].isspace() or text[j] in _TARGET_STOP):
+            if text[j] == "?":
+                last_q = j
+            j += 1
+        # Leftmost valid start: a "/" at a token boundary with a "?" after it.
+        start = -1
+        if last_q > i:
+            for k in range(i, last_q):
+                if text[k] == "/":
+                    prev = text[k - 1] if k > 0 else ""
+                    if prev == "" or prev.isspace() or prev in _TARGET_START_BOUNDARY:
+                        start = k
+                        break
+        if start < 0:
+            out.append(text[i:j])
+        else:
+            q = text.index("?", start)
+            out.append(text[i:q + 1])
+            out.append(redact_raw_query(text[q + 1:j]))
+        i = j
+    return "".join(out)
 
 
 # ``key=value`` fragments whose key carries percent-encoding (``co%64e=…``,

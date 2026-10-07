@@ -38,6 +38,15 @@ cases = {
     "spaces": "code" + " " * n + "=" + code,
     "fernet_run": "A" * (43 * (n // 40 + 1)),
     "query": "&".join(f"k{i}%41=v{i}" for i in range(n // 4)) + "&co%64e=" + code,
+    # Bare request targets whose boundary characters also appear inside a
+    # path: a regex restarts its scan at each one (quadratic).
+    "target_eq": "/=/" * n,
+    "target_comma": "/,/" * n,
+    "target_semicolon": "/;/" * n,
+    "target_paren": "/(/" * n,
+    "target_bracket": "/[/" * n,
+    "target_eq_query": "/=/" * n + "?code=" + code,
+    "target_mixed_query": "/=/,/;/(/[/" * (n // 4) + "?sta%74e=" + code,
 }
 times = {}
 for name, text in cases.items():
@@ -49,7 +58,8 @@ for name, text in cases.items():
                   "breadcrumbs": {"values": [{"data": {"http.query": text}, "message": text}]}}, {})
     _before_breadcrumb({"data": {"http.query": text}}, {})
     times[name] = time.perf_counter() - t
-    if name in ("pct_run_eq", "pct_key_chain", "slash_pct_query", "secret_run", "enc_key_run", "spaces", "query"):
+    if name in ("pct_run_eq", "pct_key_chain", "slash_pct_query", "secret_run", "enc_key_run", "spaces", "query",
+                "target_eq_query", "target_mixed_query"):
         assert code not in out, name
 print(json.dumps(times))
 """
