@@ -318,3 +318,33 @@ def test_without_consent_the_existing_whatsapp_path_is_unchanged(world, monkeypa
     conn = _resolve_connection(w.session, w.tid)
     assert isinstance(conn, ServiceConnection)
     assert [c["token"] for c in catalog_token_candidates(conn)] == [w.merchant_token, w.platform_token]
+
+
+def test_without_consent_the_waba_wrapper_queries_nothing_new():
+    """Regression: schemas without whatsapp_connections (PG lock tests) keep working."""
+    from unittest.mock import patch
+
+    from services import meta_catalog_consent as consent
+    from services.native_meta_sync_orchestrator import _waba_link_status_for_push
+
+    engine = create_engine("sqlite:///:memory:")
+    event.listen(Base.metadata, "before_create", _remap)
+    try:
+        Base.metadata.create_all(engine, tables=[Tenant.__table__, Product.__table__, ProductVariant.__table__])
+    finally:
+        event.remove(Base.metadata, "before_create", _remap)
+    statements = []
+    event.listen(engine, "before_cursor_execute",
+                 lambda conn, cursor, statement, *a: statements.append(statement))
+    session = sessionmaker(bind=engine)()
+    consent._TABLE_SEEN.clear()
+    try:
+        with patch("services.native_meta_sync_orchestrator.get_waba_catalog_link_status",
+                   return_value={"ok": True, "expected_catalog_linked": True}) as legacy:
+            assert _waba_link_status_for_push(session, 7) == {"ok": True, "expected_catalog_linked": True}
+        legacy.assert_called_once()
+        assert not any("whatsapp_connections" in s or "meta_catalog_authorizations" in s for s in statements)
+    finally:
+        session.close()
+        engine.dispose()
+        consent._TABLE_SEEN.clear()

@@ -675,6 +675,11 @@ def _authorization_row(db: Any, tenant_id: int) -> Any:
     )
 
 
+def consent_row_exists(db: Any, tenant_id: int) -> bool:
+    """Whether this tenant has any stored consent. Touches no WhatsApp table."""
+    return _authorization_row(db, tenant_id) is not None
+
+
 def consent_governs_catalog(db: Any, tenant_id: int, conn: Any) -> bool:
     """True when a stored consent (active or not) owns this tenant's catalog work.
 
@@ -749,6 +754,7 @@ __all__ = [
     "authorization_summary",
     "authorization_table_exists",
     "consent_governs_catalog",
+    "consent_row_exists",
     "build_authorize_url",
     "exchange_code",
     "is_consent_binding",

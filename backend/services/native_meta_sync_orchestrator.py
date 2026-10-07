@@ -1254,9 +1254,13 @@ def _waba_link_status_for_push(db: Any, tenant_id: int) -> Dict[str, Any]:
     read-only WABA probe runs exactly as before.
     """
     from models import WhatsAppConnection  # noqa: PLC0415
-    from services.meta_catalog_consent import consent_governs_catalog  # noqa: PLC0415
+    from services.meta_catalog_consent import consent_governs_catalog, consent_row_exists  # noqa: PLC0415
     from services.meta_catalog_linking import LINK_STATUS_UNKNOWN  # noqa: PLC0415
 
+    # Without a stored consent nothing extra is queried: the existing call
+    # sequence (and every schema it already supports) is unchanged.
+    if not consent_row_exists(db, tenant_id):
+        return get_waba_catalog_link_status(db, tenant_id)
     conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == int(tenant_id)).first()
     if consent_governs_catalog(db, tenant_id, conn):
         return {
