@@ -19,6 +19,10 @@ What gets scrubbed
   ``X-Nahla-Key``, ``X-Hub-Signature``, ``X-Hub-Signature-256``,
   ``X-Salla-Signature``, ``X-Zid-Signature``, ``Proxy-Authorization``.
 * Cookie payload (raw): always replaced with ``[scrubbed]``.
+* Request URL, query string and body; exception messages; stack-frame
+  variables; breadcrumbs (also at capture time); log entries; extra,
+  contexts and spans: redacted with ``core.log_redaction``. A failing
+  scrub withholds the payload and sends a minimal event instead.
 * Server name / host info: kept (useful for Railway region triage).
 * User context: ``send_default_pii=False`` keeps Sentry from capturing
   the IP address or the username; we set ``user_id`` + ``tenant_id``
@@ -49,14 +53,130 @@ _INITIALISED = False
 
 
 def _scrub_headers(headers: Dict[str, str]) -> Dict[str, str]:
-    """Drop any header whose lower-case name matches the sensitive set."""
+    """Drop any header whose lower-case name matches the sensitive set.
+
+    Other values (e.g. ``Referer`` holding an OAuth callback URL) are kept
+    but redacted with ``core.log_redaction``.
+    """
+    from core.log_redaction import redact_secrets  # noqa: PLC0415
+
     out: Dict[str, str] = {}
     for k, v in (headers or {}).items():
         if str(k or "").lower() in _SENSITIVE_HEADERS:
             out[k] = "[scrubbed]"
         else:
-            out[k] = v
+            out[k] = redact_secrets(v) if isinstance(v, str) else v
     return out
+
+
+def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    from core.log_redaction import redact_secrets, redact_value  # noqa: PLC0415
+
+    headers = request.get("headers") or {}
+    if headers:
+        request["headers"] = _scrub_headers(headers)
+
+    # Cookies are forwarded separately from headers in some
+    # integrations; never let the raw value through.
+    if "cookies" in request:
+        request["cookies"] = "[scrubbed]"
+
+    # The request URL and query string carry OAuth ``code`` / ``state`` on
+    # callbacks (e.g. the catalog consent and embedded signup callbacks).
+    url = request.get("url")
+    if isinstance(url, str) and url:
+        request["url"] = redact_secrets(url)
+    query = request.get("query_string")
+    if isinstance(query, (bytes, bytearray)):
+        query = query.decode("latin-1")
+    if isinstance(query, str) and query:
+        request["query_string"] = redact_secrets(query)
+    elif query:
+        request["query_string"] = redact_value(query)
+
+    # Some integrations include a ``data`` field with the raw POST
+    # body. Login bodies contain plaintext passwords — drop them
+    # entirely. Other bodies are redacted key by key.
+    path = (request.get("url") or "")
+    if isinstance(path, str) and ("/auth/login" in path or "/auth/reset-password" in path):
+        request["data"] = "[scrubbed]"
+    elif request.get("data") is not None:
+        request["data"] = redact_value(request["data"])
+    return request
+
+
+def _scrub_frames(frames: Any) -> None:
+    from core.log_redaction import redact_value  # noqa: PLC0415
+
+    for frame in frames or []:
+        if isinstance(frame, dict) and frame.get("vars"):
+            frame["vars"] = redact_value(frame["vars"])
+
+
+def _scrub_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    from core.log_redaction import redact_secrets, redact_value  # noqa: PLC0415
+
+    event["request"] = _scrub_request(event.get("request") or {})
+
+    for exc in ((event.get("exception") or {}).get("values") or []):
+        if isinstance(exc, dict):
+            if exc.get("value") is not None:
+                exc["value"] = redact_secrets(exc["value"])
+            _scrub_frames((exc.get("stacktrace") or {}).get("frames"))
+    for thread in ((event.get("threads") or {}).get("values") or []):
+        if isinstance(thread, dict):
+            _scrub_frames((thread.get("stacktrace") or {}).get("frames"))
+
+    crumbs = event.get("breadcrumbs")
+    values = crumbs.get("values") if isinstance(crumbs, dict) else crumbs
+    if isinstance(values, list):
+        cleaned = [_scrub_breadcrumb(c) for c in values]
+        cleaned = [c for c in cleaned if c is not None]
+        if isinstance(crumbs, dict):
+            crumbs["values"] = cleaned
+        else:
+            event["breadcrumbs"] = cleaned
+
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        for key in ("message", "formatted"):
+            if logentry.get(key) is not None:
+                logentry[key] = redact_secrets(logentry[key])
+        if logentry.get("params") is not None:
+            logentry["params"] = redact_value(logentry["params"])
+    if isinstance(event.get("message"), str):
+        event["message"] = redact_secrets(event["message"])
+    for key in ("extra", "contexts"):
+        if event.get(key):
+            event[key] = redact_value(event[key])
+    for span in event.get("spans") or []:
+        if isinstance(span, dict):
+            for key in ("description", "data"):
+                if span.get(key) is not None:
+                    span[key] = redact_value(span[key])
+    return event
+
+
+def _minimal_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """What survives when scrubbing itself failed: no request, frames or text."""
+    types = []
+    try:
+        for exc in ((event.get("exception") or {}).get("values") or []):
+            if isinstance(exc, dict) and isinstance(exc.get("type"), str):
+                types.append(exc["type"][:120])
+    except Exception:  # noqa: BLE001
+        types = []
+    minimal: Dict[str, Any] = {
+        "level": event.get("level") if isinstance(event.get("level"), str) else "error",
+        "message": "[sentry] event scrub failed; payload withheld",
+        "tags": {"scrub_failed": "true"},
+    }
+    if types:
+        minimal["extra"] = {"exception_types": types}
+    for key in ("environment", "release", "platform", "timestamp", "event_id"):
+        if isinstance(event.get(key), str):
+            minimal[key] = event[key]
+    return minimal
 
 
 def _before_send(event: Dict[str, Any], _hint: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -66,31 +186,38 @@ def _before_send(event: Dict[str, Any], _hint: Dict[str, Any]) -> Optional[Dict[
 
     Sentry ALSO has its own server-side scrubbing; doing it here is
     defense-in-depth so an org-level scrubbing rule that gets disabled
-    accidentally cannot leak a token.
+    accidentally cannot leak a token. Request URL / query / body,
+    exception messages, stack-frame variables, breadcrumbs, log entries,
+    extra/contexts and spans all go through ``core.log_redaction``. If
+    scrubbing fails the original payload is withheld (fail closed) and a
+    minimal event with only the exception types is sent instead.
     """
     try:
-        request = event.get("request") or {}
-        headers = request.get("headers") or {}
-        if headers:
-            request["headers"] = _scrub_headers(headers)
-
-        # Cookies are forwarded separately from headers in some
-        # integrations; never let the raw value through.
-        if "cookies" in request:
-            request["cookies"] = "[scrubbed]"
-
-        # Some integrations include a ``data`` field with the raw POST
-        # body. Login bodies contain plaintext passwords — drop them
-        # entirely. We can't selectively strip individual JSON keys
-        # without parsing, and a strip here is cheap.
-        path = (request.get("url") or "")
-        if isinstance(path, str) and ("/auth/login" in path or "/auth/reset-password" in path):
-            request["data"] = "[scrubbed]"
-
-        event["request"] = request
+        return _scrub_event(event)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[sentry] before_send scrub failed: %s — passing event through", exc)
-    return event
+        logger.warning("[sentry] before_send scrub failed: %s — sending minimal event", type(exc).__name__)
+        return _minimal_event(event)
+
+
+def _scrub_breadcrumb(crumb: Any) -> Optional[Dict[str, Any]]:
+    from core.log_redaction import redact_secrets, redact_value  # noqa: PLC0415
+
+    if not isinstance(crumb, dict):
+        return None
+    try:
+        out = dict(crumb)
+        if out.get("message") is not None:
+            out["message"] = redact_secrets(out["message"])
+        if out.get("data") is not None:
+            out["data"] = redact_value(out["data"])
+        return out
+    except Exception:  # noqa: silent-ok — a breadcrumb that cannot be scrubbed is dropped, never sent
+        return None
+
+
+def _before_breadcrumb(crumb: Dict[str, Any], _hint: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """HTTP/logging breadcrumbs carry request URLs; redact at capture time."""
+    return _scrub_breadcrumb(crumb)
 
 
 def init_sentry() -> bool:
@@ -143,6 +270,8 @@ def init_sentry() -> bool:
             attach_stacktrace=True,
             max_breadcrumbs=50,
             before_send=_before_send,
+            before_send_transaction=_before_send,
+            before_breadcrumb=_before_breadcrumb,
             integrations=[
                 StarletteIntegration(transaction_style="endpoint"),
                 FastApiIntegration(transaction_style="endpoint"),

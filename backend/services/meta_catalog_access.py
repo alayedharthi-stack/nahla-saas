@@ -105,6 +105,11 @@ def probe_catalog_readable(
 
 def catalog_token_candidates(conn: Any) -> List[Dict[str, Any]]:
     """Ordered unique Graph tokens to try against a catalog object."""
+    if getattr(conn, "is_catalog_consent_binding", False):
+        # Catalog-only consent: its own token and nothing else — no WhatsApp
+        # merchant token and no platform WA_TOKEN fallback.
+        raw = str(getattr(conn, "access_token", "") or "").strip()
+        return [{"token": raw, "token_source": "merchant_catalog_consent"}] if raw else []
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 

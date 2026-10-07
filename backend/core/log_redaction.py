@@ -180,6 +180,19 @@ def redact_value(value: Any) -> Any:
     return redact_secrets(str(value))
 
 
+def redacted_query_preview(query: Any, *, limit: int = 80) -> str:
+    """Diagnostic preview of a raw query string: redacted first, then truncated.
+
+    Truncating first could leave a credential value that no longer follows its
+    key; redacting the whole string first never does.
+    """
+    if isinstance(query, (bytes, bytearray)):
+        text = bytes(query).decode("latin-1")
+    else:
+        text = repr(query) if not isinstance(query, str) else query
+    return redact_secrets(text)[: max(0, int(limit))]
+
+
 def redact_exception(exc: BaseException) -> str:
     """``"ExcType: message"`` with credentials removed — safe for ``%s`` logging."""
     return f"{type(exc).__name__}: {redact_secrets(str(exc))}"
@@ -288,4 +301,5 @@ __all__ = [
     "redact_exception",
     "redact_secrets",
     "redact_value",
+    "redacted_query_preview",
 ]

@@ -1241,6 +1241,18 @@ def _select_graph_token(conn: Any) -> Dict[str, Any]:
                                              was skipped).
         }
     """
+    if getattr(conn, "is_catalog_consent_binding", False):
+        # Catalog-only consent binding: consent token only, never a fallback.
+        consent_token = str(getattr(conn, "access_token", "") or "").strip()
+        return {
+            "token": consent_token or None,
+            "token_source": "merchant_catalog_consent" if consent_token else _TOKEN_SOURCE_NONE,
+            "provider": "meta",
+            "connection_type": "catalog_consent",
+            "token_tail": _mask_token(consent_token),
+            "token_len": len(consent_token),
+            "considered": [],
+        }
     provider     = str(getattr(conn, "provider", "") or "").lower()
     connection_t = str(getattr(conn, "connection_type", "") or "").lower()
     plain_token  = read_access_token(conn)

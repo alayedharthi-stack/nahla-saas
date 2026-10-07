@@ -19,6 +19,7 @@ from services.meta_catalog_access import (
     ERROR_CATALOG_ID_MISSING,
     ERROR_CATALOG_NOT_READABLE,
     ERROR_NO_GRAPH_TOKEN,
+    probe_catalog_readable,
     select_catalog_graph_token,
 )
 from services.meta_catalog_export import preview_meta_variant_payload
@@ -128,12 +129,29 @@ def _graph_product_url(meta_product_id: str) -> str:
 
 def _resolve_connection(db: Any, tenant_id: int) -> Any:
     from models import WhatsAppConnection  # noqa: PLC0415
+    from services.meta_catalog_consent import (  # noqa: PLC0415
+        CatalogConsentInactive,
+        load_catalog_consent_binding,
+    )
 
     conn = (
         db.query(WhatsAppConnection)
         .filter(WhatsAppConnection.tenant_id == int(tenant_id))
         .first()
     )
+    # A verified catalog-only consent for the catalog in use replaces the
+    # connection here (consent token only, approved catalog only). Without an
+    # authorization row this is a no-op and the WhatsApp connection is used.
+    try:
+        binding = load_catalog_consent_binding(db, int(tenant_id), conn)
+    except CatalogConsentInactive as exc:
+        raise MetaCatalogPushError(
+            "catalog_consent_inactive",
+            "Catalog consent is not active for this catalog",
+            detail={"reason": exc.reason},
+        ) from None
+    if binding is not None:
+        return binding
     if conn is None:
         raise MetaCatalogPushError("connection_not_found", "WhatsApp connection not found")
     return conn
@@ -147,6 +165,22 @@ def _resolve_catalog_and_token(
     catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
     if not catalog_id:
         raise MetaCatalogPushError("catalog_id_missing", "meta_catalog_id is not set")
+
+    from services.meta_catalog_consent import is_consent_binding  # noqa: PLC0415
+
+    if is_consent_binding(conn):
+        # Consent token only: never the WhatsApp merchant token or WA_TOKEN.
+        token = conn.token_for(catalog_id)
+        if require_catalog_readable:
+            probe = probe_catalog_readable(token, catalog_id)
+            if not probe.get("ok"):
+                raise MetaCatalogPushError(
+                    "catalog_permission_denied",
+                    "The catalog consent token cannot read the approved catalog",
+                    detail={"error": probe.get("error") or ERROR_CATALOG_NOT_READABLE,
+                            "token_source": "merchant_catalog_consent"},
+                )
+        return catalog_id, token
 
     if not require_catalog_readable:
         token_info = _select_graph_token(conn) or {}
@@ -204,6 +238,12 @@ def find_meta_catalog_item_by_retailer_id(
         lookup["error"] = "retailer_id_missing"
         return None, lookup
 
+    if getattr(conn, "is_catalog_consent_binding", False) and str(catalog_id or "").strip() != str(
+        getattr(conn, "meta_catalog_id", "") or "",
+    ).strip():
+        # The consent token serves the approved catalog only; nothing is read.
+        lookup["error"] = "catalog_not_authorized"
+        return None, lookup
     _catalog_id, token = _resolve_catalog_and_token(conn)
     url = _graph_base(catalog_id, "products")
     params = {

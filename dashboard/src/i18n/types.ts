@@ -1983,6 +1983,27 @@ export interface Translations {
       lastImportNever:  string
       moreActions:      string
     }
+    metaConsent: {
+      title:          string
+      description:    string
+      button:         string
+      connecting:     string
+      approvedLine:   string
+      stateActive:    string
+      stateExpired:   string
+      stateInactive:  string
+      stateNone:      string
+      scopesLine:     string
+      verifiedAt:     string
+      expiresAt:      string
+      noExpiry:       string
+      writeNote:      string
+      loadFailed:     string
+      startFailed:    string
+      reconnect:      string
+      /** Callback result code (URL fragment) → label. */
+      results: Record<string, string>
+    }
     whatsappSync: {
       title:            string
       button:           string

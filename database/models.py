@@ -2805,6 +2805,44 @@ class WhatsAppOAuthNonce(Base):
     )
 
 
+class MetaCatalogAuthorization(Base):
+    """Verified catalog-only Meta consent (catalog_management + business_management).
+
+    One row per tenant and one tenant per catalog. The user access token is
+    stored ``enc1:``-encrypted only; it is used for the approved catalog alone
+    and never marks a WhatsApp connection as connected.
+    """
+
+    __tablename__ = "meta_catalog_authorizations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_meta_catalog_authorizations_tenant"),
+        UniqueConstraint("catalog_id", name="uq_meta_catalog_authorizations_catalog"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    catalog_id = Column(String(64), nullable=False)
+    business_id = Column(String(64), nullable=False)
+    meta_app_id = Column(String(64), nullable=False)
+    meta_user_id = Column(String(64), nullable=False)
+    access_token_enc = Column(Text, nullable=False)
+    granted_scopes = Column(sa.JSON, nullable=False)
+    token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    data_access_expires_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(16), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 # ── Store Knowledge Sync ──────────────────────────────────────────────────────
 
 class StoreSyncJob(Base):

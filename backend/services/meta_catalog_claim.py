@@ -19,6 +19,8 @@ Mechanism (same as ``meta_catalog_onboarding``, shared lock namespace):
      holder's row. On SQLite (unit tests) the lock is a no-op.
   2. ``SELECT tenant_id FROM whatsapp_connections WHERE meta_catalog_id = :cid
      AND tenant_id <> :tenant`` — any row means the id is claimed elsewhere.
+     A verified catalog-only consent row (``meta_catalog_authorizations``) for
+     the same catalog counts as a claim too.
 
 The guard never writes; the caller writes and commits inside the same
 transaction so the lock covers the write.
@@ -91,7 +93,21 @@ def other_tenants_claiming(db: Any, tenant_id: int, catalog_id: str) -> List[int
         ),
         {"cid": cid, "tid": int(tenant_id)},
     ).fetchall()
-    return [int(r[0]) for r in rows if r and r[0] is not None]
+    tenants = {int(r[0]) for r in rows if r and r[0] is not None}
+    # A verified catalog-only consent (``meta_catalog_authorizations``) claims
+    # its catalog exactly like a WhatsApp connection binding does.
+    from services.meta_catalog_consent import authorization_table_exists  # noqa: PLC0415
+
+    if authorization_table_exists(db):
+        consent_rows = db.execute(
+            text(
+                "SELECT tenant_id FROM meta_catalog_authorizations "
+                "WHERE catalog_id = :cid AND tenant_id <> :tid"
+            ),
+            {"cid": cid, "tid": int(tenant_id)},
+        ).fetchall()
+        tenants |= {int(r[0]) for r in consent_rows if r and r[0] is not None}
+    return sorted(tenants)
 
 
 def guard_catalog_claim(db: Any, tenant_id: int, catalog_id: str) -> None:
