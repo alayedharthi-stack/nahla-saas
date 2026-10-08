@@ -9,6 +9,7 @@ customer-facing sentence.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -701,6 +702,114 @@ def test_the_history_never_displaces_the_tool_result_replay():
     roles = [m["role"] for m in double.calls[1]["messages"]]
     assert roles == ["user", "assistant", "user", "assistant", "user"]
     assert double.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+# ── Messages a person at the store typed (#1170) ─────────────────────────────
+
+
+def staff(text: str, kind: str = "text", channel: str = "whatsapp_business_app") -> dict:
+    return {"role": ap.STAFF_ROLE, "text": text, "kind": kind, "channel": channel}
+
+
+def _staff_payloads(block_text: str) -> list:
+    return [json.loads(line) for line in block_text.splitlines() if line.startswith("{")]
+
+
+def test_a_staff_message_is_shown_as_labelled_data_and_never_as_an_assistant_turn():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "عندكم عطر ورد 100ml؟"},
+                                      {"role": "assistant", "text": "نعم متوفر"},
+                                      staff("باقي حبتين بس")])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert [b["text"] for b in messages[1]["content"]] == ["نعم متوفر"]
+    staff_block = messages[-1]["content"][0]["text"]
+    assert staff_block.startswith("<store_staff_message>") and staff_block.endswith("</store_staff_message>")
+    assert _staff_payloads(staff_block) == [
+        {"channel": "whatsapp_business_app", "kind": "text", "text": "باقي حبتين بس"}]
+    assert messages[-1]["content"][-1]["text"] == "عندكم حذاء رياضي؟"
+
+
+def test_a_staff_media_message_without_words_is_shown_as_its_kind_alone():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "سؤال"},
+                                      {"role": "assistant", "text": "جواب"},
+                                      staff("", kind="document"), staff("", kind="image")])
+    provider.step(request())
+    blocks = [b["text"] for b in double.calls[0]["messages"][-1]["content"]]
+    assert blocks[-1] == "عندكم حذاء رياضي؟"
+    payloads = [p for b in blocks[:-1] for p in _staff_payloads(b)]
+    assert payloads == [{"channel": "whatsapp_business_app", "kind": "document"},
+                        {"channel": "whatsapp_business_app", "kind": "image"}]
+
+
+def test_a_conversation_opening_with_the_staff_keeps_that_opening():
+    """Only an opening *assistant* turn is dropped; the staff's message is not the assistant's."""
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[staff("حياك الله", channel="nahla_inbox"),
+                                      {"role": "assistant", "text": "جواب"}])
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert _staff_payloads(messages[0]["content"][0]["text"]) == [
+        {"channel": "nahla_inbox", "kind": "text", "text": "حياك الله"}]
+
+
+def test_a_long_staff_message_is_bounded_says_so_and_its_block_stays_well_formed():
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[{"role": "user", "text": "سؤال"},
+                                      {"role": "assistant", "text": "جواب"},
+                                      staff("ق" * 2000)])
+    provider.step(request())
+    block = double.calls[0]["messages"][-1]["content"][0]["text"]
+    (payload,) = _staff_payloads(block)
+    assert payload["text"] == "ق" * ap.MAX_HISTORY_CHARS
+    assert payload["text_truncated"] is True
+    assert block.endswith("</store_staff_message>")
+
+
+def test_many_staff_media_never_push_the_customer_s_words_out_or_cut_a_block():
+    """Review finding on #1170: twelve wordless echoes followed by an earlier
+    customer message must leave that message whole and every block closed."""
+    earlier_customer = "ابداع روعه، " * 4
+    history = ([{"role": "user", "text": "أول سؤال"}, {"role": "assistant", "text": "جواب"}]
+               + [staff("", kind="document") for _ in range(12)]
+               + [staff("", kind="image"), {"role": "user", "text": earlier_customer},
+                  staff("تمام 👍")])
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=history)
+    provider.step(request())
+    messages = double.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    blocks = [b["text"] for b in messages[-1]["content"]]
+    assert earlier_customer.strip() in blocks
+    assert blocks[-1] == "عندكم حذاء رياضي؟"
+    staff_blocks = [b for b in blocks if b.startswith("<store_staff_message>")]
+    assert all(b.endswith("</store_staff_message>") for b in staff_blocks)
+    payloads = [p for b in staff_blocks for p in _staff_payloads(b)]
+    assert payloads == [
+        {"channel": "whatsapp_business_app", "kind": "document", "count": 12},
+        {"channel": "whatsapp_business_app", "kind": "image"},
+        {"channel": "whatsapp_business_app", "kind": "text", "text": "تمام 👍"},
+    ]
+
+
+def test_imported_history_is_labelled_as_such():
+    entry = dict(staff("كان عندنا عرض"), imported_history=True)
+    provider, double = build([ok([reply_block(text="ok", claims_commerce_facts=False)])],
+                             history=[entry])
+    provider.step(request())
+    (payload,) = _staff_payloads(double.calls[0]["messages"][0]["content"][0]["text"])
+    assert payload == {"channel": "whatsapp_business_app", "kind": "text",
+                       "text": "كان عندنا عرض", "imported_history": True}
+
+
+def test_the_provider_and_the_pilot_name_the_staff_role_the_same_way():
+    from core import store_staff_rows
+    from services import commerce_runtime_pilot as seam
+
+    assert ap.STAFF_ROLE == seam.STAFF_ROLE == store_staff_rows.STAFF_ROLE
 
 
 # ── Malformed tool input at the SDK boundary ─────────────────────────────────
