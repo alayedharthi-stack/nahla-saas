@@ -2,7 +2,7 @@ name: PostgreSQL 18 compatibility
 
 on:
   pull_request:
-    branches: [main, master]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59]
   push:
     branches: [main, master]
 
