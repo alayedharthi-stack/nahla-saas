@@ -5,6 +5,7 @@ revocation uses its real in-process fallback; no external services are called.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -34,7 +35,7 @@ def session_env(monkeypatch):
     monkeypatch.setattr(auth_routes, "ADMIN_PASSWORD", PASSWORD)
     monkeypatch.setattr(auth_routes, "JWT_SECRET", KEY)
     monkeypatch.setattr(token_revocation, "get_redis", lambda: None)
-    monkeypatch.setattr(token_revocation, "_LOCAL_REVOKED", {})
+    monkeypatch.setattr(token_revocation, "_LOCAL_REVOKED", OrderedDict())
     # Login rate limiting/2FA enrollment are outside this session regression.
     monkeypatch.setattr(auth_routes, "_enforce_login_rate_limits", lambda *args: None)
     monkeypatch.setattr(auth_routes, "_user_has_2fa_enabled", lambda *args: False)
@@ -188,7 +189,8 @@ def test_purpose_tokens_cannot_be_revalidated_or_promoted(session_env, monkeypat
 
 @pytest.mark.parametrize("overrides", [
     {"sub": "other@example.test"}, {"role": "owner"}, {"role": "merchant"},
-    {"tenant_id": 7}, {"tenant_id": "1"}, {"user_id": None}, {"user_id": 0},
+    {"tenant_id": 7}, {"tenant_id": "1"}, {"tenant_id": True}, {"tenant_id": 1.0},
+    {"jti": None}, {"jti": ""}, {"user_id": None}, {"user_id": 0},
     {"impersonation": True}, {"impersonation": False},
     {"actor_sub": ADMIN}, {"actor_user_id": 0}, {"session_version": 1},
     {"role": "support_impersonation", "impersonation": True, "user_id": 3},
