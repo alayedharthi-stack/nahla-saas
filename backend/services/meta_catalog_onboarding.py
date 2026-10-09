@@ -24,6 +24,7 @@ import httpx
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.plan_entitlements import EntitlementLookupUnavailable, get_entitlements
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_access import probe_catalog_readable
 from services.meta_catalog_import import _select_graph_token
 from services.meta_catalog_linking import (
@@ -209,6 +210,7 @@ def _list_owned_catalog_ids(
         token,
         params={"fields": "id", "limit": 100},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     if not resp.get("ok"):
         graph_err = resp.get("error") or {}
@@ -236,6 +238,7 @@ def _create_owned_catalog(
         token,
         data={"name": name},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     if not resp.get("ok"):
         graph_err = resp.get("error") or {}

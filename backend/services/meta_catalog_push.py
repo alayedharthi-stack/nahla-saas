@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from core.config import META_GRAPH_API_VERSION
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_access import (
     ERROR_CATALOG_ID_MISSING,
     ERROR_CATALOG_NOT_READABLE,
@@ -120,11 +120,11 @@ def load_variant_for_push(
 
 
 def _graph_base(catalog_id: str, path: str) -> str:
-    return f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/{path}"
+    return f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}/{path}"
 
 
 def _graph_product_url(meta_product_id: str) -> str:
-    return f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{meta_product_id}"
+    return f"https://graph.facebook.com/{catalog_graph_api_version()}/{meta_product_id}"
 
 
 def _resolve_connection(db: Any, tenant_id: int) -> Any:

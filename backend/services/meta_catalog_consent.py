@@ -241,9 +241,9 @@ def build_authorize_url(*, state: str, redirect_uri: str, app_id: str, config_id
 # ── Graph (read-only) ─────────────────────────────────────────────────────────
 
 def _graph_version() -> str:
-    from core.config import META_GRAPH_API_VERSION  # noqa: PLC0415
+    from core.meta_catalog_graph import catalog_graph_api_version  # noqa: PLC0415
 
-    return str(META_GRAPH_API_VERSION or "v20.0")
+    return catalog_graph_api_version()
 
 
 def _appsecret_proof(token: str, app_secret: str) -> str:

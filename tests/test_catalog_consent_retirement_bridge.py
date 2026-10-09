@@ -207,8 +207,14 @@ def _assert_consent_only(w):
     assert {token for _, _, token in w.graph.calls} | {token for token, _ in w.probes} == {w.token}
 
 
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
 @pytest.mark.parametrize("with_wa", [False, True])
-def test_deleted_owned_product_is_retired_using_only_consent(world, with_wa):
+def test_deleted_owned_product_is_retired_using_only_consent(world, with_wa, monkeypatch, catalog_version):
+    from core import config
+    monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
     w = world
     if with_wa:
         _add_wa(w)
@@ -223,6 +229,9 @@ def test_deleted_owned_product_is_retired_using_only_consent(world, with_wa):
     assert w.db.query(CatalogChannelRetirement).one().status == "done"
     assert w.db.query(WhatsAppConnection).count() == int(with_wa)
     _assert_consent_only(w)
+    assert any(method == "POST" for method, _, _ in w.graph.calls)
+    prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+    assert all(url.startswith(prefix) for _, url, _ in w.graph.calls)
 
 
 def test_hidden_owned_product_retires_without_whatsapp(world):

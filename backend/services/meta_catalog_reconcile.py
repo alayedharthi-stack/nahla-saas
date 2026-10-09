@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import httpx
 
 from core.catalog import effective_retailer_id
-from core.config import META_GRAPH_API_VERSION
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_access import select_catalog_graph_token
 
 logger = logging.getLogger("nahla.meta_catalog_reconcile")
@@ -136,7 +136,7 @@ def fetch_meta_catalog_live_products(
         return live, meta_info
     meta_info["token_source"] = pick.get("token_source")
 
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/products"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}/products"
     headers = {"Authorization": f"Bearer {token}"}
     params: Optional[Dict[str, str]] = {
         "fields": (fields or "id,retailer_id,name,price,availability").strip(),

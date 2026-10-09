@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.config import META_GRAPH_API_VERSION, WA_TOKEN
+from core.config import WA_TOKEN
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_import import (
     _TOKEN_SOURCE_MERCHANT_OAUTH,
     _TOKEN_SOURCE_NONE,
@@ -69,7 +70,7 @@ def probe_catalog_readable(
         result["error"] = ERROR_NO_GRAPH_TOKEN
         return result
 
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}"
     params = {"fields": "id,name,product_count,business{id,name}"}
     headers = _auth_headers(token)
 

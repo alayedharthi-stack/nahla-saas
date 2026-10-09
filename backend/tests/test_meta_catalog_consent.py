@@ -271,6 +271,7 @@ def test_unmarked_database_is_refused(world, monkeypatch):
 
 
 @pytest.mark.parametrize("name,value,reason", [
+    ("META_CATALOG_GRAPH_API_VERSION", "v26.0/invalid", "catalog_graph_version_invalid"),
     ("META_APP_SECRET", "", "app_credentials_missing"),
     ("META_CATALOG_CONSENT_CONFIG_ID", "", "config_id_missing"),
     ("META_CATALOG_CONSENT_REDIRECT_URI", f"http://{API_HOST}{CALLBACK_PATH}", "redirect_uri_invalid"),
@@ -320,6 +321,18 @@ def test_status_hidden_when_disabled(world, monkeypatch):
         assert s.query(WhatsAppOAuthNonce).count() == 0
 
 
+def test_invalid_catalog_version_prevents_consent_nonce_and_graph(world, monkeypatch):
+    monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", "v26.0/invalid")
+    status = world.client.get("/merchant/catalog/meta-consent/status", headers=_jwt()).json()
+    assert not status["available"] and status["reason"] == "catalog_graph_version_invalid"
+    response = world.client.post("/merchant/catalog/meta-consent/start", headers=_jwt())
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "catalog_graph_version_invalid"
+    with world.factory() as session:
+        assert session.query(WhatsAppOAuthNonce).count() == 0
+    assert not world.graph.calls
+
+
 # ── entry: authenticated, tenant from JWT, server-side asset ─────────────────
 
 def test_start_requires_authentication(world):
@@ -349,11 +362,17 @@ def test_unapproved_tenant_cannot_start(world):
     assert resp.status_code == 409 and resp.json()["detail"]["reason"] == "tenant_not_approved"
 
 
-def test_authorize_url_requests_only_catalog_scopes(world):
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
+def test_authorize_url_requests_only_catalog_scopes(world, monkeypatch, catalog_version):
+    monkeypatch.setattr(core_config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
     resp = world.client.post("/merchant/catalog/meta-consent/start", headers=_jwt())
     url = urlsplit(resp.json()["authorize_url"])
     q = parse_qs(url.query)
-    assert url.scheme == "https" and url.netloc == "www.facebook.com" and url.path.endswith("/dialog/oauth")
+    assert url.scheme == "https" and url.netloc == "www.facebook.com"
+    assert url.path == f"/{catalog_version or 'v21.0'}/dialog/oauth"
     assert q["scope"] == ["catalog_management,business_management"]
     assert q["redirect_uri"] == [REDIRECT] and q["client_id"] == [APP_ID]
     assert q["config_id"] == ["400000000000001"] and q["response_type"] == ["code"]

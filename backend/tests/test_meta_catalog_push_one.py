@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_ROOT not in sys.path:
@@ -158,7 +159,13 @@ def test_dry_run_builds_payload_without_httpx():
     client_cls.assert_not_called()
 
 
-def test_confirm_get_empty_then_create():
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
+def test_confirm_get_empty_then_create(monkeypatch, catalog_version):
+    from core import config
+    monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
     db = _mock_db()
     lookup_resp = httpx.Response(200, json={"data": []})
     create_resp = httpx.Response(200, json={"id": "META-ITEM-NEW"})
@@ -184,6 +191,9 @@ def test_confirm_get_empty_then_create():
     assert "access_token" not in get_params
     assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
+    prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+    assert post_url.startswith(prefix)
+    assert all(call.args[0].startswith(prefix) for call in mock_client.get.call_args_list)
     assert "/CAT-GENERIC-001/products" in post_url
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     post_headers = mock_client.post.call_args.kwargs.get("headers") or {}
@@ -195,9 +205,15 @@ def test_confirm_get_empty_then_create():
     assert "regular_price" not in post_body
 
 
-def test_confirm_get_existing_then_update():
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
+def test_confirm_get_existing_then_update(monkeypatch, catalog_version):
     """An existing live item is updated only with publication evidence: here a membership
     bound to that exact Graph item with the publication provenance."""
+    from core import config
+    monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
     db = _mock_db(membership=_membership())
     lookup_resp = httpx.Response(
         200,
@@ -226,6 +242,9 @@ def test_confirm_get_existing_then_update():
     assert "access_token" not in get_params
     assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
+    prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+    assert post_url.startswith(prefix)
+    assert all(call.args[0].startswith(prefix) for call in mock_client.get.call_args_list)
     assert post_url.endswith("/META-ITEM-EXISTING")
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     post_headers = mock_client.post.call_args.kwargs.get("headers") or {}

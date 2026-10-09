@@ -131,7 +131,8 @@ from core.catalog_write_router import (
     resolve_meta_import_action,
 )
 from core.catalog_image import coerce_image_url
-from core.config import META_GRAPH_API_VERSION, WA_TOKEN
+from core.config import WA_TOKEN
+from core.meta_catalog_graph import catalog_graph_api_version
 from models import Product, WhatsAppConnection
 from services.whatsapp_platform.wa_connection_secrets import read_access_token
 
@@ -532,7 +533,7 @@ def _preflight_catalog_discovery(
     out = CatalogDiscovery(catalog_id=catalog_id)
 
     # ── Hop 1: object fields ──────────────────────────────────
-    info_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    info_url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}"
     info_params = {
         "fields":       META_CATALOG_DISCOVERY_FIELDS,
         "access_token": token,
@@ -626,7 +627,7 @@ def _preflight_catalog_discovery(
     )
 
     # ── Hop 2: ``?metadata=1`` edge / field introspection ─────
-    meta_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    meta_url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}"
     meta_params = {
         "metadata":     "1",
         "access_token": token,
@@ -1043,7 +1044,7 @@ def _probe_products_page(
     limit: int = 1,
 ) -> Dict[str, Any]:
     """Cheap ``GET /{catalog_id}/{edge}?limit=1`` probe — diagnostics only."""
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}/{edge}"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}/{edge}"
     params = {
         "fields":       "id,name,retailer_id",
         "limit":        str(max(1, int(limit))),
@@ -1449,7 +1450,7 @@ def import_from_meta(db: Session, tenant_id: int) -> ImportReport:
     # proof the function actually ran.
     logger.info(
         "[META_IMPORT][START] tenant=%s graph_api_version=%s",
-        tenant_id, META_GRAPH_API_VERSION,
+        tenant_id, catalog_graph_api_version(),
     )
 
     # ── Env-var visibility (May 2026 #19g hardening) ──────────
@@ -1716,7 +1717,7 @@ def _import_from_meta_body(
     current_edge = edge_candidates[0]
     edge_candidate_idx = 0
     next_url: Optional[str] = (
-        f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+        f"https://graph.facebook.com/{catalog_graph_api_version()}"
         f"/{catalog_id}/{current_edge}"
     )
     # First page is built explicitly; subsequent pages come back with a
@@ -1732,7 +1733,7 @@ def _import_from_meta_body(
         "[META_IMPORT][READY] tenant=%s catalog_id=%s graph_api_version=%s "
         "provider=%s connection_type=%s token_source=%s "
         "token_len=%d page_size=%d max_pages=%d timeout=%.1fs",
-        tenant_id, catalog_id, META_GRAPH_API_VERSION,
+        tenant_id, catalog_id, catalog_graph_api_version(),
         token_pick["provider"] or "<unset>",
         token_pick["connection_type"] or "<unset>",
         token_pick["token_source"],
@@ -1912,7 +1913,7 @@ def _import_from_meta_body(
                         )
                         current_edge = next_edge
                         next_url = (
-                            f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+                            f"https://graph.facebook.com/{catalog_graph_api_version()}"
                             f"/{catalog_id}/{current_edge}"
                         )
                         first_params = {

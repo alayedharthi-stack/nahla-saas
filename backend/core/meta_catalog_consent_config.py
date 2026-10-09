@@ -26,6 +26,9 @@ explicit primary-deployment opt-in. Selecting both modes fails closed:
                                        ``<tenant_id>:<catalog_id>:<business_id>``
                                        comma-separated; one entry per tenant and
                                        per catalog. A caller never chooses them.
+  META_CATALOG_GRAPH_API_VERSION       optional catalog-only version override;
+                                       unset preserves META_GRAPH_API_VERSION.
+                                       Malformed explicit values fail closed.
   META_APP_ID / META_APP_SECRET        the Meta app the consent is issued for.
   WA_TOKEN_ENC_KEY                     dedicated Fernet key (no dev fallback).
   DASHBOARD_URL                        https dashboard; the callback
@@ -45,6 +48,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
+
+from core.meta_catalog_graph import CatalogGraphVersionError, catalog_graph_api_version
 
 ENABLED_ENV = "NAHLA_META_CATALOG_CONSENT_ENABLED"
 PRIMARY_ENABLED_ENV = "NAHLA_META_CATALOG_CONSENT_PRIMARY_ENABLED"
@@ -68,6 +73,7 @@ R_REVIEW_ENV_REQUIRED = "review_environment_required"
 R_REVIEW_ENV_UNVERIFIED = "review_environment_unverified"
 R_APP_CREDENTIALS_MISSING = "app_credentials_missing"
 R_CONFIG_ID_MISSING = "config_id_missing"
+R_GRAPH_VERSION_INVALID = "catalog_graph_version_invalid"
 R_REDIRECT_URI_INVALID = "redirect_uri_invalid"
 R_DASHBOARD_URL_INVALID = "dashboard_url_invalid"
 R_ENCRYPTION_KEY_MISSING = "encryption_key_missing"
@@ -265,6 +271,10 @@ def evaluate_consent_availability(
         return ConsentAvailability(False, R_APP_CREDENTIALS_MISSING)
     if not str(e.get(CONFIG_ID_ENV) or "").strip():
         return ConsentAvailability(False, R_CONFIG_ID_MISSING)
+    try:
+        catalog_graph_api_version(e)
+    except CatalogGraphVersionError:
+        return ConsentAvailability(False, R_GRAPH_VERSION_INVALID)
     redirect_uri = canonical_redirect_uri(e)
     if redirect_uri is None:
         return ConsentAvailability(False, R_REDIRECT_URI_INVALID)
