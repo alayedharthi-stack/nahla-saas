@@ -42,15 +42,28 @@ def build_product_publication_status(
             cached = sync_meta.get("waba_catalog_linked")
             waba_linked = bool(cached) if cached is not None else None
 
-    # WhatsApp per-item visibility is not verified in this PR.
-    # Meta sync + WABA catalog link do not prove the product appears in WA.
+    # Per-item WhatsApp storefront display cannot be read through the API.
+    # ``visible_in_whatsapp`` stays False (never claimed); the evidence block
+    # says what *is* proven so the UI can be honest instead of alarming.
     visible = False
+    sync_meta_block = getattr(product, "extra_metadata", None) or {}
+    sync_meta_block = sync_meta_block.get("sync_meta") if isinstance(sync_meta_block, dict) else None
+    sync_meta_block = sync_meta_block if isinstance(sync_meta_block, dict) else {}
+    retired = bool(sync_meta_block.get("channel_retired_at")) and not sync_meta_block.get("retire_pending")
 
     return {
         "data_ready_for_whatsapp": data_ready,
         "meta_catalog_synced": meta_synced,
         "waba_catalog_linked": waba_linked,
         "visible_in_whatsapp": visible,
+        "visibility_evidence": {
+            "provable_via_api": False,
+            "content_verified_in_meta": bool(sync_meta_block.get("content_verified")) and meta_synced,
+            "verified_at": sync_meta_block.get("verified_at"),
+            "waba_catalog_linked": waba_linked,
+            "channel_retired": retired,
+            "retire_pending": bool(sync_meta_block.get("retire_pending")),
+        },
     }
 
 

@@ -922,6 +922,30 @@ async def run_whatsapp_catalog_sync_scheduler() -> None:
                 )
         except Exception as exc:
             logger.error("[WhatsApp Catalog Sync] Error: %s", exc, exc_info=True)
+        try:
+            # Catch-up pass: read-only against Graph, at most one due tenant
+            # per tick (every NAHLA_WHATSAPP_CATALOG_RECONCILE_SEC per tenant,
+            # default 6h). Drift is re-queued for the drain above; this loop
+            # never writes to Graph itself.
+            from services.whatsapp_catalog_reconcile import (  # noqa: PLC0415
+                run_whatsapp_catalog_reconcile_tick,
+            )
+
+            loop = asyncio.get_running_loop()
+            rec = await loop.run_in_executor(
+                get_whatsapp_catalog_drain_executor(),
+                run_whatsapp_catalog_reconcile_tick,
+            )
+            if rec.get("tenants"):
+                logger.info(
+                    "[WhatsApp Catalog Reconcile] tenants=%s requeued=%s retire_requeued=%s errors=%s",
+                    rec.get("tenants"),
+                    rec.get("requeued"),
+                    rec.get("retire_requeued"),
+                    rec.get("errors"),
+                )
+        except Exception as exc:
+            logger.error("[WhatsApp Catalog Reconcile] Error: %s", exc, exc_info=True)
         await asyncio.sleep(_WHATSAPP_CATALOG_DRAIN_SECONDS)
 
 

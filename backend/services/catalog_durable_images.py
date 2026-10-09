@@ -23,7 +23,7 @@ from core.catalog import (
     infer_ownership_mode,
 )
 from core.catalog_image import coerce_image_url, resolve_product_image_url
-from core.config import META_GRAPH_API_VERSION
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.catalog_media_storage import (
     CatalogMediaStorageError,
     CatalogMediaValidationError,
@@ -94,7 +94,7 @@ def fetch_live_graph_image_url(
             )
             return ""
         cache[tid] = token
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{meta_id}"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{meta_id}"
     try:
         with httpx.Client(timeout=_GRAPH_IMAGE_TIMEOUT_SECONDS) as http:
             resp = http.get(

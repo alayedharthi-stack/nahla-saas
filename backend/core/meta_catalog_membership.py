@@ -25,6 +25,35 @@ from core.catalog import is_synthetic_retailer_id
 logger = logging.getLogger("nahla.meta_catalog_membership")
 
 PROVENANCE_GRAPH_RECONCILE = "meta_graph_reconcile"
+# The only provenances that prove THIS platform published the Graph item: they
+# are written solely after a successful create/update POST (push batch and
+# native sync orchestrator) — ``salla_variant_push`` for a Salla variant SKU,
+# ``native_product_push`` for any other product (``native_product_push_reconciled``
+# once reconcile mapped that same item, see below). The pre-POST identity slot
+# never writes them onto an existing row. Reconcile (Graph presence), import
+# (Meta → local rows) and identity/sibling adoption never grant them. A
+# ``literal_retailer_bind`` provenance constant exists but has no writer, so it
+# is not evidence either.
+PROVENANCE_VARIANT_PUSH = "salla_variant_push"
+PROVENANCE_NATIVE_PUSH = "native_product_push"
+PROVENANCE_NATIVE_PUSH_RECONCILED = "native_product_push_reconciled"
+PUBLICATION_PROVENANCES = frozenset({
+    PROVENANCE_VARIANT_PUSH, PROVENANCE_NATIVE_PUSH, PROVENANCE_NATIVE_PUSH_RECONCILED,
+})
+# Native catalog send capability (load/list below) must stay exactly what
+# reconcile alone grants. A native publication row is therefore write-ownership
+# evidence only — never read for capability — until a complete reconcile pass
+# maps that retailer_id to the same Graph item (the row reconcile itself would
+# have written) and marks it ``native_product_push_reconciled``. When a later
+# pass no longer maps it, the row returns to ownership-only.
+OWNERSHIP_ONLY_PROVENANCES = frozenset({PROVENANCE_NATIVE_PUSH})
+_NATIVE_PUBLICATION_PROVENANCES = frozenset({PROVENANCE_NATIVE_PUSH, PROVENANCE_NATIVE_PUSH_RECONCILED})
+
+
+def _capability_visible_clause(model: Any) -> Any:
+    return model.provenance.notin_(OWNERSHIP_ONLY_PROVENANCES)
+
+
 DIAGNOSTIC_AMBIGUOUS_LOCAL_MAPPING = "ambiguous_local_mapping"
 
 
@@ -134,6 +163,7 @@ def load_meta_catalog_membership(
                 MetaCatalogMembership.tenant_id == int(tenant_id),
                 MetaCatalogMembership.catalog_id == cid,
                 MetaCatalogMembership.retailer_id == rid,
+                _capability_visible_clause(MetaCatalogMembership),
             )
             .first()
         )
@@ -166,6 +196,7 @@ def list_memberships_for_catalog(
             .filter(
                 MetaCatalogMembership.tenant_id == int(tenant_id),
                 MetaCatalogMembership.catalog_id == cid,
+                _capability_visible_clause(MetaCatalogMembership),
             )
             .order_by(MetaCatalogMembership.id.asc())
             .limit(max(1, int(limit)))
@@ -411,8 +442,18 @@ def apply_membership_snapshot(
     desired: Sequence[DesiredMembership],
     verified_at: Optional[datetime] = None,
     provenance: str = PROVENANCE_GRAPH_RECONCILE,
+    live_meta_item_ids: Optional[Dict[str, str]] = None,
 ) -> Dict[str, int]:
-    """Replace memberships for tenant+catalog with the desired complete snapshot."""
+    """Replace memberships for tenant+catalog with the desired complete snapshot.
+
+    Reconcile observes Graph presence; it never grants publication authority.
+    *live_meta_item_ids* (retailer_id → Graph item id from the same complete
+    fetch) lets a native publication row that reconcile does not map survive,
+    ownership-only, while Graph still shows that exact item; otherwise it is
+    removed like any unobserved row. A native publication row that reconcile
+    maps to the same item becomes capability-visible, as the reconcile row it
+    stands for would be.
+    """
     from models import MetaCatalogMembership, Product  # noqa: PLC0415
 
     cid = _norm(catalog_id)
@@ -429,19 +470,44 @@ def apply_membership_snapshot(
     )
     upserted = 0
     removed = 0
+    preserved = 0
     seen: set[str] = set()
     for row in existing:
         rid = _norm(row.retailer_id)
         want = desired_by_rid.get(rid)
         if want is None:
+            current = _norm(row.meta_item_id)
+            if (
+                str(row.provenance or "") in _NATIVE_PUBLICATION_PROVENANCES
+                and current
+                and live_meta_item_ids is not None
+                and _norm(live_meta_item_ids.get(rid)) == current
+            ):
+                row.provenance = PROVENANCE_NATIVE_PUSH
+                preserved += 1
+                seen.add(rid)
+                continue
             db.delete(row)
             removed += 1
             continue
         row.product_id = int(want.product_id)
         row.variant_id = _optional_int(want.variant_id)
-        row.meta_item_id = _norm(want.meta_item_id) or None
+        wanted_mid = _norm(want.meta_item_id) or None
+        current_mid = _norm(row.meta_item_id) or None
+        # A reconcile pass proves Graph presence, never publication. It must not
+        # erase publication evidence: when the row already carries a publication
+        # provenance and still points at the same Graph item (or Graph returned
+        # no id), keep the provenance and the id. Only a changed Graph item id
+        # downgrades the row to reconcile provenance (the old evidence no longer
+        # describes the live item).
+        if str(row.provenance or "") in PUBLICATION_PROVENANCES and (wanted_mid is None or wanted_mid == current_mid):
+            if str(row.provenance or "") in _NATIVE_PUBLICATION_PROVENANCES:
+                row.provenance = PROVENANCE_NATIVE_PUSH_RECONCILED
+            preserved += 1
+        else:
+            row.meta_item_id = wanted_mid
+            row.provenance = provenance
         row.verified_at = now
-        row.provenance = provenance
         upserted += 1
         seen.add(rid)
     for rid, want in desired_by_rid.items():
@@ -472,6 +538,7 @@ def apply_membership_snapshot(
                 .filter(
                     MetaCatalogMembership.tenant_id == int(tenant_id),
                     MetaCatalogMembership.product_id == int(product.id),
+                    _capability_visible_clause(MetaCatalogMembership),
                 )
                 .first()
             )
@@ -486,7 +553,7 @@ def apply_membership_snapshot(
         upserted,
         removed,
     )
-    return {"upserted": upserted, "removed": removed}
+    return {"upserted": upserted, "removed": removed, "preserved_publication_provenance": preserved}
 
 
 def invalidate_meta_catalog_membership(
@@ -522,6 +589,7 @@ def invalidate_meta_catalog_membership(
             .filter(
                 MetaCatalogMembership.tenant_id == int(tenant_id),
                 MetaCatalogMembership.product_id == product_id,
+                _capability_visible_clause(MetaCatalogMembership),
             )
             .first()
         )

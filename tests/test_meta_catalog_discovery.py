@@ -689,8 +689,9 @@ class TestImportDiscoveryOnly:
 
 
 class TestImportUsesDiscoveredEdge:
+    @pytest.mark.parametrize("catalog_version", [None, "v26.0"])
     def test_products_edge_chosen_when_discovery_says_so(
-        self, monkeypatch, _stub_db,
+        self, monkeypatch, _stub_db, catalog_version,
     ):
         """The paging loop must hit ``/{catalog_id}/products`` —
         NOT the hard-coded ``/items`` — when discovery says the
@@ -698,6 +699,11 @@ class TestImportUsesDiscoveredEdge:
         from services.meta_catalog_import import (
             CatalogDiscovery, import_from_meta,
         )
+        from core import config
+        monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+        monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+        if catalog_version:
+            monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
         monkeypatch.delenv("META_CATALOG_DISCOVERY_ONLY", raising=False)
         good = CatalogDiscovery(
             catalog_id="123", ok=True, http_status=200,
@@ -719,6 +725,8 @@ class TestImportUsesDiscoveredEdge:
         _patch_httpx_client(monkeypatch, scripted)
 
         report = import_from_meta(_stub_db, tenant_id=1)
+        prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+        assert scripted.calls and all(url.startswith(prefix) for url in scripted.calls)
         # We actually called the /products edge:
         assert any("/123/products" in c for c in scripted.calls)
         # ...and NOT the legacy /items or /product_items:
@@ -728,8 +736,9 @@ class TestImportUsesDiscoveredEdge:
 
 
 class TestImportEdgeFallbackChain:
+    @pytest.mark.parametrize("catalog_version", [None, "v26.0"])
     def test_product_items_unsupported_falls_back_to_products(
-        self, monkeypatch, _stub_db,
+        self, monkeypatch, _stub_db, catalog_version,
     ):
         """Production incident: product_items returned code=100 but /products works."""
         from services import meta_catalog_import as mci
@@ -737,6 +746,11 @@ class TestImportEdgeFallbackChain:
             CatalogDiscovery, import_from_meta,
         )
 
+        from core import config
+        monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+        monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+        if catalog_version:
+            monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
         monkeypatch.delenv("META_CATALOG_DISCOVERY_ONLY", raising=False)
         good = CatalogDiscovery(
             catalog_id="123", ok=True, vertical="commerce",
@@ -781,6 +795,8 @@ class TestImportEdgeFallbackChain:
         monkeypatch.setattr(mci, "_process_one_meta_product", _fake_upsert)
 
         report = import_from_meta(_stub_db, tenant_id=1)
+        prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+        assert scripted.calls and all(url.startswith(prefix) for url in scripted.calls)
 
         assert report.edge_used == "products"
         assert report.unsupported_edges == ["product_items"]

@@ -2,7 +2,7 @@ name: PostgreSQL 18 compatibility
 
 on:
   pull_request:
-    branches: [main, master]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59]
   push:
     branches: [main, master]
 
@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18
+        image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
         env:
           POSTGRES_USER: nahla
           POSTGRES_PASSWORD: nahla_password

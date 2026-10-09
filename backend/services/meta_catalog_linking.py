@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from core.config import META_GRAPH_API_VERSION
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_import import (
     GRAPH_RESULT_META_HTTP_ERROR,
     GRAPH_RESULT_TOKEN_INVALID,
@@ -141,7 +142,7 @@ def _probe_catalog_exists(
     client: httpx.Client,
 ) -> Optional[bool]:
     """Lightweight read-only check that the configured catalog object exists."""
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}"
     try:
         resp = client.get(url, params={"fields": "id", "access_token": token})
     except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -243,7 +244,8 @@ def get_waba_catalog_link_status(db: Any, tenant_id: int) -> Dict[str, Any]:
 
     if missing:
         primary = (
-            "missing_waba_id" if "waba_id" in missing
+            "catalog_consent_governed" if token_source == "catalog_consent_governed"
+            else "missing_waba_id" if "waba_id" in missing
             else "missing_catalog_id" if "meta_catalog_id" in missing
             else "missing_graph_token"
         )
@@ -348,8 +350,11 @@ def _graph_json(
     data: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
     client: Optional[httpx.Client] = None,
+    graph_version: Optional[str] = None,
 ) -> Dict[str, Any]:
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{path}"
+    # WABA callers retain the shared Graph version; catalog callers opt in.
+    version = graph_version if graph_version is not None else META_GRAPH_API_VERSION
+    url = f"https://graph.facebook.com/{version}/{path}"
     headers = _auth_headers(token)
 
     def _run(http: httpx.Client) -> Dict[str, Any]:
@@ -457,6 +462,7 @@ def list_catalog_agency_business_ids(
         token,
         params={"fields": "id,name"},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     if not resp.get("ok"):
         out["error"] = "agencies_unreadable"
@@ -527,6 +533,7 @@ def share_catalog_with_business(
         token,
         json_body={"business": business_id, "permitted_tasks": ["MANAGE"]},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     result["meta"] = {
         "http_status": resp.get("http_status"),

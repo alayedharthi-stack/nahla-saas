@@ -24,6 +24,7 @@ import httpx
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.plan_entitlements import EntitlementLookupUnavailable, get_entitlements
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_access import probe_catalog_readable
 from services.meta_catalog_import import _select_graph_token
 from services.meta_catalog_linking import (
@@ -209,6 +210,7 @@ def _list_owned_catalog_ids(
         token,
         params={"fields": "id", "limit": 100},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     if not resp.get("ok"):
         graph_err = resp.get("error") or {}
@@ -236,6 +238,7 @@ def _create_owned_catalog(
         token,
         data={"name": name},
         client=client,
+        graph_version=catalog_graph_api_version(),
     )
     if not resp.get("ok"):
         graph_err = resp.get("error") or {}
@@ -423,6 +426,14 @@ def ensure_waba_catalog_for_tenant(
         result["skipped"] = True
         result["error"] = ERROR_ONBOARDING_DISABLED
         return result
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if confirm and not tenant_in_sync_scope(int(tenant_id)):
+        # Limited trial: tenants outside the scope get the read-only dry-run
+        # (no catalog create, no link, no stamp).
+        confirm = False
+        result["dry_run"] = True
+        result["scope_dry_run"] = True
 
     conn = _load_connection(db, tenant_id)
     if conn is None:

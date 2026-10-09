@@ -209,6 +209,9 @@ JWT_PUBLIC_EXACT_PATHS = frozenset({
     # Meta server-side Embedded Signup callback — browser has no JWT.
     # Durable hashed nonce must be consumed before any Graph/WABA mutation.
     "/whatsapp/embedded/oauth/callback",
+    # Catalog-only Meta consent callback — browser has no JWT. Tenant comes
+    # from signed state; the durable nonce is consumed before any Graph call.
+    "/merchant/catalog/meta-consent/callback",
 })
 
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.

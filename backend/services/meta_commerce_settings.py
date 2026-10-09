@@ -145,7 +145,8 @@ def _resolve_connection(
 
     if missing:
         primary = (
-            "missing_phone_number_id" if "phone_number_id" in missing
+            "catalog_consent_governed" if token_source == "catalog_consent_governed"
+            else "missing_phone_number_id" if "phone_number_id" in missing
             else "missing_waba_id" if "waba_id" in missing
             else "missing_catalog_id" if "meta_catalog_id" in missing
             else "missing_graph_token"

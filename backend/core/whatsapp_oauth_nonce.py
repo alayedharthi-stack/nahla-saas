@@ -20,8 +20,13 @@ logger = logging.getLogger("nahla.whatsapp_oauth_nonce")
 TABLE_NAME = "whatsapp_oauth_nonces"
 OAUTH_STATE_TTL_SECONDS = 600
 ALLOWED_CONNECTION_MODES = frozenset({"embedded", "coexistence"})
+# Catalog-only Meta consent shares the table under its own purpose value. It is
+# deliberately NOT in ALLOWED_CONNECTION_MODES, so the WhatsApp embedded /
+# coexistence entry and callback can never create or consume one of its rows.
+CATALOG_CONSENT_NONCE_PURPOSE = "meta_catalog_consent"
 _NONCE_HMAC_DOMAIN = b"wa_oauth_nonce:v1:"
 _REDIRECT_HMAC_DOMAIN = b"wa_oauth_redirect:v1:"
+_CATALOG_BINDING_HMAC_DOMAIN = b"meta_catalog_consent_binding:v1:"
 
 
 class NonceStorageUnavailable(Exception):
@@ -56,6 +61,19 @@ def fingerprint_redirect_uri(redirect_uri: str) -> str:
     digest = hmac.new(
         _hmac_key(),
         _REDIRECT_HMAC_DOMAIN + raw.encode("utf-8"),
+        hashlib.sha256,
+    )
+    return digest.hexdigest()
+
+
+def catalog_consent_binding_fingerprint(redirect_uri: str, catalog_id: str, business_id: str) -> str:
+    """Fingerprint of the exact callback plus the approved catalog and business."""
+    parts = [str(redirect_uri or ""), str(catalog_id or ""), str(business_id or "")]
+    if not all(parts):
+        raise NonceRejected("catalog_binding_incomplete")
+    digest = hmac.new(
+        _hmac_key(),
+        _CATALOG_BINDING_HMAC_DOMAIN + "\n".join(parts).encode("utf-8"),
         hashlib.sha256,
     )
     return digest.hexdigest()
@@ -100,8 +118,47 @@ def persist_oauth_nonce(
     """Insert hashed nonce. Caller must commit before issuing signed state."""
     assert_nonce_storage_ready(db)
     mode = normalize_connection_mode(connection_mode)
-    nonce_hash = hash_oauth_nonce(nonce)
-    ru_fp = fingerprint_redirect_uri(redirect_uri)
+    _insert_nonce_row(
+        db,
+        nonce_hash=hash_oauth_nonce(nonce),
+        tenant_id=tenant_id,
+        mode=mode,
+        fingerprint=fingerprint_redirect_uri(redirect_uri),
+        expires_at=expires_at,
+    )
+
+
+def persist_catalog_consent_nonce(
+    db: Session,
+    *,
+    nonce: str,
+    tenant_id: int,
+    redirect_uri: str,
+    catalog_id: str,
+    business_id: str,
+    expires_at: datetime,
+) -> None:
+    """Insert a catalog-consent nonce bound to callback + approved asset. Caller commits."""
+    assert_nonce_storage_ready(db)
+    _insert_nonce_row(
+        db,
+        nonce_hash=hash_oauth_nonce(nonce),
+        tenant_id=tenant_id,
+        mode=CATALOG_CONSENT_NONCE_PURPOSE,
+        fingerprint=catalog_consent_binding_fingerprint(redirect_uri, catalog_id, business_id),
+        expires_at=expires_at,
+    )
+
+
+def _insert_nonce_row(
+    db: Session,
+    *,
+    nonce_hash: str,
+    tenant_id: int,
+    mode: str,
+    fingerprint: str,
+    expires_at: datetime,
+) -> None:
     now = datetime.now(timezone.utc)
     db.execute(
         text(
@@ -119,7 +176,7 @@ def persist_oauth_nonce(
             "nonce_hash": nonce_hash,
             "tenant_id": int(tenant_id),
             "connection_mode": mode,
-            "redirect_uri_fingerprint": ru_fp,
+            "redirect_uri_fingerprint": fingerprint,
             "expires_at": expires_at,
             "created_at": now,
         },
@@ -145,8 +202,42 @@ def consume_oauth_nonce(
     Downstream Graph/WABA failures must not resurrect the nonce.
     """
     mode = normalize_connection_mode(connection_mode)
-    nonce_hash = hash_oauth_nonce(nonce)
-    ru_fp = fingerprint_redirect_uri(redirect_uri)
+    return _consume_nonce_row(
+        nonce_hash=hash_oauth_nonce(nonce),
+        tenant_id=tenant_id,
+        mode=mode,
+        fingerprint=fingerprint_redirect_uri(redirect_uri),
+        now=now,
+    )
+
+
+def consume_catalog_consent_nonce(
+    *,
+    nonce: str,
+    tenant_id: int,
+    redirect_uri: str,
+    catalog_id: str,
+    business_id: str,
+    now: Optional[datetime] = None,
+) -> int:
+    """Atomically consume one catalog-consent nonce (same semantics as above)."""
+    return _consume_nonce_row(
+        nonce_hash=hash_oauth_nonce(nonce),
+        tenant_id=tenant_id,
+        mode=CATALOG_CONSENT_NONCE_PURPOSE,
+        fingerprint=catalog_consent_binding_fingerprint(redirect_uri, catalog_id, business_id),
+        now=now,
+    )
+
+
+def _consume_nonce_row(
+    *,
+    nonce_hash: str,
+    tenant_id: int,
+    mode: str,
+    fingerprint: str,
+    now: Optional[datetime] = None,
+) -> int:
     stamp = now or datetime.now(timezone.utc)
     db = _independent_session()
     consumed_id: Optional[int] = None
@@ -171,7 +262,7 @@ def consume_oauth_nonce(
                 "nonce_hash": nonce_hash,
                 "tenant_id": int(tenant_id),
                 "connection_mode": mode,
-                "redirect_uri_fingerprint": ru_fp,
+                "redirect_uri_fingerprint": fingerprint,
             },
         )
         row = result.first()
@@ -222,6 +313,10 @@ def safe_oauth_error_fields(payload: Optional[dict[str, Any]] = None) -> dict[st
 
 __all__ = [
     "ALLOWED_CONNECTION_MODES",
+    "CATALOG_CONSENT_NONCE_PURPOSE",
+    "catalog_consent_binding_fingerprint",
+    "consume_catalog_consent_nonce",
+    "persist_catalog_consent_nonce",
     "OAUTH_STATE_TTL_SECONDS",
     "TABLE_NAME",
     "NonceRejected",

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_ROOT not in sys.path:
@@ -105,7 +106,15 @@ def _preview_fatal():
     return report
 
 
-def _mock_db(parent=None, variant=None, conn=None, occupied=None):
+def _membership(meta_item_id="META-ITEM-EXISTING", provenance="salla_variant_push", retailer_id="88001-591001"):
+    """A membership row: publication evidence only with a publication provenance and the same item id."""
+    return SimpleNamespace(
+        tenant_id=9, catalog_id="CAT-GENERIC-001", retailer_id=retailer_id,
+        meta_item_id=meta_item_id, provenance=provenance,
+    )
+
+
+def _mock_db(parent=None, variant=None, conn=None, occupied=None, membership=None):
     db = MagicMock()
     parent = parent or _parent()
     variant = variant or _variant()
@@ -115,7 +124,12 @@ def _mock_db(parent=None, variant=None, conn=None, occupied=None):
     def _query(model):
         q = MagicMock()
         name = getattr(model, "__name__", str(model))
-        if name == "ProductVariant":
+        if name == "MetaCatalogMembership":
+            filtered = MagicMock()
+            filtered.first.return_value = membership
+            filtered.all.return_value = [membership] if membership is not None else []
+            q.filter.return_value = filtered
+        elif name == "ProductVariant":
             filtered = MagicMock()
             filtered.first.return_value = variant
             filtered.all.return_value = list(getattr(parent, "variants", None) or [variant])
@@ -145,7 +159,13 @@ def test_dry_run_builds_payload_without_httpx():
     client_cls.assert_not_called()
 
 
-def test_confirm_get_empty_then_create():
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
+def test_confirm_get_empty_then_create(monkeypatch, catalog_version):
+    from core import config
+    monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
     db = _mock_db()
     lookup_resp = httpx.Response(200, json={"data": []})
     create_resp = httpx.Response(200, json={"id": "META-ITEM-NEW"})
@@ -171,6 +191,9 @@ def test_confirm_get_empty_then_create():
     assert "access_token" not in get_params
     assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
+    prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+    assert post_url.startswith(prefix)
+    assert all(call.args[0].startswith(prefix) for call in mock_client.get.call_args_list)
     assert "/CAT-GENERIC-001/products" in post_url
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     post_headers = mock_client.post.call_args.kwargs.get("headers") or {}
@@ -182,8 +205,16 @@ def test_confirm_get_empty_then_create():
     assert "regular_price" not in post_body
 
 
-def test_confirm_get_existing_then_update():
-    db = _mock_db()
+@pytest.mark.parametrize("catalog_version", [None, "v26.0"])
+def test_confirm_get_existing_then_update(monkeypatch, catalog_version):
+    """An existing live item is updated only with publication evidence: here a membership
+    bound to that exact Graph item with the publication provenance."""
+    from core import config
+    monkeypatch.setattr(config, "META_GRAPH_API_VERSION", "v21.0")
+    monkeypatch.delenv("META_CATALOG_GRAPH_API_VERSION", raising=False)
+    if catalog_version:
+        monkeypatch.setenv("META_CATALOG_GRAPH_API_VERSION", catalog_version)
+    db = _mock_db(membership=_membership())
     lookup_resp = httpx.Response(
         200,
         json={"data": [{"id": "META-ITEM-EXISTING", "retailer_id": "88001-591001", "name": "old"}]},
@@ -211,6 +242,9 @@ def test_confirm_get_existing_then_update():
     assert "access_token" not in get_params
     assert get_headers.get("Authorization") == "Bearer tok"
     post_url = mock_client.post.call_args.args[0]
+    prefix = f"https://graph.facebook.com/{catalog_version or 'v21.0'}/"
+    assert post_url.startswith(prefix)
+    assert all(call.args[0].startswith(prefix) for call in mock_client.get.call_args_list)
     assert post_url.endswith("/META-ITEM-EXISTING")
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     post_headers = mock_client.post.call_args.kwargs.get("headers") or {}
@@ -224,7 +258,7 @@ def test_confirm_updates_sellable_variant_even_if_parent_meta_item_differs():
     """Salla variant identity is independent of Product.meta_item_id."""
     parent = _parent()
     parent.meta_item_id = "META-PARENT-STALE"
-    db = _mock_db(parent=parent)
+    db = _mock_db(parent=parent, membership=_membership())
     lookup_resp = httpx.Response(
         200,
         json={"data": [{"id": "META-ITEM-EXISTING", "retailer_id": "88001-591001"}]},
@@ -698,3 +732,78 @@ def test_confirm_does_not_post_stale_nahla_v_when_identity_is_hyphenated():
     post_body = mock_client.post.call_args.kwargs.get("data") or mock_client.post.call_args.args[1]
     assert post_body["retailer_id"] == "88001-591001"
     assert not str(post_body["retailer_id"]).startswith("nahla_v_")
+
+
+def _existing_item_client(meta_id="META-ITEM-EXISTING"):
+    mock_client = MagicMock()
+    mock_client.get.return_value = httpx.Response(
+        200, json={"data": [{"id": meta_id, "retailer_id": "88001-591001", "name": "old"}]},
+    )
+    mock_client.post.return_value = httpx.Response(200, json={"id": meta_id})
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    return mock_client
+
+
+def _push_existing(db):
+    mock_client = _existing_item_client()
+    with patch("services.meta_catalog_push.preview_meta_variant_payload", return_value=_preview_ok()):
+        with patch("services.meta_catalog_push.select_catalog_graph_token", return_value={"token": "tok"}):
+            with patch("services.meta_catalog_push.httpx.Client", return_value=mock_client):
+                result = push_one_meta_catalog_item(db, 9, "88001-591001", confirm=True)
+    return result, mock_client
+
+
+def test_live_retailer_id_match_without_publication_evidence_is_blocked_not_updated():
+    """A live item that merely shares the retailer_id (manual item, another store's item in a
+    shared catalog, or anything this path did not publish) is never updated: no membership,
+    no legacy stamp → block with the ownership code, zero POSTs."""
+    result, client = _push_existing(_mock_db(membership=None))
+    assert result["ok"] is False
+    assert result["action"] == "block_ownership_unverified"
+    assert result["error"] == "live_match_ownership_unverified"
+    assert result["meta_product_id"] == "META-ITEM-EXISTING"
+    assert result["lookup"]["reason"] == "live_item_without_publication_evidence"
+    assert result["ownership_evidence"]["owned"] is False
+    assert "membership_absent" in result["ownership_evidence"]["reasons"]
+    assert client.post.call_count == 0
+
+
+def test_reconcile_derived_membership_is_not_publication_evidence():
+    """A membership derived from Graph presence (reconcile provenance) proves only that the
+    retailer_id exists in the catalog — not that this path published it."""
+    result, client = _push_existing(_mock_db(membership=_membership(provenance="meta_graph_reconcile")))
+    assert result["action"] == "block_ownership_unverified"
+    assert result["error"] == "live_match_ownership_unverified"
+    assert any(r.startswith("membership_provenance_not_publication") for r in result["ownership_evidence"]["reasons"])
+    assert client.post.call_count == 0
+
+
+def test_membership_bound_to_a_different_graph_item_blocks():
+    result, client = _push_existing(_mock_db(membership=_membership(meta_item_id="META-OTHER")))
+    assert result["action"] == "block_ownership_unverified"
+    assert "membership_meta_item_id_mismatch" in result["ownership_evidence"]["reasons"]
+    assert client.post.call_count == 0
+
+
+def test_literal_bind_provenance_has_no_writer_and_is_not_evidence():
+    """`literal_retailer_bind` is a constant without any writer in the codebase; until an
+    explicit, audited bind path exists it proves nothing."""
+    result, client = _push_existing(_mock_db(membership=_membership(provenance="literal_retailer_bind")))
+    assert result["action"] == "block_ownership_unverified"
+    assert any(r.startswith("membership_provenance_not_publication") for r in result["ownership_evidence"]["reasons"])
+    assert client.post.call_count == 0
+
+
+def test_legacy_product_stamp_equal_to_live_item_is_not_publication_evidence():
+    """`Product.meta_item_id` is also written by the Meta import, the identity bind and the
+    sibling adoption, so a matching stamp alone never authorizes an update."""
+    parent = _parent()
+    parent.meta_item_id = "META-ITEM-EXISTING"
+    result, client = _push_existing(_mock_db(parent=parent, membership=None))
+    assert result["action"] == "block_ownership_unverified"
+    ev = result["ownership_evidence"]
+    assert ev["owned"] is False
+    assert ev["legacy_product_meta_item_id"] == {"value": "META-ITEM-EXISTING", "matches_live_item": True}
+    assert "legacy_stamp_is_not_publication_evidence" in ev["reasons"]
+    assert client.post.call_count == 0

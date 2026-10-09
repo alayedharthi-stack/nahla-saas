@@ -460,13 +460,51 @@ def meta_export_rejection_detail(product: Any) -> Optional[Dict[str, str]]:
     }
 
 
+SOURCE_HIDDEN_STATUSES = frozenset({"hidden", "deleted"})
+
+
+def source_platform_status(product: Any) -> str:
+    """Lowercase status the source platform reported.
+
+    ``extra_metadata.source_status`` holds the raw store value (Salla:
+    ``sale`` / ``out`` / ``hidden``); ``extra_metadata.status`` holds the
+    lifecycle value the platform reads (``active`` / ``hidden`` / ...).
+    """
+    if product is None:
+        return ""
+    meta = product.get("extra_metadata") if isinstance(product, dict) else getattr(product, "extra_metadata", None)
+    if not isinstance(meta, dict):
+        return ""
+    raw = str(meta.get("source_status") or "").strip().lower()
+    if raw:
+        return raw
+    return str(meta.get("status") or "").strip().lower()
+
+
+def is_hidden_at_source(product: Any) -> bool:
+    """True when an external-platform row is hidden/deleted in its source store.
+
+    A Salla product with status ``hidden`` is not for sale; publishing it as a
+    live WhatsApp item would claim availability the merchant withdrew.
+    """
+    if product is None:
+        return False
+    src = normalize_source(
+        product.get("source") if isinstance(product, dict) else getattr(product, "source", None)
+    )
+    if src not in EXTERNAL_PLATFORM_SOURCES:
+        return False
+    return source_platform_status(product) in SOURCE_HIDDEN_STATUSES
+
+
 def is_whatsapp_channel_publish_eligible(product: Any) -> bool:
     """True when a Nahla catalog row may be published as a WhatsApp/Meta copy.
 
     Distinct from merchant-edit and from native-only Meta export.
     External-platform rows (Salla/Zid/Shopify) stay ``external_managed``;
     this only allows pushing a channel copy. Out-of-stock rows remain
-    eligible so availability can be updated on the channel.
+    eligible so availability can be updated on the channel. Rows hidden
+    at the source store are not eligible (they are retired on the channel).
     """
     if product is None:
         return False
@@ -475,6 +513,8 @@ def is_whatsapp_channel_publish_eligible(product: Any) -> bool:
     if isinstance(product, dict) and product.get("merchant_hidden_at"):
         return False
     if catalog_status_of(product) != CATALOG_STATUS_ACTIVE:
+        return False
+    if is_hidden_at_source(product):
         return False
     mode = infer_ownership_mode(product)
     if mode in (
@@ -513,6 +553,12 @@ def whatsapp_channel_publish_rejection_detail(product: Any) -> Optional[Dict[str
             "eligible": False,
             "error_code": "product_not_active_in_catalog",
             "message_ar": "المنتج غير نشط في كتالوج نحلة، لذلك لا يُنشر إلى واتساب.",
+        }
+    if is_hidden_at_source(product):
+        return {
+            "eligible": False,
+            "error_code": "product_hidden_at_source",
+            "message_ar": "المنتج مخفي في متجر المصدر، لذلك لا يُنشر إلى واتساب.",
         }
     return {
         "eligible": False,

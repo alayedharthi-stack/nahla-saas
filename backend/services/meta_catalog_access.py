@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.config import META_GRAPH_API_VERSION, WA_TOKEN
+from core.config import WA_TOKEN
+from core.meta_catalog_graph import catalog_graph_api_version
 from services.meta_catalog_import import (
     _TOKEN_SOURCE_MERCHANT_OAUTH,
     _TOKEN_SOURCE_NONE,
@@ -36,6 +37,7 @@ REQUEST_TIMEOUT: float = 45.0
 ERROR_CATALOG_NOT_READABLE = "catalog_not_readable"
 ERROR_CATALOG_ID_MISSING = "catalog_id_missing"
 ERROR_NO_GRAPH_TOKEN = "missing_graph_token"
+ERROR_CATALOG_NOT_AUTHORIZED = "catalog_not_authorized"
 
 
 def _auth_headers(token: str) -> Dict[str, str]:
@@ -68,7 +70,7 @@ def probe_catalog_readable(
         result["error"] = ERROR_NO_GRAPH_TOKEN
         return result
 
-    url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/{catalog_id}"
+    url = f"https://graph.facebook.com/{catalog_graph_api_version()}/{catalog_id}"
     params = {"fields": "id,name,product_count,business{id,name}"}
     headers = _auth_headers(token)
 
@@ -103,8 +105,44 @@ def probe_catalog_readable(
         return result
 
 
+def _consent_governed_connection(conn: Any) -> bool:
+    """A WhatsApp connection whose catalog a stored consent governs (or may).
+
+    Session-bound rows are checked against the database with the central
+    coverage rule (``consent_governs_catalog``), which also covers a
+    connection with no catalog of its own: the consent is then the tenant's
+    catalog. A persisted row that has left its session (detached) cannot be
+    checked, so its governance is unknown and it is treated as governed
+    (fail closed), whatever its catalog field holds. Objects that were never
+    persisted and non-ORM stand-ins carry no consent context.
+    """
+    from sqlalchemy.orm.state import InstanceState  # noqa: PLC0415
+
+    from services.meta_catalog_consent import consent_governs_catalog  # noqa: PLC0415
+
+    state = getattr(conn, "_sa_instance_state", None)
+    if not isinstance(state, InstanceState):
+        return False  # non-ORM stand-in
+    session = state.session
+    if session is None:
+        return bool(state.detached)
+    return consent_governs_catalog(session, int(getattr(conn, "tenant_id", 0) or 0), conn)
+
+
 def catalog_token_candidates(conn: Any) -> List[Dict[str, Any]]:
     """Ordered unique Graph tokens to try against a catalog object."""
+    if getattr(conn, "is_catalog_consent_binding", False):
+        # Catalog-only consent: its own token and nothing else — no WhatsApp
+        # merchant token and no platform WA_TOKEN fallback. A binding without
+        # an approved catalog serves nothing.
+        if not str(getattr(conn, "meta_catalog_id", "") or "").strip():
+            return []
+        raw = str(getattr(conn, "access_token", "") or "").strip()
+        return [{"token": raw, "token_source": "merchant_catalog_consent"}] if raw else []
+    if _consent_governed_connection(conn):
+        # The catalog is governed by a catalog-only consent: no WhatsApp
+        # merchant or platform token may serve it (fail closed).
+        return []
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -139,6 +177,26 @@ def select_catalog_graph_token(
             "probes": probes,
             "catalog": None,
         }
+
+    if getattr(conn, "is_catalog_consent_binding", False):
+        # The consent token serves exactly the approved catalog: any other
+        # (or an empty bound asset) is refused before any token is handed out
+        # or any provider call is made, with no WhatsApp/platform fallback.
+        from services.meta_catalog_consent import CatalogConsentInactive  # noqa: PLC0415
+
+        try:
+            conn.token_for(catalog_id)
+        except CatalogConsentInactive:
+            logger.warning("[META_CATALOG_ACCESS] catalog_not_authorized for consent binding tenant=%s",
+                           getattr(conn, "tenant_id", None))
+            return {
+                "token": None,
+                "token_source": _TOKEN_SOURCE_NONE,
+                "catalog_readable": False,
+                "error": ERROR_CATALOG_NOT_AUTHORIZED,
+                "probes": probes,
+                "catalog": None,
+            }
 
     candidates = catalog_token_candidates(conn)
     if not candidates:
@@ -210,6 +268,7 @@ __all__ = [
     "ERROR_CATALOG_ID_MISSING",
     "ERROR_CATALOG_NOT_READABLE",
     "ERROR_NO_GRAPH_TOKEN",
+    "ERROR_CATALOG_NOT_AUTHORIZED",
     "catalog_token_candidates",
     "probe_catalog_readable",
     "select_catalog_graph_token",
