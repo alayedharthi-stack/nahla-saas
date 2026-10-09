@@ -270,6 +270,48 @@ def test_merchant_account_and_tenant_checks_remain_enforced(session_env, monkeyp
     assert _refresh(client, token).status_code == 401
 
 
+def test_active_db_admin_with_user_id_still_receives_rolling_refresh(session_env):
+    client, db = session_env
+    user = _database_user(db, email=ADMIN, role="admin", tenant_id=1)
+    token = auth_core.create_token(ADMIN, "admin", tenant_id=1, user_id=user.id)
+    original = auth_core.decode_token(token)
+    response = _refresh(client, token)
+    assert response.status_code == 200
+    data = response.json()
+    fresh = auth_core.decode_token(data["access_token"])
+    assert data["access_token"] != token
+    assert (data["role"], data["tenant_id"], data["user_id"], data["email"]) == (
+        "admin", 1, user.id, ADMIN,
+    )
+    for key in ("sub", "role", "tenant_id", "user_id"):
+        assert fresh[key] == original[key]
+    assert fresh["jti"] != original["jti"]
+    assert fresh["exp"] - fresh["iat"] == 3600
+
+
+def test_active_support_session_refresh_preserves_impersonation_scope_and_actor(session_env):
+    client, db = session_env
+    user = _database_user(db)
+    token = auth_core.create_support_token(
+        merchant_email=user.email, merchant_user_id=user.id, tenant_id=7,
+        actor_email=ADMIN, actor_user_id=55, session_version=4, ttl_hours=1,
+    )
+    original = auth_core.decode_token(token)
+    response = _refresh(client, token)
+    assert response.status_code == 200
+    data = response.json()
+    fresh = auth_core.decode_token(data["access_token"])
+    assert data["access_token"] != token
+    assert (data["role"], data["tenant_id"], data["user_id"], data["email"]) == (
+        "support_impersonation", 7, user.id, user.email,
+    )
+    for key in ("sub", "role", "tenant_id", "user_id", "impersonation",
+                "actor_sub", "actor_user_id", "session_version"):
+        assert fresh[key] == original[key]
+    assert fresh["jti"] != original["jti"]
+    assert fresh["exp"] - fresh["iat"] == 3600
+
+
 def test_db_admin_with_user_id_keeps_db_account_checks(session_env, monkeypatch):
     client, db = session_env
     _database_user(db, email=ADMIN, role="admin", active=False, tenant_id=1)
