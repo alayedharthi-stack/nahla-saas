@@ -51,6 +51,7 @@ from core.auth import (
     decode_token,
     decode_token_for_refresh,
     get_current_user,
+    is_configured_env_admin_identity,
     hash_password,
     verify_password,
 )
@@ -628,9 +629,9 @@ async def auth_session_refresh(
     """
     Rolling session refresh for the merchant dashboard / PWA.
 
-    Accepts the current (possibly recently-expired) session JWT and
-    returns a fresh access_token when the signature is valid, the token
-    is not revoked, and the user account is still active.
+    Merchant sessions may roll within the configured expiry grace window.
+    Config-backed env-admin sessions are revalidated without renewal: only
+    the original unexpired access token is returned, with exp/jti unchanged.
     """
     auth_header = request.headers.get("Authorization") or ""
     token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
@@ -644,6 +645,33 @@ async def auth_session_refresh(
     email = payload.get("sub")
     if not email:
         raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Invalid token subject"})
+
+    # Env-admin login issues role=admin, tenant_id=1 with no database user_id.
+    # Revalidate that exact identity without creating rows or granting the
+    # merchant refresh grace period. Returning the same token preserves the
+    # absolute configured lifetime; expired tokens must not fall through to
+    # DB-backed renewal even if a matching User was provisioned later.
+    if (
+        payload.get("role") == "admin"
+        and "user_id" not in payload
+    ):
+        if (
+            not is_configured_env_admin_identity(email)
+            or type(payload.get("tenant_id")) is not int
+            or payload["tenant_id"] != 1
+            or not isinstance(payload.get("jti"), str)
+            or not payload["jti"]
+            or any(k in payload for k in ("impersonation", "actor_sub", "actor_user_id", "session_version"))
+            or payload["exp"] <= datetime.now(timezone.utc).timestamp()
+            or not decode_token(token)
+        ):
+            raise HTTPException(status_code=401, detail={"code": "invalid_token", "message": "Invalid or expired token"})
+        return {
+            "access_token": token,
+            "role":         "admin",
+            "tenant_id":    1,
+            "email":        email,
+        }
 
     db_user = db.query(User).filter(User.email == email).first()
     if not db_user or not db_user.is_active:
