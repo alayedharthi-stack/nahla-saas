@@ -435,6 +435,47 @@ class MetaCatalogMembership(Base):
     )
 
 
+class CatalogChannelRetirement(Base):
+    """Durable request to withdraw one channel (Meta) item this platform published.
+
+    Written in the same transaction as the local product delete (Salla
+    ``product.deleted`` or a manual delete) so no row can vanish while its
+    Graph copy stays sellable. Independent of ``products`` (no FK: the row
+    is gone) and of ``whatsapp_connections.extra_metadata`` (no concurrent
+    JSON writer can erase it). The WhatsApp catalog drain processes
+    ``pending`` rows for in-scope tenants with the same flag, readiness and
+    retry budget as publishing; nothing is deleted on Meta.
+    """
+
+    __tablename__ = "catalog_channel_retirements"
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    # NULL when the tenant had no stamped catalog at delete time; the drain
+    # resolves it from the connection, so a delete is never refused for it.
+    catalog_id = Column(String(64), nullable=True)
+    retailer_id = Column(String(255), nullable=False)
+    meta_item_id = Column(String(128), nullable=True)
+    product_id = Column(Integer, nullable=True)
+    reason = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+    done_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "catalog_id",
+            "retailer_id",
+            name="uq_catalog_channel_retirements_tenant_catalog_retailer",
+        ),
+        Index("ix_catalog_channel_retirements_tenant_status", "tenant_id", "status"),
+    )
+
+
 class Order(Base):
     __tablename__ = 'orders'
     __table_args__ = (
@@ -2758,6 +2799,44 @@ class WhatsAppOAuthNonce(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     consumed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class MetaCatalogAuthorization(Base):
+    """Verified catalog-only Meta consent (catalog_management + business_management).
+
+    One row per tenant and one tenant per catalog. The user access token is
+    stored ``enc1:``-encrypted only; it is used for the approved catalog alone
+    and never marks a WhatsApp connection as connected.
+    """
+
+    __tablename__ = "meta_catalog_authorizations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_meta_catalog_authorizations_tenant"),
+        UniqueConstraint("catalog_id", name="uq_meta_catalog_authorizations_catalog"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    catalog_id = Column(String(64), nullable=False)
+    business_id = Column(String(64), nullable=False)
+    meta_app_id = Column(String(64), nullable=False)
+    meta_user_id = Column(String(64), nullable=False)
+    access_token_enc = Column(Text, nullable=False)
+    granted_scopes = Column(sa.JSON, nullable=False)
+    token_expires_at = Column(DateTime(timezone=True), nullable=True)
+    data_access_expires_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(16), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,

@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 for entry in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if entry not in sys.path:
         sys.path.insert(0, entry)
@@ -28,7 +28,11 @@ from scripts.operators.bootstrap_migration_contract import repository_heads_expe
 def test_repository_accepts_only_known_parallel_head_topologies() -> None:
     # Payments 0115 branches from 0112, independently of the existing 0114
     # AI usage branch. Both preserve normal bootstrap pinned to 0093.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115"})
+    # Catalog consent 0120 extends the 0118 catalog-retirements branch and
+    # replaces it as a head; the 0118 topology stays an accepted checkout.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0120"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115", "0118"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0118", "0120"})
     assert repository_heads_expected({"0092", "0111", "0114"})
     assert repository_heads_expected({"0092", "0111", "0113"})
     assert not repository_heads_expected({"0092", "0111", "0113", "0114"})

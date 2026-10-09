@@ -30,6 +30,8 @@ from core.catalog import (
     normalize_source,
 )
 from core.plan_entitlements import EntitlementLookupUnavailable, get_entitlements
+from services.meta_catalog_push import MetaCatalogPushError
+from services.whatsapp_catalog_retirement import retirement_is_due
 from services.native_meta_sync_orchestrator import (
     CONTENT_LOOKUP_FIELDS,
     IDENTITY_LOOKUP_FIELDS,
@@ -80,6 +82,10 @@ _BLOCKERS_AR = {
         "لا يوجد ربط واتساب لهذا المتجر.",
         "اربط واتساب من صفحة الربط ثم أعد المحاولة.",
     ),
+    "catalog_consent_inactive": (
+        "تفويض كتالوج Meta غير نشط أو تعذّر التحقق منه.",
+        "راجع بطاقة تفويض كتالوج Meta وجدّد الصلاحيات عند الحاجة.",
+    ),
     "catalog_disabled": (
         "ربط الكتالوج بواتساب غير مفعّل.",
         "فعّل الكتالوج من إعدادات «ربط الكتالوج بواتساب وMeta».",
@@ -100,6 +106,10 @@ _BLOCKERS_AR = {
         "صلاحيات Meta غير مكتملة أو منتهية.",
         "أعد ربط واتساب لتجديد صلاحيات الكتالوج.",
     ),
+    "sync_scope_excluded": (
+        "مزامنة الكتالوج تعمل حاليًا ضمن تجربة محدودة لا تشمل هذا المتجر.",
+        "لا إجراء مطلوب؛ تُفعَّل المزامنة لهذا المتجر بعد اكتمال التجربة.",
+    ),
 }
 
 
@@ -119,17 +129,19 @@ def _blocker(code: str) -> Dict[str, Any]:
 
 
 def _load_connection(db: Any, tenant_id: int) -> Any:
-    from models import WhatsAppConnection  # noqa: PLC0415
+    # Use the same verified, fail-closed binding as the actual push. This
+    # permits catalog-only consent without manufacturing a WhatsApp link.
+    from services.meta_catalog_push import _resolve_connection  # noqa: PLC0415
 
-    return (
-        db.query(WhatsAppConnection)
-        .filter(WhatsAppConnection.tenant_id == int(tenant_id))
-        .first()
-    )
+    return _resolve_connection(db, int(tenant_id))
 
 
 def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[str, Any]:
     """Local readiness for enqueue. Does not call Graph."""
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(tenant_id):
+        return _blocker("sync_scope_excluded")
     try:
         ent = get_entitlements(db, int(tenant_id), strict_lookup=True)
         if not ent.has_feature("meta_catalog_sync"):
@@ -156,7 +168,14 @@ def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[st
         )
         return _blocker("entitlement_unavailable")
 
-    conn = _load_connection(db, tenant_id)
+    from services.meta_catalog_consent import is_consent_binding  # noqa: PLC0415
+
+    try:
+        conn = _load_connection(db, tenant_id)
+    except MetaCatalogPushError as exc:
+        # Revoked, expired, disabled or unreadable consent never falls back to
+        # a WhatsApp connection or a platform token.
+        return _blocker(exc.code)
     if conn is None:
         return _blocker("connection_not_found")
     conn_fp = connection_sync_fingerprint(conn)
@@ -184,7 +203,7 @@ def evaluate_whatsapp_catalog_sync_readiness(db: Any, tenant_id: int) -> Dict[st
         auto_on = False
     else:
         auto_on = auto_catalog_onboarding_enabled()
-    if auto_on:
+    if auto_on and not is_consent_binding(conn):
         ensure_meta = extra.get("meta_catalog_ensure") if isinstance(extra.get("meta_catalog_ensure"), dict) else {}
         bind_meta = extra.get("meta_catalog_bind") if isinstance(extra.get("meta_catalog_bind"), dict) else {}
         persist_error = str(ensure_meta.get("error") or bind_meta.get("error") or "").strip()
@@ -392,7 +411,372 @@ def _empty_sync_counts() -> Dict[str, int]:
         "blocked": 0,
         "pending_verification": 0,
         "skipped_ineligible": 0,
+        "retire_pending": 0,
+        "retire_exhausted": 0,
+        "retire_refused": 0,
+        "retired": 0,
     }
+
+
+# ── Failure → merchant action (structured codes; the dashboard localises) ──
+
+_FAILURE_ACTIONS = {
+    "access_token_missing": "reconnect_whatsapp",
+    "sync_scope_excluded": "none",
+    "access_token_invalid": "reconnect_whatsapp",
+    "connection_not_found": "connect_whatsapp",
+    "catalog_permission_denied": "grant_catalog_permission",
+    "catalog_manage_permission_required": "grant_catalog_permission",
+    "catalog_id_missing": "set_catalog_id",
+    "catalog_disabled": "enable_catalog",
+    "feature_locked": "upgrade_plan",
+    "waba_catalog_not_linked": "link_catalog_to_whatsapp",
+    "waba_catalog_link_unproven": "verify_catalog_link",
+    "catalog_business_mismatch": "fix_catalog_ownership",
+    "missing_image_url": "add_product_image",
+    "missing_price": "set_product_price",
+    "missing_url": "set_product_url",
+    "missing_retailer_id": "fix_variant_identity",
+    "ambiguous_variant_identity": "fix_variant_identity",
+    "ambiguous_sibling": "resolve_duplicate_meta_item",
+    "existing_catalog_identity": "resolve_duplicate_meta_item",
+    "product_already_meta_managed": "none",
+    "product_not_active_in_catalog": "none",
+    "product_hidden_at_source": "none",
+    "verification_failed": "wait_meta_review",
+    "verification_exhausted": "check_item_in_meta",
+    "pending_content_verification": "wait_meta_review",
+    "meta_rate_limited": "wait_retry",
+    "meta_http_error": "wait_retry",
+    "meta_push_failed": "wait_retry",
+    "lookup_failed": "wait_retry",
+    "retire_exhausted": "check_item_in_meta",
+    "retire_ownership_unverified": "check_item_in_meta",
+}
+
+
+def failure_action_code(error_code: Any) -> str:
+    """Stable action code for one sync error; ``check_product`` when unknown."""
+    return _FAILURE_ACTIONS.get(str(error_code or "").strip(), "check_product")
+
+
+# ── Catalog ↔ WABA link evidence (never a Graph call on the status path) ──
+
+LINK_EVIDENCE_STALE_AFTER = timedelta(hours=24)
+
+
+def catalog_link_evidence(
+    db: Any,
+    tenant_id: int,
+    *,
+    conn: Any = None,
+    product_evidence: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Most recent persisted proof that the stamped catalog is connected to the WABA.
+
+    Sources: the reconnect bind result, the onboarding ensure result, the
+    periodic reconciliation snapshot, and the newest product verification
+    stamp (each sync records the live link flag). Evidence for a different
+    catalog id is ignored. ``state`` is ``linked`` / ``not_linked`` /
+    ``unknown``; a stamped catalog id alone never counts as linked.
+    """
+    if conn is None:
+        try:
+            conn = _load_connection(db, tenant_id)
+        except (SQLAlchemyError, AttributeError, MetaCatalogPushError):
+            conn = None
+    out: Dict[str, Any] = {
+        "state": "unknown",
+        "evidence_at": None,
+        "evidence_source": None,
+        "catalog_id": None,
+        "waba_id": None,
+        "stale": None,
+    }
+    if conn is None:
+        return out
+    catalog_id = str(getattr(conn, "meta_catalog_id", "") or "").strip()
+    out["catalog_id"] = catalog_id or None
+    from services.meta_catalog_consent import is_consent_binding  # noqa: PLC0415
+
+    if is_consent_binding(conn):
+        # A catalog-only grant proves no WhatsApp linkage, even if a stale
+        # product stamp from an older connection says otherwise.
+        return out
+    out["waba_id"] = str(getattr(conn, "whatsapp_business_account_id", "") or "").strip() or None
+    extra = getattr(conn, "extra_metadata", None) or {}
+    extra = extra if isinstance(extra, dict) else {}
+
+    candidates: List[tuple[datetime, Optional[bool], str]] = []
+
+    bind = extra.get("meta_catalog_bind") if isinstance(extra.get("meta_catalog_bind"), dict) else {}
+    if bind and (not bind.get("catalog_id") or str(bind.get("catalog_id")) == catalog_id):
+        at = _parse_iso_dt(bind.get("at"))
+        if at is not None:
+            if bind.get("link_status") == "linked" or (bind.get("ok") and bind.get("already_linked")):
+                candidates.append((at, True, "reconnect_bind"))
+            elif bind.get("link_status") in ("not_linked", "mismatch") or bind.get("error") in (
+                "waba_catalog_not_linked", "waba_catalog_link_failed", "catalog_business_mismatch",
+            ):
+                candidates.append((at, False, "reconnect_bind"))
+
+    ensure = extra.get("meta_catalog_ensure") if isinstance(extra.get("meta_catalog_ensure"), dict) else {}
+    if ensure and (not ensure.get("catalog_id") or str(ensure.get("catalog_id")) == catalog_id):
+        at = _parse_iso_dt(ensure.get("at"))
+        if at is not None and ensure.get("waba_catalog_linked") is not None:
+            candidates.append((at, bool(ensure.get("waba_catalog_linked")), "onboarding_ensure"))
+
+    reconcile = extra.get("wa_catalog_reconcile") if isinstance(extra.get("wa_catalog_reconcile"), dict) else {}
+    if reconcile and (not reconcile.get("catalog_id") or str(reconcile.get("catalog_id")) == catalog_id):
+        at = _parse_iso_dt(reconcile.get("at"))
+        link_state = reconcile.get("waba_link_state")
+        if at is not None and link_state in ("linked", "not_linked", "mismatch"):
+            candidates.append((at, link_state == "linked", "reconcile"))
+
+    if product_evidence and product_evidence.get("at") is not None and product_evidence.get("linked") is not None:
+        at = _parse_iso_dt(product_evidence.get("at"))
+        if at is not None:
+            candidates.append((at, bool(product_evidence.get("linked")), "product_verification"))
+
+    if not candidates:
+        return out
+    candidates.sort(key=lambda item: item[0])
+    at, linked, source = candidates[-1]
+    out["state"] = "linked" if linked else "not_linked"
+    out["evidence_at"] = at.isoformat()
+    out["evidence_source"] = source
+    out["stale"] = (_now() - at) > LINK_EVIDENCE_STALE_AFTER
+    return out
+
+
+# ── Retirement snapshot ──────────────────────────────────────────────────
+
+def _retirement_snapshot(db: Any, tenant_id: int, counts: Dict[str, int]) -> Dict[str, Any]:
+    from services.whatsapp_catalog_retirement import ledger_snapshot  # noqa: PLC0415
+
+    try:
+        ledger = ledger_snapshot(db, int(tenant_id))
+    except (SQLAlchemyError, AttributeError, TypeError) as exc:
+        logger.warning(
+            "[WA_CATALOG_SYNC] retirement ledger read skipped tenant=%s err=%s",
+            int(tenant_id),
+            type(exc).__name__,
+        )
+        ledger = {"pending": 0, "exhausted": 0, "refused": 0, "done_total": 0, "last_done_at": None, "last_error": None}
+    product_pending = int(counts.get("retire_pending") or 0)
+    product_exhausted = int(counts.get("retire_exhausted") or 0)
+    product_refused = int(counts.get("retire_refused") or 0)
+    ledger_refused = int(ledger.get("refused") or 0)
+    return {
+        "pending": int(ledger["pending"]) + max(0, product_pending - product_exhausted),
+        "exhausted": int(ledger["exhausted"]) + product_exhausted,
+        # withdrawal refused: no publication evidence, so nothing was written
+        # and a channel copy may still be live in WhatsApp
+        "refused": ledger_refused + product_refused,
+        "refused_products": product_refused,
+        "retired_products": int(counts.get("retired") or 0),
+        "ledger_pending": int(ledger["pending"]),
+        "ledger_exhausted": int(ledger["exhausted"]),
+        "ledger_refused": ledger_refused,
+        "ledger_done_total": int(ledger["done_total"]),
+        "last_done_at": ledger.get("last_done_at"),
+        "last_error": ledger.get("last_error"),
+        "note": "retired = availability out of stock + visibility staging on Meta; nothing is deleted",
+    }
+
+
+# ── Stage latency (measured from persisted stamps; nothing is estimated) ──
+
+LATENCY_SAMPLE_MAX = 500
+
+
+def _seconds_between(start: Any, end: Any) -> Optional[float]:
+    a = _parse_iso_dt(start)
+    b = _parse_iso_dt(end)
+    if a is None or b is None:
+        return None
+    delta = (b - a).total_seconds()
+    return delta if delta >= 0 else None
+
+
+def _collect_latency_sample(samples: Dict[str, List[float]], status: str, sync_meta: Dict[str, Any]) -> None:
+    pending_at = sync_meta.get("pending_at")
+    push_at = sync_meta.get("last_push_at")
+    verified_at = sync_meta.get("verified_at")
+    if status == "synced":
+        platform = _seconds_between(pending_at, push_at)
+        if platform is not None and len(samples["platform"]) < LATENCY_SAMPLE_MAX:
+            samples["platform"].append(platform)
+        channel = _seconds_between(push_at, verified_at)
+        if channel is not None and len(samples["channel"]) < LATENCY_SAMPLE_MAX:
+            samples["channel"].append(channel)
+    elif status in ("pending", "", "failed", "pending_verification", "syncing") and pending_at:
+        waiting = _seconds_between(pending_at, _now().isoformat())
+        if waiting is not None and len(samples["waiting"]) < LATENCY_SAMPLE_MAX:
+            samples["waiting"].append(waiting)
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = int(round((len(ordered) - 1) * pct))
+    return round(ordered[max(0, min(idx, len(ordered) - 1))], 1)
+
+
+def summarize_latency(samples: Dict[str, List[float]]) -> Dict[str, Any]:
+    def _block(values: List[float]) -> Dict[str, Any]:
+        return {
+            "n": len(values),
+            "p50_seconds": _percentile(values, 0.5),
+            "p95_seconds": _percentile(values, 0.95),
+            "max_seconds": round(max(values), 1) if values else None,
+        }
+
+    return {
+        # Nahla owns this: product write (pending stamp) → Graph push.
+        "platform": _block(samples.get("platform") or []),
+        # Meta owns this: Graph push → Graph read shows the pushed content.
+        "channel": _block(samples.get("channel") or []),
+        # Rows written but not yet pushed (now − pending stamp).
+        "waiting": _block(samples.get("waiting") or []),
+        "drain_interval_seconds": int(os.environ.get("NAHLA_WHATSAPP_CATALOG_DRAIN_SEC", "120") or 120),
+        "note": (
+            "platform = Nahla write → Graph push; channel = Graph push → Graph read match; "
+            "WhatsApp storefront display time is not measurable through the API."
+        ),
+    }
+
+
+# ── Pipeline stages for the merchant status card ─────────────────────────
+
+def build_sync_stages(
+    db: Any,
+    tenant_id: int,
+    *,
+    conn: Any,
+    readiness: Dict[str, Any],
+    counts: Dict[str, int],
+    link: Dict[str, Any],
+    retirement: Dict[str, Any],
+    last_success_at: Optional[str],
+) -> Dict[str, Any]:
+    """Each hop of Salla → Nahla → Meta → WhatsApp with its own evidence.
+
+    States: ``ok`` (evidence present), ``pending`` (work queued),
+    ``attention`` (needs the merchant or ops), ``unknown`` (no evidence).
+    """
+    source: Dict[str, Any] = {"state": "unknown", "provider": None, "last_sync_at": None, "product_count": None}
+    try:
+        from models import Integration, StoreKnowledgeSnapshot  # noqa: PLC0415
+
+        from core.catalog import EXTERNAL_PLATFORM_SOURCES  # noqa: PLC0415
+
+        integ = (
+            db.query(Integration)
+            .filter(
+                Integration.tenant_id == int(tenant_id),
+                Integration.provider.in_(sorted(EXTERNAL_PLATFORM_SOURCES)),
+            )
+            .first()
+        )
+        if integ is not None:
+            source["provider"] = str(getattr(integ, "provider", "") or "") or None
+            source["state"] = "ok" if bool(getattr(integ, "enabled", True)) else "attention"
+        snap = (
+            db.query(StoreKnowledgeSnapshot)
+            .filter(StoreKnowledgeSnapshot.tenant_id == int(tenant_id))
+            .first()
+        )
+        if snap is not None:
+            stamps = [
+                getattr(snap, "last_full_sync_at", None),
+                getattr(snap, "last_incremental_sync_at", None),
+            ]
+            stamps = [x for x in stamps if x is not None]
+            if stamps:
+                latest = max(stamps)
+                source["last_sync_at"] = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
+            source["product_count"] = getattr(snap, "product_count", None)
+    except Exception:  # noqa: silent-ok — the source stage is informational; the status must still render without it
+        logger.warning("[WA_CATALOG_SYNC] source stage read skipped tenant=%s", tenant_id, exc_info=True)
+
+    nahla = {
+        "state": "ok" if (counts.get("eligible") or counts.get("skipped_ineligible")) else "unknown",
+        "eligible": int(counts.get("eligible") or 0),
+        "not_eligible": int(counts.get("skipped_ineligible") or 0),
+    }
+
+    connection = {
+        "state": "ok" if readiness.get("ready") else ("pending" if readiness.get("blocker_code") == "entitlement_unavailable" else "attention"),
+        "blocker_code": readiness.get("blocker_code"),
+        "action_code": failure_action_code(readiness.get("blocker_code")) if readiness.get("blocker_code") else None,
+        "catalog_id": str(getattr(conn, "meta_catalog_id", "") or "").strip() or None if conn is not None else None,
+        "waba_id": str(getattr(conn, "whatsapp_business_account_id", "") or "").strip() or None if conn is not None else None,
+    }
+
+    publish_attention = int(counts.get("failed") or 0) + int(counts.get("blocked") or 0)
+    publish_queue = int(counts.get("pending") or 0) + int(counts.get("syncing") or 0) + int(counts.get("pending_verification") or 0)
+    publish = {
+        "state": (
+            "attention" if publish_attention
+            else "pending" if publish_queue
+            else "ok" if counts.get("synced")
+            else "unknown"
+        ),
+        "verified_in_meta": int(counts.get("synced") or 0),
+        "waiting": publish_queue,
+        "rejected_or_blocked": publish_attention,
+        "last_verified_at": last_success_at,
+        "verified_fields": list(CONTENT_LOOKUP_FIELDS),
+    }
+
+    link_stage = {
+        "state": "ok" if link.get("state") == "linked" else ("attention" if link.get("state") == "not_linked" else "unknown"),
+        **{k: link.get(k) for k in ("evidence_at", "evidence_source", "stale")},
+        "action_code": (
+            None if link.get("state") == "linked"
+            else failure_action_code("waba_catalog_not_linked" if link.get("state") == "not_linked" else "waba_catalog_link_unproven")
+        ),
+    }
+
+    retire_stage = {
+        "state": (
+            "attention" if (retirement.get("exhausted") or retirement.get("refused"))
+            else ("pending" if retirement.get("pending") else "ok")
+        ),
+        "pending": retirement.get("pending"),
+        "exhausted": retirement.get("exhausted"),
+        "refused": retirement.get("refused") or 0,
+    }
+
+    visibility = {
+        # The API does not expose per-item WhatsApp storefront display.
+        "state": "unknown",
+        "provable_via_api": False,
+        "requires": ["catalog_link.state=linked", "publish.verified_in_meta>0", "Meta commerce policy review"],
+    }
+
+    return {
+        "source": source,
+        "nahla": nahla,
+        "connection": connection,
+        "publish": publish,
+        "catalog_link": link_stage,
+        "retirement": retire_stage,
+        "whatsapp_visibility": visibility,
+    }
+
+
+def _tenant_scope_status_safe(tenant_id: int) -> Dict[str, Any]:
+    """Caller-scoped write scope for the merchant status (no other tenant's ids)."""
+    try:
+        from services.whatsapp_catalog_sync_scope import tenant_scope_status  # noqa: PLC0415
+
+        return tenant_scope_status(tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WA_CATALOG_SYNC] scope status failed err=%s", type(exc).__name__)
+        return {"active": False, "tenant_in_scope": False, "products_limited": False, "product_ids": []}
 
 
 def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any]:
@@ -400,11 +784,13 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
     counts = _empty_sync_counts()
     last_success_at = None
     failures: List[Dict[str, Any]] = []
+    latency_samples: Dict[str, List[float]] = {"platform": [], "channel": [], "waiting": []}
+    product_link_evidence: Dict[str, Any] = {}
     meta_available_count = 0
     conn = None
     try:
         conn = _load_connection(db, tenant_id)
-    except (SQLAlchemyError, AttributeError):
+    except (SQLAlchemyError, AttributeError, MetaCatalogPushError):
         conn = None
     catalog_linked = _catalog_is_linked(conn)
 
@@ -425,15 +811,49 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
                 meta_available_count += 1
             if not is_whatsapp_channel_publish_eligible(row):
                 counts["skipped_ineligible"] += 1
+                sm_inel = _sync_meta(row)
+                if sm_inel.get("retire_pending"):
+                    counts["retire_pending"] += 1
+                    if sm_inel.get("retire_exhausted"):
+                        counts["retire_exhausted"] += 1
+                    if sm_inel.get("retire_exhausted") and len(failures) < FAILURE_SAMPLE_LIMIT:
+                        failures.append({
+                            "product_id": int(row.id),
+                            "title": str(getattr(row, "title", "") or "")[:120],
+                            "sync_status": "retire_pending",
+                            "error_code": "retire_exhausted",
+                            "error_summary": str(sm_inel.get("retire_last_error") or "retire_exhausted")[:240],
+                            "action_code": failure_action_code("retire_exhausted"),
+                        })
+                elif sm_inel.get("retire_blocked"):
+                    counts["retire_refused"] += 1
+                    if len(failures) < FAILURE_SAMPLE_LIMIT:
+                        failures.append({
+                            "product_id": int(row.id),
+                            "title": str(getattr(row, "title", "") or "")[:120],
+                            "sync_status": "retire_refused",
+                            "error_code": "retire_ownership_unverified",
+                            "error_summary": str(sm_inel.get("retire_blocked"))[:240],
+                            "action_code": failure_action_code("retire_ownership_unverified"),
+                        })
+                elif _status_of(row) == "retired":
+                    counts["retired"] += 1
                 continue
             counts["eligible"] += 1
             status = _status_of(row)
             sm = _sync_meta(row)
+            _collect_latency_sample(latency_samples, status, sm)
+            if sm.get("waba_catalog_linked") is not None and sm.get("verified_at"):
+                seen_at = _parse_iso_dt(sm.get("verified_at"))
+                prev_at = _parse_iso_dt(product_link_evidence.get("at"))
+                if seen_at is not None and (prev_at is None or seen_at > prev_at):
+                    product_link_evidence = {"at": seen_at.isoformat(), "linked": bool(sm.get("waba_catalog_linked"))}
             verify_exhausted = (
                 status == "pending_verification"
                 and int(sm.get("verify_retry_count") or 0) >= MAX_VERIFY_LAG_RETRIES
             )
-            if status == "pending" or status == "":
+            if status == "pending" or status == "" or status == "retired":
+                # ``retired`` + eligible again = restored row waiting for re-publish.
                 counts["pending"] += 1
             elif status == "syncing":
                 counts["syncing"] += 1
@@ -456,11 +876,14 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
 
             if (status in ("failed", "blocked") or verify_exhausted) and len(failures) < FAILURE_SAMPLE_LIMIT:
                 summary = sync_error_summary(row) or ("verification_exhausted" if verify_exhausted else status)
+                code = str(sm.get("last_error_code") or ("verification_exhausted" if verify_exhausted else status))
                 failures.append({
                     "product_id": int(row.id),
                     "title": str(getattr(row, "title", "") or "")[:120],
                     "sync_status": status,
+                    "error_code": code,
                     "error_summary": str(summary)[:240],
+                    "action_code": failure_action_code(code),
                 })
 
     if counts["syncing"] > 0:
@@ -477,28 +900,55 @@ def build_whatsapp_catalog_sync_status(db: Any, tenant_id: int) -> Dict[str, Any
         phase = "idle"
 
     auto_on = whatsapp_catalog_auto_sync_enabled()
+    link = catalog_link_evidence(db, tenant_id, conn=conn, product_evidence=product_link_evidence)
+    retirement = _retirement_snapshot(db, int(tenant_id), counts)
     if readiness.get("ready"):
         status_phase = phase
     elif readiness.get("blocker_code") == "entitlement_unavailable":
         status_phase = "retrying"
     else:
         status_phase = "blocked"
+    soft_blocker = None
+    if status_phase == "published" and link.get("state") != "linked":
+        # Content matched in Graph, but no proof the catalog is connected to
+        # the WhatsApp account: customers may not see it. Never say published.
+        status_phase = "needs_attention"
+        soft_blocker = "waba_catalog_link_unproven" if link.get("state") == "unknown" else "waba_catalog_not_linked"
+    if status_phase in ("published", "idle") and (retirement["pending"] > 0 or retirement["exhausted"] > 0):
+        status_phase = "needs_attention" if retirement["exhausted"] else "queued"
     return {
         "ok": True,
         "tenant_id": int(tenant_id),
         "ready": bool(readiness.get("ready")),
-        "blocker_code": readiness.get("blocker_code"),
+        "blocker_code": readiness.get("blocker_code") or soft_blocker,
         "message_ar": readiness.get("message_ar"),
         "action_ar": readiness.get("action_ar"),
         "phase": status_phase,
         "counts": counts,
         "queue_count": int(counts["pending"] + counts["syncing"] + counts["pending_verification"]),
         "meta_available_count": int(meta_available_count),
-        "catalog_linked": bool(catalog_linked),
+        # True only with Graph-backed evidence that the stamped catalog is
+        # connected to the WABA. A stamped catalog id alone is configuration.
+        "catalog_linked": link.get("state") == "linked",
+        "catalog_configured": bool(catalog_linked),
+        "catalog_link": link,
+        "retirement": retirement,
+        "latency": summarize_latency(latency_samples),
+        "stages": build_sync_stages(
+            db,
+            tenant_id,
+            conn=conn,
+            readiness=readiness,
+            counts=counts,
+            link=link,
+            retirement=retirement,
+            last_success_at=last_success_at,
+        ),
         "last_success_at": last_success_at,
         "failures": failures,
         "auto_sync_enabled": auto_on,
         "auto_sync_flag": _AUTO_SYNC_ENV,
+        "sync_scope": _tenant_scope_status_safe(int(tenant_id)),
         "verification": {
             "lookup_fields": list(IDENTITY_LOOKUP_FIELDS) + list(CONTENT_LOOKUP_FIELDS),
             "identity_fields": list(IDENTITY_LOOKUP_FIELDS),
@@ -554,7 +1004,7 @@ def enqueue_whatsapp_catalog_sync(
         never_synced = getattr(row, "last_synced_at", None) is None
         if not is_salla_source(row):
             never_synced = never_synced and not getattr(row, "meta_item_id", None)
-        if force or never_synced or status in ("pending", "failed", "blocked", "sync_failed", "pending_verification", ""):
+        if force or never_synced or status in ("pending", "failed", "blocked", "sync_failed", "pending_verification", "retired", ""):
             bump_content = status not in ("pending", "pending_verification")
             if mark_native_meta_sync_pending(db, row, bump_content=bump_content):
                 enqueued += 1
@@ -578,6 +1028,8 @@ def drain_whatsapp_catalog_sync(
     *,
     limit: int = DRAIN_BATCH_SIZE,
     client: Any = None,
+    attempted_product_ids: Optional[Set[int]] = None,
+    attempted_retirement_ids: Optional[Set[int]] = None,
 ) -> Dict[str, Any]:
     """Process a batch of pending/failed products for one tenant.
 
@@ -606,10 +1058,23 @@ def drain_whatsapp_catalog_sync(
 
     now = _now()
     candidates: List[Any] = []
+    retire_candidates: List[int] = []
+    current_conn_fp = str(readiness.get("connection_fp") or "")
+    from services.whatsapp_catalog_sync_scope import product_in_sync_scope  # noqa: PLC0415
+
     for row in iter_tenant_products(db, tenant_id):
         if not _belongs_to_tenant(row, tenant_id):
             continue
+        if attempted_product_ids is not None and int(row.id) in attempted_product_ids:
+            continue
+        if not product_in_sync_scope(tenant_id, getattr(row, "id", None)):
+            out["skipped_scope"] = int(out.get("skipped_scope") or 0) + 1
+            continue
         if not is_whatsapp_channel_publish_eligible(row):
+            if retirement_is_due(row, now) and len(retire_candidates) < int(limit):
+                retire_candidates.append(int(row.id))
+                if attempted_product_ids is not None:
+                    attempted_product_ids.add(int(row.id))
             continue
         status = _status_of(row)
         if status == "synced":
@@ -621,13 +1086,17 @@ def drain_whatsapp_catalog_sync(
         if status == "pending_verification" and not verify_retry_is_due(row, now):
             continue
         if status == "failed" and not retry_is_due(row, now):
-            continue
+            if not _failed_requeue_after_connection_change(db, row, current_conn_fp):
+                continue
         candidates.append(row)
         if len(candidates) >= int(limit):
             break
 
     for row in candidates:
         pid = int(row.id)
+        if attempted_product_ids is not None:
+            # A failure or a held lease must not be retried in this run.
+            attempted_product_ids.add(pid)
         try:
             result = attempt_native_meta_sync(
                 db, int(tenant_id), pid, client=client,
@@ -696,7 +1165,117 @@ def drain_whatsapp_catalog_sync(
             out["pending_verification"] = int(out.get("pending_verification") or 0) + 1
         else:
             out["failed"] += 1
+            _stamp_connection_fp_on_failure(db, int(tenant_id), pid, current_conn_fp)
+
+    out["retirements"] = _drain_retirements(
+        db, int(tenant_id), retire_candidates, limit=int(limit), client=client,
+        attempted_retirement_ids=attempted_retirement_ids,
+    )
     return out
+
+
+def _failed_requeue_after_connection_change(db: Any, row: Any, current_conn_fp: str) -> bool:
+    """A failed row whose retry budget is spent gets a fresh budget once the
+    WhatsApp connection changes (reconnect, new token, new catalog id)."""
+    sm = _sync_meta(row)
+    if int(sm.get("retry_count") or 0) < MAX_AUTO_RETRIES_LOCAL():
+        return False
+    stamped = str(sm.get("failed_connection_fp") or "")
+    if not current_conn_fp or not stamped or stamped == current_conn_fp:
+        return False
+    try:
+        return bool(mark_native_meta_sync_pending(db, row, bump_content=False))
+    except Exception:  # noqa: BLE001
+        logger.exception("[WA_CATALOG_SYNC] failed-row requeue failed product=%s", getattr(row, "id", None))
+        return False
+
+
+def MAX_AUTO_RETRIES_LOCAL() -> int:  # noqa: N802 - tiny indirection for tests
+    from services.native_meta_sync_orchestrator import MAX_AUTO_RETRIES  # noqa: PLC0415
+
+    return int(MAX_AUTO_RETRIES)
+
+
+def _stamp_connection_fp_on_failure(db: Any, tenant_id: int, product_id: int, conn_fp: str) -> None:
+    if not conn_fp:
+        return
+    try:
+        from models import Product  # noqa: PLC0415
+
+        row = (
+            db.query(Product)
+            .filter(Product.id == int(product_id), Product.tenant_id == int(tenant_id))
+            .first()
+        )
+        if row is None or _status_of(row) != "failed":
+            return
+        meta = dict(getattr(row, "extra_metadata", None) or {})
+        sync_meta = dict(meta.get("sync_meta") or {})
+        sync_meta["failed_connection_fp"] = conn_fp
+        meta["sync_meta"] = sync_meta
+        row.extra_metadata = meta
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[WA_CATALOG_SYNC] failure fingerprint stamp skipped tenant=%s product=%s err=%s",
+            tenant_id,
+            product_id,
+            type(exc).__name__,
+        )
+        try:
+            db.rollback()
+        except SQLAlchemyError:
+            _invalidate_sync_session(db)
+
+
+def _drain_retirements(
+    db: Any,
+    tenant_id: int,
+    product_ids: List[int],
+    *,
+    limit: int,
+    client: Any,
+    attempted_retirement_ids: Optional[Set[int]] = None,
+) -> Dict[str, Any]:
+    """Withdraw channel copies: hidden rows first, then the delete ledger."""
+    from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+        attempt_product_channel_retirement,
+        drain_channel_retirement_ledger,
+    )
+
+    summary: Dict[str, Any] = {"products": 0, "retired": 0, "refused": 0, "failed": 0, "ledger": None}
+    for pid in product_ids:
+        try:
+            res = attempt_product_channel_retirement(db, tenant_id, pid, client=client)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "[WA_CATALOG_SYNC] retirement failed tenant=%s product=%s", tenant_id, pid,
+            )
+            summary["failed"] += 1
+            try:
+                db.rollback()
+            except SQLAlchemyError:
+                _invalidate_sync_session(db)
+            continue
+        summary["products"] += 1
+        if res.get("refused") or res.get("error_code") == "no_publication_evidence":
+            summary["refused"] += 1
+        elif res.get("ok") and not res.get("skipped"):
+            summary["retired"] += 1
+        elif not res.get("ok"):
+            summary["failed"] += 1
+    try:
+        ledger_kwargs: Dict[str, Any] = {"limit": limit, "client": client}
+        if attempted_retirement_ids is not None:
+            ledger_kwargs["attempted_retirement_ids"] = attempted_retirement_ids
+        summary["ledger"] = drain_channel_retirement_ledger(db, tenant_id, **ledger_kwargs)
+    except Exception:  # noqa: BLE001
+        logger.exception("[WA_CATALOG_SYNC] retirement ledger drain failed tenant=%s", tenant_id)
+        try:
+            db.rollback()
+        except SQLAlchemyError:
+            _invalidate_sync_session(db)
+    return summary
 
 
 def _variant_option_bits(item: Dict[str, Any]) -> str:
@@ -745,6 +1324,7 @@ def channel_content_fingerprint(product: Any, *, extra_variants: Any = None) -> 
         str(meta.get("image_url") or ""),
         str(meta.get("product_url") or ""),
         str(getattr(product, "catalog_status", "") or ""),
+        str(meta.get("status") or ""),
         "|".join(variant_bits),
     ]
     return "\n".join(parts)
@@ -759,9 +1339,18 @@ def mark_product_pending_after_catalog_write(
     """Best-effort pending mark after Salla/native catalog persistence.
 
     Skips when Meta-relevant fields are unchanged so the 120s drain
-    does not resend an identical catalog.
+    does not resend an identical catalog. A row that stopped being
+    publish-eligible (hidden at the source store) gets a channel
+    retirement request instead, so its live copy is withdrawn.
     """
     try:
+        if not is_whatsapp_channel_publish_eligible(product):
+            from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+                mark_product_channel_retire_pending,
+            )
+
+            mark_product_channel_retire_pending(db, product)
+            return False
         if previous_fingerprint is not None:
             current = channel_content_fingerprint(product)
             if current == previous_fingerprint:
@@ -887,7 +1476,19 @@ def run_whatsapp_catalog_drain_background(tenant_id: int) -> None:
 
     db = SessionLocal()
     try:
-        drain_whatsapp_catalog_sync(db, int(tenant_id))
+        attempted: Set[int] = set()
+        retired_attempted: Set[int] = set()
+        while True:
+            before = (len(attempted), len(retired_attempted))
+            result = drain_whatsapp_catalog_sync(
+                db, int(tenant_id), attempted_product_ids=attempted,
+                attempted_retirement_ids=retired_attempted,
+            )
+            # Walk every eligible product once, including batches after the
+            # first 25. Failed, locked or unmodified rows cannot spin here;
+            # normal retry/backoff belongs to a later scheduled run.
+            if result.get("skipped") or (len(attempted), len(retired_attempted)) == before:
+                break
     except CatalogSyncSessionUnusable:
         logger.exception(
             "[WA_CATALOG_SYNC] background drain session unusable tenant=%s",
@@ -966,6 +1567,11 @@ def schedule_whatsapp_catalog_drain(
 ) -> None:
     if int(tenant_id) <= 0:
         return
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    if not tenant_in_sync_scope(tenant_id):
+        logger.info("[WA_CATALOG_SYNC] auto drain skipped tenant=%s (outside sync scope)", tenant_id)
+        return
     if not allow_without_auto_flag and not whatsapp_catalog_auto_sync_enabled():
         logger.info(
             "[WA_CATALOG_SYNC] auto drain skipped tenant=%s (%s!=1)",
@@ -984,13 +1590,24 @@ def schedule_whatsapp_catalog_drain(
 def drain_ready_tenants(db: Any, *, limit_per_tenant: int = DRAIN_BATCH_SIZE) -> Dict[str, Any]:
     if not whatsapp_catalog_auto_sync_enabled():
         return {"tenants": 0, "processed": 0, "synced": 0, "failed": 0, "skipped": True}
-    from models import WhatsAppConnection  # noqa: PLC0415
+    from models import MetaCatalogAuthorization, WhatsAppConnection  # noqa: PLC0415
+    from services.meta_catalog_consent import (  # noqa: PLC0415
+        SCHEMA_PRESENT, authorization_schema_state,
+    )
 
     conns = (
         db.query(WhatsAppConnection)
         .filter(WhatsAppConnection.catalog_enabled.is_(True))
         .all()
     )
+    # A merchant may grant catalog-only consent with no WhatsApp connection.
+    # Discover stored authorizations without decrypting tokens. Readiness and
+    # the push resolver re-check status, expiry, scope and entitlement before
+    # each operation, so inactive rows never grant access.
+    if authorization_schema_state(db) == SCHEMA_PRESENT:
+        conns = list(conns) + list(db.query(MetaCatalogAuthorization).all())
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
     tenants: List[int] = []
     seen = set()
     for conn in conns:
@@ -998,6 +1615,8 @@ def drain_ready_tenants(db: Any, *, limit_per_tenant: int = DRAIN_BATCH_SIZE) ->
         if tid <= 0 or tid in seen:
             continue
         seen.add(tid)
+        if not tenant_in_sync_scope(tid):
+            continue
         tenants.append(tid)
 
     summary = {"tenants": 0, "processed": 0, "synced": 0, "failed": 0}
@@ -1013,6 +1632,10 @@ def drain_ready_tenants(db: Any, *, limit_per_tenant: int = DRAIN_BATCH_SIZE) ->
 
 
 __all__ = [
+    "build_sync_stages",
+    "catalog_link_evidence",
+    "failure_action_code",
+    "summarize_latency",
     "channel_content_fingerprint",
     "connection_sync_fingerprint",
     "build_whatsapp_catalog_sync_status",

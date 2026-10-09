@@ -151,7 +151,11 @@ def test_linked_meta_readonly_catalog_is_available_with_empty_queue():
     ):
         status = build_whatsapp_catalog_sync_status(db, 9)
 
-    assert status["catalog_linked"] is True
+    # A stamped, enabled catalog id is configuration; "linked" needs Graph-backed
+    # evidence (bind/ensure/reconcile/product verification). None here → unknown.
+    assert status["catalog_configured"] is True
+    assert status["catalog_linked"] is False
+    assert status["catalog_link"]["state"] == "unknown"
     assert status["meta_available_count"] == 28
     assert status["queue_count"] == 0
     assert status["counts"]["pending"] == 0
@@ -159,6 +163,7 @@ def test_linked_meta_readonly_catalog_is_available_with_empty_queue():
     assert status["counts"]["skipped_ineligible"] == 28
     assert status["last_success_at"] is None
     assert status["phase"] == "idle"
+    assert status["stages"]["whatsapp_visibility"]["provable_via_api"] is False
 
 
 def test_out_of_stock_remains_channel_publish_eligible():
@@ -570,7 +575,7 @@ def test_whatsapp_sync_post_second_lookup_outage_is_503_not_409(attempt_mock):
     assert recovered["queued"] is True
     assert recovered["blocker_code"] is None
     assert recovered["phase"] == "queued"
-    drain_ok.assert_called_once_with(9)
+    drain_ok.assert_called_once_with(9, allow_without_auto_flag=True)
     attempt_mock.assert_not_called()
 
 

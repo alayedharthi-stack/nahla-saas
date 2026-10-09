@@ -1910,6 +1910,29 @@ export interface Translations {
       lastImportNever:  string
       moreActions:      string
     }
+    metaConsent: {
+      title:          string
+      description:    string
+      button:         string
+      connecting:     string
+      approvedLine:   string
+      stateActive:    string
+      stateExpired:   string
+      stateInactive:  string
+      stateNone:      string
+      scopesLine:     string
+      verifiedAt:     string
+      expiresAt:      string
+      noExpiry:       string
+      writeNote:      string
+      loadFailed:     string
+      startFailed:    string
+      reconnect:      string
+      /** Success hint not confirmed by the fresh server status. */
+      notConfirmed:   string
+      /** Callback result code (URL fragment) → label. */
+      results: Record<string, string>
+    }
     whatsappSync: {
       title:            string
       button:           string
@@ -1936,6 +1959,25 @@ export interface Translations {
       loadFailed:       string
       enqueueFailed:    string
       autoSyncOff:      string
+      linkLinked:       string
+      linkNotLinked:    string
+      linkUnknown:      string
+      linkStale:        string
+      configuredNotProven: string
+      stagesTitle:      string
+      stageSource:      string
+      stageSourceNever: string
+      stagePublish:     string
+      stageLink:        string
+      stageRetirement:  string
+      stageVisibility:  string
+      latencyTitle:     string
+      latencyPlatform:  string
+      latencyChannel:   string
+      latencyWaiting:   string
+      latencyNone:      string
+      failedAction:     string
+      actions: Record<string, string>
     }
     channels: {
       title:              string

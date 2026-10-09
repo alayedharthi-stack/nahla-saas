@@ -110,10 +110,163 @@ def _extract_order_datetime(raw: Any) -> Optional[datetime]:
     return intelligence_extract_order_datetime(raw)
 
 
+def _salla_money(value: Any) -> tuple[str, Optional[str]]:
+    """Return ``(amount_text, currency)`` for a Salla money field.
+
+    Salla sends money either as a scalar (``149`` / ``"149"``) or as an
+    object ``{"amount": 149, "currency": "SAR"}`` (raw webhook payloads).
+    The stored ``price`` column must never hold a dict repr.
+    """
+    if isinstance(value, dict):
+        amount = value.get("amount")
+        currency = str(value.get("currency") or "").strip() or None
+        if amount is None or amount == "":
+            return "", currency
+        return str(amount), currency
+    if value is None:
+        return "", None
+    return str(value), None
+
+
+def _source_in_stock(raw: Dict[str, Any]) -> bool:
+    """Availability truth for one source payload.
+
+    Adapter-normalised products carry ``in_stock``. Raw webhook payloads
+    carry ``quantity`` / ``unlimited_quantity`` only; a missing key must not
+    be read as "in stock".
+    """
+    explicit = raw.get("in_stock")
+    if isinstance(explicit, bool):
+        return explicit
+    if explicit is not None:
+        return bool(explicit)
+    if raw.get("unlimited_quantity") is True:
+        return True
+    qty = raw.get("quantity", raw.get("stock_quantity", None))
+    if qty is None or qty == "":
+        return True
+    try:
+        return int(float(qty)) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+# Source-platform statuses that still describe a sellable listing. Salla uses
+# ``sale`` (live) and ``out`` (live, no stock); AI orderability consumers read
+# ``extra_metadata.status == "active"`` and take stock from ``in_stock``.
+_SOURCE_STATUS_ACTIVE = frozenset({"active", "sale", "out", "published", "available"})
+
+
+def _lifecycle_status(source_status: str) -> str:
+    """Map a raw source status to the lifecycle value the platform reads.
+
+    ``hidden`` / ``deleted`` pass through (not sellable); live listings
+    become ``active``. The raw value is kept separately in ``source_status``.
+    """
+    text = str(source_status or "").strip().lower()
+    if not text or text in _SOURCE_STATUS_ACTIVE:
+        return "active"
+    return text
+
+
+SOURCE_EVENT_AT_KEY = "source_event_at"
+# Salla stamps ``updated_at`` at second precision and its clock is not ours:
+# a read is stamped at whole-second precision minus a small margin, so a
+# change the merchant made in the same second as (or just before) our read
+# started still counts as newer and is applied.
+SOURCE_READ_STAMP_SKEW = timedelta(seconds=2)
+# An event time later than now by more than this is not provable: a clock
+# ahead of ours, or a local wall-clock string read as UTC (Asia/Riyadh is
+# three hours ahead), would otherwise make every later read and webhook look
+# older and be discarded until that time passed. Two minutes covers ordinary
+# clock skew between Salla and us; anything beyond it is treated as having no
+# known order (the event triggers a fresh store read, a stored stamp guards
+# nothing).
+SOURCE_EVENT_FUTURE_TOLERANCE = timedelta(minutes=2)
+
+
+def _provable_event_time(stamp: Optional[datetime], now: Optional[datetime] = None) -> Optional[datetime]:
+    """*stamp*, or None when it lies beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE``."""
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    limit = (now or datetime.now(timezone.utc)) + SOURCE_EVENT_FUTURE_TOLERANCE
+    return None if stamp > limit else stamp
+
+
+def source_read_stamp(now: Optional[datetime] = None) -> datetime:
+    """Stamp for a state read from the store: read-start time at Salla precision minus skew."""
+    base = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    return base - SOURCE_READ_STAMP_SKEW
+
+
+def source_event_time(
+    payload: Any, envelope_created_at: Any = None, *, now: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """Instant the source says this product state belongs to, or None.
+
+    Order of trust: the product's own ``updated_at`` (Salla sends it as a
+    string or a ``{date, timezone}`` object), then the webhook envelope's
+    ``created_at``. A time beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE`` is
+    skipped as unprovable. ``None`` means the order of this event cannot be
+    proven.
+    """
+    from services.salla_datetime import (  # noqa: PLC0415
+        parse_salla_datetime_to_utc,
+        parse_salla_js_envelope_datetime,
+    )
+
+    if isinstance(payload, dict):
+        stamp = _provable_event_time(parse_salla_datetime_to_utc(payload.get("updated_at")), now)
+        if stamp is not None:
+            return stamp
+    if envelope_created_at:
+        stamp = parse_salla_js_envelope_datetime(envelope_created_at)
+        if stamp is None:
+            stamp = parse_salla_datetime_to_utc(envelope_created_at)
+        stamp = _provable_event_time(stamp, now)
+        if stamp is not None:
+            return stamp
+    return None
+
+
+def _parse_stamp(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    try:
+        text = str(raw).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def stored_source_event_time(product: Any, *, now: Optional[datetime] = None) -> Optional[datetime]:
+    """The row's ``source_event_at``, or None when absent or unprovable.
+
+    A stored stamp beyond now + ``SOURCE_EVENT_FUTURE_TOLERANCE`` (written
+    before future times were refused) protects nothing: treating it as known
+    would discard every correct read and webhook until that time passed.
+    """
+    meta = getattr(product, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        return None
+    return _provable_event_time(_parse_stamp(meta.get(SOURCE_EVENT_AT_KEY)), now)
+
+
 def _normalise_product(raw: Any) -> Dict:
     """Convert a store-adapter product object/dict to a normalised internal dict."""
     if hasattr(raw, "dict"):
         raw = raw.dict()
+    source_status = _extract_status_string(raw.get("status"), fallback="").strip().lower()
+    price_text, price_currency = _salla_money(raw.get("price", raw.get("regular_price", "")))
+    sale_price_text, _ = _salla_money(raw.get("sale_price", raw.get("promo_price", "")))
+    regular_price_text, _ = _salla_money(raw.get("regular_price", ""))
     image_url = extract_sync_product_image(raw)
     additional_images = extract_sync_additional_images(raw, primary=image_url)
     variants_raw = raw.get("variants") or []
@@ -134,17 +287,18 @@ def _normalise_product(raw: Any) -> Dict:
         "sku":           raw.get("sku", ""),
         "title":         raw.get("title", raw.get("name", "")),
         "description":   raw.get("description", ""),
-        "price":         str(raw.get("price", raw.get("regular_price", ""))),
-        "sale_price":    str(raw.get("sale_price", raw.get("promo_price", "")) or ""),
-        "regular_price": str(raw.get("regular_price", "") or ""),
-        "status":        _extract_status_string(raw.get("status"), fallback="active"),
+        "price":         price_text,
+        "sale_price":    sale_price_text,
+        "regular_price": regular_price_text,
+        "status":        _lifecycle_status(source_status),
+        "source_status": source_status or None,
         "category":      raw.get("category", raw.get("main_category", "")),
         "brand":         raw.get("brand", ""),
         "image_url":     image_url,
         "additional_images": additional_images,
         "product_url":   (raw.get("product_url") or raw.get("url") or "").strip(),
-        "currency":      raw.get("currency", "SAR"),
-        "in_stock":      raw.get("in_stock", True),
+        "currency":      raw.get("currency") or price_currency or "SAR",
+        "in_stock":      _source_in_stock(raw),
         "stock_qty":     raw.get("quantity", raw.get("stock_quantity", None)),
         "tags":          raw.get("tags", []),
         "variants":      variants_out,
@@ -1879,8 +2033,15 @@ class StoreSyncService:
         normalised: Dict[str, Any],
         adapter_source: str,
     ) -> Dict[str, Any]:
-        """Upsert one normalised product row (+ variants). Shared by bulk and one-product sync."""
+        """Upsert one normalised product row (+ variants). Shared by bulk and one-product sync.
+
+        Rows written here come from a direct Salla read, so their state is
+        current as of now: the ``source_event_at`` stamp lets a delayed
+        webhook describing an older change be recognised and ignored.
+        """
         ext_id = normalised["external_id"]
+        normalised.setdefault(SOURCE_EVENT_AT_KEY, source_read_stamp().isoformat())
+        incoming_at = _parse_stamp(normalised.get(SOURCE_EVENT_AT_KEY))
         new_qty = _coerce_int(normalised.get("stock_qty"))
         new_in_stock = bool(normalised.get("in_stock", True))
         new_available = new_in_stock and (new_qty is None or new_qty > 0)
@@ -1895,6 +2056,11 @@ class StoreSyncService:
         previous_fp = None
         if existing:
             existing = _lock_product_row_for_catalog_write(self.db, existing)
+            stored_at = stored_source_event_time(existing)
+            if incoming_at is not None and stored_at is not None and stored_at > incoming_at:
+                # A webhook newer than this read landed while the read was in
+                # flight: the read is the older state and must not win.
+                return {"action": "skipped_stale", "product_id": existing.id, "restocked": None}
             try:
                 from services.whatsapp_catalog_sync import (  # noqa: PLC0415
                     channel_content_fingerprint,
@@ -2051,6 +2217,7 @@ class StoreSyncService:
         resolved_nahla_id = (db_before or {}).get("nahla_product_id") or nahla_product_id
 
         try:
+            fetched_at = source_read_stamp()
             raw = await adapter.get_product(ext_id)
         except Exception as exc:  # noqa: BLE001
             return {
@@ -2071,6 +2238,7 @@ class StoreSyncService:
             }
 
         normalised = _normalise_product(raw)
+        normalised[SOURCE_EVENT_AT_KEY] = fetched_at.isoformat()
         await self._enrich_normalised_variants_from_adapter(adapter, normalised)
         salla_live = _salla_live_summary(normalised)
         diff = _compute_one_product_sync_diff(db_before, normalised)
@@ -2114,6 +2282,7 @@ class StoreSyncService:
         if incremental:
             updated_since = self._commerce_reconcile_since("products", incremental=True)
 
+        fetched_at = source_read_stamp()
         try:
             raw_list = await adapter.get_products(updated_since=updated_since)
         except Exception as exc:
@@ -2153,6 +2322,7 @@ class StoreSyncService:
         for raw in raw_list:
             try:
                 normalised = _normalise_product(raw)
+                normalised[SOURCE_EVENT_AT_KEY] = fetched_at.isoformat()
                 await self._enrich_normalised_variants_from_adapter(adapter, normalised)
                 apply_result = self._apply_normalised_product(normalised, adapter_source)
             except Exception as exc:  # noqa: BLE001
@@ -3976,13 +4146,57 @@ class StoreSyncService:
 
     # ── Incremental product update (called by webhook) ─────────────────────────
 
+    async def _fetch_product_truth(
+        self, product_id: str, *, event_type: str | None, allow_missing: bool = False,
+    ) -> tuple[Optional[Dict[str, Any]], datetime]:
+        """Current product state from the store adapter plus the instant the read started.
+
+        Raises so the event is retried on transport failure. With
+        ``allow_missing`` a product the store no longer has returns ``None``.
+        """
+        adapter = self._get_adapter()
+        if not adapter or not hasattr(adapter, "get_product"):
+            raise RuntimeError("product_hydration_failed")
+        fetched_at = source_read_stamp()
+        try:
+            fetched = await adapter.get_product(product_id)
+        except Exception as exc:
+            logger.warning(
+                "tenant=%s product truth fetch failed product_hash=%s event=%s error_code=%s",
+                self.tenant_id,
+                hash(product_id) % 10_000_000,
+                event_type,
+                type(exc).__name__,
+            )
+            raise RuntimeError("product_hydration_failed") from exc
+        if fetched is None:
+            if allow_missing:
+                return None, fetched_at
+            raise RuntimeError("product_hydration_failed")
+        if hasattr(fetched, "dict"):
+            fetched = fetched.dict()
+        elif not isinstance(fetched, dict):
+            fetched = dict(fetched)
+        truth = dict(fetched)
+        if not truth.get("id") and not truth.get("external_id"):
+            truth["id"] = product_id
+        return truth, fetched_at
+
     async def handle_product_webhook(
         self,
         payload: Dict,
         *,
         webhook_event_type: str | None = None,
+        envelope_created_at: Any = None,
     ) -> None:
-        """Process a single product update from a platform webhook."""
+        """Process a single product update from a platform webhook.
+
+        Ordering guard: a delayed event must never replace a newer local
+        state. Each row carries ``source_event_at`` (the instant its state
+        belongs to). An event older than that stamp is ignored; an event
+        whose time cannot be proven is replaced by a fresh read of the
+        product from Salla (current truth) before anything is written.
+        """
         full_payload_events = {"product.created", "product.updated"}
         product_id = str(payload.get("id") or payload.get("external_id") or "").strip()
         needs_hydration = (
@@ -3991,34 +4205,71 @@ class StoreSyncService:
             and product_id
             and not (payload.get("title") or payload.get("name"))
         )
-        if needs_hydration:
-            adapter = self._get_adapter()
-            if not adapter or not hasattr(adapter, "get_product"):
-                raise RuntimeError("product_hydration_failed")
-            try:
-                fetched = await adapter.get_product(product_id)
-            except Exception as exc:
-                logger.warning(
-                    "tenant=%s partial product webhook fetch failed product_hash=%s event=%s error_code=%s",
+        event_at = source_event_time(payload, envelope_created_at)
+        truth_read_at: Optional[datetime] = None
+        adapter_probe = self._get_adapter()
+        can_read_truth = adapter_probe is not None and hasattr(adapter_probe, "get_product")
+        if product_id:
+            existing_stamp_row = (
+                self.db.query(Product)
+                .filter_by(tenant_id=self.tenant_id, external_id=product_id)
+                .first()
+            )
+            stored_at = stored_source_event_time(existing_stamp_row) if existing_stamp_row is not None else None
+            if event_at is not None and stored_at is not None and event_at < stored_at:
+                logger.info(
+                    "tenant=%s stale product event ignored product_hash=%s event=%s event_at=%s stored_at=%s",
                     self.tenant_id,
                     hash(product_id) % 10_000_000,
                     webhook_event_type,
-                    type(exc).__name__,
+                    event_at.isoformat(),
+                    stored_at.isoformat(),
                 )
-                raise RuntimeError("product_hydration_failed") from exc
-            if fetched is None:
-                raise RuntimeError("product_hydration_failed")
-            if hasattr(fetched, "dict"):
-                fetched = fetched.dict()
-            elif not isinstance(fetched, dict):
-                fetched = dict(fetched)
-            merged = dict(fetched)
-            merged.update(payload)
-            payload = merged
+                return
+            read_truth = needs_hydration
+            if event_at is None and stored_at is not None:
+                # The row has a known state and this event's order cannot be
+                # proven: never trust the body; read the current truth instead.
+                read_truth = True
+            if existing_stamp_row is None and not needs_hydration and can_read_truth:
+                # No local row for a full-body event, product.created included:
+                # a late update, or a redelivered create, after a delete must
+                # not resurrect the product (its next drain would re-create the
+                # Graph item). Ask the store; a product it no longer has is
+                # dropped. Partial events keep the hydration contract below
+                # (retry when the read returns nothing). One extra Salla read
+                # per genuine creation is the price.
+                truth, fetched_at = await self._fetch_product_truth(
+                    product_id, event_type=webhook_event_type, allow_missing=True,
+                )
+                if truth is None:
+                    logger.info(
+                        "tenant=%s product event dropped: store no longer has product_hash=%s event=%s",
+                        self.tenant_id,
+                        hash(product_id) % 10_000_000,
+                        webhook_event_type,
+                    )
+                    return
+                payload = truth
+                truth_read_at = fetched_at
+                read_truth = False
+            if read_truth:
+                # The store read is the whole state; the event body is not
+                # merged over it (its keys may describe an older state).
+                truth, fetched_at = await self._fetch_product_truth(product_id, event_type=webhook_event_type)
+                payload = truth
+                truth_read_at = fetched_at
+            # A row without any stamp (never written through a stamped path)
+            # has no known-newer state to protect; a timed body applies and
+            # the first stamped write starts the guard.
         normalised = _normalise_product(payload)
         ext_id     = normalised["external_id"]
         if not ext_id:
             return
+        if truth_read_at is not None:
+            normalised[SOURCE_EVENT_AT_KEY] = truth_read_at.isoformat()
+        elif event_at is not None:
+            normalised[SOURCE_EVENT_AT_KEY] = event_at.isoformat()
 
         adapter = self._get_adapter()
         if adapter:
@@ -4034,6 +4285,12 @@ class StoreSyncService:
         previous_fp = None
         if existing:
             existing = _lock_product_row_for_catalog_write(self.db, existing)
+            incoming_at = _parse_stamp(normalised.get(SOURCE_EVENT_AT_KEY))
+            locked_at = stored_source_event_time(existing)
+            if incoming_at is not None and locked_at is not None and incoming_at < locked_at:
+                # Another worker applied a newer event between the unlocked
+                # check and this lock: this body is now the older state.
+                return
             try:
                 from services.whatsapp_catalog_sync import (  # noqa: PLC0415
                     channel_content_fingerprint,
@@ -4047,6 +4304,11 @@ class StoreSyncService:
             existing.sku           = normalised.get("sku", existing.sku)
             existing.in_stock      = bool(normalised.get("in_stock", True))
             existing.stock_quantity = _coerce_int(normalised.get("stock_qty"))
+            if SOURCE_EVENT_AT_KEY not in normalised:
+                # carry the prior stamp forward only while it is provable
+                prior_at = stored_source_event_time(existing)
+                if prior_at is not None:
+                    normalised[SOURCE_EVENT_AT_KEY] = prior_at.isoformat()
             apply_salla_source_metadata(existing, normalised)
             if (existing.source or "").lower() != "manual":
                 existing.source = row_source
@@ -5156,16 +5418,82 @@ class StoreSyncService:
     # ── Product deletion (called by webhook) ──────────────────────────────
 
     async def handle_product_deleted(self, external_id: str) -> None:
-        """Remove a product that was deleted in the store."""
+        """Remove a product that was deleted in the store.
+
+        Channel copies published for the row are recorded in the tenant
+        retirement ledger inside the same transaction, so the Meta item is
+        withdrawn by the drain even though the local row is gone.
+        """
         if not external_id:
             return
-        deleted = (
-            self.db.query(Product)
-            .filter_by(tenant_id=self.tenant_id, external_id=external_id)
-            .delete()
+        ledgered = 0
+        from services.catalog_deletion_guard import (  # noqa: PLC0415
+            CatalogDeletionDeferred,
+            assert_catalog_deletion_safe,
         )
-        if deleted:
+
+        try:
+            from services.whatsapp_catalog_retirement import (  # noqa: PLC0415
+                REASON_SOURCE_DELETED,
+                channel_identities_for_product,
+                enqueue_channel_retirement_ledger,
+            )
+
+            rows = (
+                self.db.query(Product)
+                .filter_by(tenant_id=self.tenant_id, external_id=external_id)
+                .order_by(Product.id)
+                .with_for_update()
+                .populate_existing()
+                .all()
+            )
+            identities: List[Dict[str, Any]] = []
+            for row in rows:
+                row_identities = channel_identities_for_product(self.db, row)
+                assert_catalog_deletion_safe(row, row_identities)
+                identities.extend(row_identities)
+            if identities:
+                ledgered = enqueue_channel_retirement_ledger(
+                    self.db, self.tenant_id, identities, reason=REASON_SOURCE_DELETED,
+                )
+            # Delete only the locked, checked rows. A row concurrently inserted
+            # with the same external id was not part of the evidence snapshot.
+            deleted = 0
+            if rows:
+                deleted = (
+                    self.db.query(Product)
+                    .filter(
+                        Product.tenant_id == self.tenant_id,
+                        Product.id.in_([row.id for row in rows]),
+                    )
+                    .delete(synchronize_session="fetch")
+                )
             self.db.commit()
+        except CatalogDeletionDeferred:
+            # The dispatcher records this as failed with bounded backoff, never
+            # processed. On exhaustion the source event and evidence remain
+            # available for an explicit replay after publication is resolved.
+            self.db.rollback()
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "tenant=%s product delete: channel retirement ledger failed external_id=%s",
+                self.tenant_id, external_id,
+            )
+            self.db.rollback()
+            raise
+        if ledgered:
+            try:
+                from services.whatsapp_catalog_sync import (  # noqa: PLC0415
+                    schedule_whatsapp_catalog_drain,
+                )
+                schedule_whatsapp_catalog_drain(int(self.tenant_id))
+            except Exception:  # noqa: silent-ok — drain scheduling is best-effort; the periodic drain tick retries the ledger
+                logger.warning(
+                    "[StoreSync] retirement drain schedule skipped tenant=%s", self.tenant_id,
+                    exc_info=True,
+                )
+        if deleted:
             snap = (
                 self.db.query(StoreKnowledgeSnapshot)
                 .filter_by(tenant_id=self.tenant_id)

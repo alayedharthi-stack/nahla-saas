@@ -104,10 +104,20 @@ def bind_current_waba_to_merchant_catalog(
     confirm: bool = False,
     client: Optional[httpx.Client] = None,
 ) -> Dict[str, Any]:
-    """Share (if needed) + POST-link current WABA to conn.meta_catalog_id."""
+    """Share (if needed) + POST-link current WABA to conn.meta_catalog_id.
+
+    Under a limited trial scope, tenants outside the scope run this as a
+    dry-run only: Graph is read, nothing is linked or shared.
+    """
+    from services.whatsapp_catalog_sync_scope import tenant_in_sync_scope  # noqa: PLC0415
+
+    scope_dry_run = confirm and not tenant_in_sync_scope(int(tenant_id))
+    if scope_dry_run:
+        confirm = False
     result: Dict[str, Any] = {
         "ok": False,
         "skipped": False,
+        "scope_dry_run": scope_dry_run,
         "tenant_id": int(tenant_id),
         "catalog_id": None,
         "waba_id": None,
@@ -313,11 +323,17 @@ def reconcile_meta_catalog_after_whatsapp_change(
         return out
 
     from services.whatsapp_catalog_sync import whatsapp_catalog_auto_sync_enabled  # noqa: PLC0415
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, tenant_in_sync_scope  # noqa: PLC0415
 
     if not whatsapp_catalog_auto_sync_enabled():
         out["ok"] = True
         out["skipped"] = len(product_ids)
         out["error"] = "auto_sync_disabled"
+        return out
+    if not tenant_in_sync_scope(int(tenant_id)):
+        out["ok"] = True
+        out["skipped"] = len(product_ids)
+        out["error"] = SCOPE_BLOCKER_CODE
         return out
 
     for pid in product_ids:

@@ -546,6 +546,8 @@ app.include_router(_wa_webhook_router)
 app.include_router(_store_sync_router)
 app.include_router(_zid_oauth_router)
 app.include_router(_integrations_router)
+from routers.meta_catalog_consent import router as _meta_catalog_consent_router  # noqa: E402
+app.include_router(_meta_catalog_consent_router)
 app.include_router(_merchant_catalog_router)
 app.include_router(_admin_catalog_router)
 app.include_router(_support_access_router)
@@ -1579,10 +1581,11 @@ async def app(scope, receive, send):  # noqa: A001 — intentional uvicorn expor
         meth = scope.get("method")
         path = scope.get("path")
         qs = scope.get("query_string", b"")
-        if isinstance(qs, bytes):
-            qs_preview = qs[:80]
-        else:
-            qs_preview = repr(qs)[:80]
+        # Redacted before truncating: an OAuth ``code``/``state`` (or any other
+        # credential) never reaches the diagnostic line, even partially.
+        from core.log_redaction import redacted_query_preview  # noqa: PLC0415
+
+        qs_preview = redacted_query_preview(qs, limit=80)
         msg = (
             f"[RAW_ASGI] type=http method={meth!r} path={path!r} "
             f"client={scope.get('client')!r} scheme={scope.get('scheme')!r} "

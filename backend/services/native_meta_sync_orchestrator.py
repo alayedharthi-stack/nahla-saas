@@ -24,9 +24,14 @@ from core.catalog import (
 )
 from services.meta_catalog_linking import get_waba_catalog_link_status
 from services.meta_catalog_push import (
+    PENDING_PUBLICATIONS_KEY,
     MetaCatalogPushError,
     find_meta_catalog_item_by_retailer_id,
+    load_variant_for_push,
+    pending_publication_record,
     push_one_meta_catalog_item,
+    with_pending_publication,
+    without_pending_publications,
     _resolve_connection,
 )
 from services.meta_catalog_sync_preview import preview_native_meta_sync
@@ -81,10 +86,18 @@ READINESS_BLOCK_CODES = frozenset({
     "catalog_disabled",
     "catalog_id_missing",
     "access_token_missing",
+    "access_token_invalid",
     "connection_not_found",
     "feature_locked",
     "catalog_permission_denied",
 })
+# Graph error codes that mean the stored token is no longer usable (expired,
+# revoked, password changed). They block the tenant until the connection
+# changes; they never consume a product's retry budget.
+GRAPH_TOKEN_INVALID_CODES = frozenset({190, 102})
+# Graph error codes that mean the token lacks the catalog permission.
+GRAPH_PERMISSION_ERROR_CODES = frozenset({10, 200, 294})
+GRAPH_PERMISSION_ERROR_SUBCODES = frozenset({2388100})
 PERMANENT_BLOCK_CODES = frozenset({
     "product_already_meta_managed",
     "product_not_channel_publish_eligible",
@@ -92,6 +105,7 @@ PERMANENT_BLOCK_CODES = frozenset({
     "existing_catalog_identity",
     "ambiguous_sibling",
     "ambiguous_variant_identity",
+    "live_match_ownership_unverified",
 })
 PRODUCT_BLOCK_CODES = frozenset({
     "preview_fatal",
@@ -122,6 +136,7 @@ _ACQUIRABLE_STATUSES = frozenset({
     "blocked",
     "sync_failed",
     "pending_verification",
+    "retired",
     "",
 })
 
@@ -353,6 +368,33 @@ def _payload_for_verify(
         if isinstance(stored, dict) and stored:
             return _content_payload_snapshot(stored)
     return {}
+
+
+def classify_graph_push_failure(push_result: Dict[str, Any], default: str) -> str:
+    """Map a failed Graph push/lookup to a sync error code.
+
+    Token and permission failures are tenant-level readiness blocks, not
+    product failures: retrying the product cannot fix them, reconnecting can.
+    """
+    from services.meta_catalog_push import graph_error_code  # noqa: PLC0415
+
+    meta_block = push_result.get("meta") if isinstance(push_result.get("meta"), dict) else {}
+    response = meta_block.get("response")
+    lookup = push_result.get("lookup") if isinstance(push_result.get("lookup"), dict) else {}
+    http_status = meta_block.get("http_status") or lookup.get("http_status")
+    code, subcode, _message = graph_error_code(response if response is not None else lookup.get("error"))
+    if code in GRAPH_TOKEN_INVALID_CODES:
+        return "access_token_invalid"
+    if code in GRAPH_PERMISSION_ERROR_CODES or subcode in GRAPH_PERMISSION_ERROR_SUBCODES:
+        return "catalog_permission_denied"
+    try:
+        if int(http_status or 0) == 429 or code == 4 or code == 17 or code == 32 or code == 613:
+            return "meta_rate_limited"
+    except (TypeError, ValueError):
+        pass
+    if http_status in (401,) and code is None:
+        return "access_token_invalid"
+    return default
 
 
 def classify_block_code(code: Optional[str]) -> str:
@@ -885,6 +927,12 @@ def mark_native_meta_sync_pending(db: Any, product: Any, *, bump_content: bool =
         verify_retry_count=0,
         next_verify_at=None,
         verify_exhausted=False,
+        # An eligible row re-entering the publish queue no longer owes a
+        # withdrawal; a later hide starts a fresh retirement budget.
+        retire_pending=False,
+        retire_exhausted=False,
+        retire_attempts=0,
+        next_retire_at=None,
     )
     if row is not product:
         product.sync_status = row.sync_status
@@ -1197,6 +1245,34 @@ def _mark_synced(
     )
 
 
+def _waba_link_status_for_push(db: Any, tenant_id: int) -> Dict[str, Any]:
+    """WhatsApp linkage for the publish stamp.
+
+    When a catalog-only Meta consent governs this tenant's catalog, no WABA
+    or phone endpoint is called and no WhatsApp/platform token is used: the
+    linkage is recorded as unknown (never linked). Otherwise the existing
+    read-only WABA probe runs exactly as before.
+    """
+    from models import WhatsAppConnection  # noqa: PLC0415
+    from services.meta_catalog_consent import consent_governs_catalog, consent_row_exists  # noqa: PLC0415
+    from services.meta_catalog_linking import LINK_STATUS_UNKNOWN  # noqa: PLC0415
+
+    # Without a stored consent nothing extra is queried: the existing call
+    # sequence (and every schema it already supports) is unchanged.
+    if not consent_row_exists(db, tenant_id):
+        return get_waba_catalog_link_status(db, tenant_id)
+    conn = db.query(WhatsAppConnection).filter(WhatsAppConnection.tenant_id == int(tenant_id)).first()
+    if consent_governs_catalog(db, tenant_id, conn):
+        return {
+            "ok": False,
+            "connected": False,
+            "expected_catalog_linked": None,
+            "link_status": LINK_STATUS_UNKNOWN,
+            "error": "catalog_consent_waba_not_probed",
+        }
+    return get_waba_catalog_link_status(db, tenant_id)
+
+
 def _waba_linked_flag(waba_status: Dict[str, Any]) -> Optional[bool]:
     if not waba_status:
         return None
@@ -1215,6 +1291,11 @@ def attempt_native_meta_sync(
     allow_synced_retry: bool = False,
 ) -> Dict[str, Any]:
     """Run one Meta sync attempt. Caller must not pass request-scoped ORM objects."""
+    from services.whatsapp_catalog_sync_scope import SCOPE_BLOCKER_CODE, product_in_sync_scope  # noqa: PLC0415
+
+    if not product_in_sync_scope(int(tenant_id), int(product_id)):
+        # Outside the trial scope: no lease, no Graph call, no state change.
+        return {"ok": False, "skipped": True, "error_code": SCOPE_BLOCKER_CODE}
     if allow_synced_retry:
         parent = _load_product(db, tenant_id, product_id)
         if parent is None:
@@ -1367,7 +1448,11 @@ def _attempt_acquired_body(
         ERROR_AMBIGUOUS_VARIANT_IDENTITY,
         ensure_variant_membership_slot,
         identity_for_retailer_id,
+        PROVENANCE_NATIVE_PUSH_RECONCILED,
+        PROVENANCE_VARIANT_PUSH,
         is_salla_source,
+        replace_stale_observation_after_create,
+        upsert_native_publication_membership,
         upsert_variant_membership,
     )
 
@@ -1401,10 +1486,21 @@ def _attempt_acquired_body(
     variant_results: Dict[str, Any] = {}
     expected_map = _expected_payloads_map(parent)
     verified_meta_item_id: Optional[str] = None
+    evidence_written_rids: List[str] = []
     retailer_id = retailer_ids[0]
     content_ok = True
     skipped_push = lookup_only
     content_generation = _generation(_read_sync_meta(parent), "content_generation")
+    # A row that was withdrawn from the channel (hidden, then restored) was
+    # left in Graph as ``visibility=staging``; the re-publish must flip it
+    # back explicitly, otherwise price/availability match while the item
+    # stays invisible in WhatsApp.
+    republished_after_retirement = bool(_read_sync_meta(parent).get("channel_retired_at"))
+    republish_overrides: Optional[Dict[str, Any]] = None
+    if republished_after_retirement and not lookup_only:
+        from services.meta_catalog_push import PUBLISHED_VISIBILITY  # noqa: PLC0415
+
+        republish_overrides = {"visibility": PUBLISHED_VISIBILITY}
 
     for retailer_id in retailer_ids:
         salla_ident = None
@@ -1447,6 +1543,7 @@ def _attempt_acquired_body(
                     str(retailer_id),
                     confirm=True,
                     client=client,
+                    payload_overrides=republish_overrides,
                 )
             except MetaCatalogPushError as exc:
                 return fail(exc.code, exc.code, retailer_id=retailer_id)
@@ -1479,7 +1576,7 @@ def _attempt_acquired_body(
                     retailer_id=retailer_id,
                     reason=str(lookup_block.get("reason") or ""),
                 )
-            waba_status = get_waba_catalog_link_status(db, tenant_id)
+            waba_status = _waba_link_status_for_push(db, tenant_id)
             waba_linked = _waba_linked_flag(waba_status)
             already = str(getattr(parent, "meta_item_id", None) or "").strip()
             if (not salla_parent) and already and already != bound_id:
@@ -1558,7 +1655,27 @@ def _attempt_acquired_body(
             code = str(push_result.get("error") or "meta_push_failed")
             if http_status == 429:
                 code = "meta_rate_limited"
+            if code in ("meta_http_error", "lookup_failed", "meta_push_failed"):
+                code = classify_graph_push_failure(push_result, code)
             return fail(code, err_msg, retailer_id=retailer_id)
+
+        if not lookup_only and str(push_result.get("action") or "") == "create":
+            # Keep the identity of this successful create (the POST's own item
+            # id, catalog, retailer_id, product) before verifying it: if the
+            # follow-up lookup does not corroborate it now (read-after-write
+            # lag, an error), a later scoped lookup returning exactly this id
+            # may still prove it (see corroborate_pending_publication). It is
+            # never authority by itself.
+            attempt = pending_publication_record(
+                product_id=int(parent.id),
+                catalog_id=str(push_result.get("catalog_id") or ""),
+                retailer_id=str(retailer_id),
+                meta_item_id=str(push_result.get("meta_product_id") or ""),
+            )
+            if attempt is not None:
+                if not _stamp_with_lease(db, parent, lease, lambda row: _write_sync_meta(
+                        row, **{PENDING_PUBLICATIONS_KEY: with_pending_publication(_read_sync_meta(row), attempt)})):
+                    return _abandon_stale_lease(db)
 
         try:
             conn = _resolve_connection(db, tenant_id)
@@ -1572,6 +1689,10 @@ def _attempt_acquired_body(
             return fail(exc.code, exc.code, retailer_id=retailer_id)
 
         last_lookup = lookup or {}
+        if last_lookup.get("error") and not last_lookup.get("matched"):
+            classified = classify_graph_push_failure({"lookup": last_lookup}, "lookup_failed")
+            if classified != "lookup_failed":
+                return fail(classified, f"{classified}: lookup rejected"[:200], retailer_id=retailer_id)
         if not meta_item_id or not last_lookup.get("matched"):
             return fail(
                 "verification_failed",
@@ -1579,20 +1700,80 @@ def _attempt_acquired_body(
                 retailer_id=retailer_id,
             )
 
-        if salla_parent:
-            if salla_ident is None:
+        # Publication evidence is written only after a create/update POST
+        # that succeeded in THIS attempt. A lookup-only verification wrote
+        # nothing to Graph, so it never creates or upgrades evidence.
+        published_now = (not lookup_only) and str(push_result.get("action") or "") in ("create", "update")
+        if published_now:
+            # The post-POST lookup (this tenant's connection catalog, this
+            # retailer_id, exactly one Graph row with an id) must return the very
+            # item this POST created (create response id) or updated (its
+            # target id). Graph item ids are global, so only that equality
+            # corroborates the publication; any other id, or none, proves
+            # nothing. Evidence is recorded for the catalog the lookup read.
+            posted_id = str(push_result.get("meta_product_id") or "").strip()
+            if not posted_id or posted_id != str(meta_item_id).strip():
                 return fail(
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
-                    ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                    "verification_failed",
+                    "verification_failed: meta_item_id_mismatch after push",
                     retailer_id=retailer_id,
                 )
-            bound = upsert_variant_membership(
-                db,
-                tenant_id=int(tenant_id),
-                catalog_id=salla_catalog_id or catalog_id,
-                identity=salla_ident,
-                meta_item_id=str(meta_item_id),
-            )
+            if salla_parent and salla_catalog_id != catalog_id:
+                # the connection's catalog changed during this attempt
+                return fail(
+                    "verification_failed",
+                    "verification_failed: catalog_changed_during_push",
+                    retailer_id=retailer_id,
+                )
+            if salla_parent:
+                if salla_ident is None:
+                    return fail(
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        ERROR_AMBIGUOUS_VARIANT_IDENTITY,
+                        retailer_id=retailer_id,
+                    )
+                bound = upsert_variant_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    identity=salla_ident,
+                    meta_item_id=str(meta_item_id),
+                )
+            else:
+                try:
+                    _pv_parent, pushed_variant = load_variant_for_push(db, int(tenant_id), retailer_id=str(retailer_id))
+                except MetaCatalogPushError as exc:
+                    return fail(exc.code, exc.code, retailer_id=retailer_id)
+                bound = upsert_native_publication_membership(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=getattr(pushed_variant, "id", None),
+                    meta_item_id=str(meta_item_id),
+                )
+            if (
+                not bound.get("ok")
+                and bound.get("reason") == "meta_item_id_immutable"
+                and str(push_result.get("action") or "") == "create"
+            ):
+                # A verified create over a stale reconcile observation of the
+                # same key (narrow repair; see replace_stale_observation_after_create).
+                bound = replace_stale_observation_after_create(
+                    db,
+                    tenant_id=int(tenant_id),
+                    catalog_id=catalog_id,
+                    retailer_id=str(retailer_id),
+                    product_id=int(parent.id),
+                    variant_id=(None if salla_parent else getattr(pushed_variant, "id", None)),
+                    created_meta_item_id=posted_id,
+                    corroborated_meta_item_id=str(meta_item_id),
+                    publication_provenance=(
+                        PROVENANCE_VARIANT_PUSH if salla_parent else PROVENANCE_NATIVE_PUSH_RECONCILED
+                    ),
+                    salla_identity=salla_ident if salla_parent else None,
+                )
             if not bound.get("ok"):
                 return fail(
                     ERROR_AMBIGUOUS_VARIANT_IDENTITY,
@@ -1608,6 +1789,7 @@ def _attempt_acquired_body(
                     f"membership_commit_failed:{type(exc).__name__}"[:200],
                     retailer_id=retailer_id,
                 )
+            evidence_written_rids.append(str(retailer_id))
         if verified_meta_item_id is None:
             verified_meta_item_id = str(meta_item_id)
 
@@ -1626,7 +1808,7 @@ def _attempt_acquired_body(
         if comparison.get("outcome") != "matched":
             content_ok = False
 
-    waba_status = get_waba_catalog_link_status(db, tenant_id)
+    waba_status = _waba_link_status_for_push(db, tenant_id)
     waba_linked = _waba_linked_flag(waba_status)
 
     pushed_payload = last_push.get("payload") if isinstance(last_push.get("payload"), dict) else None
@@ -1670,6 +1852,21 @@ def _attempt_acquired_body(
         }
         if pushed_payload:
             updates["last_pushed_payload"] = pushed_payload
+        if not skipped_push:
+            updates["last_push_at"] = _now().isoformat()
+            updates["last_push_action"] = str(last_push.get("action") or "")
+            updates["retire_pending"] = False
+            updates["retire_exhausted"] = False
+            updates["retire_attempts"] = 0
+            updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
+        if republished_after_retirement and not skipped_push:
+            updates["channel_retired_at"] = None
+            updates["republished_at"] = _now().isoformat()
+            updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)
 
@@ -1694,6 +1891,21 @@ def _attempt_acquired_body(
         }
         if pushed_payload:
             updates["last_pushed_payload"] = pushed_payload
+        if not skipped_push:
+            updates["last_push_at"] = _now().isoformat()
+            updates["last_push_action"] = str(last_push.get("action") or "")
+            updates["retire_pending"] = False
+            updates["retire_exhausted"] = False
+            updates["retire_attempts"] = 0
+            updates["next_retire_at"] = None
+            updates["retire_blocked"] = None
+            if evidence_written_rids and _read_sync_meta(row).get(PENDING_PUBLICATIONS_KEY):
+                updates[PENDING_PUBLICATIONS_KEY] = without_pending_publications(
+                    _read_sync_meta(row), evidence_written_rids)
+        if republished_after_retirement and not skipped_push:
+            updates["channel_retired_at"] = None
+            updates["republished_at"] = _now().isoformat()
+            updates["retire_reason"] = None
         _write_sync_meta(row, **updates)
         _requeue_if_dirty(row)
 
@@ -1807,6 +2019,7 @@ def schedule_native_meta_sync(background_tasks: Any, tenant_id: int, product_id:
 __all__ = [
     "META_RELEVANT_PATCH_KEYS",
     "attempt_native_meta_sync",
+    "classify_graph_push_failure",
     "build_sync_response_fields",
     "mark_native_meta_sync_pending",
     "meta_relevant_patch_keys",
