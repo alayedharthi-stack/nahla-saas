@@ -64,6 +64,9 @@ jobs:
       - name: Lint — no new silent excepts
         run: python scripts/lint_no_silent_except.py
 
+      - name: Session refresh security regression
+        run: python -m pytest tests/test_env_admin_session_refresh.py backend/tests/test_auth_session_refresh.py -q --maxfail=1
+
       - name: Run unit tests
         run: python -m pytest -q --maxfail=1
 
