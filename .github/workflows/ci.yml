@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59]
 
 jobs:
   lint-and-test:
