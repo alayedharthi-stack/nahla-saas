@@ -121,6 +121,20 @@ def test_expired_env_admin_never_renews_even_if_db_user_exists(session_env, monk
     mint.assert_not_called()
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_rotated_env_admin_identity_cannot_fall_through_to_db_renewal(session_env, monkeypatch, expired):
+    client, db = session_env
+    _database_user(db, email=ADMIN, role="admin", tenant_id=1)
+    monkeypatch.setattr(auth_core, "ADMIN_EMAIL", "replacement-admin@example.test")
+    mint = _no_mint(monkeypatch)
+    claims = _claims()
+    if expired:
+        claims["exp"] = int(datetime.now(timezone.utc).timestamp()) - 3600
+    assert _refresh(client, _sign(claims)).status_code == 401
+    db.query.assert_not_called()
+    mint.assert_not_called()
+
+
 def test_env_admin_expiry_boundary_is_closed(session_env, monkeypatch):
     client, db = session_env
     claims = _claims()

@@ -654,10 +654,10 @@ async def auth_session_refresh(
     if (
         payload.get("role") == "admin"
         and "user_id" not in payload
-        and is_configured_env_admin_identity(email)
     ):
         if (
-            type(payload.get("tenant_id")) is not int
+            not is_configured_env_admin_identity(email)
+            or type(payload.get("tenant_id")) is not int
             or payload["tenant_id"] != 1
             or not isinstance(payload.get("jti"), str)
             or not payload["jti"]
