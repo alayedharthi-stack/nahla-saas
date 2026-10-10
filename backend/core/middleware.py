@@ -212,6 +212,11 @@ JWT_PUBLIC_EXACT_PATHS = frozenset({
     # Catalog-only Meta consent callback — browser has no JWT. Tenant comes
     # from signed state; the durable nonce is consumed before any Graph call.
     "/merchant/catalog/meta-consent/callback",
+    # Dormant Shopify connection callback — browser has no JWT. Verifies the
+    # query HMAC and consumes the hashed state; binds nothing (the tenant's
+    # authenticated /complete call does). The uninstall webhook is public via
+    # the "/webhook" prefix and authenticated by its raw-body HMAC.
+    "/merchant/integrations/shopify/callback",
 })
 
 # NOTE: /integrations/whatsapp/status and /integrations/debug are PROTECTED — JWT required.
