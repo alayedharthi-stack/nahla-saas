@@ -88,8 +88,8 @@ def _https_host(raw: str) -> Optional[Tuple[str, object]]:
         return None
     if parts.scheme != "https" or parts.username or parts.password or port is not None:
         return None
-    if not _HOST_RE.fullmatch(host) or ".." in host:
-        return None
+    if not _HOST_RE.fullmatch(host) or ".." in host or host.rsplit(".", 1)[-1].isdigit():
+        return None  # DNS names only: no IPv4 / IPv6 literal
     return host, parts
 
 

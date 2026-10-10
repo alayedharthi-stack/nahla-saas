@@ -201,20 +201,33 @@ class Merchant:
 # ── Fake Shopify ──────────────────────────────────────────────────────────────
 
 class FakeShopify:
-    """Thread-safe; one current token pair per shop; uninstall revokes everything."""
+    """Thread-safe model of Shopify's documented token behaviour.
+
+    * A new OAuth acquisition (code exchange) retires every other refresh
+      token of the shop immediately.
+    * Refresh rotation grace: a presented refresh token stays usable until
+      its replacement is used (a retry returns the same replacement pair);
+      using the replacement retires it. (The 30-day / original-expiry bound
+      is not modelled: no test runs that long.)
+    * Access tokens stay usable until expiry (not modelled) unless the app is
+      uninstalled, which revokes every credential.
+    """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.codes = {}
         self.valid_access = {}      # access token -> shop
         self.valid_refresh = {}     # refresh token -> shop
+        self.successor = {}         # refresh token -> (access, refresh) it was rotated into
         self.current = {}           # shop -> (access, refresh)
         self.calls = []
         self.exchange_hook = None
+        self.refresh_pre_hook = None
         self.refresh_hook = None
         self.identity_hook = None
         self.identity_error = None
         self.refresh_error = None
+        self.lose_refresh_response = False
         self.exchange_delay = 0.0
 
     def count(self, kind):
@@ -227,14 +240,31 @@ class FakeShopify:
             self.codes[code] = shop
         return code
 
-    def _issue(self, shop):
+    def _new_pair(self, shop):
         access, refresh = f"shpat_{secrets.token_hex(16)}", f"shprt_{secrets.token_hex(16)}"
-        old = self.current.get(shop)
-        if old:
-            self.valid_refresh.pop(old[1], None)   # the previous refresh token is retired
         self.valid_access[access] = shop            # retired access tokens stay usable until expiry
         self.valid_refresh[refresh] = shop
         self.current[shop] = (access, refresh)
+        return access, refresh
+
+    def _issue(self, shop):
+        """OAuth acquisition: retires every other refresh token of the shop."""
+        for token in [t for t, s in self.valid_refresh.items() if s == shop]:
+            self.valid_refresh.pop(token)
+            self.successor.pop(token, None)
+        access, refresh = self._new_pair(shop)
+        return TokenGrant(access, refresh, 3600, 7776000, frozenset({"read_products"}))
+
+    def _rotate(self, shop, presented):
+        if presented in self.successor:              # retry inside the grace: same replacement
+            access, refresh = self.successor[presented]
+        else:
+            for parent, (_a, child) in list(self.successor.items()):
+                if child == presented:               # the replacement is now in use
+                    self.valid_refresh.pop(parent, None)
+                    self.successor.pop(parent, None)
+            access, refresh = self._new_pair(shop)
+            self.successor[presented] = (access, refresh)
         return TokenGrant(access, refresh, 3600, 7776000, frozenset({"read_products"}))
 
     def uninstall(self, shop):
@@ -242,6 +272,7 @@ class FakeShopify:
             for table in (self.valid_access, self.valid_refresh):
                 for token in [t for t, s in table.items() if s == shop]:
                     table.pop(token)
+                    self.successor.pop(token, None)
             self.current.pop(shop, None)
 
     async def exchange_code(self, *, shop_domain, code):
@@ -259,14 +290,19 @@ class FakeShopify:
     async def refresh(self, *, shop_domain, refresh_token):
         with self.lock:
             self.calls.append(("refresh", shop_domain))
+        if self.refresh_pre_hook:
+            self.refresh_pre_hook(shop_domain)
         if self.refresh_error:
             raise self.refresh_error
         with self.lock:
             if self.valid_refresh.get(refresh_token) != shop_domain:
                 raise ShopifyApiError("permanent", "grant_rejected")
-            grant = self._issue(shop_domain)
+            grant = self._rotate(shop_domain, refresh_token)
         if self.refresh_hook:
             self.refresh_hook(shop_domain)
+        if self.lose_refresh_response:
+            self.lose_refresh_response = False
+            raise ShopifyApiError("transient", "transport_error")   # issued, but the answer was lost
         return grant
 
     async def shop_identity(self, *, shop_domain, access_token):
@@ -1532,3 +1568,117 @@ def test_no_call_is_made_without_enough_lease_left(pg, monkeypatch):
     assert refused(complete, pg, a, handle, fake) == lifecycle.C_SUPERSEDED
     assert fake.count("exchange") == 1          # only the original connect
     assert row(pg, SHOP_SHOES)["status"] == "active"   # nothing was exchanged: nothing flagged
+
+
+# ── Wall-clock lease fence and recovery fence on refresh paths ───────────────
+
+def _claim_for_runner(pg):
+    with pg.Session() as db:
+        [(conn_id, lease, version)] = recovery.claim_due(db, now=lifecycle.utcnow())
+    return conn_id, lease, version
+
+
+@pytest.mark.parametrize("probe", ["retain", "tombstone"])
+def test_lease_expiring_by_wall_clock_during_the_probe_fences_the_write(pg, probe):
+    fake = FakeShopify()
+    a = Merchant(pg, "a")
+    connect(pg, a, SHOP_SHOES, fake)
+    uninstall_event(pg, SHOP_SHOES, webhook_id="w-clock", digest="c1" * 32)
+    conn_id, lease, version = _claim_for_runner(pg)
+    if probe == "tombstone":
+        fake.uninstall(SHOP_SHOES)
+
+    def expire_without_replacing(_shop, _token):
+        # Same lease id; it simply runs out while the call is in flight.
+        _sql(pg, "UPDATE shopify_connections SET reconcile_lease_expires_at = clock_timestamp() WHERE id = :i",
+             i=conn_id)
+        time.sleep(0.05)
+
+    fake.identity_hook = expire_without_replacing
+    before = row(pg, SHOP_SHOES)
+    with pg.Session() as db:
+        result = run(recovery.run_claimed(db, connection_id=conn_id, lease=lease, claimed_version=version,
+                                          api=fake, cipher=CIPHER))
+    assert result == "superseded"
+    after = row(pg, SHOP_SHOES)
+    assert after["status"] == "quarantined" and after["access_token_enc"] == before["access_token_enc"]
+    assert after["generation"] == before["generation"]
+
+
+def test_lease_expiry_uses_the_write_time_clock_seam(pg, monkeypatch):
+    fake = FakeShopify()
+    a = Merchant(pg, "a")
+    connect(pg, a, SHOP_SHOES, fake)
+    uninstall_event(pg, SHOP_SHOES, webhook_id="w-seam", digest="c2" * 32)
+    conn_id, lease, version = _claim_for_runner(pg)
+    future = lifecycle.utcnow() + timedelta(seconds=recovery.RECONCILE_LEASE_SECONDS + 5)
+    fake.identity_hook = lambda _s, _t: monkeypatch.setattr(lifecycle, "wall_clock", lambda: future)
+    with pg.Session() as db:
+        result = run(recovery.run_claimed(db, connection_id=conn_id, lease=lease, claimed_version=version,
+                                          api=fake, cipher=CIPHER))
+    assert result == "superseded"
+    assert row(pg, SHOP_SHOES)["status"] == "quarantined"
+
+
+def test_rejected_refresh_cannot_erase_credentials_after_recovery_lease_loss(pg):
+    fake = FakeShopify()
+    a = Merchant(pg, "a")
+    connect(pg, a, SHOP_SHOES, fake)
+    uninstall_event(pg, SHOP_SHOES, webhook_id="w-rr", digest="c3" * 32)
+    _sql(pg, "UPDATE shopify_connections SET access_token_expires_at = now() - interval '1 minute'")
+    conn_id, lease, version = _claim_for_runner(pg)
+    fake.refresh_pre_hook = lambda _s: _sql(
+        pg, "UPDATE shopify_connections SET reconcile_lease_id = 'newer-worker', "
+            "reconcile_lease_expires_at = now() + interval '2 minutes' WHERE id = :i", i=conn_id)
+    fake.refresh_error = ShopifyApiError("permanent", "grant_rejected")
+    before = row(pg, SHOP_SHOES)
+    with pg.Session() as db:
+        result = run(recovery.run_claimed(db, connection_id=conn_id, lease=lease, claimed_version=version,
+                                          api=fake, cipher=CIPHER))
+    assert result == "superseded"
+    after = row(pg, SHOP_SHOES)
+    assert after["status"] == "quarantined" and after["refresh_token_enc"] == before["refresh_token_enc"]
+    assert after["reconcile_lease_id"] == "newer-worker"
+    assert _sql(pg, "SELECT count(*) AS n FROM shopify_shop_leases")[0]["n"] == 0
+
+
+def test_refreshed_pair_is_not_stored_after_recovery_lease_loss_and_the_held_token_still_works(pg):
+    fake = FakeShopify()
+    a = Merchant(pg, "a")
+    connect(pg, a, SHOP_SHOES, fake)
+    uninstall_event(pg, SHOP_SHOES, webhook_id="w-rs", digest="c4" * 32)
+    _sql(pg, "UPDATE shopify_connections SET access_token_expires_at = now() - interval '1 minute'")
+    conn_id, lease, version = _claim_for_runner(pg)
+    held = stored_tokens(pg, SHOP_SHOES)
+    fake.refresh_hook = lambda _s: _sql(
+        pg, "UPDATE shopify_connections SET reconcile_lease_id = 'newer-worker', "
+            "reconcile_lease_expires_at = now() + interval '2 minutes' WHERE id = :i", i=conn_id)
+    with pg.Session() as db:
+        result = run(recovery.run_claimed(db, connection_id=conn_id, lease=lease, claimed_version=version,
+                                          api=fake, cipher=CIPHER))
+    assert result == "superseded"
+    assert stored_tokens(pg, SHOP_SHOES) == held and row(pg, SHOP_SHOES)["credential_version"] == 1
+    fake.refresh_hook = None
+    # The newer worker retries with the held refresh token (rotation grace).
+    _sql(pg, "UPDATE shopify_connections SET reconcile_lease_id = NULL, reconcile_lease_expires_at = NULL")
+    assert reconcile(pg, SHOP_SHOES, fake) == "retained"
+    assert stored_tokens(pg, SHOP_SHOES) == fake.current[SHOP_SHOES]
+
+
+def test_lost_refresh_response_is_recovered_by_retrying_the_held_token(pg):
+    fake = FakeShopify()
+    a = Merchant(pg, "a")
+    connect(pg, a, SHOP_SHOES, fake)
+    conn_id = row(pg, SHOP_SHOES)["id"]
+    held = stored_tokens(pg, SHOP_SHOES)
+    fake.lose_refresh_response = True
+    with pg.Session() as db:
+        assert run(lifecycle.refresh_credentials(db, connection_id=conn_id, api=fake, cipher=CIPHER)).status == "deferred"
+    assert stored_tokens(pg, SHOP_SHOES) == held and row(pg, SHOP_SHOES)["status"] == "active"
+    with pg.Session() as db:
+        out = run(lifecycle.refresh_credentials(db, connection_id=conn_id, api=fake, cipher=CIPHER))
+    assert out.status == "refreshed"
+    assert stored_tokens(pg, SHOP_SHOES) == fake.current[SHOP_SHOES]
+    with pg.Session() as db:   # the replacement is now in use; the held token is retired, the new one works
+        assert run(lifecycle.refresh_credentials(db, connection_id=conn_id, api=fake, cipher=CIPHER)).status == "refreshed"
+    assert held[1] not in fake.valid_refresh

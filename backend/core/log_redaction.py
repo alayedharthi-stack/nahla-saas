@@ -121,7 +121,8 @@ _BEARER_WORD = re.compile(r"Bearer\b", re.IGNORECASE)
 # token boundary, then a callback that decides sensitivity: linear in the
 # input length. The rule is exactly the former alternation's: a key that ends
 # with ``token``; contains a secret/password/api-key/authorization/cookie or
-# encryption-key fragment; or is ``code``, ``state``, ``appsecret_proof`` or ``hmac``.
+# encryption-key fragment; or is ``code``, ``state``, ``appsecret_proof``, ``hmac`` or
+# ``x-shopify-hmac-sha256``.
 _KV_KEY = re.compile(
     r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]+)([\"']?\s*[=:]\s*[\"']?)",
     re.IGNORECASE,
@@ -131,7 +132,7 @@ _KV_KEY_FRAGMENTS = (
     "secret", "password", "passwd", "apikey", "api_key", "api-key", "authorization", "cookie",
     "enc_key", "encryption_key", "fernet_key", "signing_key", "private_key",
 )
-_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof", "hmac"})
+_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof", "hmac", "x-shopify-hmac-sha256"})
 
 
 def _kv_key_is_sensitive(key: str) -> bool:
@@ -171,7 +172,8 @@ def _kv_spans(text: str) -> list:
     The sensitivity rule is the former
     alternation's: a key ending with ``token``; containing a
     secret/password/api-key/authorization/cookie or encryption-key fragment;
-    or exactly ``code``, ``state``, ``appsecret_proof`` or ``hmac``.
+    or exactly ``code``, ``state``, ``appsecret_proof``, ``hmac`` or
+    ``x-shopify-hmac-sha256``.
     """
     spans = []
     pos = 0

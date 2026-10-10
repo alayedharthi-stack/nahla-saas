@@ -170,6 +170,24 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def wall_clock() -> datetime:
+    """The clock lease fences are checked against *at write time* (a seam for tests)."""
+    return datetime.now(timezone.utc)
+
+
+def _fence_now(now: datetime) -> datetime:
+    # The later of the caller's logical time and the real time of the write:
+    # a lease that ran out while a call was in flight never passes.
+    return max(now, wall_clock())
+
+
+def _recovery_lease_holds(conn: Optional[ShopifyConnection], lease: Optional[str], now: datetime) -> bool:
+    if lease is None:
+        return True
+    return (conn is not None and conn.reconcile_lease_id == lease
+            and conn.reconcile_lease_expires_at is not None and conn.reconcile_lease_expires_at > _fence_now(now))
+
+
 def _digest(domain: bytes, value: str) -> str:
     return hashlib.sha256(domain + str(value).encode("utf-8")).hexdigest()
 
@@ -962,6 +980,7 @@ async def refresh_credentials(
     now: Optional[datetime] = None,
     allow_quarantined: bool = False,
     rejection_status: str = STATUS_REAUTH_REQUIRED,
+    reconcile_lease: Optional[str] = None,
 ) -> RefreshOutcome:
     """Rotate the token pair once, under the shop lease.
 
@@ -969,7 +988,10 @@ async def refresh_credentials(
     connection's generation, credential version and status are unchanged; a
     permanent refusal erases the pair (Shopify: clear the stored pair and
     re-authorize) under the same conditions, so a stale refusal never erases
-    a newer pair.
+    a newer pair. When called by the recovery runner, its ``reconcile_lease``
+    fences both writes too: a runner whose lease was lost or ran out stores
+    nothing and erases nothing (the held refresh token stays valid at Shopify
+    until its replacement is used, so a discarded rotation is recoverable).
     """
     current = now or utcnow()
     allowed = CREDENTIAL_STATUSES if allow_quarantined else (STATUS_ACTIVE,)
@@ -993,7 +1015,8 @@ async def refresh_credentials(
     generation, version = int(conn.generation), int(conn.credential_version)
     refresh_enc, refresh_expires_at = conn.refresh_token_enc, conn.refresh_token_expires_at
     db.commit()  # publish the lease
-    cas = dict(shop=shop, lease=lease, generation=generation, version=version, allowed=allowed)
+    cas = dict(shop=shop, lease=lease, generation=generation, version=version, allowed=allowed,
+               reconcile_lease=reconcile_lease)
 
     if refresh_expires_at is None or refresh_expires_at <= current:
         return _refresh_rejected(db, connection_id, cas, rejection_status, "refresh_token_expired", current)
@@ -1027,13 +1050,19 @@ async def refresh_credentials(
         db.rollback()
         logger.info("[SHOPIFY_CONNECTION] refresh result discarded connection=%s reason=lease_lost", connection_id)
         return RefreshOutcome("superseded")
+    conditions = [
+        ShopifyConnection.id == connection_id,
+        ShopifyConnection.generation == generation,
+        ShopifyConnection.credential_version == version,
+        ShopifyConnection.status.in_(allowed),
+    ]
+    if reconcile_lease is not None:
+        conditions += [
+            ShopifyConnection.reconcile_lease_id == reconcile_lease,
+            ShopifyConnection.reconcile_lease_expires_at > _fence_now(stored_at),
+        ]
     written = db.execute(
-        update(ShopifyConnection).where(
-            ShopifyConnection.id == connection_id,
-            ShopifyConnection.generation == generation,
-            ShopifyConnection.credential_version == version,
-            ShopifyConnection.status.in_(allowed),
-        ).values(
+        update(ShopifyConnection).where(*conditions).values(
             credential_version=version + 1,
             last_refreshed_at=stored_at,
             updated_at=stored_at,
@@ -1062,7 +1091,8 @@ def _refresh_rejected(db: Session, connection_id: int, cas: Dict[str, Any], stat
         return RefreshOutcome("superseded")
     conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
     if (conn is None or int(conn.generation) != cas["generation"]
-            or int(conn.credential_version) != cas["version"] or conn.status not in cas["allowed"]):
+            or int(conn.credential_version) != cas["version"] or conn.status not in cas["allowed"]
+            or not _recovery_lease_holds(conn, cas.get("reconcile_lease"), now)):
         _drop_lease(db, cas["shop"], cas["lease"])
         db.commit()
         return RefreshOutcome("superseded")
@@ -1143,7 +1173,8 @@ async def reconcile(
             return "superseded"
         outcome = await refresh_credentials(
             db, connection_id=connection_id, api=api, cipher=cipher, now=current, allow_quarantined=True,
-            rejection_status=STATUS_REAUTH_REQUIRED if force_refresh else STATUS_UNINSTALLED)
+            rejection_status=STATUS_REAUTH_REQUIRED if force_refresh else STATUS_UNINSTALLED,
+            reconcile_lease=reconcile_lease)
         if outcome.status == "rejected":
             return STATUS_REAUTH_REQUIRED if force_refresh else "uninstalled"
         if outcome.status != "refreshed" or outcome.generation != generation:
@@ -1170,7 +1201,7 @@ def _reconcile_lease_valid(db: Session, connection_id: int, lease: str, now: dat
         .where(ShopifyConnection.id == connection_id)
     ).first()
     db.rollback()
-    return bool(row and row[0] == lease and row[1] is not None and row[1] > now)
+    return bool(row and row[0] == lease and row[1] is not None and row[1] > _fence_now(now))
 
 
 def _fenced(conn: Optional[ShopifyConnection], *, generation: int, version: int, lease: Optional[str],
@@ -1179,10 +1210,8 @@ def _fenced(conn: Optional[ShopifyConnection], *, generation: int, version: int,
         return False
     if conn.status not in CREDENTIAL_STATUSES:
         return False
-    if lease is not None and (conn.reconcile_lease_id != lease or conn.reconcile_lease_expires_at is None
-                              or conn.reconcile_lease_expires_at <= now):
-        return False
-    return True
+    # Checked against the clock at write time, not the time the probe started.
+    return _recovery_lease_holds(conn, lease, now)
 
 
 def _cas_tombstone(db: Session, connection_id: int, version: int, status: str, reason: str, *, generation: int,
