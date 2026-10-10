@@ -126,30 +126,49 @@ including after the merchant reinstalled. Therefore:
   replacement is used, bounded at 30 days) is relied on for discarded
   rotations; past that bound the connection becomes `reauth_required`.
 
-## Activation prerequisites (none are configured by this PR)
+## Activation (none of it is configured by this PR)
 
-All of the following must hold before any route answers or the runner is
-queued; until then everything is 404 / dormant:
+### Runtime availability gate (enforced by code)
+
+`config.evaluate_availability` decides, on every request and every runner
+tick, whether anything runs. While it reports unavailable, every route
+answers 404 (flag off) or a fixed refusal, and the recovery runner does not
+touch the database (its loop is only queued at startup when available):
 
 1. `NAHLA_SHOPIFY_CONNECTION_ENABLED=1`.
-2. `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` of a Shopify app whose
-   distribution allows unrelated merchants, using expiring offline tokens.
+2. `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET` present (the secret also
+   signs the callback query and webhook bodies; missing → refused).
 3. `SHOPIFY_OAUTH_REDIRECT_URI` exactly
-   `https://<api host>/merchant/integrations/shopify/callback`, registered as
-   an allowed redirect in that app.
-4. `DASHBOARD_URL` (https origin) and a dashboard page at
-   `/integrations/shopify/complete` that reads `#shopify_handle=` and calls
-   `POST /complete` with the merchant's Authorization header — **not built
-   yet** (next slice).
-5. `SHOPIFY_TOKEN_ENC_KEY`: dedicated 32-byte url-safe base64 key; refused
+   `https://<api host>/merchant/integrations/shopify/callback` (DNS host, no
+   port, query, fragment, credentials or IP literal).
+4. `DASHBOARD_URL` an https origin (the only return target becomes
+   `<origin>/integrations/shopify/complete`).
+5. `SHOPIFY_TOKEN_ENC_KEY` a dedicated 32-byte url-safe base64 key, refused
    when equal (by decoded bytes) to `WA_TOKEN_ENC_KEY`, `TOTP_ENC_KEY` or
    `JWT_SECRET`.
-6. Migration `0121` applied deliberately after a read-only check (refuses any
-   pre-existing Shopify table).
-7. An `app/uninstalled` webhook subscription pointing at
-   `https://<api host>/webhooks/shopify/app-uninstalled`.
-8. Only this backend acquires tokens for the stores it connects (the
-   existing Shopify shell must not run a parallel OAuth/token exchange).
+6. Optional `SHOPIFY_ADMIN_API_VERSION` (`YYYY-MM`, quarterly).
+
+Storage is checked per request but is not part of the gate: when the
+Shopify tables are absent (migration `0121` not applied) or inspection
+fails, the routes answer `storage_unavailable` / 503 and the runner skips —
+fail closed, nothing written.
+
+### Operational prerequisites (not checked by code — a future activation review must verify them)
+
+* Migration `0121` applied deliberately after a read-only check of the target
+  database (it refuses any pre-existing Shopify table).
+* A dashboard page at `/integrations/shopify/complete` that reads
+  `#shopify_handle=` and calls `POST /complete` with the merchant's
+  Authorization header — **not built yet** (next slice). Without it the flow
+  cannot be completed even with the gate open.
+* A Shopify app whose distribution allows unrelated merchants and which uses
+  expiring offline tokens, with the redirect URI above registered.
+* An `app/uninstalled` webhook subscription pointing at
+  `https://<api host>/webhooks/shopify/app-uninstalled`.
+* A single token-acquiring backend per store: the existing Shopify shell must
+  not run a parallel OAuth / token exchange for stores connected here.
+* Compliance webhooks and the other limitations below, before any App Store
+  distribution.
 
 **Blocked / not done here:** the Shopify shell (Partner 5246037, org
 240110284, app 434031788033) is not altered; no secret, permission,
