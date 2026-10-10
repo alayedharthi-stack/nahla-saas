@@ -50,6 +50,7 @@ import {
 import { createCompletionController } from '../src/lib/shopifyConnection/completionController.ts'
 import { createConnectionController } from '../src/lib/shopifyConnection/connectionController.ts'
 import { shopifyConnectionAr, shopifyConnectionEn } from '../src/i18n/shopifyConnectionLabels.ts'
+import { SENTRY_SCRUB_HOOKS } from '../src/lib/sentryHooks.ts'
 
 let failed = 0
 let passed = 0
@@ -383,12 +384,28 @@ for (const path of ALIASES) {
   sanitizeSentryEvent(other)
   assert('unrelated event data unchanged', JSON.stringify(other) === before, JSON.stringify(other))
 
+  // The exact callbacks configured in Sentry.init (sentry.ts spreads SENTRY_SCRUB_HOOKS).
   const sentry = src('../src/lib/sentry.ts')
-  assert('Sentry sanitizes errors, transactions, spans and breadcrumbs',
-    /beforeBreadcrumb[\s\S]*redactShopifyDeep\(breadcrumb\)/.test(sentry)
-    && /beforeSendTransaction[\s\S]*sanitizeSentryEvent/.test(sentry)
-    && /beforeSendSpan[\s\S]*redactShopifyDeep\(span\)/.test(sentry)
-    && /beforeSend\(event\)[\s\S]*sanitizeSentryEvent/.test(sentry))
+  assert('Sentry.init uses SENTRY_SCRUB_HOOKS', /Sentry\.init\(\{[\s\S]*\.\.\.SENTRY_SCRUB_HOOKS,[\s\S]*\}\)/.test(sentry))
+  const hooks = SENTRY_SCRUB_HOOKS as unknown as Record<string, (e: unknown, h?: unknown) => unknown>
+  const API_COMPLETE = 'https://api.test/merchant/integrations/shopify/complete'
+  for (const [name, data] of [['object', { handle: HANDLE }], ['JSON string', JSON.stringify({ handle: HANDLE })]] as const) {
+    const ev = { type: undefined, message: 'x', request: { url: API_COMPLETE, method: 'POST', data, headers: { Authorization: 'Bearer abc' } }, extra: { payload: { handle: HANDLE } } }
+    const out = hooks.beforeSend(ev, {}) as Record<string, unknown>
+    assert(`configured beforeSend scrubs a ${name} {handle} body`, !!out && !JSON.stringify(out).includes(HANDLE), JSON.stringify(out))
+  }
+  const pageErr = { message: 'x', request: { url: `https://app.test/integrations/shopify/complete#shopify_handle=${HANDLE}` }, breadcrumbs: [{ data: { to: `/x#shopify_handle=${HANDLE}` } }] }
+  assert('configured beforeSend redacts page URL and breadcrumbs', !JSON.stringify(hooks.beforeSend(pageErr, {})).includes(HANDLE))
+  const control = { message: 'control', request: { url: 'https://api.test/orders/1', method: 'POST', data: { handle: 'control-body', note: 'n' }, headers: { Authorization: 'Bearer abc', Accept: 'json' } }, extra: { handle: 'control-extra' } }
+  const controlOut = JSON.stringify(hooks.beforeSend(structuredClone(control), {}))
+  assert('configured beforeSend keeps unrelated data (pre-existing scrubbing only)',
+    controlOut.includes('control-body') && controlOut.includes('control-extra') && !controlOut.includes('Bearer abc') && controlOut.includes('"Accept":"json"'), controlOut)
+  const txOut = hooks.beforeSendTransaction(structuredClone({ ...txn, spans: [{ op: 'browser.connect', description: pageUrl }] }), {})
+  assert('configured beforeSendTransaction scrubs browser.* spans', !JSON.stringify(txOut).includes(HANDLE))
+  const spanOut = hooks.beforeSendSpan({ description: pageUrl, data: { url: pageUrl } })
+  assert('configured beforeSendSpan scrubs span strings', !JSON.stringify(spanOut).includes(HANDLE))
+  const bcOut = hooks.beforeBreadcrumb({ category: 'navigation', data: { from: pageUrl, to: '/overview' } }, {})
+  assert('configured beforeBreadcrumb scrubs navigation URLs', !JSON.stringify(bcOut).includes(HANDLE))
 }
 
 // ── 7. Completion controller ──────────────────────────────────────────────────
@@ -731,8 +748,9 @@ for (const [name, body] of [
   const boot = src('../src/lib/shopifyConnection/bootCapture.ts')
   assert('boot module only imports returnCapture', (boot.match(/^import /gm) ?? []).length === 1 && boot.includes("from './returnCapture'"))
   assert('blocked boot throws a fixed error', boot.includes("throw new Error('shopify_return_scrub_failed')"))
-  for (const rel of ['../src/lib/shopifyConnection/returnCapture.ts', '../src/lib/shopifyConnection/model.ts']) {
-    const imports = (src(rel).match(/^import .*$/gm) ?? []).filter((l) => !l.includes("'./returnCapture'"))
+  for (const rel of ['../src/lib/shopifyConnection/returnCapture.ts', '../src/lib/shopifyConnection/model.ts', '../src/lib/sentryHooks.ts']) {
+    const imports = (src(rel).match(/^import .*$/gm) ?? [])
+      .filter((l) => !l.includes("'./returnCapture'") && !l.includes("'./shopifyConnection/model'") && !l.startsWith('import type '))
     assert(`${rel.split('/').pop()} has no package imports`, imports.length === 0, imports.join('; '))
   }
   const files = [
@@ -740,7 +758,7 @@ for (const [name, body] of [
     '../src/lib/shopifyConnection/model.ts', '../src/lib/shopifyConnection/completionController.ts',
     '../src/lib/shopifyConnection/connectionController.ts', '../src/api/shopifyConnection.ts',
     '../src/components/integrations/ShopifyConnectionCard.tsx', '../src/components/integrations/shopifySessionSignals.ts',
-    '../src/pages/ShopifyConnectionComplete.tsx',
+    '../src/pages/ShopifyConnectionComplete.tsx', '../src/lib/sentryHooks.ts',
   ]
   for (const rel of files) {
     const code = src(rel).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
