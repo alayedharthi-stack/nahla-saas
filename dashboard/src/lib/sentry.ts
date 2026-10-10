@@ -20,7 +20,7 @@
  */
 
 import * as Sentry from '@sentry/react'
-import { redactShopifyUrl } from './shopifyConnection/model'
+import { redactShopifyDeep, sanitizeSentryEvent } from './shopifyConnection/model'
 
 // Sensitive query/body fragments scrubbed from breadcrumbs and event data.
 // Anything matching is replaced with `[scrubbed]`.
@@ -90,31 +90,39 @@ export function initSentry(): void {
       // merchant's own customer conversations including PII. Re-evaluate
       // in Phase 3 with strict masking + opt-in.
     ],
-    // Shopify connection return values never leave the browser in a URL
-    // (they are also scrubbed before Sentry initialises; this is defence in depth).
+    // Shopify connection return values: the URL is cleaned before Sentry
+    // initialises, but the browser keeps the original navigation URL (with
+    // its fragment) in the performance timeline, which browser tracing turns
+    // into span descriptions. Every event, transaction, span and breadcrumb is
+    // therefore sanitized here (see sanitizeSentryEvent).
     beforeBreadcrumb(breadcrumb) {
       try {
-        const data = breadcrumb.data as Record<string, unknown> | undefined
-        if (data) {
-          for (const key of ['url', 'from', 'to']) {
-            if (typeof data[key] === 'string') data[key] = redactShopifyUrl(data[key] as string)
-          }
-        }
+        redactShopifyDeep(breadcrumb)
       } catch {
         // Never break breadcrumb capture on a scrubber bug.
       }
       return breadcrumb
     },
+    beforeSendTransaction(event) {
+      try {
+        sanitizeSentryEvent(event as unknown as Record<string, unknown>)
+      } catch {
+        // Never break event delivery on a scrubber bug.
+      }
+      return event
+    },
+    beforeSendSpan(span) {
+      try {
+        redactShopifyDeep(span)
+      } catch {
+        // Never break span delivery on a scrubber bug.
+      }
+      return span
+    },
     beforeSend(event) {
       try {
+        sanitizeSentryEvent(event as unknown as Record<string, unknown>)
         if (event.request) {
-          if (typeof event.request.url === 'string') {
-            const redacted = redactShopifyUrl(event.request.url)
-            if (redacted !== event.request.url) {
-              event.request.url = redacted
-              delete event.request.query_string
-            }
-          }
           if (event.request.headers) {
             event.request.headers = scrubObject(event.request.headers)
           }

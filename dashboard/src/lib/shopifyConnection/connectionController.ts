@@ -20,6 +20,9 @@
  *  * Every late result is dropped when the session (tenant, user, JWT id)
  *    changed since the request was sent.
  *  * Support impersonation is read-only (the backend refuses those mutations).
+ *  * The typed shop and an open disconnect confirmation are session data too:
+ *    a session change clears them with everything else, so a previous
+ *    tenant's shop can never reappear after the new session's status loads.
  */
 import {
   type MessageKey,
@@ -56,6 +59,10 @@ export interface ConnectionState {
   readOnly: boolean
   start: StartState
   disconnect: DisconnectState
+  /** The merchant's typed shop (raw input). */
+  shopInput: string
+  /** Shop whose disconnect confirmation is open. */
+  confirmShop: string | null
 }
 
 export interface ConnectionDeps {
@@ -74,6 +81,10 @@ export interface ConnectionController {
   refresh(): void
   start(rawShop: string): void
   disconnect(shop: string): void
+  setShopInput(value: string): void
+  openConfirm(shop: string): void
+  closeConfirm(): void
+  confirmDisconnect(): void
   clearMessages(): void
   onPageShow(persisted: boolean): void
   onSessionMaybeChanged(): void
@@ -87,6 +98,8 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
     readOnly: deps.readOnly(),
     start: { phase: 'idle' },
     disconnect: { phase: 'idle' },
+    shopInput: '',
+    confirmShop: null,
   }
   let session = deps.sessionKey()
   let readSeq = 0
@@ -211,7 +224,7 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
     const flight = new AbortController()
     disconnectFlight = flight
     const sentWith = deps.sessionKey()
-    emit({ disconnect: { phase: 'working', shop }, start: { phase: 'idle' } })
+    emit({ disconnect: { phase: 'working', shop }, start: { phase: 'idle' }, confirmShop: null })
     deps.disconnect(shop, flight.signal).then(
       (raw) => {
         if (disconnectFlight !== flight) return
@@ -265,9 +278,18 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
       readOnly: deps.readOnly(),
       start: { phase: 'idle' },
       disconnect: { phase: 'idle' },
+      shopInput: '',
+      confirmShop: null,
     })
     if (current) refresh()
     else emit({ load: 'hidden' })
+  }
+
+  function clearMessages(): void {
+    const patch: Partial<ConnectionState> = {}
+    if (state.start.phase === 'error') patch.start = { phase: 'idle' }
+    if (state.disconnect.phase === 'error' || state.disconnect.phase === 'done') patch.disconnect = { phase: 'idle' }
+    if (Object.keys(patch).length) emit(patch)
   }
 
   return {
@@ -281,12 +303,27 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
     refresh,
     start,
     disconnect,
-    clearMessages() {
-      const patch: Partial<ConnectionState> = {}
-      if (state.start.phase === 'error') patch.start = { phase: 'idle' }
-      if (state.disconnect.phase === 'error' || state.disconnect.phase === 'done') patch.disconnect = { phase: 'idle' }
-      if (Object.keys(patch).length) emit(patch)
+    setShopInput(value) {
+      if (state.start.phase === 'starting' || state.start.phase === 'redirecting') return
+      emit({ shopInput: String(value ?? '').slice(0, 120) })
+      clearMessages()
     },
+    openConfirm(rawShop) {
+      const shop = canonicalShopDomain(rawShop)
+      if (!shop || shop !== rawShop || state.readOnly || deps.readOnly()) return
+      const target = state.status?.connections.find((c) => c.shopDomain === shop)
+      if (target && canDisconnect(target)) emit({ confirmShop: shop })
+    },
+    closeConfirm() {
+      if (state.confirmShop !== null) emit({ confirmShop: null })
+    },
+    confirmDisconnect() {
+      const shop = state.confirmShop
+      if (shop === null) return
+      emit({ confirmShop: null })
+      disconnect(shop)
+    },
+    clearMessages,
     onPageShow(persisted) {
       if (!persisted) return
       startFlight?.abort()

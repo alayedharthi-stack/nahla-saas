@@ -45,6 +45,7 @@ import {
   parseCompleteResponse,
   projectApiFailure,
   redactShopifyUrl,
+  sanitizeSentryEvent,
 } from '../src/lib/shopifyConnection/model.ts'
 import { createCompletionController } from '../src/lib/shopifyConnection/completionController.ts'
 import { createConnectionController } from '../src/lib/shopifyConnection/connectionController.ts'
@@ -228,9 +229,9 @@ const headStart = indexHtml.indexOf('<head>')
 const firstScript = indexHtml.indexOf('<script>', headStart)
 const inline = indexHtml.slice(firstScript + '<script>'.length, indexHtml.indexOf('</script>', firstScript))
 {
-  const beforeScript = indexHtml.slice(headStart, firstScript)
-  assert('inline capture is the first element after <meta charset> in <head>',
-    /^<head>\s*<meta charset="UTF-8" \/>\s*$/.test(beforeScript), beforeScript)
+  const beforeScript = indexHtml.slice(headStart, firstScript).replace(/<!--[\s\S]*?-->/g, '')
+  assert('only <meta charset> and the static early referrer policy precede the inline capture',
+    /^<head>\s*<meta charset="UTF-8" \/>\s*<meta name="referrer" content="strict-origin" \/>\s*$/.test(beforeScript), beforeScript)
   assert('inline capture precedes every <link> and module script',
     firstScript < indexHtml.indexOf('<link') && firstScript < indexHtml.indexOf('<script type="module"'))
   assert('inline script uses the same marker as RETURN_MARKER_RE', inline.includes(`/${RETURN_MARKER_RE.source}/i`))
@@ -269,8 +270,10 @@ for (const path of ALIASES) {
     extFail.win.__nahlaShopifyReturnBlocked === true && extFail.replaced.length === 1
     && extFail.replaced[0] === `${ORIGIN}//external-host.invalid/path`, extFail.replaced.join(','))
   const s = runInline('/app/salla/launch?token=abc#x')
-  assert('inline: unrelated URL untouched, no getter, no meta',
-    s.location.search === '?token=abc' && s.location.hash === '#x' && !('__nahlaShopifyReturn' in s.win) && s.appended.length === 0)
+  assert('inline: unrelated URL untouched, no getter, browser-default referrer policy restored',
+    s.location.search === '?token=abc' && s.location.hash === '#x' && !('__nahlaShopifyReturn' in s.win)
+    && s.appended.length === 1 && s.appended[0].name === 'referrer' && s.appended[0].content === 'strict-origin-when-cross-origin')
+  assert('inline: stray marker route gets no-referrer', r.appended.length === 1 && r.appended[0].content === 'no-referrer')
   const b = runInline(`/Integrations/Shopify/Complete/#shopify_handle=${HANDLE}`, true)
   assert('inline: unverifiable cleanup → blocked flag, nothing held, location.replace to bare path',
     b.win.__nahlaShopifyReturnBlocked === true && (b.win.__nahlaShopifyReturn as () => string)() === '' && b.replaced[0] === `${ORIGIN}${SHOPIFY_COMPLETE_PATH}`)
@@ -356,9 +359,36 @@ for (const path of ALIASES) {
   ]
   for (const [input, expected] of cases) assert(`redact ${input.slice(0, 60)}`, redactShopifyUrl(input) === expected, redactShopifyUrl(input))
   assert('unrelated URL untouched', redactShopifyUrl('/reset-password?token=abc') === '/reset-password?token=abc')
+  assert('bare return key without query/fragment is replaced', redactShopifyUrl(`shopify_handle=${HANDLE}`) === '[scrubbed]')
+
+  // Transaction shaped like the real leak: browser.* spans from the navigation-timing entry.
+  const pageUrl = `https://app.test/Integrations/Shopify/Complete?code=x#shopify_handle=${HANDLE}`
+  const txn: Record<string, unknown> = {
+    type: 'transaction', transaction: '/integrations/shopify/complete',
+    request: { url: 'https://app.test/integrations/shopify/complete', headers: { 'User-Agent': 'x' } },
+    spans: ['browser.connect', 'browser.cache', 'browser.DNS', 'browser.request', 'browser.response'].map((op) => ({ op, description: pageUrl, data: { 'sentry.op': op } })),
+    contexts: { trace: { data: { url: pageUrl } } },
+    breadcrumbs: [{ category: 'navigation', data: { from: pageUrl, to: '/integrations' } }],
+  }
+  sanitizeSentryEvent(txn)
+  assert('transaction spans / contexts / breadcrumbs lose the handle', !JSON.stringify(txn).includes(HANDLE), JSON.stringify(txn).slice(0, 200))
+  assert('span description keeps the bare path', (txn.spans as Array<{ description: string }>)[0].description === 'https://app.test/Integrations/Shopify/Complete')
+  for (const [name, data] of [['object', { handle: HANDLE }], ['JSON string', JSON.stringify({ handle: HANDLE })]] as const) {
+    const ev: Record<string, unknown> = { request: { url: 'https://api.test/merchant/integrations/shopify/complete', method: 'POST', data }, extra: { body: { handle: HANDLE } } }
+    sanitizeSentryEvent(ev)
+    assert(`Shopify endpoint request body (${name}) is scrubbed`, !JSON.stringify(ev).includes(HANDLE), JSON.stringify(ev))
+  }
+  const other: Record<string, unknown> = { request: { url: 'https://api.test/orders/1?x=1', data: { handle: 'keep-me', note: 'n' } }, extra: { handle: 'keep-me-too' } }
+  const before = JSON.stringify(other)
+  sanitizeSentryEvent(other)
+  assert('unrelated event data unchanged', JSON.stringify(other) === before, JSON.stringify(other))
+
   const sentry = src('../src/lib/sentry.ts')
-  assert('Sentry breadcrumbs and events use redactShopifyUrl',
-    /beforeBreadcrumb[\s\S]*redactShopifyUrl/.test(sentry) && /beforeSend[\s\S]*redactShopifyUrl\(event\.request\.url\)/.test(sentry))
+  assert('Sentry sanitizes errors, transactions, spans and breadcrumbs',
+    /beforeBreadcrumb[\s\S]*redactShopifyDeep\(breadcrumb\)/.test(sentry)
+    && /beforeSendTransaction[\s\S]*sanitizeSentryEvent/.test(sentry)
+    && /beforeSendSpan[\s\S]*redactShopifyDeep\(span\)/.test(sentry)
+    && /beforeSend\(event\)[\s\S]*sanitizeSentryEvent/.test(sentry))
 }
 
 // ── 7. Completion controller ──────────────────────────────────────────────────
@@ -663,6 +693,24 @@ for (const [name, body] of [
   h.calls.status[2].resolve({ ...ACTIVE, connections: [TOMB] })
   await flush()
   assert('post-disconnect status reconciles', h.c.getSnapshot().status?.connections[0].status === 'disconnected')
+}
+{
+  // typed shop + open confirmation are cleared by a session change
+  const h = cardHarness()
+  h.c.refresh(); h.calls.status[0].resolve(ACTIVE); await flush()
+  h.c.setShopInput('old-tenant-typed')
+  h.c.openConfirm('my-store.myshopify.com')
+  assert('confirmation opens for a disconnectable shop', h.c.getSnapshot().confirmShop === 'my-store.myshopify.com')
+  h.setSession('tenant2|user2|merchant|jti-z|')
+  h.c.onSessionMaybeChanged()
+  assert('session change clears typed shop and open confirmation',
+    h.c.getSnapshot().shopInput === '' && h.c.getSnapshot().confirmShop === null && h.c.getSnapshot().status === null)
+  h.calls.status[1].resolve({ ...ACTIVE, connections: [{ ...SUMMARY, shop_domain: 'new-tenant.myshopify.com' }] })
+  await flush()
+  const snap = JSON.stringify(h.c.getSnapshot())
+  assert('old tenant shop / input never reappear after the new status loads', !snap.includes('my-store.myshopify.com') && !snap.includes('old-tenant-typed'))
+  h.c.confirmDisconnect()
+  assert('stale confirmation cannot fire after the reset', h.calls.disconnect.length === 0)
 }
 {
   const h = cardHarness()

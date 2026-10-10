@@ -2,6 +2,11 @@
 <html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8" />
+    <!-- Early, static referrer policy (honoured by the preload scanner): any
+         request issued before the inline script below sends the origin only.
+         The script then restores the browser default on every route except
+         the Shopify completion page, which gets no-referrer. -->
+    <meta name="referrer" content="strict-origin" />
     <script>
       /* Shopify connection return — runs before any other script or
          subresource. Mirrors src/lib/shopifyConnection/returnCapture.ts
@@ -13,8 +18,10 @@
          - Any other path whose query or fragment carries a Shopify return
            key: drop query and fragment, unread.
          - Cleanup not verifiable: keep nothing, flag the boot as blocked and
-           reload the bare path. Nothing is stored or logged; other URLs are
-           untouched. */
+           reload the bare path. Nothing is stored or logged.
+         - Every other route: URL untouched; the browser-default referrer
+           policy is restored (the static meta above only covers requests the
+           preload scanner issues before this script runs). */
       (function () {
         try {
           var C = '/integrations/shopify/complete';
@@ -24,11 +31,14 @@
           n = n.toLowerCase().replace(/\/{2,}/g, '/').replace(/\/+$/, '');
           var onPath = n === C;
           var marker = /shopify(?:_|%5f|%255f)(?:handle|connection)/i;
-          if (!onPath && !marker.test(loc.hash) && !marker.test(loc.search)) return;
+          var stray = !onPath && (marker.test(loc.hash) || marker.test(loc.search));
           var m = document.createElement('meta');
           m.name = 'referrer';
-          m.content = 'no-referrer';
+          // Route policy: none from the completion page or a URL carrying a
+          // return marker; the browser default everywhere else.
+          m.content = onPath || stray ? 'no-referrer' : 'strict-origin-when-cross-origin';
           document.head.appendChild(m);
+          if (!onPath && !stray) return;
           // Foreign paths: an explicit same-origin URL. A bare pathname that
           // starts with // would be read as protocol-relative (another host).
           var target = onPath ? C : loc.origin + loc.pathname;

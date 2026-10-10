@@ -287,25 +287,81 @@ export function messageKeyForFailure(f: SafeFailure): MessageKey {
   }
 }
 
-// ── Telemetry / error-report URL redaction ────────────────────────────────────
+// ── Telemetry / error-report redaction ────────────────────────────────────────
 
-/**
- * For error reporting: a URL on any Shopify connection path (any case,
- * percent-encoding or slash form, as early capture recognises it) or carrying
- * a Shopify return key anywhere loses its query and fragment. Other URLs are
- * returned unchanged.
- */
-export function redactShopifyUrl(url: string): string {
-  if (typeof url !== 'string') return url
-  const cut = url.search(/[?#]/)
-  if (cut === -1) return url
-  const base = url.slice(0, cut)
-  let decoded = base
+const SCRUBBED = '[scrubbed]'
+
+/** A Shopify connection path (any case, percent-encoding or slash form) or return key. */
+export function isShopifyConnectionText(text: string): boolean {
+  if (typeof text !== 'string' || !text) return false
+  if (RETURN_MARKER_RE.test(text)) return true
+  let decoded = text
   try {
-    decoded = decodeURIComponent(base)
+    decoded = decodeURIComponent(text)
   } catch {
     /* malformed escape: inspect the raw form */
   }
-  const onShopifyPath = decoded.toLowerCase().replace(/\/{2,}/g, '/').includes('/integrations/shopify')
-  return onShopifyPath || RETURN_MARKER_RE.test(url) ? base : url
+  return decoded.toLowerCase().replace(/\/{2,}/g, '/').includes('/integrations/shopify')
+}
+
+/**
+ * For error reporting: a URL on a Shopify connection path or carrying a
+ * Shopify return key loses its query and fragment (a string with a return key
+ * but no query/fragment is replaced). Everything else is returned unchanged.
+ */
+export function redactShopifyUrl(url: string): string {
+  if (typeof url !== 'string' || !isShopifyConnectionText(url)) return url
+  const cut = url.search(/[?#]/)
+  if (cut !== -1) return url.slice(0, cut)
+  return RETURN_MARKER_RE.test(url) ? SCRUBBED : url
+}
+
+/** Redact every string in place (objects / arrays), bounded depth. */
+export function redactShopifyDeep<T>(value: T, depth = 0): T {
+  if (typeof value === 'string') return redactShopifyUrl(value) as unknown as T
+  if (!value || typeof value !== 'object' || depth > 16) return value
+  const bag = value as unknown as Record<string, unknown>
+  for (const key of Object.keys(bag)) {
+    const v = bag[key]
+    if (typeof v === 'string') {
+      const r = redactShopifyUrl(v)
+      if (r !== v) bag[key] = r
+    } else if (v && typeof v === 'object') {
+      redactShopifyDeep(v, depth + 1)
+    }
+  }
+  return value
+}
+
+function scrubHandleKeys(value: unknown, depth = 0): void {
+  if (!value || typeof value !== 'object' || depth > 16) return
+  const bag = value as Record<string, unknown>
+  for (const key of Object.keys(bag)) {
+    if (key.toLowerCase() === 'handle') bag[key] = SCRUBBED
+    else scrubHandleKeys(bag[key], depth + 1)
+  }
+}
+
+/**
+ * Sentry error / transaction events, in place, before they leave the browser.
+ *
+ *  * Every string anywhere in the event (request, transaction name, spans —
+ *    including the browser.* spans built from the navigation-timing entry,
+ *    whose name keeps the original URL with its fragment — breadcrumbs,
+ *    contexts, extra, tags) is passed through ``redactShopifyUrl``.
+ *  * Endpoint-scoped: when the event's request is a Shopify connection URL,
+ *    its body (object or JSON string, e.g. ``{"handle": …}``) is replaced, and
+ *    any ``handle`` key in the event is scrubbed. Other events keep their data.
+ */
+export function sanitizeSentryEvent(event: Record<string, unknown>): void {
+  if (!event || typeof event !== 'object') return
+  const request = event.request as Record<string, unknown> | undefined
+  const shopifyEvent = (request && typeof request.url === 'string' && isShopifyConnectionText(request.url))
+    || (typeof event.transaction === 'string' && isShopifyConnectionText(event.transaction))
+  if (request && typeof request.url === 'string' && isShopifyConnectionText(request.url)) {
+    delete request.query_string
+    if ('data' in request) request.data = SCRUBBED
+  }
+  if (shopifyEvent) scrubHandleKeys(event)
+  redactShopifyDeep(event)
 }

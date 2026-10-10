@@ -66,9 +66,11 @@ export default function ShopifyConnectionCard() {
       navigate: (url) => window.location.assign(url),
     }),
   )
+  // Typed shop and the open confirmation live in the controller so a session
+  // change clears them with the rest of the tenant's data.
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
-  const [shopInput, setShopInput] = useState('')
-  const [confirmShop, setConfirmShop] = useState<string | null>(null)
+  const shopInput = state.shopInput
+  const confirmShop = state.confirmShop
 
   useEffect(() => {
     controller.refresh()
@@ -142,7 +144,7 @@ export default function ShopifyConnectionCard() {
                 type="button"
                 className="btn-secondary text-xs py-1.5 text-red-600 border-red-200 hover:bg-red-50"
                 disabled={working || state.disconnect.phase === 'working' || busyStart}
-                onClick={() => setConfirmShop(c.shopDomain)}
+                onClick={() => controller.openConfirm(c.shopDomain)}
                 data-testid="shopify-disconnect-button"
               >
                 {working ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
@@ -240,10 +242,7 @@ export default function ShopifyConnectionCard() {
                 placeholder={copy.form.placeholder}
                 value={shopInput}
                 disabled={busyStart}
-                onChange={(e) => {
-                  setShopInput(e.target.value)
-                  controller.clearMessages()
-                }}
+                onChange={(e) => controller.setShopInput(e.target.value)}
               />
               <p className="text-[11px] text-slate-500">{copy.form.hint}</p>
               {preview && (
@@ -290,12 +289,8 @@ export default function ShopifyConnectionCard() {
         confirmLabel={copy.disconnectConfirm.confirm}
         cancelLabel={copy.disconnectConfirm.cancel}
         destructive
-        onCancel={() => setConfirmShop(null)}
-        onConfirm={() => {
-          const shop = confirmShop
-          setConfirmShop(null)
-          if (shop) controller.disconnect(shop)
-        }}
+        onCancel={() => controller.closeConfirm()}
+        onConfirm={() => controller.confirmDisconnect()}
       />
     </section>
   )

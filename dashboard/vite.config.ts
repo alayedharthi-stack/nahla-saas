@@ -42,7 +42,11 @@ export default defineConfig(({ mode }) => {
   plugins: [react()],
   server: {
     port: 3000,
-    headers: SALLA_IFRAME_HEADERS,
+    // Dev only: Vite prepends its /@vite/client script before index.html's
+    // static <meta name="referrer" content="strict-origin">, so the dev server
+    // sends the same early policy as a header. index.html's inline script
+    // still sets the per-route policy. Shipped HTML needs no header.
+    headers: { ...SALLA_IFRAME_HEADERS, 'Referrer-Policy': 'strict-origin' },
     proxy: {
       '/api': {
         target: 'http://localhost:8000',
