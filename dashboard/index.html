@@ -2,6 +2,59 @@
 <html lang="ar" dir="rtl">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      /* Shopify connection return — runs before any other script or
+         subresource. Mirrors src/lib/shopifyConnection/returnCapture.ts
+         (normalizeRoutePath, RETURN_MARKER_RE); keep them in sync.
+         - Completion page in any form React Router renders it (any case,
+           percent-encoded, repeated or trailing slashes): send no referrer,
+           move the raw fragment into memory behind a one-shot getter and
+           replace the URL with the canonical bare path.
+         - Any other path whose query or fragment carries a Shopify return
+           key: drop query and fragment, unread.
+         - Cleanup not verifiable: keep nothing, flag the boot as blocked and
+           reload the bare path. Nothing is stored or logged; other URLs are
+           untouched. */
+      (function () {
+        try {
+          var C = '/integrations/shopify/complete';
+          var loc = window.location;
+          var n = loc.pathname;
+          try { n = decodeURIComponent(n); } catch (e) { /* compare raw */ }
+          n = n.toLowerCase().replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+          var onPath = n === C;
+          var marker = /shopify(?:_|%5f|%255f)(?:handle|connection)/i;
+          if (!onPath && !marker.test(loc.hash) && !marker.test(loc.search)) return;
+          var m = document.createElement('meta');
+          m.name = 'referrer';
+          m.content = 'no-referrer';
+          document.head.appendChild(m);
+          var target = onPath ? C : loc.pathname;
+          var held = onPath ? loc.hash : '';
+          var clean = function () {
+            return loc.hash === '' && loc.search === '' && (!onPath || loc.pathname === C);
+          };
+          if (!clean()) {
+            try { window.history.replaceState(null, '', target); } catch (e) { /* verified below */ }
+          }
+          var blocked = !clean();
+          if (blocked) held = '';
+          Object.defineProperty(window, '__nahlaShopifyReturn', {
+            configurable: true,
+            value: function () {
+              var v = held;
+              held = '';
+              try { delete window.__nahlaShopifyReturn; } catch (e) { /* ignore */ }
+              return v;
+            }
+          });
+          if (blocked) {
+            Object.defineProperty(window, '__nahlaShopifyReturnBlocked', { value: true });
+            try { loc.replace(target); } catch (e) { /* main.tsx stops the boot */ }
+          }
+        } catch (e) { /* bootCapture.ts repeats every check */ }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!--
       Static fallback SEO values for non-JS crawlers only.

@@ -4,6 +4,7 @@
  */
 import type { CustomersPageLabels } from './customersPageLabels'
 import type { LandingPricingLabels } from './landingPricingLabels'
+import type { ShopifyConnectionLabels } from './shopifyConnectionLabels'
 import type { CampaignsListLabels } from './campaignsListPageLabels'
 import type { TemplatesPageExtraLabels } from './templatesPageLabels'
 
@@ -987,6 +988,7 @@ export interface Translations {
   /** Customers page — static UI only; dynamic customer data stays as API values */
   customersPage: CustomersPageLabels
   landingPricing: LandingPricingLabels
+  shopifyConnection: ShopifyConnectionLabels
 
   /** Analytics page */
   analyticsPage: {

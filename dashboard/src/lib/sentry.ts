@@ -20,6 +20,7 @@
  */
 
 import * as Sentry from '@sentry/react'
+import { redactShopifyUrl } from './shopifyConnection/model'
 
 // Sensitive query/body fragments scrubbed from breadcrumbs and event data.
 // Anything matching is replaced with `[scrubbed]`.
@@ -34,6 +35,7 @@ const SENSITIVE_KEYS = [
   'x-nahla-key',
   'x-hub-signature',
   'x-hub-signature-256',
+  'shopify_handle',
 ]
 
 function scrubObject<T>(input: T): T {
@@ -88,9 +90,31 @@ export function initSentry(): void {
       // merchant's own customer conversations including PII. Re-evaluate
       // in Phase 3 with strict masking + opt-in.
     ],
+    // Shopify connection return values never leave the browser in a URL
+    // (they are also scrubbed before Sentry initialises; this is defence in depth).
+    beforeBreadcrumb(breadcrumb) {
+      try {
+        const data = breadcrumb.data as Record<string, unknown> | undefined
+        if (data) {
+          for (const key of ['url', 'from', 'to']) {
+            if (typeof data[key] === 'string') data[key] = redactShopifyUrl(data[key] as string)
+          }
+        }
+      } catch {
+        // Never break breadcrumb capture on a scrubber bug.
+      }
+      return breadcrumb
+    },
     beforeSend(event) {
       try {
         if (event.request) {
+          if (typeof event.request.url === 'string') {
+            const redacted = redactShopifyUrl(event.request.url)
+            if (redacted !== event.request.url) {
+              event.request.url = redacted
+              delete event.request.query_string
+            }
+          }
           if (event.request.headers) {
             event.request.headers = scrubObject(event.request.headers)
           }

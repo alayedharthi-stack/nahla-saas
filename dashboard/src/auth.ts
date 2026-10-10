@@ -730,6 +730,18 @@ function _currentClaims(): Record<string, unknown> {
   return _cachedClaims
 }
 
+/** Opaque in-memory identity of the current session: tenant, user, role and
+ *  JWT id. Changes on login, logout, impersonation and session refresh. Used
+ *  only to drop late results that belong to an earlier session; never
+ *  persisted, logged or sent. Empty when there is no session. */
+export function getSessionBindingKey(): string {
+  if (!getToken()) return ''
+  const c = _currentClaims()
+  return [c.tenant_id, c.user_id, c.role, c.jti, c.impersonation === true ? 'imp' : '']
+    .map(v => String(v ?? ''))
+    .join('|')
+}
+
 /** True when the current JWT is a support-impersonation token issued
  *  via `POST /admin/impersonate/{tenant_id}`. */
 export function isImpersonatingSupport(): boolean {

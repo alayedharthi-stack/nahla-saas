@@ -31,6 +31,7 @@ const PAGE_META: Record<string, PageMetaSelector> = {
   }),
   '/templates/manual-coupon':    tr => tr.pages.campaigns,
   '/integrations':               tr => tr.pages.integrations,
+  '/integrations/shopify/complete': tr => tr.shopifyConnection.page,
   '/analytics':                  tr => tr.pages.analytics,
   '/settings':                   tr => tr.pages.settings,
   '/settings/security':          tr => ({
