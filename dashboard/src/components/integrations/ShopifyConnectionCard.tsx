@@ -130,7 +130,7 @@ export default function ShopifyConnectionCard() {
               <button
                 type="button"
                 className="btn-secondary text-xs py-1.5"
-                disabled={busyStart}
+                disabled={busyStart || state.disconnect.phase === 'working'}
                 onClick={() => controller.start(c.shopDomain)}
                 data-testid="shopify-reconnect-button"
               >
@@ -141,7 +141,7 @@ export default function ShopifyConnectionCard() {
               <button
                 type="button"
                 className="btn-secondary text-xs py-1.5 text-red-600 border-red-200 hover:bg-red-50"
-                disabled={working || state.disconnect.phase === 'working'}
+                disabled={working || state.disconnect.phase === 'working' || busyStart}
                 onClick={() => setConfirmShop(c.shopDomain)}
                 data-testid="shopify-disconnect-button"
               >
@@ -254,7 +254,7 @@ export default function ShopifyConnectionCard() {
               <button
                 type="submit"
                 className="btn-primary text-xs py-1.5"
-                disabled={busyStart || !shopInput.trim()}
+                disabled={busyStart || state.disconnect.phase === 'working' || !shopInput.trim()}
                 data-testid="shopify-connect-button"
               >
                 {busyStart ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}

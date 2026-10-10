@@ -1,5 +1,5 @@
 /**
- * Shopify connection — pure client model (no imports, CI-checkable).
+ * Shopify connection — pure client model (no package imports, CI-checkable).
  *
  * Mirrors the backend contract of ``backend/routers/shopify_connection.py``:
  * canonical shop domains, the exact authorize URL ``POST /start`` returns,
@@ -8,6 +8,7 @@
  * Nothing here formats provider or server text for display: errors are
  * projected to a closed set of codes that map to fixed UI copy.
  */
+import { RETURN_MARKER_RE } from './returnCapture'
 
 export const SHOP_SUFFIX = '.myshopify.com'
 /** The only scope the foundation requests or accepts (read-only catalog). */
@@ -288,14 +289,23 @@ export function messageKeyForFailure(f: SafeFailure): MessageKey {
 
 // ── Telemetry / error-report URL redaction ────────────────────────────────────
 
-const SHOPIFY_URL_MARKERS = ['/integrations/shopify/', 'shopify_handle', 'shopify_connection']
-
 /**
- * For error reporting: any URL on a Shopify connection path, or carrying a
- * Shopify return value, loses its query and fragment. Other URLs are unchanged.
+ * For error reporting: a URL on any Shopify connection path (any case,
+ * percent-encoding or slash form, as early capture recognises it) or carrying
+ * a Shopify return key anywhere loses its query and fragment. Other URLs are
+ * returned unchanged.
  */
 export function redactShopifyUrl(url: string): string {
-  if (typeof url !== 'string' || !SHOPIFY_URL_MARKERS.some((m) => url.includes(m))) return url
+  if (typeof url !== 'string') return url
   const cut = url.search(/[?#]/)
-  return cut === -1 ? url : url.slice(0, cut)
+  if (cut === -1) return url
+  const base = url.slice(0, cut)
+  let decoded = base
+  try {
+    decoded = decodeURIComponent(base)
+  } catch {
+    /* malformed escape: inspect the raw form */
+  }
+  const onShopifyPath = decoded.toLowerCase().replace(/\/{2,}/g, '/').includes('/integrations/shopify')
+  return onShopifyPath || RETURN_MARKER_RE.test(url) ? base : url
 }

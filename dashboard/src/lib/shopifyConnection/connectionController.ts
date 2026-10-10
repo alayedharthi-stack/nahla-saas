@@ -8,6 +8,13 @@
  *  * Start is single-flight (repeated clicks are ignored while starting or
  *    redirecting). The authorize URL is validated against the requested shop
  *    and handed straight to ``navigate``; it is never kept in state.
+ *  * Start and disconnect are serialized: no start while a disconnect runs;
+ *    a disconnect fences and aborts a start still waiting for its URL (a
+ *    late start answer can never navigate after it) and is refused once the
+ *    browser is already leaving for Shopify.
+ *  * "Disconnected" is shown only when the answer proves a tombstone for
+ *    exactly that shop; anything else is reported as uncertain and the status
+ *    is re-read.
  *  * Back from Shopify (bfcache ``pageshow``) re-enables the form and re-reads
  *    the status instead of leaving a stuck "redirecting" button.
  *  * Every late result is dropped when the session (tenant, user, JWT id)
@@ -132,6 +139,7 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
 
   function start(rawShop: string): void {
     if (state.start.phase === 'starting' || state.start.phase === 'redirecting') return
+    if (state.disconnect.phase === 'working') return
     if (state.readOnly || deps.readOnly()) {
       emit({ start: { phase: 'error', message: 'merchantOnly' } })
       return
@@ -190,6 +198,12 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
     }
     const target = state.status?.connections.find((c) => c.shopDomain === shop)
     if (!target || !canDisconnect(target)) return
+    // The browser is already leaving for Shopify: nothing to serialize against.
+    if (state.start.phase === 'redirecting') return
+    // A start still waiting for its URL is superseded: fence it so a late
+    // answer can never navigate after this explicit disconnect.
+    startFlight?.abort()
+    startFlight = null
     // Any status read already in flight predates the disconnect: drop it.
     readSeq += 1
     readFlight?.abort()
@@ -204,8 +218,14 @@ export function createConnectionController(deps: ConnectionDeps): ConnectionCont
         disconnectFlight = null
         if (!sameSession(sentWith)) return onSessionMaybeChanged()
         const summary = parseDisconnectResponse(raw)
-        if (summary && summary.shopDomain === shop) applySummary(summary)
-        emit({ disconnect: { phase: 'done', shop } })
+        const proved = summary !== null && summary.shopDomain === shop
+          && (summary.status === 'disconnected' || summary.status === 'uninstalled')
+        if (proved && summary) {
+          applySummary(summary)
+          emit({ disconnect: { phase: 'done', shop } })
+        } else {
+          emit({ disconnect: { phase: 'error', shop, message: 'uncertain' } })
+        }
         refresh()
       },
       (err) => {
