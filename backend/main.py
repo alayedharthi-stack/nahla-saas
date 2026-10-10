@@ -548,6 +548,12 @@ app.include_router(_zid_oauth_router)
 app.include_router(_integrations_router)
 from routers.meta_catalog_consent import router as _meta_catalog_consent_router  # noqa: E402
 app.include_router(_meta_catalog_consent_router)
+# Dormant Shopify connection foundation: every route answers 404 unless
+# NAHLA_SHOPIFY_CONNECTION_ENABLED is set; nothing registers a store adapter.
+from routers.shopify_connection import router as _shopify_connection_router  # noqa: E402
+from routers.shopify_connection import webhook_router as _shopify_webhook_router  # noqa: E402
+app.include_router(_shopify_connection_router)
+app.include_router(_shopify_webhook_router)
 app.include_router(_merchant_catalog_router)
 app.include_router(_admin_catalog_router)
 app.include_router(_support_access_router)

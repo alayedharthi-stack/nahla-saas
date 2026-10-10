@@ -124,6 +124,8 @@ _WITHHELD_FRAME_MODULES = (
     "services.meta_oauth_redirect",
     "services.whatsapp_platform.wa_connection_secrets",
     "services.whatsapp_platform.token_manager",
+    "services.shopify_connection",
+    "routers.shopify_connection",
     "cryptography",
 )
 _WITHHELD_FRAME_FILES = tuple(
