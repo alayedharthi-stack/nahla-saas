@@ -20,9 +20,11 @@ expiring offline tokens, read-only catalog scope). Off by default: while
                                                   identity, claims the shop
   POST /merchant/integrations/shopify/disconnect  JWT merchant actor; body {shop}; erases
                                                   credentials, keeps the ownership tombstone
-  POST /webhooks/shopify/app-uninstalled          public; raw-body HMAC; persists, dedupes,
-                                                  quarantines and acknowledges, then
-                                                  reconciles in the background
+  POST /webhooks/shopify/app-uninstalled          public; bounded raw-body HMAC; persists,
+                                                  dedupes, quarantines and acknowledges
+                                                  with a durable reconciliation request;
+                                                  one background attempt, then the
+                                                  flag-gated recovery runner
 
 No route registers Shopify in the store adapter registry or the catalog, and
 none touches the AI runtime, Salla, Meta, WhatsApp or Moyasar. Codes, states,
@@ -41,7 +43,7 @@ from sqlalchemy.orm import Session
 
 from core.auth import PLATFORM_ADMIN_ROLES, get_jwt_tenant_id, require_authenticated
 from core.database import get_db
-from services.shopify_connection import crypto, lifecycle
+from services.shopify_connection import crypto, lifecycle, recovery
 from services.shopify_connection.actor import ActorRejected, VerifiedActor, revalidate_actor
 from services.shopify_connection.config import (
     REQUESTED_SCOPES,
@@ -239,6 +241,17 @@ async def shopify_disconnect(body: ShopBody, request: Request, db: Session = Dep
     return JSONResponse({"connection": summary}, headers=_NO_STORE)
 
 
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Stream the body and stop past *limit* bytes, whatever Content-Length
+    claims (absent, chunked or dishonest): never buffer an unbounded body."""
+    received = bytearray()
+    async for chunk in request.stream():
+        received.extend(chunk)
+        if len(received) > limit:
+            raise WebhookRejected("body_too_large")
+    return bytes(received)
+
+
 def _single_header(request: Request, name: str, *, required: bool) -> Optional[str]:
     values = request.headers.getlist(name)
     if len(values) > 1 or (required and not values):
@@ -253,10 +266,13 @@ async def shopify_app_uninstalled(request: Request, background: BackgroundTasks,
     if not secret:
         logger.error("[SHOPIFY_CONNECTION] webhook refused reason=secret_missing")
         return JSONResponse({"error": "webhook_unavailable"}, status_code=503)
-    declared = request.headers.get("content-length")
-    if declared is not None and (not declared.isdigit() or int(declared) > MAX_BODY_BYTES):
+    declared = request.headers.getlist("content-length")
+    if len(declared) > 1 or (declared and (not declared[0].isdigit() or int(declared[0]) > MAX_BODY_BYTES)):
         return JSONResponse({"error": "body_invalid"}, status_code=413)
-    raw = await request.body()
+    try:
+        raw = await _read_bounded_body(request, MAX_BODY_BYTES)
+    except WebhookRejected:
+        return JSONResponse({"error": "body_invalid"}, status_code=413)
     try:
         signature = _single_header(request, "x-shopify-hmac-sha256", required=True)
         verify_webhook_hmac(raw, signature, secret)
@@ -291,7 +307,8 @@ async def shopify_app_uninstalled(request: Request, background: BackgroundTasks,
         return JSONResponse({"error": "retry"}, status_code=503)
     logger.info("[SHOPIFY_CONNECTION] uninstall webhook outcome=%s", outcome)
     if reconcile_id is not None:
-        availability = evaluate_availability()
-        if availability.available:
-            background.add_task(lifecycle.reconcile_in_new_session, reconcile_id, config=availability.config)
+        # One immediate attempt after the acknowledgement. The request is
+        # already durable (reconcile_next_at); the recovery runner retries it
+        # if this attempt never runs, fails or finds configuration missing.
+        background.add_task(recovery.reconcile_now, reconcile_id)
     return JSONResponse({"ok": True}, status_code=200)

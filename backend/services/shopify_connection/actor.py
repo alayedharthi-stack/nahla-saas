@@ -44,6 +44,7 @@ class VerifiedActor:
     tenant_id: int
     user_id: int
     session_ref_hash: str = field(repr=False)
+    jti: str = field(default="", repr=False)
 
 
 def session_ref_hash(jti: str) -> str:
@@ -79,11 +80,16 @@ def check_claims(payload: Mapping[str, Any]) -> tuple:
     return _positive_int(payload.get("tenant_id")), _positive_int(payload.get("user_id")), role, jti
 
 
-def _user_and_tenant_valid(db: Any, *, tenant_id: int, user_id: int, role: str = "") -> str:
-    """'' when valid, else a refusal code."""
+def _user_and_tenant_valid(db: Any, *, tenant_id: int, user_id: int, role: str = "", lock: bool = False) -> str:
+    """'' when valid, else a refusal code. ``lock`` takes FOR SHARE row locks on
+    the user and tenant rows so a concurrent demotion, deactivation or
+    re-assignment waits for the caller's commit (or is seen before it)."""
     from models import Tenant, User  # noqa: PLC0415
 
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    user_q = db.query(User).filter(User.id == int(user_id))
+    if lock:
+        user_q = user_q.with_for_update(read=True)
+    user = user_q.populate_existing().first()
     if user is None or not bool(user.is_active):
         return "actor_inactive"
     if int(user.tenant_id) != int(tenant_id):
@@ -91,7 +97,10 @@ def _user_and_tenant_valid(db: Any, *, tenant_id: int, user_id: int, role: str =
     db_role = str(user.role or "").strip()
     if db_role not in CONNECTION_ROLES or (role and db_role != role):
         return "role_not_permitted"
-    tenant = db.query(Tenant).filter(Tenant.id == int(tenant_id)).first()
+    tenant_q = db.query(Tenant).filter(Tenant.id == int(tenant_id))
+    if lock:
+        tenant_q = tenant_q.with_for_update(read=True)
+    tenant = tenant_q.populate_existing().first()
     if tenant is None or tenant.is_active is False:
         return "tenant_inactive"
     return ""
@@ -107,7 +116,24 @@ def revalidate_actor(db: Any, payload: Mapping[str, Any]) -> VerifiedActor:
         raise ActorRejected(refusal)
     if is_jti_revoked(jti):
         raise ActorRejected("session_revoked")
-    return VerifiedActor(tenant_id=tenant_id, user_id=user_id, session_ref_hash=session_ref_hash(jti))
+    return VerifiedActor(tenant_id=tenant_id, user_id=user_id, session_ref_hash=session_ref_hash(jti), jti=jti)
+
+
+def recheck_actor_locked(db: Any, actor: VerifiedActor) -> str:
+    """Re-validate the actor inside the transaction that commits ownership.
+
+    Locks the user and tenant rows (FOR SHARE) and repeats the role / active /
+    tenant checks, then repeats the inherited best-effort denylist lookup.
+    '' when the actor may still commit, else a refusal code.
+    """
+    from core.token_revocation import is_jti_revoked  # noqa: PLC0415
+
+    refusal = _user_and_tenant_valid(db, tenant_id=actor.tenant_id, user_id=actor.user_id, lock=True)
+    if refusal:
+        return refusal
+    if not actor.jti or is_jti_revoked(actor.jti):
+        return "session_revoked"
+    return ""
 
 
 def actor_still_valid(db: Any, *, tenant_id: int, user_id: int) -> bool:

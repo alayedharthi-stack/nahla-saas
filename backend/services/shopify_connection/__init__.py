@@ -4,7 +4,7 @@ services/shopify_connection
 Dormant, disabled-by-default Shopify secure connection foundation.
 
 Standalone authorization-code grant with expiring offline tokens
-(``docs/engineering/adr/0002-shopify-standalone-auth-code.md``). This package
+(``docs/adr/0006-shopify-standalone-auth-code-expiring-offline-tokens.md``). This package
 owns its own tables (``models.ShopifyBase``) and never touches the shared
 ``integrations/shared`` OAuth helpers, the ``Integration`` table, the store
 adapter registry, the catalog, the AI runtime, Salla, Meta, WhatsApp or
@@ -23,5 +23,7 @@ Module map:
   webhooks.py    raw-body webhook HMAC and signed uninstall payload identity
   models.py      Shopify-owned tables (not part of ``models.Base``)
   actor.py       DB revalidation of the tenant actor behind a JWT
-  lifecycle.py   state, claim, refresh, disconnect, uninstall, reconcile
+  lifecycle.py   state, claim, shop lease, refresh, disconnect, uninstall,
+                 reconcile
+  recovery.py    durable, flag-gated retry of pending uninstall reconciliations
 """

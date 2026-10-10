@@ -13,8 +13,13 @@ Invariants enforced by the database itself:
     a disconnected or uninstalled row stays as the ownership tombstone, so a
     different tenant can never take the shop over by reconnecting;
   * credentials exist exactly while the connection is ``active`` or
-    ``quarantined``; every other status has no ciphertext and no refresh
-    lease (``ck_shopify_connections_credentials``);
+    ``quarantined``; every other status has no ciphertext
+    (``ck_shopify_connections_credentials``);
+  * at most one credential-producing Shopify call (code exchange or token
+    refresh) per shop is in flight across all workers: ``shopify_shop_leases``
+    holds one short, expiring lease row per shop. A lease is never ownership —
+    it expires on its own, a stale one is taken over, and it is deleted in the
+    same transaction that stores (or discards) the call's result;
   * an OAuth state carries an encrypted code only while ``callback_received``.
 
 A connection row is only ever written after Shopify's authenticated identity
@@ -48,12 +53,13 @@ from sqlalchemy.orm import declarative_base
 ShopifyBase = declarative_base()
 
 # Reference-only stubs so foreign keys resolve inside this metadata. They are
-# never created from here: ``create_shopify_tables`` creates the four
+# never created from here: ``create_shopify_tables`` creates the
 # Shopify tables only; the application owns ``tenants`` and ``users``.
 tenants_reference = Table("tenants", ShopifyBase.metadata, Column("id", Integer, primary_key=True))
 users_reference = Table("users", ShopifyBase.metadata, Column("id", Integer, primary_key=True))
 
 CONNECTIONS_TABLE = "shopify_connections"
+LEASES_TABLE = "shopify_shop_leases"
 STATES_TABLE = "shopify_oauth_states"
 WEBHOOK_EVENTS_TABLE = "shopify_webhook_events"
 AUDIT_TABLE = "shopify_connection_audit"
@@ -96,8 +102,7 @@ class ShopifyConnection(ShopifyBase):
             " AND access_token_expires_at IS NOT NULL AND refresh_token_expires_at IS NOT NULL)"
             f" OR (status IN ({_in(TOMBSTONE_STATUSES)})"
             " AND access_token_enc IS NULL AND refresh_token_enc IS NULL"
-            " AND access_token_expires_at IS NULL AND refresh_token_expires_at IS NULL"
-            " AND refresh_lease_id IS NULL AND refresh_lease_expires_at IS NULL)",
+            " AND access_token_expires_at IS NULL AND refresh_token_expires_at IS NULL)",
             name="ck_shopify_connections_credentials",
         ),
         CheckConstraint("generation >= 1 AND credential_version >= 1", name="ck_shopify_connections_versions"),
@@ -116,8 +121,6 @@ class ShopifyConnection(ShopifyBase):
     refresh_token_enc = Column(Text, nullable=True)
     refresh_token_expires_at = Column(DateTime(timezone=True), nullable=True)
     granted_scopes = Column(String(512), nullable=True)
-    refresh_lease_id = Column(String(64), nullable=True)
-    refresh_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     connected_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     connected_at = Column(DateTime(timezone=True), nullable=True)
     disconnected_at = Column(DateTime(timezone=True), nullable=True)
@@ -125,16 +128,47 @@ class ShopifyConnection(ShopifyBase):
     quarantined_at = Column(DateTime(timezone=True), nullable=True)
     quarantine_reason = Column(String(32), nullable=True)
     revalidation_requested_at = Column(DateTime(timezone=True), nullable=True)
+    # Durable reconciliation schedule (quarantine / revalidation). A worker
+    # claims a due row with a short lease; a crash leaves the lease to expire.
+    reconcile_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    reconcile_next_at = Column(DateTime(timezone=True), nullable=True)
+    reconcile_lease_id = Column(String(64), nullable=True)
+    reconcile_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     last_refreshed_at = Column(DateTime(timezone=True), nullable=True)
     last_verified_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
 
-    def __repr__(self) -> str:  # never the ciphertexts or the lease id
+    def __repr__(self) -> str:  # never the ciphertexts
         return (
             f"ShopifyConnection(id={self.id!r}, tenant_id={self.tenant_id!r}, shop_domain={self.shop_domain!r}, "
             f"status={self.status!r}, generation={self.generation!r}, credential_version={self.credential_version!r})"
         )
+
+
+LEASE_EXCHANGE = "exchange"
+LEASE_REFRESH = "refresh"
+
+
+class ShopifyShopLease(ShopifyBase):
+    """Short per-shop mutual exclusion for code exchange and token refresh.
+
+    Shopify keeps one current expiring offline token per app and store: a new
+    exchange or refresh retires the previous pair. Serialising those calls per
+    shop keeps a losing call from retiring the credential a winner stores.
+    """
+
+    __tablename__ = LEASES_TABLE
+    __table_args__ = (
+        CheckConstraint("purpose IN ('exchange', 'refresh')", name="ck_shopify_shop_leases_purpose"),
+    )
+
+    shop_domain = Column(String(255), primary_key=True)
+    lease_id = Column(String(64), nullable=False)
+    purpose = Column(String(16), nullable=False)
+    tenant_id = Column(Integer, nullable=False)
+    acquired_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class ShopifyOAuthState(ShopifyBase):
@@ -226,6 +260,7 @@ class ShopifyConnectionAudit(ShopifyBase):
 
 SHOPIFY_TABLES = (
     ShopifyConnection.__table__,
+    ShopifyShopLease.__table__,
     ShopifyOAuthState.__table__,
     ShopifyWebhookEvent.__table__,
     ShopifyConnectionAudit.__table__,
@@ -234,5 +269,5 @@ SHOPIFY_TABLE_NAMES = tuple(t.name for t in SHOPIFY_TABLES)
 
 
 def create_shopify_tables(bind) -> None:
-    """Test/provisioning helper: the four Shopify tables only (never tenants/users)."""
+    """Test/provisioning helper: the Shopify tables only (never tenants/users)."""
     ShopifyBase.metadata.create_all(bind, tables=list(SHOPIFY_TABLES))

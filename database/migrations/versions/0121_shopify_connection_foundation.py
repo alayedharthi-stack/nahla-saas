@@ -3,23 +3,26 @@
 Revision ID: 0121
 Revises: 0120
 
-Creates the four Shopify-owned tables declared on ``ShopifyBase`` in
+Creates the five Shopify-owned tables declared on ``ShopifyBase`` in
 ``backend/services/shopify_connection/models.py`` (they are deliberately not
 part of ``models.Base``, so startup ``create_all`` never builds them):
 
   shopify_connections       one row per shop, unconditional uniqueness on
                             shop_domain and shop_gid (ownership tombstone),
                             AES-GCM ciphertexts only, credential CHECK
+  shopify_shop_leases       one short expiring lease per shop serialising
+                            code exchange and token refresh (never ownership)
   shopify_oauth_states      hashed single-use authorization states
   shopify_webhook_events    durable uninstall delivery record / dedupe
   shopify_connection_audit  append-only, secret-free lifecycle evidence
 
-Additive only. If any of the four tables already exists the upgrade compares
-its column names, types and nullability with the definition below and
-raises on any difference without changing anything; an identical table is
-adopted. Chained on 0120 and replaces it as that branch's head; it merges
-nothing and normal bootstrap (pinned to 0093) never applies it. Apply only as
-an explicit, owner-approved step. Downgrade drops only these four tables.
+Additive only. If any of these tables already exists — complete, partial or
+malformed — the upgrade refuses and changes nothing: they are new here, so a
+pre-existing one was not built by this revision and its constraints cannot be
+trusted. It must be inspected and removed manually first. Chained on 0120
+and replaces it as that branch's head; it merges nothing and normal
+bootstrap (pinned to 0093) never applies it. Apply only as
+an explicit, owner-approved step. Downgrade drops only these five tables.
 """
 from __future__ import annotations
 
@@ -33,10 +36,11 @@ branch_labels = None
 depends_on = None
 
 CONNECTIONS = "shopify_connections"
+LEASES = "shopify_shop_leases"
 STATES = "shopify_oauth_states"
 EVENTS = "shopify_webhook_events"
 AUDIT = "shopify_connection_audit"
-TABLES = (CONNECTIONS, STATES, EVENTS, AUDIT)
+TABLES = (CONNECTIONS, LEASES, STATES, EVENTS, AUDIT)
 
 _CREDENTIAL = "'active', 'quarantined'"
 _TOMBSTONE = "'reauth_required', 'disconnected', 'uninstalled'"
@@ -65,8 +69,6 @@ def _definitions() -> dict:
         sa.Column("refresh_token_enc", sa.Text(), nullable=True),
         _ts("refresh_token_expires_at"),
         sa.Column("granted_scopes", sa.String(512), nullable=True),
-        sa.Column("refresh_lease_id", sa.String(64), nullable=True),
-        _ts("refresh_lease_expires_at"),
         sa.Column("connected_by_user_id", sa.Integer(), sa.ForeignKey("users.id", ondelete="SET NULL"),
                   nullable=True),
         _ts("connected_at"),
@@ -75,6 +77,10 @@ def _definitions() -> dict:
         _ts("quarantined_at"),
         sa.Column("quarantine_reason", sa.String(32), nullable=True),
         _ts("revalidation_requested_at"),
+        sa.Column("reconcile_attempts", sa.Integer(), nullable=False, server_default=sa.text("0")),
+        _ts("reconcile_next_at"),
+        sa.Column("reconcile_lease_id", sa.String(64), nullable=True),
+        _ts("reconcile_lease_expires_at"),
         _ts("last_refreshed_at"),
         _ts("last_verified_at"),
         _ts("created_at", nullable=False, default=True),
@@ -88,12 +94,21 @@ def _definitions() -> dict:
             " AND access_token_expires_at IS NOT NULL AND refresh_token_expires_at IS NOT NULL)"
             f" OR (status IN ({_TOMBSTONE})"
             " AND access_token_enc IS NULL AND refresh_token_enc IS NULL"
-            " AND access_token_expires_at IS NULL AND refresh_token_expires_at IS NULL"
-            " AND refresh_lease_id IS NULL AND refresh_lease_expires_at IS NULL)",
+            " AND access_token_expires_at IS NULL AND refresh_token_expires_at IS NULL)",
             name="ck_shopify_connections_credentials",
         ),
         sa.CheckConstraint("generation >= 1 AND credential_version >= 1", name="ck_shopify_connections_versions"),
         sa.Index("ix_shopify_connections_tenant_id", "tenant_id"),
+    )
+    leases = sa.Table(
+        LEASES, meta,
+        sa.Column("shop_domain", sa.String(255), primary_key=True),
+        sa.Column("lease_id", sa.String(64), nullable=False),
+        sa.Column("purpose", sa.String(16), nullable=False),
+        sa.Column("tenant_id", sa.Integer(), nullable=False),
+        _ts("acquired_at", nullable=False),
+        _ts("expires_at", nullable=False),
+        sa.CheckConstraint("purpose IN ('exchange', 'refresh')", name="ck_shopify_shop_leases_purpose"),
     )
     states = sa.Table(
         STATES, meta,
@@ -159,69 +174,25 @@ def _definitions() -> dict:
         _ts("created_at", nullable=False, default=True),
         sa.Index("ix_shopify_connection_audit_tenant_created", "tenant_id", "created_at"),
     )
-    return {CONNECTIONS: connections, STATES: states, EVENTS: events, AUDIT: audit}
-
-
-def _type_key(column_type) -> tuple:
-    if isinstance(column_type, sa.DateTime):
-        return ("TIMESTAMPTZ" if column_type.timezone else "TIMESTAMP"), None
-    if isinstance(column_type, sa.BigInteger):
-        return "BIGINT", None
-    if isinstance(column_type, sa.Integer):
-        return "INTEGER", None
-    if isinstance(column_type, sa.Text):
-        return "TEXT", None
-    if isinstance(column_type, sa.String):
-        return "VARCHAR", column_type.length
-    if isinstance(column_type, postgresql.JSONB):
-        return "JSONB", None
-    return type(column_type).__name__.upper(), None
-
-
-def existing_table_mismatches(inspector, name: str, table: sa.Table) -> list:
-    problems = []
-    columns = {c["name"]: c for c in inspector.get_columns(name)}
-    expected = {c.name: c for c in table.columns}
-    for extra in sorted(set(columns) - set(expected)):
-        problems.append(f"{name}: unexpected column {extra}")
-    for col_name, col in expected.items():
-        found = columns.get(col_name)
-        if found is None:
-            problems.append(f"{name}: missing column {col_name}")
-            continue
-        if _type_key(found["type"]) != _type_key(col.type):
-            problems.append(f"{name}: column {col_name} has type {found['type']}")
-        if bool(found.get("nullable", True)) != bool(col.nullable):
-            problems.append(f"{name}: column {col_name} nullability differs")
-    expected_uniques = sorted(sorted(c.name for c in u.columns) for u in table.constraints
-                              if isinstance(u, sa.UniqueConstraint))
-    found_uniques = sorted(sorted(u.get("column_names") or []) for u in inspector.get_unique_constraints(name))
-    if found_uniques != expected_uniques:
-        problems.append(f"{name}: uniqueness is {found_uniques}, expected {expected_uniques}")
-    expected_checks = sorted(c.name for c in table.constraints if isinstance(c, sa.CheckConstraint))
-    found_checks = sorted(c.get("name") or "" for c in inspector.get_check_constraints(name))
-    if found_checks != expected_checks:
-        problems.append(f"{name}: check constraints are {found_checks}, expected {expected_checks}")
-    return problems
+    return {CONNECTIONS: connections, LEASES: leases, STATES: states, EVENTS: events, AUDIT: audit}
 
 
 def upgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    present = set(inspector.get_table_names())
-    definitions = _definitions()
-    problems = []
-    for name in TABLES:
-        if name in present:
-            problems.extend(existing_table_mismatches(inspector, name, definitions[name]))
-    if problems:
+    present = sorted(set(sa.inspect(bind).get_table_names()) & set(TABLES))
+    if present:
+        # These tables are new in this revision. Any pre-existing one — complete,
+        # partial or malformed — was created outside this migration, and its
+        # constraints (credential CHECK, unconditional ownership uniqueness,
+        # foreign keys) cannot be trusted. Refuse without changing anything;
+        # an operator inspects and removes it before applying 0121.
         raise RuntimeError(
-            "Shopify connection tables already exist with a different definition; inspect them before "
-            f"applying this revision ({'; '.join(problems)})"
+            "Shopify connection tables already exist (" + ", ".join(present) + "); they were not created "
+            "by revision 0121. Inspect and remove them manually before applying this revision."
         )
+    definitions = _definitions()
     for name in TABLES:
-        if name not in present:
-            definitions[name].create(bind)
+        definitions[name].create(bind)
 
 
 def downgrade() -> None:

@@ -52,6 +52,8 @@ ALLOWED_GRANTED_SCOPES = frozenset(REQUESTED_SCOPES)
 
 DEFAULT_API_VERSION = "2026-07"
 _API_VERSION_RE = re.compile(r"20[2-9][0-9]-(01|04|07|10)")
+# A DNS host name only (no IP literal, no brackets, no trailing dot).
+_HOST_RE = re.compile(r"(?=.{4,253}\Z)[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+")
 
 R_DISABLED = "disabled"
 R_CLIENT_CREDENTIALS_MISSING = "client_credentials_missing"
@@ -78,17 +80,15 @@ def flag_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
 def _https_host(raw: str) -> Optional[Tuple[str, object]]:
     if not raw or any(ch.isspace() for ch in raw) or not raw.isascii():
         return None
-    parts = urlsplit(raw)
-    if parts.scheme != "https" or parts.username or parts.password:
-        return None
     try:
+        parts = urlsplit(raw)
         port = parts.port
-    except ValueError:
+        host = (parts.hostname or "").lower()
+    except ValueError:  # malformed IPv6 literal, bad port, …
         return None
-    if port is not None:
+    if parts.scheme != "https" or parts.username or parts.password or port is not None:
         return None
-    host = (parts.hostname or "").lower()
-    if not host or "." not in host or host.endswith("."):
+    if not _HOST_RE.fullmatch(host) or ".." in host:
         return None
     return host, parts
 
@@ -131,15 +131,32 @@ def parse_encryption_key(raw: str) -> Optional[bytes]:
     return key if len(key) == 32 else None
 
 
+def _decoded_variants(raw: str) -> set:
+    """Every byte string *raw* decodes to as url-safe or standard base64
+    (padding optional), plus its own bytes — used only to detect key reuse."""
+    value = str(raw or "").strip()
+    out = {value.encode("utf-8")} if value else set()
+    padded = value + "=" * (-len(value) % 4)
+    for decode in (base64.urlsafe_b64decode, base64.standard_b64decode):
+        try:
+            out.add(decode(padded.encode("ascii")))
+        except (ValueError, TypeError, UnicodeEncodeError):
+            continue
+    return out
+
+
 def encryption_key_reason(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
     e = _env(env)
     raw = _get(e, ENCRYPTION_KEY_ENV)
     if not raw:
         return R_ENCRYPTION_KEY_MISSING
-    if parse_encryption_key(raw) is None:
+    key = parse_encryption_key(raw)
+    if key is None:
         return R_ENCRYPTION_KEY_INVALID
-    if any(raw == _get(e, name) for name in _FOREIGN_KEY_ENVS):
-        return R_ENCRYPTION_KEY_REUSED
+    for name in _FOREIGN_KEY_ENVS:
+        foreign = _get(e, name)
+        if foreign and (foreign == raw or key in _decoded_variants(foreign)):
+            return R_ENCRYPTION_KEY_REUSED
     return None
 
 
