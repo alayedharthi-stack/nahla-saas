@@ -94,7 +94,7 @@ export function isShopifyCompletePath(pathname: string): boolean {
 
 export interface CaptureEnv {
   /** Must be live (``window.location``): it is re-read after scrubbing. */
-  location: { pathname: string; search: string; hash: string }
+  location: { origin: string; pathname: string; search: string; hash: string }
   history: { replaceState(data: unknown, unused: string, url?: string | null): void }
   /** The inline script's one-shot getter, when it ran. */
   takeEarly?: () => string
@@ -143,7 +143,9 @@ export function captureShopifyReturn(env: CaptureEnv, now: number): CaptureResul
   const loc = env.location
   const onPath = isShopifyCompletePath(loc.pathname)
   const stray = !onPath && (RETURN_MARKER_RE.test(loc.hash) || RETURN_MARKER_RE.test(loc.search))
-  const target = onPath ? SHOPIFY_COMPLETE_PATH : loc.pathname
+  // Foreign paths keep their path on an explicit same-origin URL: a bare
+  // pathname starting with // would be read as protocol-relative (another host).
+  const target = onPath ? SHOPIFY_COMPLETE_PATH : loc.origin + loc.pathname
   let early = ''
   try {
     early = env.takeEarly ? String(env.takeEarly() || '') : ''

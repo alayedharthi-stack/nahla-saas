@@ -92,33 +92,49 @@ const PROVIDER_TEXT = `provider-detail-${rand(16)}`
 }
 
 // ── 2. Boot capture (TS) on every rendered path form ──────────────────────────
-type FakeLoc = { pathname: string; search: string; hash: string }
+const ORIGIN = 'https://app.test'
+/**
+ * Browser URL semantics for the fakes: the *document* URL is origin + raw
+ * path (a browser shows a //-path as a path), while every target handed to
+ * replaceState / location.replace resolves against the current URL like
+ * ``new URL(target, location.href)`` — so a target starting with // is
+ * protocol-relative (another host). Cross-origin replaceState throws like the
+ * browser's SecurityError; location.replace records the resolved absolute URL.
+ */
+function browserLocation(path: string, throwReplace = false) {
+  const u = new URL(`${ORIGIN}${path}`)
+  const loc = {
+    origin: ORIGIN, pathname: u.pathname, search: u.search, hash: u.hash,
+    get href() { return `${this.origin}${this.pathname}${this.search}${this.hash}` },
+    replace(target: string) { navigations.push(new URL(String(target), loc.href).href) },
+  }
+  const navigations: string[] = []
+  const replaceState = (_d: unknown, _u: string, target?: string | null) => {
+    if (throwReplace) throw new Error('SecurityError')
+    const n = new URL(String(target), loc.href)
+    if (n.origin !== loc.origin) throw new Error('SecurityError: cross-origin replaceState')
+    loc.pathname = n.pathname
+    loc.search = n.search
+    loc.hash = n.hash
+  }
+  return { loc, navigations, replaceState }
+}
+
 function fakeEnv(url: string, opts: { throwReplace?: boolean; early?: string; earlyBlocked?: boolean } = {}) {
-  // Same-origin path as a browser keeps it (a leading // is a path here, not a host).
-  const u = new URL(`https://app.test${url}`)
-  const location: FakeLoc = { pathname: u.pathname, search: u.search, hash: u.hash }
-  const replaced: string[] = []
+  const b = browserLocation(url, opts.throwReplace)
   const timers: Array<() => void> = []
   return {
     env: {
-      location,
-      history: {
-        replaceState(_d: unknown, _u: string, target?: string | null) {
-          if (opts.throwReplace) throw new Error('blocked')
-          const n = new URL(String(target), 'https://app.test')
-          location.pathname = n.pathname
-          location.search = n.search
-          location.hash = n.hash
-        },
-      },
+      location: b.loc,
+      history: { replaceState: b.replaceState },
       takeEarly: opts.early !== undefined ? () => opts.early as string : undefined,
       earlyBlocked: opts.earlyBlocked,
-      replaceLocation: (t: string) => { replaced.push(t) },
+      replaceLocation: (t: string) => b.loc.replace(t),
       setTimer: (fn: () => void) => { timers.push(fn); return timers.length },
       clearTimer: () => {},
     },
-    location,
-    replaced,
+    location: b.loc,
+    replaced: b.navigations,
     timers,
   }
 }
@@ -163,6 +179,22 @@ for (const path of ['/integrations/shopify/completed', '/integrations/shopify', 
   assert('double-encoded / upper-case stray marker dropped', g.location.hash === '' && g.location.search === '')
 }
 {
+  // A foreign path that starts with // must never become a protocol-relative target.
+  const EXT = '//external-host.invalid/path'
+  assert('harness: a bare //-path target is protocol-relative (the hazard)', new URL(EXT, ORIGIN).origin !== ORIGIN)
+  const f = fakeEnv(`${EXT}?shopify_handle=${HANDLE}`)
+  const r = captureShopifyReturn(f.env, 0)
+  assert('//external-host stray marker: cleaned on the same origin, path kept',
+    !r.blocked && f.location.origin === ORIGIN && f.location.pathname === EXT && f.location.search === '' && f.replaced.length === 0,
+    f.location.href)
+  const g = fakeEnv(`${EXT}?shopify_handle=${HANDLE}`, { throwReplace: true })
+  const rg = captureShopifyReturn(g.env, 0)
+  assert('//external-host forced cleanup failure: fallback stays same-origin',
+    rg.blocked && g.replaced.length === 1 && new URL(g.replaced[0]).origin === ORIGIN && g.replaced[0] === `${ORIGIN}${EXT}`,
+    g.replaced.join(','))
+  assert('…and holds nothing', takeShopifyReturn(1).kind === 'none')
+}
+{
   const f = fakeEnv('/app/salla/launch?token=abc&lang=ar#section')
   const r = captureShopifyReturn(f.env, 0)
   assert('unrelated Salla URL untouched', !r.blocked && f.location.search === '?token=abc&lang=ar' && f.location.hash === '#section')
@@ -171,7 +203,7 @@ for (const path of ['/integrations/shopify/completed', '/integrations/shopify', 
   discardShopifyReturn()
   const f = fakeEnv(`/Integrations/Shopify/Complete#shopify_handle=${HANDLE}`, { throwReplace: true })
   const r = captureShopifyReturn(f.env, 0)
-  assert('replaceState failure fails closed', r.blocked && f.replaced[0] === SHOPIFY_COMPLETE_PATH)
+  assert('replaceState failure fails closed', r.blocked && f.replaced[0] === `${ORIGIN}${SHOPIFY_COMPLETE_PATH}`)
   assert('fail-closed keeps nothing', takeShopifyReturn(1).kind === 'none')
   const g = fakeEnv('/integrations/shopify/complete', { early: `#shopify_handle=${HANDLE}`, earlyBlocked: true })
   assert('inline-script block flag fails closed', captureShopifyReturn(g.env, 0).blocked && takeShopifyReturn(1).kind === 'none')
@@ -205,30 +237,16 @@ const inline = indexHtml.slice(firstScript + '<script>'.length, indexHtml.indexO
   assert('inline script uses the canonical path', inline.includes(`'${SHOPIFY_COMPLETE_PATH}'`))
 }
 function runInline(url: string, throwReplace = false) {
-  // Same-origin path as a browser keeps it (a leading // is a path here, not a host).
-  const u = new URL(`https://app.test${url}`)
-  const replaced: string[] = []
-  const location = {
-    pathname: u.pathname, search: u.search, hash: u.hash,
-    replace(t: string) { replaced.push(t) },
-  }
+  const b = browserLocation(url, throwReplace)
   const appended: Array<{ name?: string; content?: string }> = []
   const win: Record<string, unknown> = {
-    location,
-    history: {
-      replaceState(_d: unknown, _u: string, target: string) {
-        if (throwReplace) throw new Error('blocked')
-        const n = new URL(target, 'https://app.test')
-        location.pathname = n.pathname
-        location.search = n.search
-        location.hash = n.hash
-      },
-    },
+    location: b.loc,
+    history: { replaceState: b.replaceState },
     document: { head: { appendChild: (el: { name?: string; content?: string }) => appended.push(el) }, createElement: () => ({}) },
   }
   win.window = win
   runInNewContext(inline, win)
-  return { win, location, replaced, appended }
+  return { win, location: b.loc, replaced: b.navigations, appended }
 }
 for (const path of ALIASES) {
   const r = runInline(`${path}?code=${rand(8)}#shopify_handle=${HANDLE}`)
@@ -243,12 +261,19 @@ for (const path of ALIASES) {
   const r = runInline(`/overview#shopify_handle=${HANDLE}`)
   assert('inline: stray marker dropped unread', r.location.hash === '' && r.location.pathname === '/overview'
     && (r.win.__nahlaShopifyReturn as () => string)() === '')
+  const ext = runInline(`//external-host.invalid/path?shopify_handle=${HANDLE}`)
+  assert('inline: //external-host stray marker cleaned on the same origin',
+    ext.location.origin === ORIGIN && ext.location.pathname === '//external-host.invalid/path' && ext.location.search === '' && ext.replaced.length === 0)
+  const extFail = runInline(`//external-host.invalid/path?shopify_handle=${HANDLE}`, true)
+  assert('inline: //external-host forced failure → same-origin location.replace',
+    extFail.win.__nahlaShopifyReturnBlocked === true && extFail.replaced.length === 1
+    && extFail.replaced[0] === `${ORIGIN}//external-host.invalid/path`, extFail.replaced.join(','))
   const s = runInline('/app/salla/launch?token=abc#x')
   assert('inline: unrelated URL untouched, no getter, no meta',
     s.location.search === '?token=abc' && s.location.hash === '#x' && !('__nahlaShopifyReturn' in s.win) && s.appended.length === 0)
   const b = runInline(`/Integrations/Shopify/Complete/#shopify_handle=${HANDLE}`, true)
   assert('inline: unverifiable cleanup → blocked flag, nothing held, location.replace to bare path',
-    b.win.__nahlaShopifyReturnBlocked === true && (b.win.__nahlaShopifyReturn as () => string)() === '' && b.replaced[0] === SHOPIFY_COMPLETE_PATH)
+    b.win.__nahlaShopifyReturnBlocked === true && (b.win.__nahlaShopifyReturn as () => string)() === '' && b.replaced[0] === `${ORIGIN}${SHOPIFY_COMPLETE_PATH}`)
 }
 
 // ── 4. Shop input and authorize URL ───────────────────────────────────────────

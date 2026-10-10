@@ -29,7 +29,9 @@
           m.name = 'referrer';
           m.content = 'no-referrer';
           document.head.appendChild(m);
-          var target = onPath ? C : loc.pathname;
+          // Foreign paths: an explicit same-origin URL. A bare pathname that
+          // starts with // would be read as protocol-relative (another host).
+          var target = onPath ? C : loc.origin + loc.pathname;
           var held = onPath ? loc.hash : '';
           var clean = function () {
             return loc.hash === '' && loc.search === '' && (!onPath || loc.pathname === C);
