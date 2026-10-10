@@ -3,6 +3,7 @@ import { customersPageAr } from './customersPageLabels'
 import { campaignsListAr } from './campaignsListPageLabels'
 import { templatesPageExtraAr } from './templatesPageLabels'
 import { landingPricingAr } from './landingPricingLabels'
+import { shopifyConnectionAr } from './shopifyConnectionLabels'
 import { COMPANY_INFO } from '../config/companyInfo'
 
 /**
@@ -2933,6 +2934,7 @@ const ar: Translations = {
   },
 
   landingPricing: landingPricingAr,
+  shopifyConnection: shopifyConnectionAr,
 }
 
 export default ar

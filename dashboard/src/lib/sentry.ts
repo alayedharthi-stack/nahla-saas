@@ -20,41 +20,7 @@
  */
 
 import * as Sentry from '@sentry/react'
-
-// Sensitive query/body fragments scrubbed from breadcrumbs and event data.
-// Anything matching is replaced with `[scrubbed]`.
-const SENSITIVE_KEYS = [
-  'password',
-  'access_token',
-  'refresh_token',
-  'token',
-  'authorization',
-  'cookie',
-  'set-cookie',
-  'x-nahla-key',
-  'x-hub-signature',
-  'x-hub-signature-256',
-]
-
-function scrubObject<T>(input: T): T {
-  if (!input || typeof input !== 'object') return input
-  // Don't mutate the original; clone shallowly and replace sensitive
-  // keys. Sentry already deep-clones before send, but we add another
-  // pass so a future SDK upgrade can't regress this.
-  if (Array.isArray(input)) {
-    return input.map((item) => scrubObject(item)) as unknown as T
-  }
-  const out: Record<string, unknown> = { ...(input as Record<string, unknown>) }
-  for (const key of Object.keys(out)) {
-    const lower = key.toLowerCase()
-    if (SENSITIVE_KEYS.some(s => lower.includes(s))) {
-      out[key] = '[scrubbed]'
-    } else if (out[key] && typeof out[key] === 'object') {
-      out[key] = scrubObject(out[key])
-    }
-  }
-  return out as unknown as T
-}
+import { SENTRY_SCRUB_HOOKS } from './sentryHooks'
 
 let initialised = false
 
@@ -88,41 +54,8 @@ export function initSentry(): void {
       // merchant's own customer conversations including PII. Re-evaluate
       // in Phase 3 with strict masking + opt-in.
     ],
-    beforeSend(event) {
-      try {
-        if (event.request) {
-          if (event.request.headers) {
-            event.request.headers = scrubObject(event.request.headers)
-          }
-          if (event.request.cookies) {
-            // Sentry types `cookies` as `{ [k: string]: string }`; replace
-            // every value with the scrub marker so the keys disappear.
-            event.request.cookies = { _scrubbed: '[scrubbed]' }
-          }
-          if (event.request.data) {
-            event.request.data = scrubObject(event.request.data)
-          }
-          if (event.request.query_string) {
-            // Query strings on the dashboard rarely carry secrets, but
-            // password reset flows use `?token=` — drop the whole
-            // query for affected paths.
-            const url = (event.request.url ?? '') as string
-            if (url.includes('/reset-password') || url.includes('/verify-email')) {
-              event.request.query_string = '[scrubbed]'
-            }
-          }
-        }
-        if (event.contexts) {
-          event.contexts = scrubObject(event.contexts) as typeof event.contexts
-        }
-        if (event.extra) {
-          event.extra = scrubObject(event.extra) as typeof event.extra
-        }
-      } catch {
-        // Never break event delivery on a scrubber bug.
-      }
-      return event
-    },
+    // Scrubbing and Shopify connection sanitization: see sentryHooks.ts.
+    ...SENTRY_SCRUB_HOOKS,
   })
 
   initialised = true

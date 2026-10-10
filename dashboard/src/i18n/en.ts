@@ -3,6 +3,7 @@ import { customersPageEn } from './customersPageLabels'
 import { campaignsListEn } from './campaignsListPageLabels'
 import { templatesPageExtraEn } from './templatesPageLabels'
 import { landingPricingEn } from './landingPricingLabels'
+import { shopifyConnectionEn } from './shopifyConnectionLabels'
 import { COMPANY_INFO } from '../config/companyInfo'
 
 const en: Translations = {
@@ -2929,6 +2930,7 @@ const en: Translations = {
   },
 
   landingPricing: landingPricingEn,
+  shopifyConnection: shopifyConnectionEn,
 }
 
 export default en
