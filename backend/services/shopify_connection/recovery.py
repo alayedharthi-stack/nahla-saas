@@ -10,14 +10,18 @@ crash after the 200, transient Shopify failure, configuration unavailable at
 that moment, duplicate redelivery).
 
 Multi-worker safety
-  * a due row is claimed with ``SELECT … FOR UPDATE SKIP LOCKED`` and a short
-    ``reconcile_lease_id`` / ``reconcile_lease_expires_at`` in one
-    transaction, so competing workers never run the same connection at once;
+  * rows are claimed one at a time, just before they are processed, with
+    ``SELECT … FOR UPDATE SKIP LOCKED`` and a short ``reconcile_lease_id`` /
+    ``reconcile_lease_expires_at`` in one transaction — a slow row never
+    leaves later rows holding stale batch leases;
+  * the lease is validated before the reconciliation starts and fences its
+    writes (``lifecycle.reconcile(reconcile_lease=…)``) together with the
+    generation / credential-version compare-and-swap, so a stale runner whose
+    lease expired and was re-claimed cannot write;
   * a crashed worker's lease simply expires and the row becomes due again;
-  * the reconciliation itself only writes through generation +
-    credential-version compare-and-swap (``lifecycle.reconcile``), so a
-    reinstall, disconnect or refresh that happens meanwhile supersedes it;
-  * the schedule is updated only while the lease is still ours.
+  * the schedule is updated only while the lease is still ours, and a
+    reconciliation request newer than the claim (``reconcile_request_version``)
+    keeps the row due immediately instead of backing off.
 
 Backoff: ``30 s · 2^(attempts-1)``, capped at one hour. A quarantine is never
 lifted by giving up: an unreachable Shopify keeps the credential unused
@@ -69,17 +73,18 @@ def _pending_clause(now: datetime):
     )
 
 
-def claim_due(db: Session, *, now: datetime, limit: int = BATCH_LIMIT,
-              connection_id: Optional[int] = None) -> List[Tuple[int, str]]:
-    """Claim up to *limit* due connections (optionally one specific id). Commits."""
-    query = select(ShopifyConnection.id).where(_pending_clause(now))
+def claim_due(db: Session, *, now: datetime, limit: int = 1,
+              connection_id: Optional[int] = None) -> List[Tuple[int, str, int]]:
+    """Claim up to *limit* due connections (optionally one specific id) as
+    (id, lease, request version at claim). Commits."""
+    query = select(ShopifyConnection.id, ShopifyConnection.reconcile_request_version).where(_pending_clause(now))
     if connection_id is not None:
         query = query.where(ShopifyConnection.id == int(connection_id))
     query = (query.order_by(ShopifyConnection.reconcile_next_at.asc().nulls_first(), ShopifyConnection.id)
              .limit(int(limit)).with_for_update(skip_locked=True))
-    ids = list(db.execute(query).scalars().all())
-    claimed: List[Tuple[int, str]] = []
-    for cid in ids:
+    rows = list(db.execute(query).all())
+    claimed: List[Tuple[int, str, int]] = []
+    for cid, request_version in rows:
         lease = secrets.token_hex(16)
         db.execute(
             update(ShopifyConnection).where(ShopifyConnection.id == cid).values(
@@ -87,12 +92,12 @@ def claim_due(db: Session, *, now: datetime, limit: int = BATCH_LIMIT,
                 reconcile_lease_expires_at=now + timedelta(seconds=RECONCILE_LEASE_SECONDS),
             ).execution_options(synchronize_session=False)
         )
-        claimed.append((int(cid), lease))
+        claimed.append((int(cid), lease, int(request_version or 0)))
     db.commit()
     return claimed
 
 
-def _finalize(db: Session, connection_id: int, lease: str, claimed_at: datetime, now: datetime) -> None:
+def _finalize(db: Session, connection_id: int, lease: str, claimed_version: int, now: datetime) -> None:
     """Reset or back off the schedule — only while our lease is still on the row."""
     conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
     if conn is None or conn.reconcile_lease_id != lease:
@@ -106,8 +111,8 @@ def _finalize(db: Session, connection_id: int, lease: str, claimed_at: datetime,
     if not still_pending:
         conn.reconcile_attempts = 0
         conn.reconcile_next_at = None
-    elif conn.reconcile_next_at is not None and conn.reconcile_next_at > claimed_at:
-        pass  # a new request arrived while we ran: stay due now, no backoff
+    elif int(conn.reconcile_request_version or 0) != claimed_version:
+        conn.reconcile_next_at = now  # a new request arrived while we ran: stay due, no backoff
     else:
         conn.reconcile_attempts = int(conn.reconcile_attempts or 0) + 1
         conn.reconcile_next_at = now + timedelta(seconds=backoff_seconds(conn.reconcile_attempts))
@@ -119,13 +124,17 @@ async def run_claimed(
     *,
     connection_id: int,
     lease: str,
+    claimed_version: int,
     api: ShopifyApi,
     cipher: crypto.TokenCipher,
-    claimed_at: datetime,
     now: Optional[datetime] = None,
 ) -> str:
+    current = now or lifecycle.utcnow()
+    if not lifecycle._reconcile_lease_valid(db, connection_id, lease, current):
+        return "lease_lost"  # expired and possibly re-claimed: nothing is done
     try:
-        result = await lifecycle.reconcile(db, connection_id=connection_id, api=api, cipher=cipher, now=now)
+        result = await lifecycle.reconcile(db, connection_id=connection_id, api=api, cipher=cipher, now=now,
+                                           reconcile_lease=lease)
     except Exception as exc:  # noqa: BLE001 — the quarantine stays in place (fail safe)
         logger.error("[SHOPIFY_CONNECTION] reconcile failed connection=%s kind=%s",
                      connection_id, type(exc).__name__)
@@ -134,7 +143,7 @@ async def run_claimed(
         except Exception:  # noqa: silent-ok — best-effort rollback before the schedule update
             pass
         result = "deferred"
-    _finalize(db, connection_id, lease, claimed_at, now or lifecycle.utcnow())
+    _finalize(db, connection_id, lease, claimed_version, now or lifecycle.utcnow())
     return result
 
 
@@ -164,14 +173,17 @@ async def run_recovery_tick(
     try:
         if not lifecycle.tables_present(db):
             return {"skipped": "storage_unavailable"}
-        claimed_at = now or lifecycle.utcnow()
-        claimed = claim_due(db, now=claimed_at, limit=limit, connection_id=connection_id)
-        counts["claimed"] = len(claimed)
         cipher = crypto.TokenCipher(config.encryption_key)
         client = api or _api_for(config)
-        for cid, lease in claimed:
-            result = await run_claimed(db, connection_id=cid, lease=lease, api=client, cipher=cipher,
-                                       claimed_at=claimed_at, now=now)
+        for _ in range(int(limit)):
+            # Just-in-time: one row per claim, immediately processed.
+            claimed = claim_due(db, now=now or lifecycle.utcnow(), limit=1, connection_id=connection_id)
+            if not claimed:
+                break
+            (cid, lease, claimed_version), = claimed
+            counts["claimed"] += 1
+            result = await run_claimed(db, connection_id=cid, lease=lease, claimed_version=claimed_version,
+                                       api=client, cipher=cipher, now=now)
             counts[result] = counts.get(result, 0) + 1
         return counts
     finally:

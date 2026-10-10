@@ -130,6 +130,9 @@ class ShopifyConnection(ShopifyBase):
     revalidation_requested_at = Column(DateTime(timezone=True), nullable=True)
     # Durable reconciliation schedule (quarantine / revalidation). A worker
     # claims a due row with a short lease; a crash leaves the lease to expire.
+    # Bumped by every reconciliation request; a probe may only clear the
+    # request version it snapshotted (a newer request stays pending).
+    reconcile_request_version = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
     reconcile_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     reconcile_next_at = Column(DateTime(timezone=True), nullable=True)
     reconcile_lease_id = Column(String(64), nullable=True)

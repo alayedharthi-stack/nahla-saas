@@ -44,10 +44,12 @@ Nothing here logs or returns a token, code, state, handle or secret.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
 import secrets
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -98,8 +100,17 @@ MAX_PENDING_AUTHORIZATIONS_PER_TENANT = 5
 # Longer than both bounded HTTP calls of a completion (2 x 10 s) plus margin.
 EXCHANGE_LEASE_SECONDS = 60
 REFRESH_LEASE_SECONDS = 30
+# Every Shopify call admitted by a lease must finish (or be abandoned) while
+# that lease still has at least this much life left, and no single call may
+# take longer than CALL_DEADLINE_SECONDS in total.
+LEASE_SAFETY_SECONDS = 10
+CALL_DEADLINE_SECONDS = 20
 ACCESS_TOKEN_MARGIN_SECONDS = 120
 WEBHOOK_LOCK_TIMEOUT = "2000ms"
+# Quarantine reason when a code exchange may have produced a grant that was
+# not stored: Shopify may have retired the stored pair. Only a successful
+# forced refresh clears it.
+POSSIBLE_RETIRED = "possible_retired_credential"
 
 _STATE_DOMAIN = b"nahla.shopify.oauth_state:v1:"
 _HANDLE_DOMAIN = b"nahla.shopify.completion_handle:v1:"
@@ -259,6 +270,59 @@ def _release_lease(db: Session, shop_domain: str, lease: str) -> None:
     db.commit()
 
 
+class _LeaseLost(Exception):
+    """The shop lease was taken over (or has too little life left): no call is made."""
+
+
+@dataclass
+class _HeldLease:
+    shop_domain: str
+    lease_id: str
+    seconds: int
+    started: float  # time.monotonic() at acquisition
+
+    def budget(self) -> float:
+        return self.seconds - (time.monotonic() - self.started) - LEASE_SAFETY_SECONDS
+
+
+async def _guarded_call(db: Session, lease: _HeldLease, call):
+    """Run one Shopify call only while the lease is ours, with a total deadline
+    that ends before the lease can expire. Called between transactions.
+
+    The deadline bounds how long *we* wait; it cannot recall a request Shopify
+    already received. Callers treat a timed-out exchange as possibly granted.
+    """
+    still_ours = db.execute(
+        select(ShopifyShopLease.lease_id).where(
+            ShopifyShopLease.shop_domain == lease.shop_domain, ShopifyShopLease.lease_id == lease.lease_id)
+    ).first()
+    db.rollback()
+    budget = min(CALL_DEADLINE_SECONDS, lease.budget())
+    if still_ours is None or budget <= 0:
+        raise _LeaseLost()
+    try:
+        return await asyncio.wait_for(call(), timeout=budget)
+    except asyncio.TimeoutError:
+        raise ShopifyApiError("transient", "deadline_exceeded") from None
+
+
+def _flag_possible_retirement(db: Session, shop_domain: str, now: datetime) -> None:
+    """A grant may exist that we did not store: the shop's stored credential may
+    have been retired by Shopify. Quarantine it for a forced-refresh
+    revalidation (ownership is untouched). Caller commits."""
+    conn = _connection_by_domain(db, shop_domain, lock=True)
+    if conn is None or conn.status not in CREDENTIAL_STATUSES:
+        return
+    conn.status = STATUS_QUARANTINED
+    conn.quarantined_at = now
+    conn.quarantine_reason = POSSIBLE_RETIRED
+    conn.revalidation_requested_at = None
+    _request_reconcile(conn, now)
+    conn.updated_at = now
+    _audit(db, tenant_id=conn.tenant_id, shop_domain=shop_domain, action="possible_credential_retirement",
+           connection=conn)
+
+
 # ── Authorization start ───────────────────────────────────────────────────────
 
 def begin_authorization(
@@ -411,14 +475,19 @@ def _burn_state(db: Session, state_id: int, code: str, now: datetime, *, expect:
     db.commit()
 
 
-def _finish_failed_exchange(db: Session, state_id: int, shop_domain: str, lease: str, code: str) -> None:
-    """Fail the exchanging state and release the shop lease, atomically."""
+def _finish_failed_exchange(db: Session, state_id: int, shop_domain: str, lease: str, code: str,
+                            *, possible_grant: bool) -> None:
+    """Fail the exchanging state, flag a possibly retired incumbent credential
+    and release the shop lease, atomically."""
     db.rollback()
+    now = utcnow()
     row = db.get(ShopifyOAuthState, state_id, with_for_update=True, populate_existing=True)
     if row is not None and row.status == STATE_EXCHANGING:
-        _fail_state(row, code, utcnow())
+        _fail_state(row, code, now)
         _audit(db, tenant_id=row.tenant_id, shop_domain=row.shop_domain, action="authorization_refused",
                actor_user_id=row.actor_user_id, detail={"stage": "completion", "code": code})
+    if possible_grant:
+        _flag_possible_retirement(db, shop_domain, now)
     _drop_lease(db, shop_domain, lease)
     db.commit()
 
@@ -493,8 +562,10 @@ async def complete_authorization(
 
     state_id, shop = int(row.id), row.shop_domain
     generation_at_start = int(row.connection_generation_at_start)
+    lease_seconds = EXCHANGE_LEASE_SECONDS
     lease = acquire_shop_lease(db, shop_domain=shop, purpose=LEASE_EXCHANGE, tenant_id=actor.tenant_id,
-                               now=current, seconds=EXCHANGE_LEASE_SECONDS)
+                               now=current, seconds=lease_seconds)
+    held = _HeldLease(shop, lease, lease_seconds, time.monotonic()) if lease else None
     if lease is None:
         # Another exchange or refresh for this shop is in flight. Nothing is
         # spent: the completion stays usable until it expires.
@@ -512,11 +583,20 @@ async def complete_authorization(
     row.code_enc = None
     db.commit()
 
+    # From here on, any path that does not store the grant flags the shop's
+    # stored credential (if any) as possibly retired by Shopify: a grant may
+    # exist that we never stored (late response, discarded result).
     stage = "exchange"
+    exchange_code_value = code
     try:
-        grant = await api.exchange_code(shop_domain=shop, code=code)
+        grant = await _guarded_call(db, held, lambda: api.exchange_code(shop_domain=shop, code=exchange_code_value))
         stage = "identity"
-        identity = await api.shop_identity(shop_domain=shop, access_token=grant.access_token)
+        identity = await _guarded_call(
+            db, held, lambda: api.shop_identity(shop_domain=shop, access_token=grant.access_token))
+    except _LeaseLost:
+        logger.warning("[SHOPIFY_CONNECTION] completion lease lost tenant=%s stage=%s", actor.tenant_id, stage)
+        _finish_failed_exchange(db, state_id, shop, lease, C_SUPERSEDED, possible_grant=stage == "identity")
+        raise ConnectionRefused(C_SUPERSEDED) from None
     except ShopifyApiError as exc:
         if exc.code in ("scope_missing", "scope_excess"):
             out = C_SCOPE_INVALID
@@ -524,28 +604,32 @@ async def complete_authorization(
             out = C_IDENTITY_UNVERIFIED
         else:
             out = C_EXCHANGE_FAILED
+        # A definite refusal of the code issues nothing; anything else at the
+        # exchange (timeout, 5xx, a token we refused) may have issued a grant.
+        possible = stage == "identity" or exc.kind != "permanent"
         logger.warning("[SHOPIFY_CONNECTION] completion refused tenant=%s stage=%s code=%s",
                        actor.tenant_id, stage, exc.code)
-        _finish_failed_exchange(db, state_id, shop, lease, out)
+        _finish_failed_exchange(db, state_id, shop, lease, out, possible_grant=possible)
         raise ConnectionRefused(out) from None
     finally:
         code = None
+        exchange_code_value = None
     if identity.shop_domain != shop:
-        _finish_failed_exchange(db, state_id, shop, lease, C_IDENTITY_MISMATCH)
+        _finish_failed_exchange(db, state_id, shop, lease, C_IDENTITY_MISMATCH, possible_grant=True)
         raise ConnectionRefused(C_IDENTITY_MISMATCH)
 
     try:
         return _claim(db, actor=actor, state_id=state_id, shop_domain=shop, lease=lease, identity=identity,
                       grant=grant, generation_at_start=generation_at_start, cipher=cipher, now=now or utcnow())
     except ConnectionRefused as exc:
-        _finish_failed_exchange(db, state_id, shop, lease, exc.code)
+        _finish_failed_exchange(db, state_id, shop, lease, exc.code, possible_grant=True)
         raise
     except IntegrityError:
         # A concurrent claim committed first (only possible after a lease takeover).
         db.rollback()
         winner = _connection_by_domain(db, shop) or _connection_by_gid(db, identity.shop_gid)
         out = C_SHOP_UNAVAILABLE if winner is not None and winner.tenant_id != actor.tenant_id else C_SUPERSEDED
-        _finish_failed_exchange(db, state_id, shop, lease, out)
+        _finish_failed_exchange(db, state_id, shop, lease, out, possible_grant=True)
         raise ConnectionRefused(out) from None
 
 
@@ -687,8 +771,10 @@ def _supersede_states(db: Session, shop_domain: str, now: datetime) -> None:
 
 
 def _request_reconcile(conn: ShopifyConnection, now: datetime) -> None:
-    """Make the connection due for reconciliation now (durable)."""
+    """Make the connection due for reconciliation now (durable) and bump the
+    request version, so a probe that started earlier cannot clear it."""
     conn.reconcile_next_at = now
+    conn.reconcile_request_version = int(conn.reconcile_request_version or 0) + 1
 
 
 # ── Tenant disconnect ─────────────────────────────────────────────────────────
@@ -892,8 +978,10 @@ async def refresh_credentials(
         db.rollback()
         return RefreshOutcome("not_active")
     shop, tenant_id = conn.shop_domain, int(conn.tenant_id)
+    lease_seconds = REFRESH_LEASE_SECONDS
     lease = acquire_shop_lease(db, shop_domain=shop, purpose=LEASE_REFRESH, tenant_id=tenant_id, now=current,
-                               seconds=REFRESH_LEASE_SECONDS)
+                               seconds=lease_seconds)
+    held = _HeldLease(shop, lease, lease_seconds, time.monotonic()) if lease else None
     if lease is None:
         db.rollback()
         return RefreshOutcome("in_progress")
@@ -915,8 +1003,15 @@ async def refresh_credentials(
     except crypto.CredentialCryptoError:
         return _refresh_rejected(db, connection_id, cas, STATUS_REAUTH_REQUIRED, "credential_unreadable", current)
     try:
-        grant = await api.refresh(shop_domain=shop, refresh_token=refresh_token)
+        grant = await _guarded_call(db, held, lambda: api.refresh(shop_domain=shop, refresh_token=refresh_token))
+    except _LeaseLost:
+        refresh_token = None
+        logger.info("[SHOPIFY_CONNECTION] refresh not attempted connection=%s reason=lease_lost", connection_id)
+        return RefreshOutcome("superseded")
     except ShopifyApiError as exc:
+        # A timed-out refresh may have rotated the pair at Shopify; the stored
+        # pair is kept (Shopify accepts a retry of the previous refresh token
+        # until the replacement is used) and the attempt is deferred.
         refresh_token = None
         if exc.kind == "permanent" or exc.code in ("scope_missing", "scope_excess"):
             reason = "scope_invalid" if exc.code.startswith("scope_") else "refresh_rejected"
@@ -990,10 +1085,12 @@ async def reconcile(
     api: ShopifyApi,
     cipher: crypto.TokenCipher,
     now: Optional[datetime] = None,
+    reconcile_lease: Optional[str] = None,
 ) -> str:
     """Resolve a quarantine / revalidation with Shopify's own answer.
 
-    retained | uninstalled | identity_mismatch | deferred | superseded | nothing_to_do | not_found
+    retained | uninstalled | reauth_required | identity_mismatch | deferred | superseded | nothing_to_do |
+    not_found
 
     A normally expired access token is refreshed first (a successful refresh
     is itself evidence the install is alive); only a credential Shopify
@@ -1001,6 +1098,15 @@ async def reconcile(
     current one (same generation **and** credential version) — a refusal of an
     older pair never erases a newer one. Transient failures leave the
     quarantine in place.
+
+    A quarantine for a possibly retired credential (``POSSIBLE_RETIRED``) is
+    only cleared by a successful forced refresh — an access token Shopify
+    retired stays usable until it expires, so a probe alone proves nothing.
+
+    Fences: the result is written only if generation, credential version and
+    (when given) the recovery runner's ``reconcile_lease`` still hold, and a
+    retain clears the request only if no newer reconciliation request
+    (``reconcile_request_version``) arrived after the snapshot.
     """
     current = now or utcnow()
     conn = db.get(ShopifyConnection, connection_id, populate_existing=True)
@@ -1012,6 +1118,8 @@ async def reconcile(
         db.rollback()
         return "nothing_to_do"
     generation, version = int(conn.generation), int(conn.credential_version)
+    request_version = int(conn.reconcile_request_version or 0)
+    force_refresh = conn.status == STATUS_QUARANTINED and conn.quarantine_reason == POSSIBLE_RETIRED
     tenant_id, shop, shop_gid = conn.tenant_id, conn.shop_domain, conn.shop_gid
     access_enc, access_expires_at = conn.access_token_enc, conn.access_token_expires_at
     # Events received after this point are not covered by this probe.
@@ -1021,18 +1129,23 @@ async def reconcile(
     )
     db.rollback()
 
+    fence = dict(generation=generation, request_version=request_version, lease=reconcile_lease, now=current)
     token: Optional[str] = None
-    if access_expires_at is not None and access_expires_at > current + timedelta(seconds=ACCESS_TOKEN_MARGIN_SECONDS):
+    if (not force_refresh and access_expires_at is not None
+            and access_expires_at > current + timedelta(seconds=ACCESS_TOKEN_MARGIN_SECONDS)):
         try:
             token = cipher.decrypt(access_enc, crypto.token_context(
                 crypto.PURPOSE_ACCESS_TOKEN, tenant_id=tenant_id, shop_domain=shop, generation=generation))
         except crypto.CredentialCryptoError:
             token = None
     if token is None:
-        outcome = await refresh_credentials(db, connection_id=connection_id, api=api, cipher=cipher, now=current,
-                                            allow_quarantined=True, rejection_status=STATUS_UNINSTALLED)
+        if reconcile_lease is not None and not _reconcile_lease_valid(db, connection_id, reconcile_lease, current):
+            return "superseded"
+        outcome = await refresh_credentials(
+            db, connection_id=connection_id, api=api, cipher=cipher, now=current, allow_quarantined=True,
+            rejection_status=STATUS_REAUTH_REQUIRED if force_refresh else STATUS_UNINSTALLED)
         if outcome.status == "rejected":
-            return "uninstalled"
+            return STATUS_REAUTH_REQUIRED if force_refresh else "uninstalled"
         if outcome.status != "refreshed" or outcome.generation != generation:
             return "superseded" if outcome.status in ("superseded", "not_active") else "deferred"
         token, version = outcome.access_token, int(outcome.credential_version)
@@ -1041,22 +1154,41 @@ async def reconcile(
     except ShopifyApiError as exc:
         token = None
         if exc.kind == "rejected":
-            return _cas_tombstone(db, connection_id, generation, version, STATUS_UNINSTALLED, "uninstalled", current)
+            return _cas_tombstone(db, connection_id, version, STATUS_UNINSTALLED, "uninstalled", **fence)
         logger.warning("[SHOPIFY_CONNECTION] reconcile deferred connection=%s code=%s", connection_id, exc.code)
         return "deferred"
     token = None
     if identity.shop_gid != shop_gid or identity.shop_domain != shop:
-        result = _cas_tombstone(db, connection_id, generation, version, STATUS_REAUTH_REQUIRED,
-                                "identity_mismatch", current)
+        result = _cas_tombstone(db, connection_id, version, STATUS_REAUTH_REQUIRED, "identity_mismatch", **fence)
         return "identity_mismatch" if result != "superseded" else result
-    return _cas_retain(db, connection_id, generation, version, snapshot, current)
+    return _cas_retain(db, connection_id, version, snapshot, **fence)
 
 
-def _cas_tombstone(db: Session, connection_id: int, generation: int, version: int, status: str, reason: str,
-                   now: datetime) -> str:
+def _reconcile_lease_valid(db: Session, connection_id: int, lease: str, now: datetime) -> bool:
+    row = db.execute(
+        select(ShopifyConnection.reconcile_lease_id, ShopifyConnection.reconcile_lease_expires_at)
+        .where(ShopifyConnection.id == connection_id)
+    ).first()
+    db.rollback()
+    return bool(row and row[0] == lease and row[1] is not None and row[1] > now)
+
+
+def _fenced(conn: Optional[ShopifyConnection], *, generation: int, version: int, lease: Optional[str],
+            now: datetime) -> bool:
+    if conn is None or int(conn.generation) != generation or int(conn.credential_version) != version:
+        return False
+    if conn.status not in CREDENTIAL_STATUSES:
+        return False
+    if lease is not None and (conn.reconcile_lease_id != lease or conn.reconcile_lease_expires_at is None
+                              or conn.reconcile_lease_expires_at <= now):
+        return False
+    return True
+
+
+def _cas_tombstone(db: Session, connection_id: int, version: int, status: str, reason: str, *, generation: int,
+                   request_version: int, lease: Optional[str], now: datetime) -> str:
     conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
-    if (conn is None or int(conn.generation) != generation or int(conn.credential_version) != version
-            or conn.status not in CREDENTIAL_STATUSES):
+    if not _fenced(conn, generation=generation, version=version, lease=lease, now=now):
         db.rollback()
         return "superseded"
     _tombstone(conn, status, reason, now)
@@ -1069,23 +1201,17 @@ def _cas_tombstone(db: Session, connection_id: int, generation: int, version: in
     return status
 
 
-def _cas_retain(db: Session, connection_id: int, generation: int, version: int, snapshot: Optional[int],
-                now: datetime) -> str:
+def _cas_retain(db: Session, connection_id: int, version: int, snapshot: Optional[int], *, generation: int,
+                request_version: int, lease: Optional[str], now: datetime) -> str:
     conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
-    if (conn is None or int(conn.generation) != generation or int(conn.credential_version) != version
-            or conn.status not in CREDENTIAL_STATUSES):
+    if not _fenced(conn, generation=generation, version=version, lease=lease, now=now):
         db.rollback()
         return "superseded"
-    newer = db.scalar(
-        select(func.count()).select_from(ShopifyWebhookEvent).where(
-            ShopifyWebhookEvent.connection_id == connection_id,
-            ShopifyWebhookEvent.resolution == "pending",
-            ShopifyWebhookEvent.id > (snapshot or 0),
-        )
-    )
+    newer = int(conn.reconcile_request_version or 0) != request_version
     _resolve_events(db, connection_id, "retained", now, max_event_id=snapshot or 0)
     if newer:
-        # An uninstall arrived after the probe began; it needs its own probe.
+        # A reconciliation was requested after this probe began (a new event, a
+        # duplicate delivery, a possible retirement); it needs its own probe.
         _audit(db, tenant_id=conn.tenant_id, shop_domain=conn.shop_domain, action="quarantine_probe_outdated",
                connection=conn)
         db.commit()

@@ -77,6 +77,7 @@ def _definitions() -> dict:
         _ts("quarantined_at"),
         sa.Column("quarantine_reason", sa.String(32), nullable=True),
         _ts("revalidation_requested_at"),
+        sa.Column("reconcile_request_version", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column("reconcile_attempts", sa.Integer(), nullable=False, server_default=sa.text("0")),
         _ts("reconcile_next_at"),
         sa.Column("reconcile_lease_id", sa.String(64), nullable=True),
