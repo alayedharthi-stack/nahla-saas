@@ -96,6 +96,7 @@ def proof():
     from core.observability_sentry import _before_send
 
     assert Path(main.__file__).resolve() == ROOT / 'backend/main.py'
+    assert os.environ['RAILWAY_GIT_COMMIT_SHA'] == os.environ['PROOF_SOURCE_SHA']
     application = main._FASTAPI_APPLICATION
     assert not application.dependency_overrides
     paths = {route.path for route in application.routes}
@@ -163,6 +164,9 @@ def proof():
                                     follow_redirects=False) as client:
             for path in ('/alive', '/healthz', '/auth/ping'):
                 assert (await client.get(path)).status_code == 200
+            version = await client.get('/version')
+            assert version.status_code == 200
+            assert version.json()['git_sha'] == os.environ['PROOF_SOURCE_SHA']
             check('real_asgi_liveness', lambda: None)
             response = await client.get(callback + '?' + query)
             assert response.status_code == (404 if MODE != 'legacy' else 401)
@@ -242,10 +246,9 @@ def proof():
 
     def no_side_effects():
         assert not ATTEMPTS['network'] and not ATTEMPTS['database'], ATTEMPTS
-        # Python's platform.processor() probes `uname -p` on Linux. The guard
-        # still refuses it. Classify only that exact stdlib read-only lookup;
-        # every other subprocess attempt fails, even if caught by app code.
-        assert all(p['stdlib_processor_lookup'] for p in ATTEMPTS['subprocess']), ATTEMPTS
+        # Supply genuine non-secret source metadata, preventing the existing
+        # health router's import-time git fallback. No subprocess is waived.
+        assert not ATTEMPTS['subprocess'], ATTEMPTS
         extra = [t.name for t in threading.enumerate() if t.ident not in THREADS_BEFORE]
         assert not any('shopify' in name.lower() for name in extra), extra
         REPORT['additional_threads'] = extra

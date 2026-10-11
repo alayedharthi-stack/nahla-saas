@@ -121,6 +121,7 @@ jobs:
             esac
             docker run --rm --network none \
               --env-file proof.env --env "PROOF_MODE=$kind" --env "PROOF_SOURCE_SHA=$revision" \
+              --env "RAILWAY_GIT_COMMIT_SHA=$revision" \
               --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_production_asgi.py,target=/proof.py,readonly" \
               "nahla-asgi-proof:$kind" python -B /proof.py 2>&1 | tee "$kind-asgi.log"
             if [ "${PIPESTATUS[0]}" -ne 0 ]; then failed=1; fi
@@ -156,6 +157,7 @@ jobs:
             esac
             docker run --rm --network none --env-file proof.env \
               --env "PROOF_MODE=$kind" --env "PROOF_SOURCE_SHA=$revision" \
+              --env "RAILWAY_GIT_COMMIT_SHA=$revision" \
               --env PROOF_CALLBACK_PROBE=1 --env API_SECRET_KEY=synthetic-service-key-for-asgi-proof \
               --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_production_asgi.py,target=/proof.py,readonly" \
               "nahla-asgi-proof:$kind" python -B /proof.py 2>&1 | tee "$kind-service-key-callback.log"
