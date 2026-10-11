@@ -239,7 +239,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # Dormant Google Merchant binding and offer ledger: migration 0124,
                    # frozen scope and dispatched operations, lease fences, high-water
                    # generations and retained evidence.
-                   "google_merchant_ledger"]
+                   "google_merchant_ledger", "google_merchant_ledger_repository"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -276,6 +276,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "shopify_catalog_import": ("proof", harness_env),
         "shopify_privacy_webhooks": ("proof", harness_env),
         "google_merchant_ledger": ("proof", harness_env),
+        "google_merchant_ledger_repository": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]
