@@ -37,22 +37,33 @@ Idempotency, replay and redelivery
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
-from sqlalchemy import func, inspect, or_, select, text
+from sqlalchemy import create_engine, func, inspect, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from services.shopify_connection.models import ShopifyConnection
-from services.shopify_privacy.config import DEADLINE_DAYS, RECEIPT_LOCK_TIMEOUT, RECEIPT_STATEMENT_TIMEOUT
+from services.shopify_privacy.config import (
+    DEADLINE_DAYS,
+    RECEIPT_CONNECT_TIMEOUT_SECONDS,
+    RECEIPT_LOCK_TIMEOUT,
+    RECEIPT_POOL_TIMEOUT_SECONDS,
+    RECEIPT_STATEMENT_TIMEOUT,
+    RECEIPT_STATEMENT_TIMEOUT_MS,
+    RECEIPT_WORKERS,
+)
 from services.shopify_privacy.models import (
     DUE_STATES,
     IDENTITY_CONFLICT,
     IDENTITY_MATCHED,
     IDENTITY_UNKNOWN,
+    ALWAYS_RECORDED_ACTIONS,
     MAX_DELIVERY_ROWS_PER_REQUEST,
+    MAX_EVENTS_PER_REQUEST,
     OPEN_STATES,
     PRIVACY_TABLE_NAMES,
     STATE_RECEIVED,
@@ -77,15 +88,56 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def wall_clock() -> datetime:
+    """The clock a receipt is stamped with at write time (a seam for tests)."""
+    return datetime.now(timezone.utc)
+
+
 def tables_present(db: Session) -> bool:
     """True only when inspection proves the privacy tables (0123) and the
-    connection table exist; an inspection failure is treated as absent."""
+    connection table exist; an inspection failure is treated as absent.
+    Inspects through the session's own connection, so the caller's
+    connection-level timeouts bound it."""
     try:
-        names = set(inspect(db.get_bind()).get_table_names())
+        names = set(inspect(db.connection()).get_table_names())
     except Exception as exc:  # noqa: BLE001 — unknown schema is treated as absent (fail closed)
         logger.warning("[SHOPIFY_PRIVACY] schema inspect failed kind=%s", type(exc).__name__)
         return False
     return set(PRIVACY_TABLE_NAMES) | {"shopify_connections"} <= names
+
+
+def dedicated_session_factory(database_url: Optional[str] = None) -> Callable[[], Session]:
+    """Sessions for the webhook receipt only: the shared database URL with a
+    separate, small pool and tight bounds (checkout, connect, statement and
+    lock timeouts), so a starved or slow shared pool can never hold a
+    delivery past its budget. The shared engine's settings are unchanged."""
+    if database_url is None:
+        from session import DATABASE_URL as database_url  # noqa: PLC0415,N811
+    engine = create_engine(
+        database_url,
+        future=True,
+        pool_size=RECEIPT_WORKERS,
+        max_overflow=0,
+        pool_timeout=RECEIPT_POOL_TIMEOUT_SECONDS,
+        pool_pre_ping=True,
+        pool_recycle=280,
+        connect_args={
+            "connect_timeout": RECEIPT_CONNECT_TIMEOUT_SECONDS,
+            "options": f"-c statement_timeout={RECEIPT_STATEMENT_TIMEOUT_MS} -c lock_timeout={RECEIPT_LOCK_TIMEOUT}",
+        },
+    )
+    return sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+
+def _commit_before(db: Session, deadline: Optional[float]) -> None:
+    """Commit only while the delivery's budget still holds; otherwise roll
+    back (the sender is answered 503 and redelivers). A commit already in
+    flight at the deadline may still complete: the redelivery then attaches
+    to the same open request, so a late commit is idempotent, never a loss."""
+    if deadline is not None and time.monotonic() >= deadline:
+        db.rollback()
+        raise ReceiptUnavailable("deadline")
+    db.commit()
 
 
 @dataclass(frozen=True)
@@ -147,6 +199,19 @@ def resolve_identity(db: Session, shop_domain: str, shop_gid: str) -> Identity:
 
 
 def event(db: Session, request: ShopifyPrivacyRequest, action: str, *, detail: Optional[dict] = None) -> None:
+    """Append one transition, capped per request so signed replays cannot grow
+    storage without bound. The first receipt and an execution are always
+    recorded; past the cap a single ``event_log_capped`` marker is written
+    and later redeliveries / evaluations only move the request's counters
+    (``delivery_count``, ``attempts``), which stay authoritative for the
+    fences. Every caller holds the request row lock, so the count is exact."""
+    if action not in ALWAYS_RECORDED_ACTIONS:
+        count = db.scalar(select(func.count()).select_from(ShopifyPrivacyRequestEvent)
+                          .where(ShopifyPrivacyRequestEvent.request_id == request.id))
+        if count >= MAX_EVENTS_PER_REQUEST:
+            return
+        if count == MAX_EVENTS_PER_REQUEST - 1:
+            action, detail = "event_log_capped", {"delivery_count": int(request.delivery_count)}
     db.add(ShopifyPrivacyRequestEvent(
         request_id=request.id, tenant_id=request.tenant_id, action=action, state=request.state,
         reason=request.reason, detail=detail or None,
@@ -212,15 +277,21 @@ def record_receipt(
     webhook_id: Optional[str],
     triggered_at: Optional[datetime],
     now: Optional[datetime] = None,
+    deadline: Optional[float] = None,
 ) -> Tuple[str, int]:
     """(outcome, request id) after the receipt is committed. Raises on any
-    database error (the caller rolls back and answers non-2xx)."""
-    current = now or utcnow()
+    database error (the caller rolls back and answers non-2xx).
+
+    Timestamps are taken at write time, after any lock wait: a delivery that
+    started earlier but waited behind a later one is stamped no earlier than
+    the row it attaches to (``last_delivery_at >= received_at`` always holds).
+    """
     db.execute(text(f"SET LOCAL lock_timeout = '{RECEIPT_LOCK_TIMEOUT}'"))
     db.execute(text(f"SET LOCAL statement_timeout = '{RECEIPT_STATEMENT_TIMEOUT}'"))
     identity = resolve_identity(db, payload.shop_domain, payload.shop_gid)
     request = _open_request(db, payload, body_sha256)
     if request is None:
+        current = now or wall_clock()
         generation = identity.generation if identity.state == IDENTITY_MATCHED else None
         new_id = db.execute(pg_insert(ShopifyPrivacyRequest).values(
             topic=payload.topic, shop_domain=payload.shop_domain, shop_gid=payload.shop_gid,
@@ -237,16 +308,18 @@ def record_receipt(
             _log_delivery(db, new_id, webhook_id=webhook_id, triggered_at=triggered_at, generation=generation,
                           now=current)
             event(db, request, "received", detail={"identity": identity.state})
-            db.commit()
+            _commit_before(db, deadline)
             return OUTCOME_RECEIVED, new_id
         # A concurrent delivery of the same body committed first.
         request = _open_request(db, payload, body_sha256)
         if request is None:
             raise ReceiptUnavailable("open request vanished")
-    observed = _attach(db, request, identity, current)
+    # Under the request lock: never earlier than the row's own timestamps.
+    stamp = max(now or wall_clock(), request.received_at, request.last_delivery_at)
+    observed = _attach(db, request, identity, stamp)
     _log_delivery(db, request.id, webhook_id=webhook_id, triggered_at=triggered_at, generation=observed,
-                  now=current)
+                  now=stamp)
     event(db, request, "redelivered", detail={"delivery_count": int(request.delivery_count)})
     request_id = int(request.id)
-    db.commit()
+    _commit_before(db, deadline)
     return OUTCOME_DUPLICATE, request_id

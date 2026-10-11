@@ -15,7 +15,8 @@ so startup ``create_all`` never builds them):
                                     30-day deadline, completion evidence CHECK
   shopify_privacy_deliveries        capped delivery log (canonical UUID webhook
                                     id / parsed timestamp only)
-  shopify_privacy_request_events    append-only, PII-free transitions
+  shopify_privacy_request_events    append-only transitions (fixed codes and counts;
+                                    no raw customer identifier or payload)
 
 No raw body, header, HMAC, email, phone, customer id or order id has a column.
 Nothing existing is altered: the composite foreign key reuses

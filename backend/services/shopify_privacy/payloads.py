@@ -45,6 +45,9 @@ from services.shopify_privacy.models import (
 )
 
 _ID_LIMIT = 10 ** 20
+# A persisted id must fit PostgreSQL's signed BIGINT; a larger one is a
+# deterministic refusal, never a storage retry.
+_BIGINT_MAX = 2 ** 63 - 1
 
 # Fixed refusal codes (the only text that leaves this module).
 C_PAYLOAD_INVALID = "payload_invalid"
@@ -62,7 +65,9 @@ class PayloadRejected(Exception):
 
 @dataclass(frozen=True)
 class PrivacyPayload:
-    """The non-personal facts of one signed compliance body."""
+    """What is kept of one signed compliance body: no raw customer identifier
+    or payload. The shop identity and the Shopify request id remain linkable
+    metadata (covered by the pending retention policy)."""
 
     topic: str
     shop_id: int
@@ -191,7 +196,7 @@ def parse_privacy_body(raw: bytes, claimed_topic: str) -> PrivacyPayload:
         return PrivacyPayload(topic=claimed_topic, shop_id=shop_id, shop_domain=domain, customer_ref_kind=kind,
                               orders_count=_order_ids(payload["orders_to_redact"]))
     request = payload["data_request"]
-    if not isinstance(request, dict) or not _positive_id(request.get("id")):
+    if not isinstance(request, dict) or not _positive_id(request.get("id")) or request["id"] > _BIGINT_MAX:
         raise PayloadRejected(C_PAYLOAD_INVALID)
     return PrivacyPayload(topic=claimed_topic, shop_id=shop_id, shop_domain=domain, customer_ref_kind=kind,
                           orders_count=_order_ids(payload["orders_requested"]),

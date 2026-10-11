@@ -17,7 +17,8 @@ WhatsApp, Moyasar, ``products`` or any other shared table.
 Module map:
 
   config.py    flags (intake / worker / destructive, all off), bounds, audit version
-  payloads.py  strict JSON and signed-body topic classification (no PII returned)
+  payloads.py  strict JSON and signed-body topic classification (no raw customer
+               identifier or payload returned)
   headers.py   unsigned diagnostic headers reduced to canonical UUID / timestamp
   models.py    ShopifyPrivacyBase tables (not models.Base)
   store.py     identity resolution and durable, idempotent receipt

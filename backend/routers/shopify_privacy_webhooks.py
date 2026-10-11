@@ -17,6 +17,7 @@ a delivery that was never stored. Here every failure stays non-2xx.
 
 Order of checks (fixed response codes; bodies are fixed codes only):
   413  declared or streamed body larger than the bound (before anything else)
+  408  body not received within RECEIPT_BODY_READ_SECONDS
   401  client secret missing (fail closed), missing / repeated / malformed
        ``X-Shopify-Hmac-Sha256``, or a raw-body HMAC mismatch
   415  not ``application/json`` (after authentication)
@@ -24,8 +25,25 @@ Order of checks (fixed response codes; bodies are fixed codes only):
        strict JSON; body shape not that topic's (signed-body classification);
        signed shop identity not canonical; ``X-Shopify-Shop-Domain`` not equal
        to the signed domain
-  503  storage absent or the durable receipt failed (Shopify redelivers)
-  200  only after the receipt committed
+  503  no receipt slot free, storage absent, the durable receipt failed, or it
+       did not commit within RECEIPT_BUDGET_SECONDS (Shopify redelivers)
+  200  only after the receipt committed within the budget
+
+Event loop and budget
+  The handler never touches the database on the event loop. The durable
+  receipt — pool checkout, connect, schema inspection, receipt SQL and
+  commit — runs on a dedicated bounded thread pool with its own small engine
+  (``store.dedicated_session_factory``: shared URL, separate pool, tight
+  checkout / connect / statement / lock timeouts; the shared engine is not
+  changed). A slot is taken without waiting (no backlog: a full pool answers
+  503 at once) and released only when the thread finishes. The answer waits
+  at most RECEIPT_BUDGET_SECONDS. A Python thread cannot be cancelled: a
+  receipt still running at the deadline keeps its slot and its connection
+  until its own statement timeout ends it, and it checks the deadline again
+  before committing (rolling back when passed). A commit already in flight
+  at the deadline may still complete after the 503 — Shopify's redelivery
+  then attaches to the same open request (idempotent), so the outcome is a
+  duplicate delivery count, never a lost or falsely acknowledged receipt.
 
 Never logged, stored or reflected: the body, any header value, the HMAC, the
 secret, a customer email / phone / id or order ids. Unsigned webhook id and
@@ -33,18 +51,24 @@ triggered-at are kept only in canonical UUID / timestamp form.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from core.database import get_db
 from services.shopify_connection.webhooks import WebhookRejected, body_digest, verify_webhook_hmac
 from services.shopify_privacy import store
 from services.shopify_privacy.config import (
     MAX_BODY_BYTES,
+    RECEIPT_BODY_READ_SECONDS,
+    RECEIPT_BUDGET_SECONDS,
+    RECEIPT_WORKERS,
     ROUTE_PREFIX,
     TOPIC_PATHS,
     intake_enabled,
@@ -57,7 +81,7 @@ from services.shopify_privacy.models import (
     TOPIC_SHOP_REDACT,
     TOPICS,
 )
-from services.shopify_privacy.payloads import PayloadRejected, parse_privacy_body
+from services.shopify_privacy.payloads import PayloadRejected, PrivacyPayload, parse_privacy_body
 
 logger = logging.getLogger("nahla.shopify_privacy")
 
@@ -73,7 +97,61 @@ C_HEADER_INVALID = "header_invalid"
 C_TOPIC_INVALID = "topic_invalid"
 C_TOPIC_MISMATCH = "topic_mismatch"
 C_SHOP_MISMATCH = "shop_mismatch"
+C_BODY_TIMEOUT = "body_timeout"
 C_RETRY = "retry"
+
+# Dedicated, bounded receipt execution (never the event loop, never the
+# shared pool). Slots == workers, so an admitted receipt starts at once.
+_EXECUTOR = ThreadPoolExecutor(max_workers=RECEIPT_WORKERS, thread_name_prefix="shopify-privacy-receipt")
+_SLOTS = threading.BoundedSemaphore(RECEIPT_WORKERS)
+_session_factory: Optional[Callable[[], Session]] = None
+_factory_lock = threading.Lock()
+
+
+def set_receipt_session_factory(factory: Optional[Callable[[], Session]]) -> None:
+    """Test / provisioning seam: the session factory receipts use (None = the
+    lazily built dedicated engine)."""
+    global _session_factory
+    with _factory_lock:
+        _session_factory = factory
+
+
+def _receipt_sessions() -> Callable[[], Session]:
+    global _session_factory
+    with _factory_lock:
+        if _session_factory is None:
+            _session_factory = store.dedicated_session_factory()
+        return _session_factory
+
+
+class _StorageAbsent(Exception):
+    pass
+
+
+def _durable_receipt(payload: PrivacyPayload, digest: str, webhook_id: Optional[str], triggered_at,
+                     deadline: float) -> Tuple[str, int]:
+    """Runs on the receipt pool. Releases its slot when it ends, whatever happened."""
+    try:
+        if time.monotonic() >= deadline:
+            raise store.ReceiptUnavailable("deadline")
+        db = _receipt_sessions()()
+        try:
+            if not store.tables_present(db):
+                raise _StorageAbsent()
+            if time.monotonic() >= deadline:  # the caller has already answered 503
+                raise store.ReceiptUnavailable("deadline")
+            return store.record_receipt(db, payload=payload, body_sha256=digest, webhook_id=webhook_id,
+                                        triggered_at=triggered_at, deadline=deadline)
+        except BaseException:
+            try:
+                db.rollback()
+            except Exception:  # noqa: silent-ok — best-effort rollback; the caller answers 503
+                pass
+            raise
+        finally:
+            db.close()
+    finally:
+        _SLOTS.release()
 
 
 class _Refused(Exception):
@@ -117,14 +195,17 @@ def _json_content_type(value: str) -> bool:
     return all(p in ("charset=utf-8", 'charset="utf-8"') for p in parts[1:])
 
 
-async def _intake(request: Request, db: Session, path_topic: Optional[str]) -> JSONResponse:
+async def _intake(request: Request, path_topic: Optional[str]) -> JSONResponse:
     if not intake_enabled():
         return _reply(C_NOT_FOUND, 404)
     try:
         declared = request.headers.getlist("content-length")
         if len(declared) > 1 or (declared and (not declared[0].isdigit() or int(declared[0]) > MAX_BODY_BYTES)):
             raise _Refused(C_BODY_TOO_LARGE, 413)
-        raw = await _read_bounded(request)
+        try:
+            raw = await asyncio.wait_for(_read_bounded(request), timeout=RECEIPT_BODY_READ_SECONDS)
+        except asyncio.TimeoutError:
+            raise _Refused(C_BODY_TIMEOUT, 408) from None
         secret = webhook_secret()
         if not secret:
             logger.error("[SHOPIFY_PRIVACY] delivery refused reason=secret_missing")
@@ -156,17 +237,27 @@ async def _intake(request: Request, db: Session, path_topic: Optional[str]) -> J
 
     webhook_id = canonical_webhook_id(_optional_single(request, "x-shopify-webhook-id"))
     triggered_at = parse_triggered_at(_optional_single(request, "x-shopify-triggered-at"))
-    if not store.tables_present(db):
+    if not _SLOTS.acquire(blocking=False):
+        logger.warning("[SHOPIFY_PRIVACY] receipt deferred kind=no_receipt_slot")
         return _reply(C_RETRY, 503)
+    deadline = time.monotonic() + RECEIPT_BUDGET_SECONDS
     try:
-        outcome, request_id = store.record_receipt(
-            db, payload=payload, body_sha256=body_digest(raw), webhook_id=webhook_id, triggered_at=triggered_at,
-        )
+        job = _EXECUTOR.submit(_durable_receipt, payload, body_digest(raw), webhook_id, triggered_at, deadline)
+    except Exception as exc:  # noqa: BLE001 — executor unavailable (shutdown)
+        _SLOTS.release()
+        logger.warning("[SHOPIFY_PRIVACY] receipt deferred kind=%s", type(exc).__name__)
+        return _reply(C_RETRY, 503)
+    # A job cancelled before it started never ran its own release.
+    job.add_done_callback(lambda f: _SLOTS.release() if f.cancelled() else None)
+    try:
+        outcome, request_id = await asyncio.wait_for(asyncio.wrap_future(job), timeout=RECEIPT_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("[SHOPIFY_PRIVACY] receipt deferred kind=deadline_exceeded")
+        return _reply(C_RETRY, 503)
+    except _StorageAbsent:
+        logger.warning("[SHOPIFY_PRIVACY] receipt deferred kind=storage_unavailable")
+        return _reply(C_RETRY, 503)
     except Exception as exc:  # noqa: BLE001 — never acknowledged; Shopify redelivers
-        try:
-            db.rollback()
-        except Exception:  # noqa: silent-ok — best-effort rollback; a fixed 503 is returned
-            pass
         logger.warning("[SHOPIFY_PRIVACY] receipt deferred kind=%s", type(exc).__name__)
         return _reply(C_RETRY, 503)
     logger.info("[SHOPIFY_PRIVACY] receipt outcome=%s request=%s topic=%s", outcome, request_id, payload.topic)
@@ -174,20 +265,20 @@ async def _intake(request: Request, db: Session, path_topic: Optional[str]) -> J
 
 
 @router.post(TOPIC_PATHS[TOPIC_CUSTOMERS_DATA_REQUEST])
-async def shopify_privacy_customers_data_request(request: Request, db: Session = Depends(get_db)):
-    return await _intake(request, db, TOPIC_CUSTOMERS_DATA_REQUEST)
+async def shopify_privacy_customers_data_request(request: Request):
+    return await _intake(request, TOPIC_CUSTOMERS_DATA_REQUEST)
 
 
 @router.post(TOPIC_PATHS[TOPIC_CUSTOMERS_REDACT])
-async def shopify_privacy_customers_redact(request: Request, db: Session = Depends(get_db)):
-    return await _intake(request, db, TOPIC_CUSTOMERS_REDACT)
+async def shopify_privacy_customers_redact(request: Request):
+    return await _intake(request, TOPIC_CUSTOMERS_REDACT)
 
 
 @router.post(TOPIC_PATHS[TOPIC_SHOP_REDACT])
-async def shopify_privacy_shop_redact(request: Request, db: Session = Depends(get_db)):
-    return await _intake(request, db, TOPIC_SHOP_REDACT)
+async def shopify_privacy_shop_redact(request: Request):
+    return await _intake(request, TOPIC_SHOP_REDACT)
 
 
 @router.post(ROUTE_PREFIX)
-async def shopify_privacy_any_topic(request: Request, db: Session = Depends(get_db)):
-    return await _intake(request, db, None)
+async def shopify_privacy_any_topic(request: Request):
+    return await _intake(request, None)

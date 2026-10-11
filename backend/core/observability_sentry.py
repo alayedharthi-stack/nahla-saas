@@ -76,6 +76,12 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     headers = request.get("headers") or {}
     if headers:
         request["headers"] = _scrub_headers(headers)
+    url_text = request.get("url")
+    if isinstance(url_text, str) and "/webhooks/shopify/" in url_text and "headers" in request:
+        # Shopify webhook headers are unsigned and caller-controlled — values
+        # (topic, shop domain, webhook id, triggered-at) and names alike: the
+        # whole map is replaced by one fixed sentinel.
+        request["headers"] = {"[withheld]": "shopify webhook headers"}
 
     # Cookies are forwarded separately from headers in some
     # integrations; never let the raw value through.

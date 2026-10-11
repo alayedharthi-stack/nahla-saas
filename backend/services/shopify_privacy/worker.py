@@ -26,12 +26,16 @@ Decisions (never from an unsigned header, delivery id or timestamp)
   * identity conflict / changed → ``manual_review``;
   * audited-schema drift, any legacy Shopify footprint or an unavailable
     legacy check → ``manual_review`` (never a broad "no data" outcome);
-  * customer request otherwise → ``assessed``: no structured Shopify customer
-    or order resource exists in the audited product-only schema — catalog
+  * unknown shop identity (no ownership row for the signed domain + GID) →
+    ``manual_review`` / ``unknown_shop_identity`` for every topic: the
+    obligation stays open with its deadline and no "no data" outcome is
+    recorded; once a connection owns the exact signed identity, the
+    reconsideration pass makes the request due again (attribution only ever
+    to that one ownership row — nothing is rebound);
+  * matched customer request otherwise → ``assessed``: no structured Shopify
+    customer record exists in the audited product-only schema — catalog
     free text, generic-customer mapping and legal fulfilment stay open;
-  * ``shop/redact``:
-      - unknown shop → ``assessed`` (no Shopify-owned row for the shop) or
-        ``manual_review`` (rows or legacy evidence exist);
+  * ``shop/redact`` on a matched shop:
       - active / quarantined at the generation observed by the latest
         delivery → one foundation revalidation probe covering that delivery,
         then ``awaiting_evidence``; a probe that retained the credential →
@@ -55,7 +59,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.orm import Session
 
 from services.shopify_connection import lifecycle
@@ -86,6 +90,7 @@ from services.shopify_privacy.models import (
     STATE_AWAITING_EVIDENCE,
     STATE_BLOCKED_POLICY,
     STATE_MANUAL_REVIEW,
+    STATE_RECEIVED,
     ShopifyPrivacyRequest,
 )
 from services.shopify_privacy.store import Identity, event, resolve_identity, snapshot, tables_present, utcnow
@@ -97,9 +102,11 @@ R_IDENTITY_CONFLICT = "identity_conflict"
 R_IDENTITY_CHANGED = "identity_changed"
 R_LEGACY_PRESENT = "legacy_shopify_data_present"
 R_LEGACY_UNAVAILABLE = "legacy_audit_unavailable"
-R_UNLINKED_ROWS = "unlinked_shopify_rows_present"
-R_NO_CUSTOMER_RESOURCES = "no_structured_shopify_customer_data_in_audited_scope"
-R_NO_SHOP_ROWS = "no_shopify_owned_rows_for_shop"
+R_UNKNOWN_SHOP = "unknown_shop_identity"
+R_IDENTITY_RESOLVABLE = "identity_resolvable"
+# Bounded claim: the audited product-only Shopify schema holds no structured
+# customer record (see audit.AUDITED_SCOPE for what stays unassessed).
+R_NO_CUSTOMER_RESOURCES = "no_structured_customer_records_in_audited_scope"
 R_AWAITING_UNINSTALL = "awaiting_uninstall_evidence"
 R_ACTIVE_RETAINED = "active_installation_retained"
 R_REINSTALLED = "reinstalled_after_last_delivery"
@@ -122,7 +129,9 @@ def _fence_now(now: datetime) -> datetime:
 
 
 def backoff_seconds(attempts: int) -> int:
-    return int(min(WORKER_BACKOFF_CAP_SECONDS, WORKER_BACKOFF_BASE_SECONDS * (2 ** max(0, int(attempts) - 1))))
+    # The exponent is clamped before it is computed (as the foundation's recovery does).
+    exponent = min(max(0, int(attempts) - 1), 16)
+    return int(min(WORKER_BACKOFF_CAP_SECONDS, WORKER_BACKOFF_BASE_SECONDS * (2 ** exponent)))
 
 
 @dataclass
@@ -160,21 +169,16 @@ def decide(db: Session, request: ShopifyPrivacyRequest, identity: Identity, now:
     footprint = audit.legacy_footprint(db, tenant_id=identity.tenant_id, shop_domain=request.shop_domain,
                                        shop_id=int(request.shop_gid.rsplit("/", 1)[1]))
     blocked = audit.footprint_blocks(footprint)
+    if identity.state == IDENTITY_UNKNOWN:
+        # No ownership row for the exact signed identity: no "no data"
+        # outcome; counts only, for the reviewer.
+        rows = audit.shop_rows(db, shop_domain=request.shop_domain, shop_gid=request.shop_gid)
+        return _manual(R_UNKNOWN_SHOP, audit.shop_assessment(footprint=footprint, rows=rows))
     if request.topic in CUSTOMER_TOPICS:
-        proposal = audit.customer_assessment(topic=request.topic, footprint=footprint,
-                                             matched=identity.state == IDENTITY_MATCHED)
+        proposal = audit.customer_assessment(topic=request.topic, footprint=footprint, matched=True)
         if blocked:
             return _manual(_legacy_reason(footprint), proposal)
         return Decision(STATE_ASSESSED, R_NO_CUSTOMER_RESOURCES, proposal)
-
-    if identity.state == IDENTITY_UNKNOWN:
-        rows = audit.shop_rows(db, shop_domain=request.shop_domain, shop_gid=request.shop_gid)
-        proposal = audit.shop_assessment(footprint=footprint, rows=rows)
-        if blocked:
-            return _manual(_legacy_reason(footprint), proposal)
-        if any(rows.values()):
-            return _manual(R_UNLINKED_ROWS, proposal)
-        return Decision(STATE_ASSESSED, R_NO_SHOP_ROWS, proposal)
 
     conn = identity.connection
     observed = request.last_delivery_generation
@@ -208,6 +212,30 @@ def decide(db: Session, request: ShopifyPrivacyRequest, identity: Identity, now:
             return _manual(R_ACTIVE_RETAINED)
         return _awaiting(R_AWAITING_UNINSTALL, attempts, R_EVIDENCE_TIMEOUT)
     return _manual(R_NO_CONFIRMED_UNINSTALL)
+
+
+# ── Reconsideration of unknown identities ─────────────────────────────────────
+
+def reopen_resolvable_unknowns(db: Session, *, now: datetime, limit: int = WORKER_BATCH_LIMIT) -> int:
+    """Make due again the requests held for an unknown shop identity whose
+    signed domain or GID is now owned by a connection row. The worker then
+    re-resolves the exact identity (matched, or conflict → review); nothing
+    is attributed or rebound here. Commits; returns the number reopened."""
+    ids = db.execute(text(
+        "SELECT r.id FROM shopify_privacy_requests r"
+        " WHERE r.state = :state AND r.reason = :reason AND EXISTS ("
+        "  SELECT 1 FROM shopify_connections c WHERE c.shop_domain = r.shop_domain OR c.shop_gid = r.shop_gid)"
+        " ORDER BY r.id LIMIT :limit FOR UPDATE OF r SKIP LOCKED"),
+        {"state": STATE_MANUAL_REVIEW, "reason": R_UNKNOWN_SHOP, "limit": int(limit)}).scalars().all()
+    for request_id in ids:
+        request = db.get(ShopifyPrivacyRequest, request_id)
+        request.state = STATE_RECEIVED
+        request.reason = R_IDENTITY_RESOLVABLE
+        request.next_attempt_at = now
+        request.updated_at = now
+        event(db, request, "reconsidered")
+    db.commit()
+    return len(ids)
 
 
 # ── Claim / apply ─────────────────────────────────────────────────────────────
@@ -279,6 +307,12 @@ def apply_decision(db: Session, *, request_id: int, lease: str, evaluated_count:
         return OUTCOME_LEASE_LOST
     if int(request.delivery_count) != evaluated_count:
         return _requeue(db, request, now, "redelivered_during_evaluation")
+    # The identity evaluated must still be the identity now (a connect flow
+    # may have committed an ownership row meanwhile, or a conflict appeared).
+    current_identity = resolve_identity(db, request.shop_domain, request.shop_gid)
+    if (current_identity.state != identity.state
+            or current_identity.connection_id != identity.connection_id):
+        return _requeue(db, request, now, "identity_changed_during_evaluation")
     if identity.state == IDENTITY_MATCHED and (
             conn is None or snapshot(conn).fingerprint() != identity.connection.fingerprint()):
         return _requeue(db, request, now, "evidence_changed_during_evaluation")
@@ -346,6 +380,8 @@ def run_tick(
     try:
         if not tables_present(db):
             return {"skipped": "storage_unavailable"}
+        db.rollback()
+        counts["reconsidered"] = reopen_resolvable_unknowns(db, now=now or utcnow(), limit=limit)
         for _ in range(int(limit)):
             claimed = claim_next(db, now=now or utcnow())
             if claimed is None:

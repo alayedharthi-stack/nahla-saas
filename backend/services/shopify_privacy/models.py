@@ -10,6 +10,10 @@ on PostgreSQL.
 
 What is stored — and what is not
 ────────────────────────────────
+No raw customer identifier or payload is retained. What remains — the body
+digest, the signed shop identity, the Shopify ``data_request.id`` and our
+request ids — is linkable metadata, kept under the pending retention policy
+(an owner decision; no period is defined here).
 One row per *logical* request (``shopify_privacy_requests``) keyed by the
 topic, the shop identity **from the signed body** and the SHA-256 of the raw
 signed body. No raw body, header, HMAC, customer email, phone, customer id or
@@ -107,6 +111,9 @@ DIGEST_RE = r"^[0-9a-f]{64}$"
 WEBHOOK_ID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 
 MAX_DELIVERY_ROWS_PER_REQUEST = 20
+# Transitions kept per request (see store.event); counters stay authoritative.
+MAX_EVENTS_PER_REQUEST = 50
+ALWAYS_RECORDED_ACTIONS = frozenset({"received", "executed"})
 
 
 def _now() -> datetime:
@@ -267,7 +274,11 @@ class ShopifyPrivacyDelivery(ShopifyPrivacyBase):
 
 
 class ShopifyPrivacyRequestEvent(ShopifyPrivacyBase):
-    """Append-only transitions: fixed codes and counts only (no PII)."""
+    """Append-only, per-request capped transitions: fixed codes and counts
+    only — no raw customer identifier or payload. Request ids remain linkable
+    metadata (pending retention policy). The first receipt and an execution
+    are always recorded; past ``MAX_EVENTS_PER_REQUEST`` only the request's
+    counters move."""
 
     __tablename__ = EVENTS_TABLE
     __table_args__ = (Index("ix_shopify_privacy_request_events_request", "request_id", "id"),)

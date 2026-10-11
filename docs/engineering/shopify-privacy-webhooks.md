@@ -75,9 +75,24 @@ slice does not claim its own fetch succeeded.
    **the signed body is classified on its own** and must equal the claimed
    topic (400) → canonical signed shop identity (`shop_id`, exact canonical
    `shop_domain`), unsigned `X-Shopify-Shop-Domain` must merely agree (400) →
-   storage present (else 503) → durable receipt committed → **200**. Any
-   storage error → rollback → **503** (Shopify retries). Response bodies are
-   fixed codes only.
+   durable receipt committed → **200**. Any storage problem → rollback →
+   **503** (Shopify retries). Response bodies are fixed codes only.
+
+   **Event loop and budget.** No database work runs on the event loop. The
+   body must arrive within 1 s (else 408); HMAC and validation are in-memory
+   on at most 64 KiB; the durable receipt — slot admission (non-blocking: a
+   full pool answers 503 at once, no backlog), pool checkout, connect,
+   schema inspection on the same bounded connection, receipt SQL and commit
+   — runs on a dedicated 4-thread pool with its own small engine (shared
+   `DATABASE_URL`, separate pool, 1 s checkout, 2 s connect, 2.5 s statement,
+   1.5 s lock timeouts; the shared engine is unchanged) and is answered within
+   3 s, so the answer comes within about 4 s of Shopify's 5 s. A thread
+   cannot be cancelled: a receipt still running at the deadline keeps its slot
+   and connection until its own timeouts end it, re-checks the deadline
+   before the receipt SQL and before committing (rolling back when passed),
+   and a commit already in flight may still complete after the 503 — the
+   redelivery then attaches to the same open request (a duplicate count,
+   never a lost or falsely acknowledged receipt).
 
 2. **Signed-body topic classification** (no header ever decides an action):
 
@@ -110,7 +125,12 @@ slice does not claim its own fetch succeeded.
      triggered-at only as a strictly parsed timestamp; anything else (an
      email- or token-shaped value, free text) is neither stored nor logged.
      Diagnostics only, never evidence.
-   * `shopify_privacy_request_events` — append-only, PII-free transitions.
+   * `shopify_privacy_request_events` — append-only transitions (fixed codes
+     and counts; no raw customer identifier or payload), **capped at 50 per
+     request**: the first receipt and an execution are always recorded; past
+     the cap one `event_log_capped` marker is written and further replays /
+     evaluations only move the request's counters (`delivery_count`,
+     `attempts`), which remain the authoritative fences.
 
    **Not stored:** the raw body, customer email, phone, customer id, order
    ids, headers or the HMAC. Only the customer reference *kind*
@@ -141,12 +161,19 @@ slice does not claim its own fetch succeeded.
    write-time clock; lock order is **connection → request** (the foundation
    and mirror order is connection → run); bounded exponential backoff.
    Decisions:
-   * identity unknown / conflicting → `manual_review` (no connection is
-     touched, nothing is rebound);
+   * identity unknown → `manual_review` / `unknown_shop_identity` for every
+     topic: the obligation stays open with its deadline and **no** "no data"
+     outcome is recorded. A reconsideration pass makes such a request due
+     again once a connection owns the signed domain or GID; the worker then
+     re-resolves the exact identity (attribution only to that one ownership
+     row). The identity is re-resolved at write time too, so a connect flow
+     committing during an evaluation sends the request back to the queue;
+   * identity conflicting → `manual_review` (no connection is touched,
+     nothing is rebound);
    * any legacy `shopify` footprint (see the audit) or schema drift of the
      audited stores → `manual_review` — never a broad "no data" outcome;
-   * customer requests with no legacy footprint → `assessed` with the
-     bounded outcome `no_structured_shopify_customer_data_in_audited_scope`
+   * customer requests on a matched shop with no legacy footprint →
+     `assessed` with the bounded outcome `no_structured_customer_records_in_audited_scope`
      at audit version `shopify-product-only-schema-audit-v1`: the
      product-only integration schema stores no structured Shopify customer
      or order resource. Catalog free text (titles, options, SKUs, vendors,
@@ -170,15 +197,18 @@ slice does not claim its own fetch succeeded.
 6. **Destructive scaffolding** — a fixture-tested provider-owned cleanup
    helper (mirror rows, staged rows and import runs of exactly one
    `(connection, tenant)`), and an operator-only executor that refuses unless
-   the destructive flag **and** an approved policy object are present. The
-   runtime's approved policy is `None`; no route or scheduler calls the
-   executor. The connection ownership tombstone, audit rows, uninstall events,
+   the destructive flag **and** an approved policy object are present, and
+   re-validates under the connection lock the audit version, the audited
+   schema snapshot and the legacy footprint (any change refuses, deletes
+   nothing and leaves the request open). The runtime's approved policy is
+   `None`; no route or scheduler calls the executor. The connection ownership tombstone, audit rows, uninstall events,
    OAuth states and privacy receipts are never deleted by this slice.
 
 7. **Observability** — `services.shopify_privacy` and
-   `routers.shopify_privacy_webhooks` join `_WITHHELD_FRAME_MODULES`; request
-   bodies on `/webhooks/shopify/` are scrubbed entirely and the HMAC header is
-   scrubbed. Logs carry fixed codes, request ids and tenant ids only.
+   `routers.shopify_privacy_webhooks` join `_WITHHELD_FRAME_MODULES`; on
+   `/webhooks/shopify/` requests the body is scrubbed and the whole headers
+   map (unsigned, caller-controlled names and values) is replaced by one
+   fixed sentinel; the HMAC header is scrubbed everywhere. Logs carry fixed codes, request ids and tenant ids only.
 
 8. **Audit script** — `scripts/audit_shopify_privacy_readonly.py`, one
    `READ ONLY` transaction, counts only (no raw rows, config or customer

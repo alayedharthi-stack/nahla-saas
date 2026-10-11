@@ -58,9 +58,25 @@ MAX_EMAIL_CHARS = 320
 MAX_PHONE_CHARS = 64
 
 DEADLINE_DAYS = 30
-# Bounded waits so the whole delivery stays inside Shopify's 5-second limit.
+
+# Supported delivery budget (Shopify allows 5 s for the whole delivery):
+#   body read            <= RECEIPT_BODY_READ_SECONDS (else 408, redelivered)
+#   HMAC + validation    in-memory, bounded by the 64 KiB body (milliseconds)
+#   durable receipt      <= RECEIPT_BUDGET_SECONDS end to end: slot admission
+#                        (non-blocking), pool checkout, connect, schema
+#                        inspection, receipt SQL and commit (else 503)
+# => at most about 4 s before the answer, plus framework overhead.
+# The receipt runs on a dedicated, bounded thread pool and its own small
+# engine (the shared DATABASE_URL with a separate pool and tighter timeouts;
+# the shared engine's defaults are unchanged), never on the event loop.
+RECEIPT_BODY_READ_SECONDS = 1.0
+RECEIPT_BUDGET_SECONDS = 3.0
+RECEIPT_WORKERS = 4
+RECEIPT_POOL_TIMEOUT_SECONDS = 1
+RECEIPT_CONNECT_TIMEOUT_SECONDS = 2
+RECEIPT_STATEMENT_TIMEOUT_MS = 2500
 RECEIPT_LOCK_TIMEOUT = "1500ms"
-RECEIPT_STATEMENT_TIMEOUT = "3000ms"
+RECEIPT_STATEMENT_TIMEOUT = f"{RECEIPT_STATEMENT_TIMEOUT_MS}ms"
 
 WORKER_LEASE_SECONDS = 60
 WORKER_BACKOFF_BASE_SECONDS = 300

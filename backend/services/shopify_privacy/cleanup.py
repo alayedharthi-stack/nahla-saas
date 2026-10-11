@@ -25,7 +25,12 @@ Two pieces, neither reachable from a route or a scheduler:
     request): the request is ``blocked_policy`` with no newer delivery since
     its evaluation, the connection is still Shopify-confirmed ``uninstalled``
     at the evaluated generation with the exact signed identity, and no
-    authorization, credential call or import is in flight. A reinstall that
+    authorization, credential call or import is in flight; and the evidence
+    that made the proposal safe is re-checked fresh in the same transaction:
+    the request's audit version is still the current one, the audited schema
+    still equals its pinned snapshot and the legacy Shopify footprint is still
+    empty. Any refusal rolls back: no row is deleted and the request stays
+    open in ``blocked_policy``. A reinstall that
     commits first is therefore refused; one that starts later waits for this
     transaction and builds a new generation. Completion records the deleted
     counts and the policy's retained categories — it is a statement about the
@@ -66,6 +71,9 @@ C_NOT_BLOCKED_POLICY = "not_blocked_policy"
 C_REDELIVERED = "redelivered_since_evaluation"
 C_CONNECTION_CHANGED = "connection_changed"
 C_IN_FLIGHT = "in_flight_lifecycle"
+C_AUDIT_VERSION_CHANGED = "audit_version_changed"
+C_AUDIT_SCHEMA_CHANGED = "audit_schema_changed"
+C_LEGACY_FOOTPRINT = "legacy_footprint_present"
 
 
 class ExecutionRefused(Exception):
@@ -162,6 +170,16 @@ def execute_shop_redaction(
         raise _refuse(db, C_CONNECTION_CHANGED)
     if audit.in_flight_lifecycle(db, connection_id=connection_id, shop_domain=conn.shop_domain, now=current):
         raise _refuse(db, C_IN_FLIGHT)
+    # Fresh evidence, not the proposal's: an assessment is only as current as
+    # the audit version, schema and legacy footprint it was made against.
+    if request.audit_version != AUDIT_VERSION:
+        raise _refuse(db, C_AUDIT_VERSION_CHANGED)
+    if audit.schema_drift(db):
+        raise _refuse(db, C_AUDIT_SCHEMA_CHANGED)
+    footprint = audit.legacy_footprint(db, tenant_id=tenant_id, shop_domain=conn.shop_domain,
+                                       shop_id=int(conn.shop_gid.rsplit("/", 1)[1]))
+    if audit.footprint_blocks(footprint):
+        raise _refuse(db, C_LEGACY_FOOTPRINT)
     deleted = delete_shop_mirror(db, connection_id=connection_id, tenant_id=tenant_id)
     request.state = STATE_COMPLETED
     request.reason = None
