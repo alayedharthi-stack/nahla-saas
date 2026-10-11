@@ -35,6 +35,7 @@ _BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 
+from backend.tests._log_redaction_isolation import restoring_log_filters  # noqa: E402
 from core import log_redaction  # noqa: E402
 from core.log_redaction import (  # noqa: E402
     REDACTED,
@@ -124,26 +125,29 @@ def test_exact_token_refresh_path_logs_no_credential(caplog) -> None:
         access_token=CANARY_EXCHANGE_TOKEN, token_type="long_lived",
         token_expires_at=None, wa_provider="meta",
     )
-    install_log_redaction()
-    with patch.object(token_manager, "META_APP_ID", "123456"), patch.object(
-        token_manager, "META_APP_SECRET", CANARY_APP_SECRET
-    ), patch.object(token_manager, "read_access_token", return_value=CANARY_EXCHANGE_TOKEN), patch.object(
-        token_manager, "store_access_token"
-    ), patch.object(token_manager, "wa_provider", return_value="meta"), patch.object(
-        token_manager, "_merchant_token_health", return_value=("expiring_soon", None)
-    ), patch.object(token_manager, "build_token_context", return_value="ctx"), patch.object(
-        token_manager.httpx, "AsyncClient", side_effect=_client
-    ), caplog.at_level(logging.DEBUG):
-        result = asyncio.run(token_manager._refresh_merchant_long_lived_token(conn))
+    # Redaction stays installed for the whole test; only the filters it added
+    # come off pytest's handlers afterwards, even if the test fails.
+    with restoring_log_filters():
+        install_log_redaction()
+        with patch.object(token_manager, "META_APP_ID", "123456"), patch.object(
+            token_manager, "META_APP_SECRET", CANARY_APP_SECRET
+        ), patch.object(token_manager, "read_access_token", return_value=CANARY_EXCHANGE_TOKEN), patch.object(
+            token_manager, "store_access_token"
+        ), patch.object(token_manager, "wa_provider", return_value="meta"), patch.object(
+            token_manager, "_merchant_token_health", return_value=("expiring_soon", None)
+        ), patch.object(token_manager, "build_token_context", return_value="ctx"), patch.object(
+            token_manager.httpx, "AsyncClient", side_effect=_client
+        ), caplog.at_level(logging.DEBUG):
+            result = asyncio.run(token_manager._refresh_merchant_long_lived_token(conn))
 
-    assert result == "ctx"
-    httpx_lines = [r.getMessage() for r in caplog.records if r.name == "httpx"]
-    assert httpx_lines, "httpx must have logged the request (the exact production line)"
-    for line in httpx_lines:
-        assert "oauth/access_token" in line
-        _assert_no_canary(line)
-    for record in caplog.records:
-        _assert_no_canary(record.getMessage())
+        assert result == "ctx"
+        httpx_lines = [r.getMessage() for r in caplog.records if r.name == "httpx"]
+        assert httpx_lines, "httpx must have logged the request (the exact production line)"
+        for line in httpx_lines:
+            assert "oauth/access_token" in line
+            _assert_no_canary(line)
+        for record in caplog.records:
+            _assert_no_canary(record.getMessage())
 
 
 def test_exact_token_refresh_exception_path_logs_no_credential(caplog) -> None:
@@ -162,22 +166,27 @@ def test_exact_token_refresh_exception_path_logs_no_credential(caplog) -> None:
         return real_client(transport=httpx.MockTransport(_handler), **kwargs)
 
     conn = SimpleNamespace(tenant_id=1, access_token=CANARY_EXCHANGE_TOKEN)
-    with patch.object(token_manager, "META_APP_ID", "123456"), patch.object(
-        token_manager, "META_APP_SECRET", CANARY_APP_SECRET
-    ), patch.object(token_manager, "read_access_token", return_value=CANARY_EXCHANGE_TOKEN), patch.object(
-        token_manager, "wa_provider", return_value="meta"
-    ), patch.object(
-        token_manager, "_merchant_token_health", return_value=("expiring_soon", None)
-    ), patch.object(token_manager.httpx, "AsyncClient", side_effect=_client), caplog.at_level(
-        logging.DEBUG
-    ):
-        assert asyncio.run(token_manager._refresh_merchant_long_lived_token(conn)) is None
+    # This path used to inherit the redaction the previous test left on
+    # pytest's handlers; install it here the way ``backend/main.py`` does, for
+    # the whole test, and remove only what was added afterwards.
+    with restoring_log_filters():
+        install_log_redaction()
+        with patch.object(token_manager, "META_APP_ID", "123456"), patch.object(
+            token_manager, "META_APP_SECRET", CANARY_APP_SECRET
+        ), patch.object(token_manager, "read_access_token", return_value=CANARY_EXCHANGE_TOKEN), patch.object(
+            token_manager, "wa_provider", return_value="meta"
+        ), patch.object(
+            token_manager, "_merchant_token_health", return_value=("expiring_soon", None)
+        ), patch.object(token_manager.httpx, "AsyncClient", side_effect=_client), caplog.at_level(
+            logging.DEBUG
+        ):
+            assert asyncio.run(token_manager._refresh_merchant_long_lived_token(conn)) is None
 
-    warnings = [r.getMessage() for r in caplog.records if "refresh failed" in r.getMessage()]
-    assert warnings, "the network-error warning must still be logged"
-    for line in warnings:
-        assert "HTTPStatusError" in line
-        _assert_no_canary(line)
+        warnings = [r.getMessage() for r in caplog.records if "refresh failed" in r.getMessage()]
+        assert warnings, "the network-error warning must still be logged"
+        for line in warnings:
+            assert "HTTPStatusError" in line
+            _assert_no_canary(line)
 
 
 # ── Exception text and stack text ──────────────────────────────────────
@@ -218,26 +227,27 @@ def test_uvicorn_access_log_redacts_inbound_query_secrets() -> None:
     previous_level, previous_propagate = logger.level, logger.propagate
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    try:
-        install_log_redaction()
-        logger.info(
-            '%s - "%s %s HTTP/%s" %d', "10.0.0.1:1234", "GET",
-            f"/webhook/whatsapp?hub.mode=subscribe&hub.verify_token={CANARY_VERIFY_TOKEN}&hub.challenge=42",
-            "1.1", 200,
-        )
-        logger.info(
-            '%s - "%s %s HTTP/%s" %d', "10.0.0.1:1234", "GET",
-            f"/auth/salla/callback?code={CANARY_OAUTH_CODE}&state=abc", "1.1", 302,
-        )
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-        logger.propagate = previous_propagate
-    out = stream.getvalue()
-    _assert_no_canary(out, CANARY_VERIFY_TOKEN, CANARY_OAUTH_CODE)
-    assert "GET /webhook/whatsapp?hub.mode=subscribe&hub.verify_token=" in out
-    assert "hub.challenge=42" in out
-    assert '" 200' in out and '" 302' in out
+    with restoring_log_filters():
+        try:
+            install_log_redaction()
+            logger.info(
+                '%s - "%s %s HTTP/%s" %d', "10.0.0.1:1234", "GET",
+                f"/webhook/whatsapp?hub.mode=subscribe&hub.verify_token={CANARY_VERIFY_TOKEN}&hub.challenge=42",
+                "1.1", 200,
+            )
+            logger.info(
+                '%s - "%s %s HTTP/%s" %d', "10.0.0.1:1234", "GET",
+                f"/auth/salla/callback?code={CANARY_OAUTH_CODE}&state=abc", "1.1", 302,
+            )
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+            logger.propagate = previous_propagate
+        out = stream.getvalue()
+        _assert_no_canary(out, CANARY_VERIFY_TOKEN, CANARY_OAUTH_CODE)
+        assert "GET /webhook/whatsapp?hub.mode=subscribe&hub.verify_token=" in out
+        assert "hub.challenge=42" in out
+        assert '" 200' in out and '" 302' in out
 
 
 # ── Headers, cookies, bodies, mappings ─────────────────────────────────
@@ -317,19 +327,20 @@ def test_install_covers_root_handlers_and_named_loggers() -> None:
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(message)s"))
     root.addHandler(handler)
-    try:
-        install_log_redaction()
-        install_log_redaction()  # idempotent
-        assert sum(isinstance(f, SecretRedactingFilter) for f in handler.filters) == 1
-        for name in log_redaction.DEFAULT_REDACTED_LOGGERS:
-            assert any(isinstance(f, SecretRedactingFilter) for f in logging.getLogger(name).filters), name
-        app_logger = logging.getLogger("nahla.some.module")
-        app_logger.setLevel(logging.INFO)
-        app_logger.warning("refresh failed: %s", httpx.URL(TOKEN_URL))
-    finally:
-        root.removeHandler(handler)
-    _assert_no_canary(stream.getvalue(), CANARY_APP_SECRET, CANARY_EXCHANGE_TOKEN)
-    assert "oauth/access_token" in stream.getvalue()
+    with restoring_log_filters():
+        try:
+            install_log_redaction()
+            install_log_redaction()  # idempotent
+            assert sum(isinstance(f, SecretRedactingFilter) for f in handler.filters) == 1
+            for name in log_redaction.DEFAULT_REDACTED_LOGGERS:
+                assert any(isinstance(f, SecretRedactingFilter) for f in logging.getLogger(name).filters), name
+            app_logger = logging.getLogger("nahla.some.module")
+            app_logger.setLevel(logging.INFO)
+            app_logger.warning("refresh failed: %s", httpx.URL(TOKEN_URL))
+        finally:
+            root.removeHandler(handler)
+        _assert_no_canary(stream.getvalue(), CANARY_APP_SECRET, CANARY_EXCHANGE_TOKEN)
+        assert "oauth/access_token" in stream.getvalue()
 
 
 def test_main_installs_redaction_on_root_handlers() -> None:

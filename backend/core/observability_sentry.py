@@ -47,6 +47,7 @@ _SENSITIVE_HEADERS = frozenset({
     "x-salla-signature",
     "x-zid-signature",
     "x-meta-signature",
+    "x-shopify-hmac-sha256",
 })
 
 _INITIALISED = False
@@ -75,6 +76,12 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     headers = request.get("headers") or {}
     if headers:
         request["headers"] = _scrub_headers(headers)
+    url_text = request.get("url")
+    if isinstance(url_text, str) and "/webhooks/shopify/" in url_text and "headers" in request:
+        # Shopify webhook headers are unsigned and caller-controlled — values
+        # (topic, shop domain, webhook id, triggered-at) and names alike: the
+        # whole map is replaced by one fixed sentinel.
+        request["headers"] = {"[withheld]": "shopify webhook headers"}
 
     # Cookies are forwarded separately from headers in some
     # integrations; never let the raw value through.
@@ -102,6 +109,10 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     path = (request.get("url") or "")
     if isinstance(path, str) and ("/auth/login" in path or "/auth/reset-password" in path):
         request["data"] = "[scrubbed]"
+    elif isinstance(path, str) and "/webhooks/shopify/" in path:
+        # Shopify webhook bodies carry shop and customer personal data
+        # (privacy compliance requests: email, phone, order ids).
+        request["data"] = "[scrubbed]"
     elif request.get("data") is not None:
         request["data"] = redact_value(request["data"])
     return request
@@ -124,6 +135,12 @@ _WITHHELD_FRAME_MODULES = (
     "services.meta_oauth_redirect",
     "services.whatsapp_platform.wa_connection_secrets",
     "services.whatsapp_platform.token_manager",
+    "services.shopify_connection",
+    "routers.shopify_connection",
+    "services.shopify_catalog",
+    "routers.shopify_catalog_import",
+    "services.shopify_privacy",
+    "routers.shopify_privacy_webhooks",
     "cryptography",
 )
 _WITHHELD_FRAME_FILES = tuple(

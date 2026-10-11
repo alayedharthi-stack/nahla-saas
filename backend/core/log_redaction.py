@@ -70,6 +70,9 @@ _EXACT_SENSITIVE_KEYS = frozenset({
     "client_id_secret",
     "code",
     "state",
+    # Shopify OAuth callback query signature and the webhook signature header.
+    "hmac",
+    "x-shopify-hmac-sha256",
 })
 # Any key *containing* one of these fragments is treated as a secret
 # (``x-api-key``, ``app_secret``, ``proxy-authorization`` …).
@@ -118,7 +121,8 @@ _BEARER_WORD = re.compile(r"Bearer\b", re.IGNORECASE)
 # token boundary, then a callback that decides sensitivity: linear in the
 # input length. The rule is exactly the former alternation's: a key that ends
 # with ``token``; contains a secret/password/api-key/authorization/cookie or
-# encryption-key fragment; or is ``code``, ``state`` or ``appsecret_proof``.
+# encryption-key fragment; or is ``code``, ``state``, ``appsecret_proof``, ``hmac`` or
+# ``x-shopify-hmac-sha256``.
 _KV_KEY = re.compile(
     r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]+)([\"']?\s*[=:]\s*[\"']?)",
     re.IGNORECASE,
@@ -128,7 +132,7 @@ _KV_KEY_FRAGMENTS = (
     "secret", "password", "passwd", "apikey", "api_key", "api-key", "authorization", "cookie",
     "enc_key", "encryption_key", "fernet_key", "signing_key", "private_key",
 )
-_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof"})
+_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof", "hmac", "x-shopify-hmac-sha256"})
 
 
 def _kv_key_is_sensitive(key: str) -> bool:
@@ -168,7 +172,8 @@ def _kv_spans(text: str) -> list:
     The sensitivity rule is the former
     alternation's: a key ending with ``token``; containing a
     secret/password/api-key/authorization/cookie or encryption-key fragment;
-    or exactly ``code``, ``state`` or ``appsecret_proof``.
+    or exactly ``code``, ``state``, ``appsecret_proof``, ``hmac`` or
+    ``x-shopify-hmac-sha256``.
     """
     spans = []
     pos = 0
@@ -217,6 +222,9 @@ def _redact_kv(text: str) -> str:
 
 # Meta Graph user / page / system-user tokens start with ``EAA``.
 _META_TOKEN = re.compile(r"\bEAA[A-Za-z0-9]{20,}")
+# Shopify credentials carry a ``shp<xx>_`` prefix (``shpat_`` admin access,
+# ``shpua_`` user access, ``shpss_`` shared secret, refresh tokens, …).
+_SHOPIFY_TOKEN = re.compile(r"\bshp[a-z]{2}_[A-Za-z0-9]{16,}")
 # A Fernet key (32 bytes, url-safe base64 with one ``=`` pad) wherever it
 # appears, e.g. as the value of a local named ``key``. Over-matching another
 # 32-byte base64 value only redacts more; it never reveals anything.
@@ -509,6 +517,7 @@ def _redact_in_base_order(text: str) -> str:
     out = _BASE_AUTH_HEADER.sub(r"\1" + REDACTED, out)
     out = _redact_kv(out)
     out = _META_TOKEN.sub(REDACTED, out)
+    out = _SHOPIFY_TOKEN.sub(REDACTED, out)
     return _FERNET_KEY.sub(REDACTED, out)
 
 
@@ -546,6 +555,7 @@ def redact_secrets(text: Any) -> str:
         out = _redact_bare_targets(out)
         out = _redact_encoded_kv(out)
         out = _META_TOKEN.sub(REDACTED, out)
+        out = _SHOPIFY_TOKEN.sub(REDACTED, out)
         out = _FERNET_KEY.sub(REDACTED, out)
         # Never keep a credential-like token the pre-PR order removes.
         return _keep_only_tokens_in(out, _redact_in_base_order(original))

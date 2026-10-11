@@ -50,6 +50,7 @@ const EXACT_CHILD: Record<string, string> = {
   '/templates/manual-coupon': '/templates',
   '/marketing/templates': '/templates-hub',
   '/integrations': '/channels',
+  '/integrations/shopify/complete': '/integrations',
   '/store-integration': '/channels',
   '/whatsapp-connect': '/channels',
   '/help/whatsapp-manual-setup': '/channels',
@@ -88,6 +89,7 @@ const EXACT_CHILD: Record<string, string> = {
 }
 
 const DEEP_CHILD = new Set<string>([
+  '/integrations/shopify/complete',
   '/customers/import',
   '/campaigns/manual-coupon',
   '/templates/manual-coupon',

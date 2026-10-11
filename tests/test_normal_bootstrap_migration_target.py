@@ -30,7 +30,17 @@ def test_repository_accepts_only_known_parallel_head_topologies() -> None:
     # AI usage branch. Both preserve normal bootstrap pinned to 0093.
     # Catalog consent 0120 extends the 0118 catalog-retirements branch and
     # replaces it as a head; the 0118 topology stays an accepted checkout.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0120"})
+    # The Shopify connection foundation 0121 extends 0120 the same way; the
+    # 0120 topology stays accepted and both heads together are not.
+    # The Shopify catalog mirror 0122 extends 0121 the same way, and the
+    # Shopify privacy requests 0123 extend 0122 the same way.
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0123"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115", "0122"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0122", "0123"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115", "0121"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0121", "0122"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115", "0120"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0120", "0121"})
     assert repository_heads_expected({"0092", "0111", "0114", "0115", "0118"})
     assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0118", "0120"})
     assert repository_heads_expected({"0092", "0111", "0114"})

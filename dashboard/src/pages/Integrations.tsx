@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CheckCircle, XCircle, ExternalLink, RefreshCw, AlertCircle, Plug, Smartphone, Copy, Loader2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import Badge from '../components/ui/Badge'
+import ShopifyConnectionCard from '../components/integrations/ShopifyConnectionCard'
 import { apiCall } from '../api/client'
 import { INTEGRATION_MANAGEMENT_PATHS } from '../lib/navigationPolicy'
 
@@ -448,6 +449,9 @@ export default function Integrations() {
           }
         />
       </div>
+
+      {/* Shopify (dormant): renders nothing unless the dashboard flag is on and the backend route answers. */}
+      <ShopifyConnectionCard />
 
       {/* Webhook info */}
       <div className="card p-5">

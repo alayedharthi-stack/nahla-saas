@@ -225,7 +225,17 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    "catalog_stale_repair_row_lock",
                    # The catalog channel-retirements migration adopts an existing
                    # table only when its definition matches; anything else fails closed.
-                   "catalog_channel_retirements_migration", "catalog_meta_consent"]
+                   "catalog_channel_retirements_migration", "catalog_meta_consent",
+                   # Dormant Shopify connection: migration 0121, ownership, leases,
+                   # fences, uninstall reconciliation and durable recovery.
+                   "shopify_connection_foundation",
+                   # Dormant read-only Shopify catalog import: migration 0122, mirror
+                   # identity and isolation, completeness, fences and publication.
+                   "shopify_catalog_import",
+                   # Dormant Shopify privacy compliance webhooks: migration 0123,
+                   # receipts, replay/reinstall fences, bounded audit scope and
+                   # fixture-only cleanup.
+                   "shopify_privacy_webhooks"]
     harness_env = {"NAHLA_RELIABILITY_REQUIRE_PG": "1", "NAHLA_RELIABILITY_PG_ADMIN_DSN": None}
     expected = {
         "commerce_runtime_foundation": ("proof", harness_env),
@@ -258,6 +268,9 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
         "catalog_stale_repair_row_lock": ("proof", harness_env),
         "catalog_channel_retirements_migration": ("proof", harness_env),
         "catalog_meta_consent": ("proof", harness_env),
+        "shopify_connection_foundation": ("proof", harness_env),
+        "shopify_catalog_import": ("proof", harness_env),
+        "shopify_privacy_webhooks": ("proof", harness_env),
     }
     for suite in manifest["suites"]:
         kind, env = expected[suite["id"]]

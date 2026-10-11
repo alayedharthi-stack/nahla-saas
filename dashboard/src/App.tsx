@@ -27,6 +27,7 @@ import SalesChannelsSettingsTab from './pages/SalesChannelsSettingsTab'
 import SalesChannelsContactsTab from './pages/SalesChannelsContactsTab'
 import SalesChannelsRoutingTab from './pages/SalesChannelsRoutingTab'
 import Integrations from './pages/Integrations'
+import ShopifyConnectionComplete from './pages/ShopifyConnectionComplete'
 import Analytics from './pages/Analytics'
 import Settings from './pages/Settings'
 import SecuritySettings from './pages/SecuritySettings'
@@ -216,6 +217,8 @@ export default function App() {
             <Route path="operations-center"  element={<OperationsCenterBranches />} />
             <Route path="operations-center/branches/:branchId" element={<OperationsCenterBranchDetail />} />
             <Route path="integrations"       element={<Integrations />} />
+            {/* Fixed return target of the dormant Shopify callback (fragment captured at boot). */}
+            <Route path="integrations/shopify/complete" element={<ShopifyConnectionComplete />} />
             <Route path="analytics"          element={<Analytics />} />
             <Route path="settings"           element={<LegacySettingsEntryRedirect />} />
             <Route path="settings/security"  element={<SecuritySettings />} />
