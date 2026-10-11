@@ -134,6 +134,7 @@ class FakeCatalogShop:
         self.levels: Dict[Tuple[int, int], Dict[str, Any]] = {}  # (item, location) -> {number, available, updatedAt}
         self.media: Dict[int, Media] = {}
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
+        self.call_tokens: List[str] = []
         self.hooks: Dict[str, Callable] = {}
         self.version_header: Optional[str] = API_VERSION
         self.count_override: Optional[Tuple[int, str]] = None
@@ -385,6 +386,7 @@ class FakeCatalogShop:
             variables = body.get("variables") or {}
             index = sum(1 for o, _ in self.calls if o == op)
             self.calls.append((op, variables))
+            self.call_tokens.append(token)
             hook = self.hooks.get(op)
             if hook is not None:
                 override = hook(self, variables, index)

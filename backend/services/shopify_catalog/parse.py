@@ -4,8 +4,12 @@ Strict validation of Admin API 2026-10 catalog nodes into normalised records.
 Every function either returns a plain, JSON-serialisable record built only
 from validated values, or raises ``ImportFailure``. Nothing is guessed:
 
-* a missing field, a wrong type, an over-long string or an enum value the
-  pinned version does not define is ``invalid_response``;
+* every field the import queries must be **present** in the response:
+  an omitted key is ``invalid_response`` even when the field is nullable,
+  while an explicit ``null`` stays a legitimate value (a valid-JSON partial
+  payload can therefore never clear a stored value);
+* a wrong type, an over-long string or an enum value the pinned version
+  does not define is ``invalid_response``;
 * a malformed GID, a ``legacyResourceId`` that disagrees with its GID, or a
   parent link that does not match is ``invalid_identity``;
 * the parameterised InventoryLevel GID
@@ -56,10 +60,20 @@ def _identity() -> E.ImportFailure:
     return E.ImportFailure(E.R_INVALID_IDENTITY)
 
 
+class Strict(dict):
+    """A response object whose ``get`` requires the key to be present
+    (presence is checked separately from nullability)."""
+
+    def get(self, key, default=None):  # noqa: D401 — same signature, stricter contract
+        if key not in self:
+            raise _invalid()
+        return dict.__getitem__(self, key)
+
+
 def obj(value: Any) -> Mapping[str, Any]:
     if not isinstance(value, dict):
         raise _invalid()
-    return value
+    return value if isinstance(value, Strict) else Strict(value)
 
 
 def lst(value: Any, *, limit: int) -> List[Any]:

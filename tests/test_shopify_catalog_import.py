@@ -527,11 +527,23 @@ def test_media_conflicts_are_refused():
     with pytest.raises(E.ImportFailure) as exc:
         run(_full(t))
     assert _reason(exc) == E.R_IDENTITY_CONFLICT
-    # One media in two products' own lists.
+    # One shared file read with two different payloads in one run.
     fake = _shop()
     first = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}])
     second = fake.add_product("قميص قطني أزرق", variants=[{"price": "89.90"}])
-    fake.products[second].media.append(fake.products[first].media[0])
+    shared = fake.products[first].media[0]
+    fake.products[second].media.append(shared)
+    original = fake._product_node
+
+    def drifting_alt(product, variables):
+        node = original(product, variables)
+        if product.number == second:
+            for media_node in node["media"]["nodes"]:
+                if media_node["id"].endswith(f"/{shared}"):
+                    media_node["image"] = dict(media_node["image"], altText="نص بديل مختلف")
+        return node
+
+    fake._product_node = drifting_alt
     t, _ = _traversal(fake)
     with pytest.raises(E.ImportFailure) as exc:
         run(_full(t))
@@ -553,6 +565,82 @@ def test_media_conflicts_are_refused():
     with pytest.raises(E.ImportFailure) as exc:
         run(_full(t))
     assert _reason(exc) in (E.R_DUPLICATE_IDENTITY, E.R_INVALID_RESPONSE)
+
+
+def test_one_file_shared_by_two_products_across_pages_and_by_their_variants(monkeypatch):
+    """Shopify files may reference several products; each product (and its
+    variants) still only uses media from its own list."""
+    monkeypatch.setattr(C, "PRODUCTS_PAGE", 1)
+    fake = _shop()
+    shoe = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}])
+    shared = fake.products[shoe].media[0]
+    shirt = fake.add_product("قميص قطني أزرق", images=0, variants=[{"price": "89.90"}, {"price": "92.00", "title": "L"}])
+    fake.products[shirt].media = [shared]
+    fake.products[shirt].featured = shared
+    for v in fake.variants.values():
+        v.media = [shared]
+    t, staged = _traversal(fake)
+    run(_full(t))
+    assert fake.ops("NahlaCatalogProducts") == 2
+    url = fake.media[shared].url
+    assert {r[3]["image_url"] for r in _kinds(staged, KIND_PRODUCT)} == {url}
+    assert {(r[3]["image_url"], r[3]["image_source"]) for r in _kinds(staged, KIND_VARIANT)} == {(url, "variant")}
+
+
+def test_omitted_queried_fields_are_refused_while_explicit_null_is_kept():
+    variant = {
+        "id": "gid://shopify/ProductVariant/21", "legacyResourceId": "21", "title": "42", "sku": None, "barcode": None,
+        "position": 1, "price": "199.00", "compareAtPrice": None, "availableForSale": True, "inventoryPolicy": "DENY",
+        "requiresComponents": False, "createdAt": "2026-09-01T08:00:00Z", "updatedAt": "2026-10-01T08:00:00Z",
+        "selectedOptions": [], "inventoryItem": {"id": "gid://shopify/InventoryItem/31", "tracked": True,
+                                                 "updatedAt": "2026-10-01T07:00:00Z"},
+    }
+    parsed = parse.variant(variant)
+    assert (parsed["sku"], parsed["barcode"], parsed["compare_at_price"]) == (None, None, None)
+    for key in ("sku", "barcode", "compareAtPrice", "legacyResourceId"):
+        with pytest.raises(E.ImportFailure) as exc:
+            parse.variant({k: v for k, v in variant.items() if k != key})
+        assert _reason(exc) == E.R_INVALID_RESPONSE, key
+    product = _product_node()
+    assert parse.product(product)["online_store_published_at"] is None
+    for key in ("publishedAt", "featuredMedia", "combinedListingRole", "vendor", "productType"):
+        with pytest.raises(E.ImportFailure) as exc:
+            parse.product({k: v for k, v in product.items() if k != key})
+        assert _reason(exc) == E.R_INVALID_RESPONSE, key
+    image = {"id": "gid://shopify/MediaImage/9", "mediaContentType": "IMAGE",
+             "image": {"url": "https://cdn.shopify.com/s/files/a.jpg", "altText": None}}
+    assert parse.media(image)["alt"] is None
+    for broken in ({"id": image["id"], "mediaContentType": "IMAGE"},
+                   dict(image, image={"url": "https://cdn.shopify.com/s/files/a.jpg"}),
+                   dict(image, image={"altText": None})):
+        with pytest.raises(E.ImportFailure):
+            parse.media(broken)
+    with pytest.raises(E.ImportFailure):
+        parse.page_info({"hasNextPage": False})
+
+
+def test_an_option_and_variant_added_mid_read_restart_the_whole_product_unit(monkeypatch):
+    monkeypatch.setattr(C, "NESTED_VARIANTS_PAGE", 1)
+    fake = _shop()
+    product = fake.add_product("حذاء رياضي أبيض", options=[("المقاس", ["40", "41"])], variants=[
+        {"price": "199.00", "title": "40", "options": [("المقاس", "40")]},
+        {"price": "199.00", "title": "41", "options": [("المقاس", "41")]}])
+
+    def add_size(f, v, i):
+        if i == 0:
+            f.products[product].options = [("المقاس", ["40", "41", "43"])]
+            f.products[product].updated_at = "2026-10-02T08:00:00Z"
+            f.add_variant(product, price="205.00", title="43", position=3, options=[("المقاس", "43")])
+
+    fake.hooks["NahlaCatalogProductVariants"] = add_size
+    t, staged = _traversal(fake)
+    run(t.products())
+    assert t.restarts == 1
+    [record] = [r[3] for r in _kinds(staged, KIND_PRODUCT)]
+    assert record["options"][0]["values"] == ["40", "41", "43"]          # metadata from the same reading
+    assert record["source_updated_at"].startswith("2026-10-02")
+    assert record["variants_count"] == 3 and record["has_only_default_variant"] is False
+    assert {r[3]["title"] for r in _kinds(staged, KIND_VARIANT)} == {"40", "41", "43"}
 
 
 def test_shared_inventory_item_is_read_once_and_never_double_counted():
@@ -645,41 +733,95 @@ def test_cursor_loops_and_stalled_pages_are_refused(monkeypatch):
         assert _reason(exc) == E.R_PAGINATION_LOOP, mutate
 
 
-def test_variant_count_mismatch_gets_one_fresh_read_then_fails_closed():
+def test_a_variant_deleted_between_pages_restarts_the_whole_unit(monkeypatch):
+    """Reviewer reproduction: page 1 shows V1 with count 3; V1 is deleted
+    before page 2, which shows V2, V3 with count 2. The accumulated 3 must not
+    be accepted against the original 3: the whole products-page unit is read
+    again and only that consistent reading is staged."""
+    monkeypatch.setattr(C, "NESTED_VARIANTS_PAGE", 1)
+    monkeypatch.setattr(C, "FOLLOWUP_VARIANTS_PAGE", 2)
     fake = _shop()
-    product = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}, {"price": "199.00", "title": "41"}])
-    original = fake._variants_count
+    product = fake.add_product("حذاء رياضي أبيض", variants=[
+        {"price": "199.00", "title": "40"}, {"price": "199.00", "title": "41"}, {"price": "199.00", "title": "42"}])
+    v1, v2, v3 = sorted(n for n, v in fake.variants.items() if v.product == product)
+    fake.hooks["NahlaCatalogProductVariants"] = lambda f, v, i: f.delete_variant(v1) if i == 0 else None
+    stages = []
+
+    async def stage(records, version):
+        stages.append(records)
+
+    t, _ = _traversal(fake, stage=stage)
+    run(t.products())
+    assert fake.ops("NahlaCatalogProducts") == 2 and t.restarts == 1
+    assert len(stages) == 1   # nothing from the inconsistent reading was staged
+    variants = [r for r in stages[0] if r[0] == KIND_VARIANT]
+    assert {r[1] for r in variants} == {gid("ProductVariant", v2), gid("ProductVariant", v3)}
+    assert [r for r in stages[0] if r[0] == KIND_PRODUCT][0][3]["variants_count"] == 2
+
+
+def test_a_persistent_count_drift_fails_closed(monkeypatch):
+    monkeypatch.setattr(C, "NESTED_VARIANTS_PAGE", 1)
+    fake = _shop()
+    fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}, {"price": "199.00", "title": "41"}])
     fake._variants_count = lambda number: {"count": 3, "precision": "EXACT"}
-    t, _ = _traversal(fake)
+    staged = []
+
+    async def stage(records, version):
+        staged.extend(records)
+
+    t, _ = _traversal(fake, stage=stage)
     with pytest.raises(E.ImportFailure) as exc:
         run(t.products())
-    assert _reason(exc) == E.R_SOURCE_CHANGED
-    # A transient difference healed by the fresh read is accepted.
+    assert _reason(exc) == E.R_SOURCE_CHANGED and staged == []
+    from services.shopify_catalog.traversal import MAX_UNIT_RESTARTS
+
+    assert fake.ops("NahlaCatalogProducts") == MAX_UNIT_RESTARTS + 1
+    # A follow-up page whose count disagrees with the product's count is drift too.
+    fake = _shop()
+    fake.add_product("قميص قطني أزرق", variants=[{"price": "89.90"}, {"price": "89.90", "title": "L"}])
+    original = fake.op_NahlaCatalogProductVariants
+
+    def disagreeing(variables):
+        data = original(variables)
+        data["product"]["variantsCount"] = {"count": 5, "precision": "EXACT"}
+        return data
+
+    fake.op_NahlaCatalogProductVariants = disagreeing
+    t, staged = _traversal(fake)
+    with pytest.raises(E.ImportFailure) as exc:
+        run(t.products())
+    assert _reason(exc) == E.R_SOURCE_CHANGED and staged == []
+
+
+def test_a_transient_count_drift_is_healed_by_rereading_the_unit():
     fake = _shop()
     fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}, {"price": "199.00", "title": "41"}])
     calls = {"n": 0}
-    original = fake._variants_count
+    original = fake._product_node
 
-    def once(number):
+    def once(product, variables):
+        node = original(product, variables)
         calls["n"] += 1
-        value = original(number)
-        return dict(value, count=value["count"] + 1) if calls["n"] == 1 else value
+        if calls["n"] == 1:
+            node["variantsCount"] = dict(node["variantsCount"], count=node["variantsCount"]["count"] + 1)
+        return node
 
-    fake._variants_count = once
+    fake._product_node = once
     t, staged = _traversal(fake)
     run(t.products())
-    assert len(_kinds(staged, KIND_VARIANT)) == 2
+    assert len(_kinds(staged, KIND_VARIANT)) == 2 and t.restarts == 1
 
 
-def test_an_object_vanishing_between_pages_ends_the_run(monkeypatch):
+def test_an_object_vanishing_between_pages_restarts_the_unit(monkeypatch):
     monkeypatch.setattr(C, "NESTED_VARIANTS_PAGE", 1)
     fake = _shop()
-    product = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}, {"price": "199.00", "title": "41"}])
-    fake.hooks["NahlaCatalogProductVariants"] = lambda f, v, i: f.delete_product(product)
-    t, _ = _traversal(fake)
-    with pytest.raises(E.ImportFailure) as exc:
-        run(t.products())
-    assert _reason(exc) == E.R_SOURCE_CHANGED
+    gone = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}, {"price": "199.00", "title": "41"}])
+    kept = fake.add_product("قميص قطني أزرق", variants=[{"price": "89.90"}])
+    fake.hooks["NahlaCatalogProductVariants"] = lambda f, v, i: f.delete_product(gone) if i == 0 else None
+    t, staged = _traversal(fake)
+    run(t.products())
+    assert {r[1] for r in _kinds(staged, KIND_PRODUCT)} == {gid("Product", kept)}
+    assert t.restarts == 1
 
 
 def test_duplicate_product_across_pages_is_refused(monkeypatch):

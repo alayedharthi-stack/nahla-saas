@@ -165,6 +165,7 @@ class CatalogImporter:
         while True:
             try:
                 data, version = await self._query(queries.PREFLIGHT, {}, 10)
+                data = parse.obj(data)
                 shop = parse.shop(data.get("shop"))
                 if shop["gid"] != self.handle.shop_gid or shop["domain"] != self.handle.shop_domain:
                     raise E.ImportFailure(E.R_IDENTITY_MISMATCH)

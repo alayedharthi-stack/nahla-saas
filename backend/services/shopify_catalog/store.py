@@ -34,7 +34,11 @@ Concurrency model
   Rows whose stored Shopify ``updatedAt`` is newer than the staged one are
   not overwritten (``stale_skipped``) and keep their previous
   ``last_seen_run_id``: being seen with older data is not a refresh, so the
-  availability view keeps calling them stale. Absent products, variants and
+  availability view keeps calling them stale. Their relationships survive
+  with them: an inventory item is detached only when no present variant
+  references it any more, and absent levels are detached only for items
+  this run actually traversed — so skipping a stale variant never orphans
+  the (newer) item and levels it still points to. Absent products, variants and
   locations become ``deleted`` only if Shopify confirmed each of them gone;
   inventory items and levels no longer referenced become ``detached``.
   Nothing is ever hard-deleted from the mirror.
@@ -83,6 +87,7 @@ from services.shopify_catalog.models import (
     ShopifyCatalogStagedRecord as Staged,
     ShopifyCatalogVariant as Variant,
 )
+from services.shopify_connection.actor import VerifiedActor, recheck_actor_locked
 from services.shopify_connection.models import SHOPIFY_TABLE_NAMES, STATUS_ACTIVE, ShopifyConnection
 
 logger = logging.getLogger("nahla.shopify_catalog")
@@ -93,7 +98,8 @@ _CHUNK = 500
 S_NOT_FOUND = "not_found"
 S_CONNECTION_UNAVAILABLE = "connection_unavailable"
 S_IN_PROGRESS = "import_in_progress"
-START_REFUSALS = frozenset({S_NOT_FOUND, S_CONNECTION_UNAVAILABLE, S_IN_PROGRESS})
+S_ACTOR_REVOKED = "actor_revoked"
+START_REFUSALS = frozenset({S_NOT_FOUND, S_CONNECTION_UNAVAILABLE, S_IN_PROGRESS, S_ACTOR_REVOKED})
 
 # Merchant-facing import states.
 ST_NOT_STARTED = "not_started"
@@ -167,15 +173,28 @@ def reconcile_interrupted(db: Session, *, connection_id: int, now: Optional[date
     return ids
 
 
-def begin_run(db: Session, *, tenant_id: int, user_id: Optional[int], shop_domain: str,
+def begin_run(db: Session, *, actor: VerifiedActor, shop_domain: str,
               now: Optional[datetime] = None) -> RunHandle:
     """Create the connection's single running import, or refuse.
 
-    The connection is looked up by (tenant, shop) — another tenant's shop is
-    ``not_found`` — and must be ``active``. Its row is held ``FOR SHARE`` so a
-    concurrent disconnect / uninstall waits for (or precedes) this commit.
+    Lock order (the same as the foundation's claim, then the catalog's
+    fence): actor → connection → run.
+
+    1. The merchant actor is re-validated **inside this transaction** with
+       the foundation's ``recheck_actor_locked``: the user and tenant rows are
+       held ``FOR SHARE`` and the user must still be active, still belong to
+       the tenant and still hold the merchant role (a demotion, deactivation
+       or re-assignment committed before this point refuses; one attempted
+       after it waits for this commit).
+    2. The connection is looked up by (tenant, shop) — another tenant's shop
+       is ``not_found`` — must be ``active``, and is held ``FOR SHARE`` so a
+       concurrent disconnect / uninstall waits for (or precedes) this commit.
     """
     current = now or utcnow()
+    tenant_id, user_id = int(actor.tenant_id), int(actor.user_id)
+    if recheck_actor_locked(db, actor):
+        db.rollback()
+        raise StartRefused(S_ACTOR_REVOKED)
     conn = db.execute(
         select(ShopifyConnection).where(
             ShopifyConnection.tenant_id == int(tenant_id), ShopifyConnection.shop_domain == shop_domain,
@@ -543,7 +562,9 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
             "UPDATE shopify_catalog_inventory_items m SET lifecycle = 'detached', removed_at = :now, updated_at = :now"
             " WHERE m.connection_id = :c AND m.lifecycle = 'present' AND NOT EXISTS ("
             "  SELECT 1 FROM shopify_catalog_staged_records s WHERE s.run_id = :r AND s.kind = 'inventory_item'"
-            "  AND s.gid = m.inventory_item_gid) RETURNING m.inventory_item_gid"), params)
+            "  AND s.gid = m.inventory_item_gid)"
+            " AND NOT EXISTS (SELECT 1 FROM shopify_catalog_variants v WHERE v.inventory_item_id = m.id"
+            "  AND v.lifecycle = 'present') RETURNING m.inventory_item_gid"), params)
         if mode == INVENTORY_PER_LOCATION:
             removed_locations = _tombstone(db, (
                 "UPDATE shopify_catalog_locations m SET lifecycle = 'deleted', removed_at = :now, updated_at = :now"
@@ -556,7 +577,11 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
                 "UPDATE shopify_catalog_inventory_levels m SET lifecycle = 'detached', removed_at = :now,"
                 " updated_at = :now WHERE m.connection_id = :c AND m.lifecycle = 'present' AND NOT EXISTS ("
                 "  SELECT 1 FROM shopify_catalog_staged_records s WHERE s.run_id = :r AND s.kind = 'inventory_level'"
-                "  AND s.gid = m.inventory_level_gid) RETURNING m.inventory_level_gid"), params)
+                "  AND s.gid = m.inventory_level_gid)"
+                " AND EXISTS (SELECT 1 FROM shopify_catalog_staged_records s2 JOIN shopify_catalog_inventory_items i"
+                "  ON i.connection_id = :c AND i.inventory_item_gid = s2.gid"
+                "  WHERE s2.run_id = :r AND s2.kind = 'inventory_item' AND i.id = m.inventory_item_id)"
+                " RETURNING m.inventory_level_gid"), params)
         # Levels of an item no longer in the catalog are detached in every mode.
         _tombstone(db, (
             "UPDATE shopify_catalog_inventory_levels m SET lifecycle = 'detached', removed_at = :now, updated_at = :now"
@@ -698,12 +723,16 @@ def variant_availability(db: Session, *, tenant_id: int, connection_id: int, var
             return {"state": "unknown", "basis": "bundle_components"}
         item = db.get(Item, variant.inventory_item_id)
         policy = variant.inventory_policy
+        # Freshness and lifecycle before anything definitive (untracked included):
+        # evidence the committed run did not itself refresh is never an answer.
+        if item is None or item.lifecycle != PRESENT:
+            return {"state": "unknown", "basis": "item_detached", "policy": policy}
+        if item.last_seen_run_id != published.id or variant.last_seen_run_id != published.id:
+            return {"state": "unknown", "basis": "stale_observation", "policy": policy}
         if item.tracking == "untracked":
             return {"state": "untracked", "policy": policy}
         if published.inventory_mode != INVENTORY_PER_LOCATION:
             return {"state": "unknown", "basis": "inventory_scope_missing", "policy": policy}
-        if item.last_seen_run_id != published.id or variant.last_seen_run_id != published.id:
-            return {"state": "unknown", "basis": "stale_observation", "policy": policy}
         rows = db.execute(
             select(Level.available, Level.last_seen_run_id, Location.is_active, Location.fulfills_online_orders,
                    Location.lifecycle)

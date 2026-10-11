@@ -12,9 +12,10 @@ Off by default: unless both ``NAHLA_SHOPIFY_CONNECTION_ENABLED`` and
        reason and the last committed run's evidence (counts, time, API
        version, inventory mode — inventory counts are null when not read).
   POST /merchant/integrations/shopify/catalog-import/start   body {shop}
-       DB-revalidated merchant actor (no support impersonation). Starts the
-       connection's single import run and returns 202; the run executes in
-       the background and records its own outcome.
+       DB-revalidated merchant actor (no support impersonation), re-checked
+       under row locks inside the transaction that admits the run. Starts
+       the connection's single import run and returns 202; the run executes
+       in the background and records its own outcome.
 
 "Imported" is the committed Shopify mirror only: nothing here writes the
 shared catalog, Salla, Meta, WhatsApp or the AI runtime. Tokens, URLs,
@@ -97,9 +98,9 @@ async def catalog_import_start(body: ShopBody, request: Request, background: Bac
         raise HTTPException(status_code=503, detail={"error": "shopify_catalog_unavailable",
                                                      "reason": "storage_unavailable"})
     try:
-        handle = store.begin_run(db, tenant_id=actor.tenant_id, user_id=actor.user_id, shop_domain=shop)
+        handle = store.begin_run(db, actor=actor, shop_domain=shop)
     except store.StartRefused as exc:
-        status = 404 if exc.code == store.S_NOT_FOUND else 409
+        status = {store.S_NOT_FOUND: 404, store.S_ACTOR_REVOKED: 403}.get(exc.code, 409)
         raise HTTPException(status_code=status, detail={"error": exc.code}) from None
     from services.shopify_catalog.importer import run_import_job  # noqa: PLC0415
 
