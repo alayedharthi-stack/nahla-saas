@@ -1,0 +1,825 @@
+{
+ "schema": "nahla.baseline-test-isolation.validation-evidence/v1",
+ "status": "evidence only: sanitized subset derived from retained artifacts; not itself a test run",
+ "pull_request": 1207,
+ "frozen_source_sha": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+ "baseline_sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+ "privacy_source_sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+ "changed_files_vs_baseline": [
+  "backend/tests/_log_redaction_isolation.py",
+  "backend/tests/test_log_redaction_meta_credentials.py",
+  "backend/tests/test_log_redaction_test_isolation.py",
+  "backend/tests/test_meta_catalog_consent.py",
+  "backend/tests/test_salla_embedded_reconcile_telemetry.py"
+ ],
+ "commits": [
+  "c4ecda002477ae876dd7404d99c9415b80fe0993 test(isolation): restore the log-redaction filters and JSONB column types tests leave behind",
+  "3affff6d18eebcf632ef118b0e8b46616913147f test(isolation): consent fixture removes its redaction filters even if setup fails",
+  "7ae59f4d8635efa84b50b14d0da379cc5b4ad928 test(isolation): log-redaction credential tests remove the filters they install"
+ ],
+ "environment": {
+  "python": "3.12.3",
+  "pytest": "9.1.1",
+  "postgresql": {
+   "version": "16.15",
+   "source": "Ubuntu package postgresql-16 16.15-0ubuntu0.24.04.1",
+   "listen": "127.0.0.1:5433",
+   "auth": "TCP host scram-sha-256 on loopback only; synthetic CI role; credentials omitted",
+   "restore": {
+    "reboot_utc": "2026-10-11T09:49:30Z",
+    "restarted_utc": "2026-10-11T10:36:14Z",
+    "stale_postmaster_pid_dead": true,
+    "crash_recovery": "redo from the 09:31:19Z checkpoint; system identifier unchanged",
+    "evidence": [
+     "correct synthetic CI password over TCP: connected",
+     "server_version_num 160015 | password_encryption scram-sha-256 | server 127.0.0.1/32 5433",
+     "role password stored as SCRAM-SHA-256: True",
+     "pg_hba host rules: [('scram-sha-256', '127.0.0.1'), ('scram-sha-256', '::1'), ('scram-sha-256', '127.0.0.1'), ('scram-sha-256', '::1')]",
+     "system identifier: 7695297279087089957",
+     "wrong password refused: True"
+    ]
+   }
+  },
+  "environment_variables_unset_for_every_stage": [
+   "NAHLA_RELIABILITY_REQUIRE_PG",
+   "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+   "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+   "LEGACY_MIG_PG_TEST_DATABASE_URL",
+   "A1_PG_TEST_DATABASE_URL",
+   "DATABASE_URL"
+  ],
+  "postgresql_reached_via": "test fixture default service URL on 127.0.0.1:5433 (legacy_migration_drift_postgres_fixtures.DEFAULT_SERVICE_URL); no PG variable set"
+ },
+ "owner_regression_gate": {
+  "file_list": {
+   "count": 65,
+   "ordered": [
+    "backend/tests/test_admin_tenant_list_billing_badge.py",
+    "backend/tests/test_billing_partner_override.py",
+    "backend/tests/test_billing_scenarios.py",
+    "backend/tests/test_constitution_compliance.py",
+    "backend/tests/test_fixed_tenant_policy.py",
+    "backend/tests/test_intelligence_non_interference_guard.py",
+    "backend/tests/test_intelligence_non_interference_source_locations.py",
+    "backend/tests/test_manual_billing_grant.py",
+    "backend/tests/test_meta_catalog_auto_sync.py",
+    "backend/tests/test_meta_catalog_claim_guard_pg.py",
+    "backend/tests/test_meta_catalog_consent.py",
+    "backend/tests/test_meta_catalog_consent_pg.py",
+    "backend/tests/test_meta_catalog_identity.py",
+    "backend/tests/test_meta_catalog_identity_postgres.py",
+    "backend/tests/test_meta_catalog_import_guards.py",
+    "backend/tests/test_meta_catalog_linking.py",
+    "backend/tests/test_meta_catalog_localized_price_verification.py",
+    "backend/tests/test_meta_catalog_onboarding.py",
+    "backend/tests/test_meta_catalog_onboarding_postgres.py",
+    "backend/tests/test_meta_catalog_push_one.py",
+    "backend/tests/test_meta_catalog_reconcile.py",
+    "backend/tests/test_meta_catalog_stale_repair_lock_pg.py",
+    "backend/tests/test_meta_catalog_variant_eligibility.py",
+    "backend/tests/test_meta_catalog_variant_payload_preview.py",
+    "backend/tests/test_p0b_tenant_commerce_permissions.py",
+    "backend/tests/test_salla_adapter_sale_price_normalize.py",
+    "backend/tests/test_salla_broad_browse_global_fallback_guard.py",
+    "backend/tests/test_salla_broad_browse_ownership.py",
+    "backend/tests/test_salla_cart_recovery_postgres.py",
+    "backend/tests/test_salla_check_session.py",
+    "backend/tests/test_salla_cod_in_progress_gate.py",
+    "backend/tests/test_salla_commerce_reconciler_postgres.py",
+    "backend/tests/test_salla_compose_trusted_singleton_handoff.py",
+    "backend/tests/test_salla_coupons_poller_race_postgres.py",
+    "backend/tests/test_salla_customer_address_candidates_pg.py",
+    "backend/tests/test_salla_delete_401_branch_closure_postgres.py",
+    "backend/tests/test_salla_delete_401_refresh_postgres.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "backend/tests/test_salla_embedded_diag.py",
+    "backend/tests/test_salla_embedded_identity_binding.py",
+    "backend/tests/test_salla_embedded_reconcile_completion_handoff.py",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_integration_resolver_ambiguity.py",
+    "backend/tests/test_salla_merchant_ai_e2e_acceptance.py",
+    "backend/tests/test_salla_merchant_ai_layer2_e2e.py",
+    "backend/tests/test_salla_merchant_ai_layer3_dialogue.py",
+    "backend/tests/test_salla_oauth_callback_reconcile.py",
+    "backend/tests/test_salla_pr888_remaining_remediation.py",
+    "backend/tests/test_salla_pr888_remediation.py",
+    "backend/tests/test_salla_presented_identity_product_card.py",
+    "backend/tests/test_salla_product_discovery_direct_presentation.py",
+    "backend/tests/test_salla_realtime_commerce.py",
+    "backend/tests/test_salla_sale_price_display.py",
+    "backend/tests/test_salla_shipment_tracking.py",
+    "backend/tests/test_salla_shipment_tracking_migration_preflight.py",
+    "backend/tests/test_salla_shipment_tracking_pg.py",
+    "backend/tests/test_salla_tenant_guard.py",
+    "backend/tests/test_salla_tenant_reconcile.py",
+    "backend/tests/test_salla_variant_catalog_identity.py",
+    "backend/tests/test_salla_variant_catalog_identity_postgres.py",
+    "backend/tests/test_salla_variant_option_summary_fallback.py",
+    "backend/tests/test_salla_variant_sync.py",
+    "backend/tests/test_salla_webhook_identity.py",
+    "backend/tests/test_tenant_config_hygiene.py",
+    "backend/tests/test_tenant_merchant_clone_operator.py"
+   ],
+   "digest": {
+    "algorithm": "sha256",
+    "value": "ff606274c0bb84b57bee3310306ff00f80057c12b1cbaa05bde959b8a06460e1",
+    "format": "UTF-8 bytes of the repository-relative paths in the listed order, each followed by one LF"
+   }
+  },
+  "command": {
+   "cwd": "repository root",
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=<out>/<label>_junit.xml",
+    "<the 65 paths of file_list.ordered, in order>"
+   ]
+  },
+  "runs": {
+   "base_gate": {
+    "exit_code": 1,
+    "started_utc": "2026-10-11T10:41:51Z",
+    "pytest_summary": "2 failed, 1075 passed, 41 skipped, 2088 warnings in 441.31s (0:07:21)",
+    "postgresql_stable_during_stage": true,
+    "finished_utc": "2026-10-11T10:49:21Z",
+    "tree_after": {
+     "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+     "porcelain_entries": 0
+    },
+    "sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "note": "clean baseline"
+   },
+   "fix_gate": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T10:49:21Z",
+    "pytest_summary": "1078 passed, 41 skipped, 2087 warnings in 440.82s (0:07:20)",
+    "postgresql_stable_during_stage": true,
+    "finished_utc": "2026-10-11T10:56:50Z",
+    "tree_after": {
+     "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+     "porcelain_entries": 0
+    },
+    "sha": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "note": "repair head"
+   },
+   "compat_gate": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T10:56:52Z",
+    "pytest_summary": "1078 passed, 41 skipped, 2088 warnings in 447.07s (0:07:27)",
+    "postgresql_stable_during_stage": true,
+    "finished_utc": "2026-10-11T11:04:28Z",
+    "tree_after": {
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "porcelain_entries": 0
+    },
+    "sha": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+    "note": "privacy source 3681ebd + the isolation commits (temporary local head, never pushed)",
+    "temporary_head": {
+     "base": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+     "cherry_pick_rc": 0,
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "changed_files_vs_privacy_source": [
+      "backend/tests/_log_redaction_isolation.py",
+      "backend/tests/test_log_redaction_meta_credentials.py",
+      "backend/tests/test_log_redaction_test_isolation.py",
+      "backend/tests/test_meta_catalog_consent.py",
+      "backend/tests/test_salla_embedded_reconcile_telemetry.py"
+     ]
+    }
+   },
+   "compat_privacy_dbfree": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T11:04:29Z",
+    "pytest_summary": "130 passed, 1 warning in 14.36s",
+    "postgresql_stable_during_stage": true,
+    "finished_utc": "2026-10-11T11:04:45Z",
+    "tree_after": {
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "porcelain_entries": 0
+    }
+   }
+  },
+  "comparisons": {
+   "original_baseline_junit_vs_base_gate": {
+    "a_cases": 1118,
+    "b_cases": 1118,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [],
+    "outcome_changes": [],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "base_gate_vs_fix_gate": {
+    "a_cases": 1118,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [
+     [
+      "backend.tests.test_salla_embedded_reconcile_telemetry",
+      "test_requests_here_run_under_the_app_log_redaction"
+     ]
+    ],
+    "outcome_changes": [
+     [
+      "backend.tests.test_salla_embedded_app_identity",
+      "test_rejection_emits_structured_log",
+      "failure",
+      "passed"
+     ],
+     [
+      "backend.tests.test_salla_shipment_tracking",
+      "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+      "failure",
+      "passed"
+     ]
+    ],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "original_privacy_candidate_junit_vs_compat_gate": {
+    "a_cases": 1118,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [
+     [
+      "backend.tests.test_salla_embedded_reconcile_telemetry",
+      "test_requests_here_run_under_the_app_log_redaction"
+     ]
+    ],
+    "outcome_changes": [
+     [
+      "backend.tests.test_salla_embedded_app_identity",
+      "test_rejection_emits_structured_log",
+      "failure",
+      "passed"
+     ],
+     [
+      "backend.tests.test_salla_shipment_tracking",
+      "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+      "failure",
+      "passed"
+     ]
+    ],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "fix_gate_vs_compat_gate": {
+    "a_cases": 1119,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [],
+    "outcome_changes": [],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "base_gate_formerly_pg_skipped_cases": {
+    "count": 37,
+    "outcomes": {
+     "passed": 37,
+     "failure": 0,
+     "error": 0,
+     "skipped": 0
+    }
+   },
+   "fix_gate_formerly_pg_skipped_cases": {
+    "count": 37,
+    "outcomes": {
+     "passed": 37,
+     "failure": 0,
+     "error": 0,
+     "skipped": 0
+    }
+   },
+   "compat_gate_formerly_pg_skipped_cases": {
+    "count": 37,
+    "outcomes": {
+     "passed": 37,
+     "failure": 0,
+     "error": 0,
+     "skipped": 0
+    }
+   }
+  }
+ },
+ "focused_coverage": {
+  "focus_head": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:04:45Z",
+   "pytest_summary": "3 failed, 253 passed, 627 warnings in 16.70s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:06Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed": [
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction",
+      "name": "test_graph_error_sanitized_no_token_in_message"
+     },
+     "error_lines": [
+      "E       ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (tests/../backend/services/meta_catalog_sync_confirm.py)"
+     ],
+     "source_location": [
+      "backend/tests/test_log_redaction.py",
+      "53",
+      "ImportError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_exception_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    }
+   ],
+   "failed_count": 3
+  },
+  "focus_base": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:06Z",
+   "pytest_summary": "5 failed, 247 passed, 627 warnings in 17.00s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:28Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed": [
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction",
+      "name": "test_graph_error_sanitized_no_token_in_message"
+     },
+     "error_lines": [
+      "E       ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (tests/../backend/services/meta_catalog_sync_confirm.py)"
+     ],
+     "source_location": [
+      "backend/tests/test_log_redaction.py",
+      "53",
+      "ImportError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_exception_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_salla_embedded_app_identity",
+      "name": "test_rejection_emits_structured_log"
+     },
+     "error_lines": [],
+     "source_location": [
+      "backend/tests/test_salla_embedded_app_identity.py",
+      "93",
+      "AssertionError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_salla_shipment_tracking",
+      "name": "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+     },
+     "error_lines": [
+      "E       AssertionError: assert False"
+     ],
+     "source_location": [
+      "backend/tests/test_salla_shipment_tracking.py",
+      "250",
+      "AssertionError"
+     ]
+    }
+   ],
+   "failed_count": 5
+  },
+  "files": [
+   "backend/tests/test_log_redaction.py",
+   "backend/tests/test_log_redaction_leak_proof.py",
+   "backend/tests/test_log_redaction_meta_credentials.py",
+   "tests/test_log_redaction_uvicorn_access_compat.py",
+   "backend/tests/test_meta_catalog_consent.py",
+   "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+   "backend/tests/test_salla_embedded_app_identity.py",
+   "backend/tests/test_salla_shipment_tracking.py",
+   "(head only) backend/tests/test_log_redaction_test_isolation.py"
+  ],
+  "standalone_failures_retained": {
+   "status": "FAILED alone at both 08428cb and the repair head; not leakage; not changed by this PR",
+   "cases": [
+    {
+     "node_id": "backend/tests/test_log_redaction.py::test_graph_error_sanitized_no_token_in_message",
+     "error": "ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (backend/services/meta_catalog_sync_confirm.py)",
+     "name_actually_defined_at": "backend/services/native_meta_sync_orchestrator.py:144"
+    },
+    {
+     "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+     "error": "AttributeError: <module 'services.whatsapp_platform.token_manager' from 'backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider' (raised by unittest.mock.patch.object)",
+     "name_actually_defined_at": "backend/services/whatsapp_platform/provider_utils.py:53"
+    },
+    {
+     "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_exception_path_logs_no_credential",
+     "error": "same AttributeError on token_manager.wa_provider",
+     "name_actually_defined_at": "backend/services/whatsapp_platform/provider_utils.py:53"
+    }
+   ],
+   "history_limit": "shallow clone: the commit at which each name diverged cannot be established"
+  }
+ },
+ "reproductions": {
+  "repro_base_R1": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:51Z",
+   "pytest_summary": "1 failed, 9 deselected, 9 warnings in 9.36s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:04Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R1d": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:04Z",
+   "pytest_summary": "1 failed, 1 passed, 3 warnings in 1.94s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:07Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R2": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:07Z",
+   "pytest_summary": "1 failed, 1 passed, 5 warnings in 2.13s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:11Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+   ]
+  },
+  "repro_base_R3a": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:11Z",
+   "pytest_summary": "2 failed in 1.04s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:13Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R3b": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:13Z",
+   "pytest_summary": "1 failed, 1 passed in 0.87s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:14Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R3c": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:14Z",
+   "pytest_summary": "1 failed, 1 passed in 0.77s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:16Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_head_R1": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:28Z",
+   "pytest_summary": "1 passed, 10 deselected, 9 warnings in 8.52s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:39Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R1d": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:40Z",
+   "pytest_summary": "2 passed, 3 warnings in 1.92s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:43Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R2": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:43Z",
+   "pytest_summary": "2 passed, 5 warnings in 2.00s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:46Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R3a": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:46Z",
+   "pytest_summary": "1 failed, 1 passed in 1.11s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:48Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential"
+   ]
+  },
+  "repro_head_R3b": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:48Z",
+   "pytest_summary": "2 passed in 0.83s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:50Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R3c": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:50Z",
+   "pytest_summary": "2 passed in 0.70s",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:05:51Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "legend": {
+   "R1": "telemetry file + embedded-identity file, -k test_rejection_emits_structured_log",
+   "R1d": "consent test_unmarked_database_is_refused then the structured-log target",
+   "R2": "consent test_unmarked_database_is_refused then the JSONB target",
+   "R3a/R3b/R3c": "meta_credentials installer test (token refresh path / uvicorn access log / install covers root) then the structured-log target"
+  }
+ },
+ "governance": {
+  "lint": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:16Z",
+   "pytest_summary": null,
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:28Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "last_line": "no-silent-except: OK (624 pre-existing, all baselined)"
+  },
+  "gov002": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:28Z",
+   "pytest_summary": null,
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:06:29Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "output_flags": {
+    "INTELLIGENCE_NON_INTERFERENCE_POLICY": "ACTIVE",
+    "TRUSTED_BASE_SCANNER_REQUIRED": "yes",
+    "BOOTSTRAP_HEAD_TRUST_EXCEPTION": "no",
+    "GOV002_BOOTSTRAP": "no",
+    "SINGLE_USE_SCOPE": "PER_SCAN",
+    "PERSISTENT_CONSUMPTION": "NO",
+    "MODEL_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "FINDINGS": "none"
+   },
+   "argv": [
+    "python",
+    "<scanner from 08428cb:scripts/lint_intelligence_non_interference.py>",
+    "--repo",
+    ".",
+    "--base",
+    "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "--head",
+    "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "--trusted-base-scanner"
+   ]
+  },
+  "constitution": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:29Z",
+   "pytest_summary": "98 passed in 144.30s (0:02:24)",
+   "postgresql_stable_during_stage": true,
+   "finished_utc": "2026-10-11T11:08:55Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "last_line": "98 passed in 144.30s (0:02:24)"
+  }
+ },
+ "superseded_no_postgresql_runs": {
+  "reason": "the machine rebooted at 2026-10-11T09:49:30Z and stopped the disposable PostgreSQL clusters; runs before the restore had no PostgreSQL and 37 PostgreSQL-backed cases skipped",
+  "baseline_probe_configuration": {
+   "pytest_summary": "2 failed, 1038 passed, 78 skipped",
+   "extra_skips_vs_original_baseline": 37,
+   "extra_skip_reasons": {
+    "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"": 31,
+    "PostgreSQL not available": 2,
+    "PostgreSQL DSN is not configured": 4
+   },
+   "other_outcome_changes": []
+  },
+  "head_3affff6_plain_command": {
+   "pytest_summary": "1041 passed, 78 skipped",
+   "status": "superseded; not acceptance"
+  },
+  "cancelled_before_start": [
+   "queued no-PostgreSQL duplicate gates (plain baseline, privacy source) and the no-PostgreSQL compat stage; no active test was interrupted"
+  ]
+ },
+ "assertion_retention": {
+  "backend/tests/test_meta_catalog_consent.py": {
+   "assert_statements_ast": {
+    "baseline": 191,
+    "head": 191
+   },
+   "test_functions": {
+    "baseline": 90,
+    "head": 90
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "none",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_log_redaction_meta_credentials.py": {
+   "assert_statements_ast": {
+    "baseline": 42,
+    "head": 42
+   },
+   "test_functions": {
+    "baseline": 16,
+    "head": 16
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "none",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_salla_embedded_reconcile_telemetry.py": {
+   "assert_statements_ast": {
+    "baseline": 5,
+    "head": 7
+   },
+   "test_functions": {
+    "baseline": 3,
+    "head": 4
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "one canary test with 2 assert statements, inserted before the original tests",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_salla_embedded_app_identity.py": {
+   "byte_identical_to_baseline": true
+  },
+  "backend/tests/test_salla_shipment_tracking.py": {
+   "byte_identical_to_baseline": true
+  }
+ }
+}
