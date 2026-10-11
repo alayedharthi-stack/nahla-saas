@@ -438,32 +438,96 @@ def test_downgrade_of_empty_tables_drops_only_the_google_objects():
         _drop(name)
 
 
-def test_alembic_chain_upgrades_0123_to_0124_and_back():
-    name = _fresh_db("gmc_chain")
+# The production database records the heads {0111, 0113, 0120}. The same row
+# set is reached here only through real upgrades along the repository's actual
+# Alembic graph (0093 -> 0111 -> 0113 -> 0120), never by stamping.
+PRODUCTION_SHAPED_HEADS = {"0111", "0113", "0120"}
+_SHOPIFY_TABLES = {"shopify_connections", "shopify_catalog_products", "shopify_privacy_requests"}
+
+
+def _alembic(name: str):
     env = {**os.environ, "DATABASE_URL": _url(name)}
 
-    def alembic(*args):
+    def run(*args):
         return subprocess.run([sys.executable, "-m", "alembic", *args], cwd=str(_REPO / "database"), env=env,
                               capture_output=True, text=True, timeout=600)
 
+    return run
+
+
+def _versions(eng) -> set:
+    with eng.connect() as conn:
+        return set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
+
+
+def _google_objects(eng) -> tuple:
+    names, _cols, funcs = _names(eng)
+    return tuple(sorted(set(GOOGLE_MERCHANT_TABLE_NAMES) & set(names))), tuple(funcs)
+
+
+def _ok(proc) -> None:
+    assert proc.returncode == 0, proc.stderr[-3000:]
+
+
+def _upgrade_to_production_shape(alembic, eng) -> None:
+    for target in ("0093", "0111", "0113", "0120"):
+        _ok(alembic("upgrade", target))
+    assert _versions(eng) == PRODUCTION_SHAPED_HEADS
+
+
+_PRESENT = (tuple(sorted(GOOGLE_MERCHANT_TABLE_NAMES)), tuple(sorted(GOOGLE_MERCHANT_GUARD_FUNCTIONS)))
+
+
+def test_alembic_chain_upgrades_0123_to_0124_and_back():
+    name = _fresh_db("gmc_chain")
+    alembic = _alembic(name)
+    eng = create_engine(_url(name), poolclass=NullPool, future=True)
     try:
-        for target in ("0093", "0111", "0113", "0120", "0121", "0122", "0123", "0124"):
-            proc = alembic("upgrade", target)
-            assert proc.returncode == 0, proc.stderr[-3000:]
-        eng = create_engine(_url(name), poolclass=NullPool, future=True)
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0124" in versions and "0123" not in versions
-        assert set(GOOGLE_MERCHANT_TABLE_NAMES) <= set(inspect(eng).get_table_names())
-        proc = alembic("downgrade", "0124@-1")
-        assert proc.returncode == 0, proc.stderr[-3000:]
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0123" in versions and "0124" not in versions
-        names = set(inspect(eng).get_table_names())
-        assert not (set(GOOGLE_MERCHANT_TABLE_NAMES) & names) and "shopify_privacy_requests" in names
-        eng.dispose()
+        _upgrade_to_production_shape(alembic, eng)
+        _ok(alembic("upgrade", "0123"))
+        assert _versions(eng) == {"0111", "0113", "0123"}
+        assert _google_objects(eng) == ((), ())
+        _ok(alembic("upgrade", "0124"))
+        assert _versions(eng) == {"0111", "0113", "0124"}
+        assert _google_objects(eng) == _PRESENT
+        for downgrade_target in ("0124@-1", "0123"):
+            _ok(alembic("downgrade", downgrade_target))
+            assert _versions(eng) == {"0111", "0113", "0123"}, downgrade_target
+            assert _google_objects(eng) == ((), ()), downgrade_target
+            assert _SHOPIFY_TABLES <= set(inspect(eng).get_table_names()), downgrade_target
+            if downgrade_target == "0124@-1":
+                _ok(alembic("upgrade", "0124"))
+                assert _versions(eng) == {"0111", "0113", "0124"}
     finally:
+        eng.dispose()
+        _drop(name)
+
+
+def test_production_shaped_heads_upgrade_to_0124_and_a_refused_downgrade_keeps_everything():
+    name = _fresh_db("gmc_prod")
+    alembic = _alembic(name)
+    eng = create_engine(_url(name), poolclass=NullPool, future=True)
+    try:
+        _upgrade_to_production_shape(alembic, eng)
+        _ok(alembic("upgrade", "0124"))
+        assert _versions(eng) == {"0111", "0113", "0124"}
+        assert _google_objects(eng) == _PRESENT
+        with eng.begin() as conn:
+            tenant = conn.execute(text("INSERT INTO tenants (name, is_active, is_platform_tenant)"
+                                       " VALUES (:n, true, false) RETURNING id"),
+                                  {"n": f"gmc-prod-{secrets.token_hex(3)}"}).scalar()
+            conn.execute(text(f"INSERT INTO {CONN} (tenant_id, account_id, content_language, feed_label, status)"
+                              " VALUES (:t, :a, 'ar', 'SA', 'authorized')"), {"t": tenant, "a": ACCOUNT_A})
+        proc = alembic("downgrade", "0123")
+        assert proc.returncode != 0 and "hold evidence" in proc.stderr
+        assert _versions(eng) == {"0111", "0113", "0124"}
+        assert _google_objects(eng) == _PRESENT
+        assert _SHOPIFY_TABLES <= set(inspect(eng).get_table_names())
+        with eng.connect() as conn:
+            rows = conn.execute(text(f"SELECT tenant_id, account_id FROM {CONN}")).all()
+        assert [tuple(r) for r in rows] == [(tenant, ACCOUNT_A)]
+    finally:
+        eng.dispose()
         _drop(name)
 
 
