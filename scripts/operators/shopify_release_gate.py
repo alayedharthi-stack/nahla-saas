@@ -455,9 +455,6 @@ _SHOPIFY_FUNCTIONS_SQL = (
 _SHOPIFY_CONSTRAINTS_SQL = (
     "SELECT c.conname, r.relname, n.nspname FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid JOIN pg_namespace n ON n.oid = r.relnamespace"
     " WHERE" + _USER_SCHEMA + " AND c.conname LIKE :contains ESCAPE '\\' ORDER BY c.conname")
-_DB_ROLE_SETTINGS_SQL = (
-    "SELECT unnest(setconfig) FROM pg_db_role_setting WHERE (setdatabase = 0 OR setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database()))"
-    " AND (setrole = 0 OR setrole = (SELECT oid FROM pg_roles WHERE rolname = current_user))")
 _OID_SQL = "SELECT CAST(to_regclass(:name) AS oid)"
 
 
@@ -596,7 +593,10 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
         search_path = str(_scalar(conn, "SHOW search_path") or "").replace(" ", "")
         if _scalar(conn, "SELECT pg_is_in_recovery()") is not False:
             checks.append(Check("server", k.FAIL, k.R_SERVER_IN_RECOVERY))
-        elif any(str(setting).replace(" ", "") == "default_transaction_read_only=on" for (setting,) in _rows(conn, _DB_ROLE_SETTINGS_SQL)):
+        # Inspect the effective default, including server-wide configuration.
+        # transaction_read_only is deliberately ON for this observation and
+        # is not evidence that the application's ordinary transactions work.
+        elif str(_scalar(conn, "SHOW default_transaction_read_only") or "").strip().lower() != "off":
             checks.append(Check("server", k.FAIL, k.R_SERVER_READ_ONLY))
         elif search_path != k.SEARCH_PATH:
             checks.append(Check("server", k.FAIL, k.R_SEARCH_PATH_MISMATCH))

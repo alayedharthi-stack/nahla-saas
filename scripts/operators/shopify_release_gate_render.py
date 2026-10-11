@@ -19,7 +19,8 @@ and never against the existing platform database. Subcommands:
     initializers that must be absent, the inventory digest and count, the gate
     module's SHA-256, the approval payload's SHA-256, the phase and the
     database and backup targets — verifies all of it **before importing
-    anything from the repository**, then ``exec``s the gate.
+    anything from the repository**, then executes the verified gate bytes in
+    the same process with source-only repository imports.
 
 ``snapshot --database-url <disposable S3 DSN> --out <path> --source-sha <40 hex>``
     Writes the canonical schema expectations (retained relations and the
@@ -65,8 +66,9 @@ class RenderRefusal(Exception):
 
 # The bootstrap. Standard library only; every ``{name}`` is a JSON literal
 # substituted by ``render_command``. It imports nothing from the repository
-# until every pin has been verified, and then replaces itself with the gate.
+# until every pin has been verified, and then executes the verified gate bytes.
 BOOTSTRAP_TEMPLATE = r'''import base64, hashlib, os, sys
+import importlib.machinery
 P = {prefix}
 R = {root}
 REL = {release}
@@ -106,10 +108,13 @@ for dirpath, _dirnames, filenames in os.walk(os.path.join(R, "database")):
 if len(paths) != N:
     fail("inventory_count_mismatch")
 digest = hashlib.sha256()
+verified = {}
 try:
     for relative in sorted(paths):
-        with open(os.path.join(R, relative), "rb") as handle:
+        absolute = os.path.abspath(os.path.join(R, relative))
+        with open(absolute, "rb") as handle:
             data = handle.read()
+        verified[absolute] = data
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(data)
@@ -136,7 +141,68 @@ except (ValueError, TypeError):
 if hashlib.sha256(raw).hexdigest() != ASHA:
     fail("approval_payload_pin_mismatch")
 print(P + " BOOTSTRAP PASS gate_version=2 inventory_count=" + str(N), flush=True)
-os.execv(sys.executable, [sys.executable, "-I", gate_path] + ARGV)
+
+# Keep the verified bytes in this process. A source-only loader prevents a
+# valid-looking, unpinned __pycache__ entry from replacing a verified .py file,
+# including Alembic's direct SourceFileLoader use. The finder refuses other
+# repository import origins (scripts.py, scripts.pyc, native extensions, etc.)
+# before their loader runs. Installed dependencies retain their normal loader.
+root = os.path.abspath(R)
+directories = set([root])
+for absolute in verified:
+    parent = os.path.dirname(absolute)
+    while parent != root and os.path.commonpath([root, parent]) == root:
+        directories.add(parent)
+        parent = os.path.dirname(parent)
+
+
+def inside_repository(path):
+    try:
+        return os.path.commonpath([root, os.path.abspath(path)]) == root
+    except ValueError:
+        return False
+
+
+original_get_code = importlib.machinery.SourceFileLoader.get_code
+
+
+def verified_get_code(loader, fullname):
+    absolute = os.path.abspath(loader.path)
+    if inside_repository(absolute):
+        data = verified.get(absolute)
+        if data is None or not absolute.endswith(".py"):
+            fail("repository_import_unverified")
+        return compile(data, absolute, "exec", dont_inherit=True)
+    return original_get_code(loader, fullname)
+
+
+class RepositoryImportGate:
+    def find_spec(self, fullname, path=None, target=None):
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if spec is None:
+            return None
+        owned_package = fullname.split(".", 1)[0] in ("scripts", "database")
+        if owned_package and spec.origin and not inside_repository(spec.origin):
+            fail("repository_import_unverified")
+        if spec.origin and inside_repository(spec.origin):
+            absolute = os.path.abspath(spec.origin)
+            if absolute not in verified or not isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+                fail("repository_import_unverified")
+            return spec
+        for location in spec.submodule_search_locations or ():
+            if owned_package and not inside_repository(location):
+                fail("repository_import_unverified")
+            if inside_repository(location) and os.path.abspath(location) not in directories:
+                fail("repository_import_unverified")
+        return spec if spec.origin is None else None
+
+
+importlib.machinery.SourceFileLoader.get_code = verified_get_code
+sys.meta_path.insert(0, RepositoryImportGate())
+sys.path.insert(0, root)
+sys.argv = [gate_path] + ARGV
+exec(compile(verified[os.path.abspath(gate_path)], gate_path, "exec"),
+     {"__name__": "__main__", "__file__": gate_path})
 '''
 
 
@@ -244,17 +310,24 @@ def decode_command(command: str) -> str:
 
 def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] = None, root: Optional[Path] = None) -> Dict[str, Any]:
     """Canonical schema expectations read from a disposable S3 database built at ``source_sha`` (read-only)."""
-    try:
-        from sqlalchemy.engine import make_url
+    # The authority alone is not the driver's target. Refuse inherited libpq
+    # indirection before parsing, then use the existing strict driver-aware
+    # validator and a fully explicit URL. Neither step opens a connection.
+    import os
 
-        parsed = make_url(database_url)
-        host = str(parsed.host or "").lower()
-    except Exception as exc:  # noqa: BLE001 - the type only; the URL is never printed
-        raise RenderRefusal("database_url_malformed") from exc
-    if host == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
+    environment = dict(os.environ)
+    if any(str(environment.get(name) or "").strip() for name in k.LIBPQ_TARGET_ENV_VARS):
+        raise RenderRefusal("snapshot_environment_override")
+    target, _refusal = gate.parse_database_url(database_url, environment)
+    if target is None:
+        raise RenderRefusal("database_url_malformed")
+    if target["host"] == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
         raise RenderRefusal("refusing_existing_platform_database")
+    bound_url = gate.explicit_url(database_url, target)
+    if bound_url is None:
+        raise RenderRefusal("database_url_malformed")
     try:
-        engine = gate._engine(database_url)
+        engine = gate._engine(bound_url)
         try:
             with engine.connect().execution_options(postgresql_readonly=True) as conn:
                 retained = gate.observe_retained(conn)

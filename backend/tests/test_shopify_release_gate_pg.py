@@ -254,6 +254,11 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         _sql(db, f'DROP SEQUENCE other."{SECRET_NAME}_seq"', "DROP SCHEMA other", "CREATE SEQUENCE planted_seq OWNED BY shopify_connections.generation")
         _assert_fail(gate_root, "S3", db, "non-Shopify-named sequence owned by an expected column", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
         _sql(db, "DROP SEQUENCE planted_seq", "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_webhook_events.id")
+        ownership = _sql(db, "SELECT t.relname, a.attname FROM pg_depend d "
+                         "JOIN pg_class t ON t.oid = d.refobjid "
+                         "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+                         "WHERE d.objid = 'shopify_connections_id_seq'::regclass AND d.deptype = 'a'")
+        assert ownership == [("shopify_webhook_events", "id")]
         out = _assert_fail(gate_root, "S3", db, "pinned sequence re-owned", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
         assert '"drift":["public.shopify_connections_id_seq"]' in out
         _sql(db, "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_connections.id")
@@ -463,9 +468,9 @@ def test_expectations_file_equals_fresh_snapshots_on_this_server():
         finally:
             engine.dispose()
         with pytest.raises(render.RenderRefusal, match="database_is_not_a_complete_s3_build"):
-            render.snapshot(_loopback_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
+            render.snapshot(_alias_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
         _build(db, "0121", "0122", "0123")
-        fresh = render.snapshot(_loopback_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
+        fresh = render.snapshot(_alias_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
         for key in ("retained", "shopify_s3", "database_py_digest", "expectations_version"):
             assert fresh[key] == EXPECTATIONS[key], key
         with pytest.raises(render.RenderRefusal, match="refusing_existing_platform_database"):

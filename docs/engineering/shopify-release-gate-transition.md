@@ -85,7 +85,13 @@ repository** it verifies, in order: root; `RAILWAY_GIT_COMMIT_SHA` equals the
 release; every platform id; no inherited libpq target variable; no forbidden
 initializer; the complete inventory count and digest (computed by the
 bootstrap itself); the gate module's digest; the payload's digest. Only then
-does it `exec` the gate. A tampered contract, pilot module, migration file,
+does it execute the verified gate bytes in the same process. Repository
+source imports compile the bytes already hashed, including Alembic's direct
+`SourceFileLoader` path, without consulting bytecode caches. A finder refuses
+uninventoried repository origins before their loaders run: `scripts.py`,
+sourceless `.pyc` files, native package initializers and dependency shadows
+inside the container root. Installed dependencies outside that root retain
+their normal import mechanism. A tampered contract, pilot module, migration file,
 package initializer or gate therefore never executes — not even its module
 body — and the tests prove it with import-time side-effect markers.
 
@@ -138,9 +144,11 @@ Database-side, one connection (NullPool, `echo=False`,
 `idle_in_transaction_session_timeout=20000`, `search_path=public,pg_catalog`,
 read-only transaction, wall-clock alarm 120 s): `connect`; `lock`
 (`pg_try_advisory_lock(8182734029736770447)` — the legacy key, so a
-concurrent legacy guard, migration operator or second gate makes this deploy
-refuse rather than wait); `server` (`pg_is_in_recovery()` false, no
-`default_transaction_read_only=on` at database or role level, `search_path`
+cooperating legacy guard, operator that actually acquires this key, or second
+gate makes this deploy refuse rather than wait); `server`
+(`pg_is_in_recovery()` false, effective `SHOW default_transaction_read_only`
+exactly `off`, including server-wide settings, independently of the guard's
+intentional read-only observation transaction; `search_path`
 exactly the pinned one, current schema `public`, current database equal to
 the target); `version_rows` (exactly the phase's rows; table missing,
 duplicates, unknown ids and any other multiset are refusals; unknown values
@@ -169,6 +177,21 @@ on PASS; 1 on any FAIL; 2 on a bootstrap refusal or an invalid invocation (any
 phase other than S0 or S3 included). No DSN, environment value, argument
 value, row value, database-chosen object name or exception body is ever
 printed; library exceptions are reported by type.
+
+The advisory key does not serialize plain Alembic migration commands. The
+#1211 manual upgrade blocks do not acquire it. Retained OID comparisons catch
+relation replacement, not every concurrent schema change: an `upgrade 0121`
+can commit after S0 row/footprint observations without changing retained OIDs.
+PASS is therefore an observation during a controlled window, not proof of
+automatic deploy/migration exclusion. The enforced deployment freeze in
+section 7 is mandatory throughout the manual migration window.
+
+The expectations snapshot command refuses inherited libpq target variables
+and validates the effective driver target with the same strict parser before
+opening a connection. Query overrides (including `host`, `hostaddr`, `dbname`,
+`port`, `service`), malformed targets and the existing platform database host
+are refused before `_engine`; an accepted disposable target is bound to an
+explicit host, port and database. No forbidden-target probe is made.
 
 ## 5. Source / state / phase matrix
 
@@ -269,29 +292,50 @@ re-rendered command (its SHA-256 is pinned there).
    another service's compiled Vite configuration, so that needs the owner's
    separate evidence.
 6. **Migration window S0 → S3, one separately approved manual operation, no
-   normal deploy inside it**: (a) read-only audit proves exact S0; (b) the
+   normal deploy inside it**: before the first audit, the owner must enforce
+   exclusion across every automated and manual deployment actor for the API
+   and dashboard: block deployment triggers and manual deployment access,
+   drain or cancel queued deployments, and verify no in-flight deployment or
+   pre-deploy remains. Record the exclusion controls and that drain evidence.
+   A warning to avoid deployments is insufficient. If exclusion cannot be
+   enforced and verified, do not start the window. Keep it enforced through
+   every upgrade, audit and any rollback: (a) read-only audit proves exact S0; (b) the
    three one-step blocks of the #1211 plan (`upgrade 0121`, audit exact S1,
    `upgrade 0122`, audit exact S2, `upgrade 0123`, audit exact S3), each with
    an explicit `DATABASE_URL`, never from the gate; any failure inside the
    window is rolled back branch-qualified (`0123@-1`, `0122@-1`, `0121@-1`)
    to exact S0 with Shopify features off. While the database is at S1 or S2
    the configured S0 command refuses every redeploy and restart with
-   pre-deploy, by design.
+   pre-deploy, by design. That refusal is a secondary safeguard, not the
+   exclusion mechanism; the plain migration blocks do not acquire the gate's
+   advisory key.
 7. **Approval for S3** (requires a verified restore rehearsal and a backup
    observation within 72 hours), `render --phase S3`, the atomic change of
-   command + variable (+ pin if `R` changed), deploy: `RESULT=PASS phase=S3`.
+   command + variable (+ pin if `R` changed). Keep the freeze until the final
+   S3 audit, reviewed approval, source pin, gate command and payload are all
+   ready; then allow only the supervised deployment: `RESULT=PASS phase=S3`.
+   Re-enable other deployment actors only after its checks succeed. If the
+   window rolls back to S0, retain exclusion until the S0 audit and matching
+   command, payload and source pin are restored and reviewed.
 8. Shopify feature activation (flags, secrets, app configuration, supervised
    journey) is a later slice with its own gate rule; this gate refuses any
    enabled flag in every phase it knows.
 
 ## 8. Old-deployment startup, redeploy and rollback compatibility
 
-* **New source at S0 or S3**: the application's background bootstrap
+The disposable tests exercise only Alembic Step C (`upgrade 0093`). They do
+not run the full startup path: Salla cleanup, `create_all`, and safe alters
+remain unverified at each Shopify state. Reports of unchanged rows/schema
+below apply to Step C only. Full startup compatibility is an acceptance gap,
+not established by the gate or those tests.
+
+* **New-source Step C**: the application's background bootstrap
   (`alembic upgrade 0093`, pinned by `bootstrap_migration_contract`) is a
   no-op because `0093` is an ancestor of the retained `0111` row — proven on
   disposable PostgreSQL at S1 and S3 (rows and schema unchanged). Runtime
-  behaviour does not depend on the Shopify tables while the flags are off.
-* **Legacy 462 against S1, S2 or S3**: its bootstrap `alembic upgrade 0093`
+  behaviour with flags off still requires the full startup compatibility
+  verification described above before any rollout.
+* **Legacy-462 Step C against S1, S2 or S3**: its bootstrap `alembic upgrade 0093`
   fails closed because the Shopify revision is unknown to its script directory
   (non-fatal to the worker, logged as a Step C failure, nothing mutated —
   proven with the 462 checkout at every Shopify state), and its pre-deploy
@@ -408,7 +452,13 @@ read-only database, wrong target, stale/foreign/ancient-backup payload) —
 the tests in §2; (4) the backup observation is entered as evidence only and
 `restore_verified` is false until a restore rehearsal is independently
 verified; (5) the Shopify configuration plan (§9) is confirmed against the
-official pages cited by the coordinator before any shell setting changes.
+official pages cited by the coordinator before any shell setting changes;
+(6) the effective read-only default, source-only import controls and snapshot
+target refusals are tested on the exact proposed source; (7) full startup
+compatibility is verified separately from Step C; (8) deployment exclusion
+is enforceable and its drain evidence is recorded before the manual window.
+Prior PostgreSQL runs on an earlier guard do not establish these checks on
+the modified guard; the current evidence document distinguishes them.
 
 ## 12. What this slice does not do
 

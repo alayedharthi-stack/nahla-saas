@@ -17,6 +17,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import py_compile
 import re
 import shutil
 import struct
@@ -206,6 +207,87 @@ def test_bootstrap_refuses_a_planted_initializer_and_an_added_migration(rendered
     assert rc == 2 and harness.bootstrap(out) == k.R_INVENTORY_COUNT_MISMATCH and not marker.exists() and "CHECK" not in out
 
 
+def _source_bootstrap(root, gate_source):
+    """Run the exact rendered Python payload directly, without asserting Bash compatibility."""
+    (root / k.GATE_RELATIVE_PATH).write_text(gate_source, encoding="utf-8")
+    approval = harness.approval_for(root, "S0", DB)
+    source = render.render_source(
+        root, release_sha=harness.SYNTHETIC_RELEASE_SHA, phase="S0", approval_sha256=harness.payload_sha(approval),
+        db=DB, backup_service=harness.SYNTHETIC_BACKUP["service"], backup_volume=harness.SYNTHETIC_BACKUP["volume"],
+        container_root=root.as_posix(), **harness.SYNTHETIC_IDENTITY)
+    env = harness.gate_environment("postgresql://u:p@db.internal/railway", approval=approval)
+    # The installed Windows interpreter needs its normal OS directory; this
+    # adds no database target or deployment identity to the synthetic process.
+    if os.name == "nt" and os.environ.get("SystemRoot"):
+        env["SystemRoot"] = os.environ["SystemRoot"]
+    return source, env
+
+
+def _run_source_bootstrap(source, env):
+    completed = subprocess.run([sys.executable, "-I", "-c", source], env=env, capture_output=True, text=True, timeout=30)
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("shadow", ["scripts.py", "scripts.pyc", "sqlalchemy.py"])
+def test_direct_bootstrap_refuses_uninventoried_import_shadow_before_its_marker(tmp_path, shadow):
+    root = harness.build_root(tmp_path / "root")
+    marker = tmp_path / "unverified-import-ran"
+    gate_source = "import sqlalchemy\n" if shadow == "sqlalchemy.py" else "from scripts.operators import shopify_release_gate_contract\n"
+    source, env = _source_bootstrap(root, gate_source)
+    payload = f"open({str(marker)!r}, 'w').close()\n"
+    if shadow.endswith(".pyc"):
+        temporary = tmp_path / "shadow-source.py"
+        temporary.write_text(payload, encoding="utf-8")
+        py_compile.compile(str(temporary), cfile=str(root / shadow), doraise=True)
+    else:
+        (root / shadow).write_text(payload, encoding="utf-8")
+    rc, out = _run_source_bootstrap(source, env)
+    assert rc == 2 and "BOOTSTRAP PASS" in out and "reason=repository_import_unverified" in out, out[-1500:]
+    assert not marker.exists() and "Traceback" not in out
+
+
+@pytest.mark.parametrize("direct_loader", [False, True])
+def test_direct_bootstrap_uses_verified_source_instead_of_unchecked_hash_bytecode(tmp_path, direct_loader):
+    root = harness.build_root(tmp_path / "root")
+    marker = tmp_path / "unverified-bytecode-ran"
+    if direct_loader:
+        target = root / "database/migrations/versions/0121_shopify_connection_foundation.py"
+        # A synthetic pinned migration isolates the direct-loader control
+        # from installed Alembic/SQLAlchemy availability in python -I.
+        target.write_text("revision = '0121'\n", encoding="utf-8")
+        gate_source = (
+            "import importlib.util\n"
+            f"spec = importlib.util.spec_from_file_location('verified_migration', {str(target)!r})\n"
+            "module = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(module)\n"
+            "assert module.revision == '0121'\nprint('VERIFIED_SOURCE_RAN')\n")
+        payload = f"open({str(marker)!r}, 'w').close()\nrevision = '0121'\n"
+    else:
+        target = root / k.CONTRACT_RELATIVE_PATH
+        gate_source = "from scripts.operators import shopify_release_gate_contract as k\nassert k.GATE_VERSION == 2\nprint('VERIFIED_SOURCE_RAN')\n"
+        payload = f"open({str(marker)!r}, 'w').close()\nGATE_VERSION = 2\n"
+    source, env = _source_bootstrap(root, gate_source)
+    temporary = tmp_path / "bytecode-source.py"
+    temporary.write_text(payload, encoding="utf-8")
+    cache = Path(importlib.util.cache_from_source(str(target)))
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    py_compile.compile(str(temporary), cfile=str(cache), doraise=True,
+                       invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+    rc, out = _run_source_bootstrap(source, env)
+    assert rc == 0 and "BOOTSTRAP PASS" in out and "VERIFIED_SOURCE_RAN" in out, out[-1500:]
+    assert not marker.exists() and "Traceback" not in out
+
+
+def test_direct_bootstrap_refuses_native_package_initializer_before_loader(tmp_path):
+    from importlib.machinery import EXTENSION_SUFFIXES
+
+    root = harness.build_root(tmp_path / "root")
+    source, env = _source_bootstrap(root, "from scripts.operators import shopify_release_gate_contract\n")
+    (root / "scripts/operators" / ("__init__" + EXTENSION_SUFFIXES[0])).write_bytes(b"unverified native candidate")
+    rc, out = _run_source_bootstrap(source, env)
+    assert rc == 2 and "BOOTSTRAP PASS" in out and "reason=repository_import_unverified" in out, out[-1500:]
+    assert "Traceback" not in out and "DLL load failed" not in out
+
+
 def test_bootstrap_refuses_wrong_release_identity_libpq_and_payload_before_any_import(rendered_root):
     root, command, env, marker = rendered_root
     # release, identity and libpq are refused before the inventory is even read: tampered modules stay unexecuted
@@ -370,6 +452,49 @@ def test_renderer_never_prints_a_third_party_exception_body(monkeypatch, capsys,
     with pytest.raises(render.RenderRefusal) as excinfo:
         render.snapshot("postgresql://u:sentinelcredentiallowercase@h:notaport/db", source_sha=harness.SYNTHETIC_RELEASE_SHA)
     assert excinfo.value.token == "database_url_malformed"
+
+
+@pytest.mark.parametrize("query", ["host=postgres-ancu.railway.internal", "hostaddr=192.0.2.1", "dbname=railway", "port=5432", "service=hidden"])
+def test_snapshot_refuses_target_query_before_connection(monkeypatch, capsys, query):
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    calls = []
+    monkeypatch.setattr(gate, "_engine", lambda url: calls.append(url))
+    with pytest.raises(render.RenderRefusal) as failure:
+        render.snapshot("postgresql://u:sentinelcredentiallowercase@disposable.internal/test?" + query,
+                        source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert failure.value.token == "database_url_malformed" and calls == []
+    assert "sentinelcredential" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", k.LIBPQ_TARGET_ENV_VARS)
+def test_snapshot_refuses_inherited_target_before_connection(monkeypatch, name):
+    for variable in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv(name, "sentinel-target")
+    calls = []
+    monkeypatch.setattr(gate, "_engine", lambda url: calls.append(url))
+    with pytest.raises(render.RenderRefusal) as failure:
+        render.snapshot("postgresql://u:p@disposable.internal/test", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert failure.value.token == "snapshot_environment_override" and calls == []
+
+
+def test_snapshot_uses_only_the_validated_explicit_target_and_refuses_current_host(monkeypatch):
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    calls = []
+
+    def stop(url):
+        calls.append(url)
+        raise RuntimeError("no connection in this control")
+
+    monkeypatch.setattr(gate, "_engine", stop)
+    with pytest.raises(render.RenderRefusal, match="refusing_existing_platform_database"):
+        render.snapshot("postgresql://u:p@postgres-ancu.railway.internal/railway", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert calls == []
+    with pytest.raises(render.RenderRefusal, match="snapshot_runtimeerror"):
+        render.snapshot("postgresql://u:p@DISPOSABLE.internal/test", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert calls == ["postgresql://u:p@disposable.internal:5432/test"]
 
 
 # ── Pure evaluations ─────────────────────────────────────────────────────────
@@ -874,7 +999,25 @@ def _run(conn, phase="S0"):
     return {c.name: c for c in checks}, engine
 
 
-SERVER_OK = {"search_path": [("public, pg_catalog",)], "pg_is_in_recovery": [(False,)], "current_schema": [("public",)], "current_database": [("x",)]}
+SERVER_OK = {"search_path": [("public, pg_catalog",)], "pg_is_in_recovery": [(False,)], "current_schema": [("public",)],
+             "current_database": [("x",)], "default_transaction_read_only": [("off",)]}
+
+
+def test_effective_global_read_only_default_is_refused_and_observation_read_only_is_distinct():
+    # There are no pg_db_role_setting rows in this control: SHOW must see the
+    # effective server-wide default. The observation transaction remains read
+    # only even when the application's default is writable.
+    for value in ("on", "", None):
+        conn = _FakeConn({**SERVER_OK, "default_transaction_read_only": [(value,)]})
+        checks, engine = _run(conn)
+        assert checks["server"].reason == k.R_SERVER_READ_ONLY
+        assert checks["unlock"].status == k.PASS and conn.closed and engine.disposed
+        assert any(sql == "SHOW default_transaction_read_only" for sql, _ in conn.log)
+        assert not any("pg_db_role_setting" in sql for sql, _ in conn.log)
+    conn = _FakeConn({**SERVER_OK, "transaction_read_only": [("on",)]})
+    checks, _ = _run(conn)
+    assert checks["server"].status == k.PASS
+    assert not any(sql == "SHOW transaction_read_only" for sql, _ in conn.log)
 
 
 def test_lock_denied_on_the_legacy_key_refuses_without_reading_anything_and_without_unlocking():
@@ -912,7 +1055,7 @@ def test_timeouts_and_errors_are_reported_by_closed_token_and_type_only():
     checks, _ = _run(conn)
     assert (checks["database"].reason, checks["database"].detail) == (k.R_TIMEOUT, {"error": "LockTimeout"})
     assert checks["unlock"].status == k.PASS and conn.rolled_back >= 1 and "server" not in checks
-    conn = _FakeConn({"pg_is_in_recovery": [(False,)], "search_path": [("public, pg_catalog",)]}, raise_on="current_schema", raise_exc=ValueError("p-not-a-real-secret"))
+    conn = _FakeConn(SERVER_OK, raise_on="current_schema", raise_exc=ValueError("p-not-a-real-secret"))
     checks, _ = _run(conn)
     assert (checks["database"].reason, checks["database"].detail) == (k.R_INTERNAL_ERROR, {"error": "ValueError"})
     assert "p-not-a-real-secret" not in json.dumps({n: c.detail for n, c in checks.items()})
