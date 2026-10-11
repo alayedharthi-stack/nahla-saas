@@ -1,0 +1,497 @@
+{
+  "schema_version": 1,
+  "pull_request": 1217,
+  "runtime_pull_request": 1216,
+  "runtime_frozen": true,
+  "run": {
+    "id": 38178126550,
+    "source": "d3920af2381f4ab8ccd7f09949abd139a199c39d",
+    "status": "completed",
+    "conclusion": "failure",
+    "started": "2026-10-11T21:52:12Z",
+    "updated": "2026-10-11T21:54:27Z",
+    "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38178126550"
+  },
+  "job": {
+    "id": 114584750516,
+    "status": "completed",
+    "conclusion": "failure",
+    "steps": [
+      {
+        "name": "Set up job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 1
+      },
+      {
+        "name": "Fetch exact frozen source and separate test driver",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 2
+      },
+      {
+        "name": "Resolve real Docker base and build unmodified production Dockerfile",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 3
+      },
+      {
+        "name": "Compare baseline production build if candidate build fails",
+        "status": "completed",
+        "conclusion": "skipped",
+        "number": 4
+      },
+      {
+        "name": "Full candidate and two baselines in identical production dependencies",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 5
+      },
+      {
+        "name": "Compare browser callback with synthetic service API key configured",
+        "status": "completed",
+        "conclusion": "failure",
+        "number": 6
+      },
+      {
+        "name": "Record final immutable source identities",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 7
+      },
+      {
+        "name": "Complete job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 8
+      }
+    ]
+  },
+  "driver_sha": "d3920af2381f4ab8ccd7f09949abd139a199c39d",
+  "source_before_after": [
+    {
+      "kind": "candidate",
+      "sha": "193d1bdca04a84f093d5ae1bfbbde45d9e2c88fe",
+      "tree": "4c7cb22523fee701588513b0dc9d18f9021479b5"
+    },
+    {
+      "kind": "accepted",
+      "sha": "7031e3efec639625dd537026d5a80376f3d679c9",
+      "tree": "600ffd638cadee2bb45e8eab7fbc1ea8134cec22"
+    },
+    {
+      "kind": "legacy",
+      "sha": "462ede1aff602cad84e9569be859cca0087b190d",
+      "tree": "f2866da7abec02e55592360b0360279205b6c08c"
+    },
+    {
+      "kind": "driver",
+      "sha": "d3920af2381f4ab8ccd7f09949abd139a199c39d",
+      "tree": "e625ea6dbe83a6bb4d0a746091478ff7ae1a39b1"
+    },
+    {
+      "kind": "candidate",
+      "sha": "193d1bdca04a84f093d5ae1bfbbde45d9e2c88fe",
+      "tree": "4c7cb22523fee701588513b0dc9d18f9021479b5"
+    },
+    {
+      "kind": "accepted",
+      "sha": "7031e3efec639625dd537026d5a80376f3d679c9",
+      "tree": "600ffd638cadee2bb45e8eab7fbc1ea8134cec22"
+    },
+    {
+      "kind": "legacy",
+      "sha": "462ede1aff602cad84e9569be859cca0087b190d",
+      "tree": "f2866da7abec02e55592360b0360279205b6c08c"
+    },
+    {
+      "kind": "driver",
+      "sha": "d3920af2381f4ab8ccd7f09949abd139a199c39d",
+      "tree": "e625ea6dbe83a6bb4d0a746091478ff7ae1a39b1"
+    }
+  ],
+  "production_build": {
+    "dockerfile_unmodified": true,
+    "base_image_id": "sha256:541096ae9b05d3b850341b78790e2ed31e94d5aa0ea086933c6ff0c09ffa2e63",
+    "base_repository_digests": [
+      "python@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
+    ],
+    "image_ids": {
+      "candidate": "sha256:bb9209f19b835af9bb79ab01530312001f4b2ea729898f1878ed6716b7aa400a",
+      "accepted": "sha256:601036074809a5eecaaa66a344596f26d51f6b7d4e6bd2d2bed8c75054eb44dd",
+      "legacy": "sha256:ccb3d6483ae4206029eea28b629b621734d2f1098e574792d49f62e3f8a7dbb7"
+    },
+    "identical_dependency_layers": [
+      "sha256:15f1c8eb1ab18eae260c7fb6296434cbe1ff0e1e30fd814ae92a80dd54005e62",
+      "sha256:56864e09c37360dbf846cf5ac9fc3090034f02e382fd0fbe4c7b576207436200",
+      "sha256:ba18d048b43a42f86dc288babadbdfe01602571200fd60c9e172deb8abf4147f",
+      "sha256:020f37c339b9fc549a11bcc5a937b81e3500281270bb62edde29022b27919d86",
+      "sha256:aa00866206c46176ede336cd774fde6d28b3c0280cd9a93cd47928fe00be4f8b",
+      "sha256:a39a116c25654c1cac687dff36418acc02c7992c6ca40e0510575653a71d1b99",
+      "sha256:e63b962e977d91746aa1ef97abbcb4d4cc783f0c9264be2ec0b814385b97cbff",
+      "sha256:46f28b2fa234b1fc7f7f104d8ef824261c11b3f756a3f60004a37be5a184beca"
+    ],
+    "python": "3.11.17",
+    "candidate_pip_check": "passed",
+    "candidate_production_preflight": "passed",
+    "build_input_bytes_equal_in_all_sources": [
+      "Dockerfile",
+      "requirements.txt",
+      ".dockerignore",
+      "nixpacks.toml",
+      "start.sh"
+    ]
+  },
+  "full_asgi": {
+    "passed": 24,
+    "failed": 0,
+    "skipped": 0,
+    "reports": [
+      {
+        "additional_threads": [],
+        "api_key_configured": false,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          },
+          {
+            "name": "real_asgi_liveness",
+            "status": "passed"
+          },
+          {
+            "name": "callback_exact_public_and_protected_jwt",
+            "status": "passed"
+          },
+          {
+            "name": "two_signed_tenants_all_disabled_routes",
+            "status": "passed"
+          },
+          {
+            "name": "installed_log_filters_actual_httpx_uvicorn_raw_asgi",
+            "status": "passed"
+          },
+          {
+            "name": "sentry_before_send_no_transport",
+            "status": "passed"
+          },
+          {
+            "name": "production_resolved_encryption_library",
+            "status": "passed"
+          },
+          {
+            "name": "zero_provider_database_or_shopify_worker_attempts",
+            "status": "passed"
+          }
+        ],
+        "dependency_versions": {
+          "cryptography": "50.0.2",
+          "fastapi": "0.111.0",
+          "httpx": "0.27.0",
+          "openai-agents": "0.22.2",
+          "psycopg2-binary": "2.9.9",
+          "pydantic": "2.12.5",
+          "python-jose": "3.3.0",
+          "sentry-sdk": "2.71.0",
+          "sqlalchemy": "2.0.30",
+          "starlette": "0.37.2"
+        },
+        "hmac_log_scrubbed": true,
+        "lifespan_executed": false,
+        "mode": "candidate",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "refused_subprocess_details": [],
+        "sentry_shopify_scrubbed": true,
+        "shopify_route_count": 12,
+        "source_sha": "193d1bdca04a84f093d5ae1bfbbde45d9e2c88fe",
+        "status": "passed"
+      },
+      {
+        "additional_threads": [],
+        "api_key_configured": false,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          },
+          {
+            "name": "real_asgi_liveness",
+            "status": "passed"
+          },
+          {
+            "name": "callback_exact_public_and_protected_jwt",
+            "status": "passed"
+          },
+          {
+            "name": "two_signed_tenants_all_disabled_routes",
+            "status": "passed"
+          },
+          {
+            "name": "installed_log_filters_actual_httpx_uvicorn_raw_asgi",
+            "status": "passed"
+          },
+          {
+            "name": "sentry_before_send_no_transport",
+            "status": "passed"
+          },
+          {
+            "name": "production_resolved_encryption_library",
+            "status": "passed"
+          },
+          {
+            "name": "zero_provider_database_or_shopify_worker_attempts",
+            "status": "passed"
+          }
+        ],
+        "dependency_versions": {
+          "cryptography": "50.0.2",
+          "fastapi": "0.111.0",
+          "httpx": "0.27.0",
+          "openai-agents": "0.22.2",
+          "psycopg2-binary": "2.9.9",
+          "pydantic": "2.12.5",
+          "python-jose": "3.3.0",
+          "sentry-sdk": "2.71.0",
+          "sqlalchemy": "2.0.30",
+          "starlette": "0.37.2"
+        },
+        "hmac_log_scrubbed": true,
+        "lifespan_executed": false,
+        "mode": "accepted",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "refused_subprocess_details": [],
+        "sentry_shopify_scrubbed": true,
+        "shopify_route_count": 12,
+        "source_sha": "7031e3efec639625dd537026d5a80376f3d679c9",
+        "status": "passed"
+      },
+      {
+        "additional_threads": [],
+        "api_key_configured": false,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          },
+          {
+            "name": "real_asgi_liveness",
+            "status": "passed"
+          },
+          {
+            "name": "callback_exact_public_and_protected_jwt",
+            "status": "passed"
+          },
+          {
+            "name": "two_signed_tenants_all_disabled_routes",
+            "status": "passed"
+          },
+          {
+            "name": "installed_log_filters_actual_httpx_uvicorn_raw_asgi",
+            "status": "passed"
+          },
+          {
+            "name": "sentry_before_send_no_transport",
+            "status": "passed"
+          },
+          {
+            "name": "production_resolved_encryption_library",
+            "status": "passed"
+          },
+          {
+            "name": "zero_provider_database_or_shopify_worker_attempts",
+            "status": "passed"
+          }
+        ],
+        "dependency_versions": {
+          "cryptography": "50.0.2",
+          "fastapi": "0.111.0",
+          "httpx": "0.27.0",
+          "openai-agents": "0.22.2",
+          "psycopg2-binary": "2.9.9",
+          "pydantic": "2.12.5",
+          "python-jose": "3.3.0",
+          "sentry-sdk": "2.71.0",
+          "sqlalchemy": "2.0.30",
+          "starlette": "0.37.2"
+        },
+        "hmac_log_scrubbed": false,
+        "lifespan_executed": false,
+        "mode": "legacy",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "refused_subprocess_details": [],
+        "sentry_shopify_scrubbed": false,
+        "shopify_route_count": 0,
+        "source_sha": "462ede1aff602cad84e9569be859cca0087b190d",
+        "status": "passed"
+      }
+    ]
+  },
+  "configured_api_key_callback": {
+    "candidate": "failed_401_expected_404",
+    "accepted": "failed_401_expected_404",
+    "legacy": "passed_401_control",
+    "reports": [
+      {
+        "api_key_configured": true,
+        "callback_expected_status": 404,
+        "callback_status": 401,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          }
+        ],
+        "error_type": "AssertionError",
+        "lifespan_executed": false,
+        "mode": "candidate",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "refused_subprocess_details": [],
+        "shopify_route_count": 12,
+        "source_sha": "193d1bdca04a84f093d5ae1bfbbde45d9e2c88fe",
+        "status": "failed"
+      },
+      {
+        "api_key_configured": true,
+        "callback_expected_status": 404,
+        "callback_status": 401,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          }
+        ],
+        "error_type": "AssertionError",
+        "lifespan_executed": false,
+        "mode": "accepted",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "refused_subprocess_details": [],
+        "shopify_route_count": 12,
+        "source_sha": "7031e3efec639625dd537026d5a80376f3d679c9",
+        "status": "failed"
+      },
+      {
+        "api_key_configured": true,
+        "callback_expected_status": 401,
+        "callback_status": 401,
+        "cases": [
+          {
+            "name": "full_module_and_router_graph",
+            "status": "passed"
+          },
+          {
+            "name": "configured_service_key_browser_callback",
+            "status": "passed"
+          }
+        ],
+        "lifespan_executed": false,
+        "mode": "legacy",
+        "non_shopify_routes_count": 643,
+        "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+        "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+        "refused_attempt_counts": {
+          "database": 0,
+          "network": 0,
+          "subprocess": 0
+        },
+        "shopify_route_count": 0,
+        "source_sha": "462ede1aff602cad84e9569be859cca0087b190d",
+        "status": "passed"
+      }
+    ]
+  },
+  "final_decoded_log_lf_sha256": "b9362f606721d3cde6fb13561484db33fa5dd11bc043782965821a11dd694fd6",
+  "previous_runs": [
+    {
+      "id": 38177339413,
+      "job_id": 114582391449,
+      "driver": "92d3491795a4b6b662d99e70276c7f322c93786a",
+      "classification": "Synthetic ADMIN_EMAIL omitted: candidate and deployed baseline image, Python and pip checks passed, production preflight refused both; no ASGI tests ran.",
+      "terminal_status": "completed",
+      "conclusion": "failure",
+      "decoded_log_lf_sha256": "69ef57b6cd7943466e681b2a917aa33c9f6a12c629f96a4612f4dc76da6b83e7",
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38177339413"
+    },
+    {
+      "id": 38177524930,
+      "job_id": 114582949510,
+      "driver": "4758ab9d705f71eb71521578dc31993064eba95b",
+      "classification": "Candidate seven HTTP/import checks passed. Strict subprocess invariant found the existing health Git identity fallback; shell errexit prevented baselines. Test infrastructure correction required.",
+      "terminal_status": "completed",
+      "conclusion": "failure",
+      "decoded_log_lf_sha256": "afe6bf3b6c4ed6b37185ccf4ea1822115caedd927b565cb91cf3ce6b12ecb5a2",
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38177524930"
+    },
+    {
+      "id": 38177755128,
+      "job_id": 114583640573,
+      "driver": "1df343046a20f112a1a0088089e79770e1493ffb",
+      "classification": "All source comparisons executed. Refused Git fallback occurs in all three sources. Legacy OPTIONS catch-all returned 405 instead of the test's mistaken 404. Configured service-key callback independently failed 401 on candidate/accepted; legacy 401 control passed.",
+      "terminal_status": "completed",
+      "conclusion": "failure",
+      "decoded_log_lf_sha256": "dbf788b2f1432a2bbe5ee4aac4f1e58cd4790161b30b7ba402c2359bd40f820f",
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38177755128"
+    },
+    {
+      "id": 38177929101,
+      "job_id": 114584165403,
+      "driver": "979f90bf4c6f94a7c1403510ca0815dc60300abb",
+      "classification": "Exact injected source metadata removes fallback; candidate/accepted eight checks each passed with zero attempts. Legacy baseline still required the source-backed 405 expectation. Configured service-key blocker remained.",
+      "terminal_status": "completed",
+      "conclusion": "failure",
+      "decoded_log_lf_sha256": "aafbd68f387f64bdf282e6003393b39c8a8ddcc4fe07b0d23a08c516ce04e9da",
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38177929101"
+    }
+  ],
+  "boundaries": {
+    "credentials": "synthetic_only",
+    "docker_runtime_network": "none",
+    "db_connects": 0,
+    "provider_calls": 0,
+    "subprocess_attempts": 0,
+    "additional_threads": 0,
+    "lifespan_executed": false,
+    "real_pg_startup_proof": "carried accepted run 38176146625; not rerun",
+    "essential_guard_proof": "carried accepted run 38171916514; not rerun",
+    "railway_running_builder_observed": false,
+    "live_configuration_changes": false,
+    "deployment": false,
+    "merge": false,
+    "app_secret_access": false,
+    "new_purchase": false
+  }
+}
