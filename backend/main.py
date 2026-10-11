@@ -1128,6 +1128,18 @@ async def on_startup() -> None:
             for stmt in safe_alters:
                 try:
                     with engine.begin() as conn:
+                        # Migration 0013 drops this legacy column. Resolve the
+                        # same relation as the unqualified ALTER, including its
+                        # search_path, and retain both repairs for older schemas.
+                        if stmt in (
+                            "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used SET DEFAULT 0",
+                            "ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used DROP NOT NULL",
+                        ) and not conn.execute(text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute "
+                            "WHERE attrelid = pg_catalog.to_regclass('whatsapp_usage') "
+                            "AND attname = 'conversations_used' AND attnum > 0 AND NOT attisdropped)"
+                        )).scalar():
+                            continue
                         conn.execute(text(stmt))
                 except Exception as exc:
                     logger.warning("Startup migration skipped statement: %s | error=%s", stmt[:120], exc)

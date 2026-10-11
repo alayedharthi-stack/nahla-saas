@@ -1,0 +1,1056 @@
+{
+  "evidence_version": 1,
+  "run": {
+    "id": 38176146625,
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-10-11T21:23:11Z",
+    "updated_at": "2026-10-11T21:24:45Z",
+    "run_attempt": 1,
+    "head_sha": "71e699b41b8598bc2865dbe413989a5ca072dc49"
+  },
+  "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38176146625",
+  "functional_repair_sha": "5eafa3b71bea4ca01dbfa585a39aa6962c000f37",
+  "functional_repair_tree": "c88c3308fcf86c4a48b64729d126a14df516c71e",
+  "tested_sha": "71e699b41b8598bc2865dbe413989a5ca072dc49",
+  "tested_tree": "a2e3112b80fa6e13c9ec558c57654c15f7bcd189",
+  "baseline_sha": "7031e3efec639625dd537026d5a80376f3d679c9",
+  "deployed_sha": "462ede1aff602cad84e9569be859cca0087b190d",
+  "full_asgi_or_production_image_pass": false,
+  "jobs": [
+    {
+      "id": 114578843204,
+      "name": "Startup / PostgreSQL 18",
+      "status": "completed",
+      "conclusion": "success",
+      "test_summary": "2026-10-11T21:24:39.1093896Z 10 passed in 36.30s",
+      "junit": "2026-10-11T21:24:39.2662838Z {'ok': True, 'reason': 'clean', 'tests': 10, 'skipped': 0, 'failures': 0, 'errors': 0, 'path': '/home/runner/work/_temp/legacy-usage-startup.xml', 'suites': 1}",
+      "server": "2026-10-11T21:24:02.2467933Z PostgreSQL server_version_num= 180006",
+      "focused_cases": [
+        "LEGACY_COLUMN_PROOF public present PASS",
+        "LEGACY_COLUMN_PROOF usage_probe present PASS",
+        "LEGACY_COLUMN_PROOF public dropped PASS",
+        "LEGACY_COLUMN_PROOF usage_probe dropped PASS"
+      ],
+      "preservation": [
+        {
+          "phase": "S0",
+          "result": "PASS",
+          "details": {
+            "baseline_expected_errors": 2,
+            "candidate_boots": 2,
+            "candidate_errors": 0,
+            "public_tables": 128,
+            "relation_identities": 695,
+            "version_rows": [
+              "0111",
+              "0113",
+              "0120"
+            ]
+          }
+        },
+        {
+          "phase": "S3",
+          "result": "PASS",
+          "details": {
+            "baseline_expected_errors": 2,
+            "candidate_boots": 2,
+            "candidate_errors": 0,
+            "public_tables": 143,
+            "relation_identities": 775,
+            "version_rows": [
+              "0111",
+              "0113",
+              "0123"
+            ]
+          }
+        }
+      ],
+      "gates": [
+        {
+          "phase": "S0",
+          "exit_code": 0,
+          "checks": {
+            "approval": [
+              "PASS",
+              null
+            ],
+            "connect": [
+              "PASS",
+              null
+            ],
+            "database_target": [
+              "PASS",
+              null
+            ],
+            "expectations": [
+              "PASS",
+              null
+            ],
+            "graph": [
+              "PASS",
+              null
+            ],
+            "identity": [
+              "PASS",
+              null
+            ],
+            "inventory": [
+              "PASS",
+              null
+            ],
+            "libraries": [
+              "PASS",
+              null
+            ],
+            "lock": [
+              "PASS",
+              null
+            ],
+            "migration_preflight": [
+              "PASS",
+              null
+            ],
+            "relation_identity": [
+              "PASS",
+              null
+            ],
+            "release_sha": [
+              "PASS",
+              null
+            ],
+            "retained_schema": [
+              "PASS",
+              null
+            ],
+            "root": [
+              "PASS",
+              null
+            ],
+            "server": [
+              "PASS",
+              null
+            ],
+            "shopify_flags": [
+              "PASS",
+              null
+            ],
+            "shopify_footprint": [
+              "PASS",
+              null
+            ],
+            "unlock": [
+              "PASS",
+              null
+            ],
+            "version_rows": [
+              "PASS",
+              null
+            ]
+          }
+        },
+        {
+          "phase": "S3",
+          "exit_code": 0,
+          "checks": {
+            "approval": [
+              "PASS",
+              null
+            ],
+            "connect": [
+              "PASS",
+              null
+            ],
+            "database_target": [
+              "PASS",
+              null
+            ],
+            "expectations": [
+              "PASS",
+              null
+            ],
+            "graph": [
+              "PASS",
+              null
+            ],
+            "identity": [
+              "PASS",
+              null
+            ],
+            "inventory": [
+              "PASS",
+              null
+            ],
+            "libraries": [
+              "PASS",
+              null
+            ],
+            "lock": [
+              "PASS",
+              null
+            ],
+            "migration_preflight": [
+              "PASS",
+              null
+            ],
+            "relation_identity": [
+              "PASS",
+              null
+            ],
+            "release_sha": [
+              "PASS",
+              null
+            ],
+            "retained_schema": [
+              "PASS",
+              null
+            ],
+            "root": [
+              "PASS",
+              null
+            ],
+            "server": [
+              "PASS",
+              null
+            ],
+            "shopify_flags": [
+              "PASS",
+              null
+            ],
+            "shopify_footprint": [
+              "PASS",
+              null
+            ],
+            "unlock": [
+              "PASS",
+              null
+            ],
+            "version_rows": [
+              "PASS",
+              null
+            ]
+          }
+        }
+      ],
+      "startup_reports": [
+        {
+          "main_sha256": "1dd3aacb6a16bbcb3105407a2ff1b2faab9c76cd025eac48488f33590a839ea3",
+          "startup_ast_sha256": "0fb20149626b7041912eddcbccb61e054319de6e1d4d58be3424999f232b2187",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "d5f5675a6594a64ef35766964d322fdd4fed5b43df10957546f00a3850196400",
+          "startup_ast_sha256": "ce440cd4932c879c6872e131e4eb2520211b2e36277e12e5ecf916b962f1eec0",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "1dd3aacb6a16bbcb3105407a2ff1b2faab9c76cd025eac48488f33590a839ea3",
+          "startup_ast_sha256": "0fb20149626b7041912eddcbccb61e054319de6e1d4d58be3424999f232b2187",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "d5f5675a6594a64ef35766964d322fdd4fed5b43df10957546f00a3850196400",
+          "startup_ast_sha256": "ce440cd4932c879c6872e131e4eb2520211b2e36277e12e5ecf916b962f1eec0",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [],
+          "withheld_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_coexistence_client_id_repair_bg",
+            "_migrate_background",
+            "_reconcile_pending_moyasar_sweep",
+            "_subscribe_platform_phone",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": false,
+          "safe_alters_ready": false,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        }
+      ],
+      "source_identities": [
+        "2026-10-11T21:23:44.8969591Z baseline=7031e3efec639625dd537026d5a80376f3d679c9 tree=600ffd638cadee2bb45e8eab7fbc1ea8134cec22",
+        "2026-10-11T21:23:44.9015062Z legacy=462ede1aff602cad84e9569be859cca0087b190d tree=f2866da7abec02e55592360b0360279205b6c08c",
+        "2026-10-11T21:23:44.9063219Z driver=71e699b41b8598bc2865dbe413989a5ca072dc49 tree=a2e3112b80fa6e13c9ec558c57654c15f7bcd189",
+        "2026-10-11T21:24:39.6084138Z baseline=7031e3efec639625dd537026d5a80376f3d679c9 tree=600ffd638cadee2bb45e8eab7fbc1ea8134cec22",
+        "2026-10-11T21:24:39.6129755Z legacy=462ede1aff602cad84e9569be859cca0087b190d tree=f2866da7abec02e55592360b0360279205b6c08c",
+        "2026-10-11T21:24:39.7765159Z candidate=71e699b41b8598bc2865dbe413989a5ca072dc49 tree=a2e3112b80fa6e13c9ec558c57654c15f7bcd189"
+      ],
+      "container_stop": "success"
+    },
+    {
+      "id": 114578843373,
+      "name": "Startup / PostgreSQL 16",
+      "status": "completed",
+      "conclusion": "success",
+      "test_summary": "2026-10-11T21:24:41.4182787Z 10 passed in 37.18s",
+      "junit": "2026-10-11T21:24:41.5547980Z {'ok': True, 'reason': 'clean', 'tests': 10, 'skipped': 0, 'failures': 0, 'errors': 0, 'path': '/home/runner/work/_temp/legacy-usage-startup.xml', 'suites': 1}",
+      "server": "2026-10-11T21:24:03.6953538Z PostgreSQL server_version_num= 160015",
+      "focused_cases": [
+        "LEGACY_COLUMN_PROOF public present PASS",
+        "LEGACY_COLUMN_PROOF usage_probe present PASS",
+        "LEGACY_COLUMN_PROOF public dropped PASS",
+        "LEGACY_COLUMN_PROOF usage_probe dropped PASS"
+      ],
+      "preservation": [
+        {
+          "phase": "S0",
+          "result": "PASS",
+          "details": {
+            "baseline_expected_errors": 2,
+            "candidate_boots": 2,
+            "candidate_errors": 0,
+            "public_tables": 128,
+            "relation_identities": 695,
+            "version_rows": [
+              "0111",
+              "0113",
+              "0120"
+            ]
+          }
+        },
+        {
+          "phase": "S3",
+          "result": "PASS",
+          "details": {
+            "baseline_expected_errors": 2,
+            "candidate_boots": 2,
+            "candidate_errors": 0,
+            "public_tables": 143,
+            "relation_identities": 775,
+            "version_rows": [
+              "0111",
+              "0113",
+              "0123"
+            ]
+          }
+        }
+      ],
+      "gates": [
+        {
+          "phase": "S0",
+          "exit_code": 0,
+          "checks": {
+            "approval": [
+              "PASS",
+              null
+            ],
+            "connect": [
+              "PASS",
+              null
+            ],
+            "database_target": [
+              "PASS",
+              null
+            ],
+            "expectations": [
+              "PASS",
+              null
+            ],
+            "graph": [
+              "PASS",
+              null
+            ],
+            "identity": [
+              "PASS",
+              null
+            ],
+            "inventory": [
+              "PASS",
+              null
+            ],
+            "libraries": [
+              "PASS",
+              null
+            ],
+            "lock": [
+              "PASS",
+              null
+            ],
+            "migration_preflight": [
+              "PASS",
+              null
+            ],
+            "relation_identity": [
+              "PASS",
+              null
+            ],
+            "release_sha": [
+              "PASS",
+              null
+            ],
+            "retained_schema": [
+              "PASS",
+              null
+            ],
+            "root": [
+              "PASS",
+              null
+            ],
+            "server": [
+              "PASS",
+              null
+            ],
+            "shopify_flags": [
+              "PASS",
+              null
+            ],
+            "shopify_footprint": [
+              "PASS",
+              null
+            ],
+            "unlock": [
+              "PASS",
+              null
+            ],
+            "version_rows": [
+              "PASS",
+              null
+            ]
+          }
+        },
+        {
+          "phase": "S3",
+          "exit_code": 0,
+          "checks": {
+            "approval": [
+              "PASS",
+              null
+            ],
+            "connect": [
+              "PASS",
+              null
+            ],
+            "database_target": [
+              "PASS",
+              null
+            ],
+            "expectations": [
+              "PASS",
+              null
+            ],
+            "graph": [
+              "PASS",
+              null
+            ],
+            "identity": [
+              "PASS",
+              null
+            ],
+            "inventory": [
+              "PASS",
+              null
+            ],
+            "libraries": [
+              "PASS",
+              null
+            ],
+            "lock": [
+              "PASS",
+              null
+            ],
+            "migration_preflight": [
+              "PASS",
+              null
+            ],
+            "relation_identity": [
+              "PASS",
+              null
+            ],
+            "release_sha": [
+              "PASS",
+              null
+            ],
+            "retained_schema": [
+              "PASS",
+              null
+            ],
+            "root": [
+              "PASS",
+              null
+            ],
+            "server": [
+              "PASS",
+              null
+            ],
+            "shopify_flags": [
+              "PASS",
+              null
+            ],
+            "shopify_footprint": [
+              "PASS",
+              null
+            ],
+            "unlock": [
+              "PASS",
+              null
+            ],
+            "version_rows": [
+              "PASS",
+              null
+            ]
+          }
+        }
+      ],
+      "startup_reports": [
+        {
+          "main_sha256": "1dd3aacb6a16bbcb3105407a2ff1b2faab9c76cd025eac48488f33590a839ea3",
+          "startup_ast_sha256": "0fb20149626b7041912eddcbccb61e054319de6e1d4d58be3424999f232b2187",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "d5f5675a6594a64ef35766964d322fdd4fed5b43df10957546f00a3850196400",
+          "startup_ast_sha256": "ce440cd4932c879c6872e131e4eb2520211b2e36277e12e5ecf916b962f1eec0",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "1dd3aacb6a16bbcb3105407a2ff1b2faab9c76cd025eac48488f33590a839ea3",
+          "startup_ast_sha256": "0fb20149626b7041912eddcbccb61e054319de6e1d4d58be3424999f232b2187",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "d5f5675a6594a64ef35766964d322fdd4fed5b43df10957546f00a3850196400",
+          "startup_ast_sha256": "ce440cd4932c879c6872e131e4eb2520211b2e36277e12e5ecf916b962f1eec0",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 2,
+          "sql_error_types": [
+            "UndefinedColumn:whatsapp_usage.conversations_used",
+            "UndefinedColumn:whatsapp_usage.conversations_used"
+          ]
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_migrate_background"
+          ],
+          "withheld_tasks": [
+            "_coexistence_client_id_repair_bg",
+            "_reconcile_pending_moyasar_sweep",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": true,
+          "safe_alters_ready": true,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [
+            {
+              "operation": "cleanup",
+              "returncode": 0
+            },
+            {
+              "operation": "upgrade 0093",
+              "returncode": 0
+            }
+          ],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        },
+        {
+          "main_sha256": "58ce5e1f25755c5a335b39922d0fab3d91bb0d7d9f00c97642002d129d140846",
+          "startup_ast_sha256": "36af9264b59d12b776592b7206c5e0444c0c2ebd208c0960522c01d1eee20a8a",
+          "db_tasks": [],
+          "withheld_tasks": [
+            "_bootstrap_db_schema_bg",
+            "_coexistence_client_id_repair_bg",
+            "_migrate_background",
+            "_reconcile_pending_moyasar_sweep",
+            "_subscribe_platform_phone",
+            "run_runtime_heartbeat"
+          ],
+          "bootstrap_ready": false,
+          "safe_alters_ready": false,
+          "lifespan_complete": true,
+          "network_canary_refused": true,
+          "provider_network_attempts": 0,
+          "provider_client_calls": [],
+          "scheduler_registrations": [],
+          "subprocesses": [],
+          "sql_error_count": 0,
+          "sql_error_types": []
+        }
+      ],
+      "source_identities": [
+        "2026-10-11T21:23:44.9481471Z baseline=7031e3efec639625dd537026d5a80376f3d679c9 tree=600ffd638cadee2bb45e8eab7fbc1ea8134cec22",
+        "2026-10-11T21:23:44.9525460Z legacy=462ede1aff602cad84e9569be859cca0087b190d tree=f2866da7abec02e55592360b0360279205b6c08c",
+        "2026-10-11T21:23:44.9570035Z driver=71e699b41b8598bc2865dbe413989a5ca072dc49 tree=a2e3112b80fa6e13c9ec558c57654c15f7bcd189",
+        "2026-10-11T21:24:41.8729922Z baseline=7031e3efec639625dd537026d5a80376f3d679c9 tree=600ffd638cadee2bb45e8eab7fbc1ea8134cec22",
+        "2026-10-11T21:24:41.8772915Z legacy=462ede1aff602cad84e9569be859cca0087b190d tree=f2866da7abec02e55592360b0360279205b6c08c",
+        "2026-10-11T21:24:42.0414957Z candidate=71e699b41b8598bc2865dbe413989a5ca072dc49 tree=a2e3112b80fa6e13c9ec558c57654c15f7bcd189"
+      ],
+      "container_stop": "success"
+    }
+  ]
+}
