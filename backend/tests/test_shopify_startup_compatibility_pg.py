@@ -195,7 +195,7 @@ def test_adopted_nonce_survives_s0_to_s3_without_fixture_reset(tmp_path, monkeyp
     spec.loader.exec_module(nonce_api)
     # Supply only a synthetic HMAC key, without importing service config/provider clients.
     monkeypatch.setattr(nonce_api, "_hmac_key", lambda: b"synthetic-adopted-nonce-hmac-key")
-    db = pg._fresh_db("adopted_nonce")
+    db = pg._fresh_db("startup_adopted_nonce")
     engine = create_engine(pg._loopback_url(db), poolclass=NullPool)
     factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     monkeypatch.setattr(nonce_api, "_independent_session", factory)
