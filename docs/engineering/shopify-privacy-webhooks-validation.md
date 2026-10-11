@@ -22,7 +22,7 @@ absolute checkout and scratch paths made repository-relative or removed,
 Python object addresses replaced by `<addr>`, host name and credentials
 omitted; nothing else rewritten, and candidate and baseline values are kept
 separate. It was built and then cross-checked by a second, independent
-script against the retained files (164 checks, 0 failures), without
+script against the retained files (167 checks, 0 failures), without
 re-running any test.
 
 ## Verdict summary
@@ -267,18 +267,27 @@ D4 detail (both SHAs): failure 1 FAILED with the same `caplog` assertion;
 failure 2 PASSED; the 5 skipped are the 5 collection-time
 `A1_PG_INTEGRATION_REQUIRED` module skips listed above (module-level skips
 are reported before `-k` deselection); 1 + 1 + 5 + 1111 = 1118, the full
-run's report count.
+run's report count. D4 executed the two selected test nodes **together with
+their fixtures and the session's conftest / plugin hooks**, after collecting
+(importing) the full list.
 
 Interpretation, bounded by this evidence:
 
-* Failure 1 needs only collection / import of the full list (D4: only the
-  two selected nodes executed; no unrelated test cases ran) — a collection
-  or import side effect on logging capture. The responsible logger / module
-  is not identified.
-* Failure 2 passes alone (D1b), after the billing-badge file (D2 —
-  counterevidence for that suspect) and in D4; it fails only when earlier
-  tests execute. **The exact leaking fixture or test remains unidentified**;
-  this limitation is retained.
+* Failure 1 passes alone (D1a) but fails in D4, where only the two selected
+  test nodes executed (no unrelated test case ran), with their fixtures and
+  hooks, inside the collection context of the full list. This shows
+  **sensitivity to the full list's collection context**; it does not isolate
+  an import or collection cause. The responsible logger / module is **not
+  identified**.
+* Failure 2 passes alone (D1b), in the two-file D2 run and in D4; it fails
+  only when earlier tests execute in the full list. D2 did **not** rule out
+  the billing-badge file: `backend/tests/test_admin_tenant_list_billing_badge.py`
+  registers a module-level `before_create` listener on `Base.metadata` that
+  rewrites `JSONB` column types to `JSON` and is never removed (verified in
+  the source, identical at both SHAs), so it remains a verified suspect,
+  including module-alias and ordering interactions. That two-file run was
+  insufficient to reproduce the failure. **The polluting fixture or test
+  remains unidentified**; this limitation is retained.
 * Both failures reproduce identically on the baseline, in files #1205 does
   not change. Neither is fixed here: legacy tests are not silently fixed,
   globals, assertions and source are unchanged, and no failure is
@@ -338,10 +347,14 @@ their only evidence and are not GitHub check results.
 ## Not proven / open
 
 * The owner 65-file gate is **FAILED** (reproduced baseline debt above).
-* The JSONB failure's leaking fixture is unidentified.
+* The caplog failure's responsible logger / module and the JSONB failure's
+  polluting fixture or test are unidentified (D2 did not rule out the
+  billing-badge listener; D4 shows collection-context sensitivity only).
 * Root skip / xfail identities are not compared (counts only).
-* An HTTP receipt timeout answers 503 but does not terminate the receipt
-  thread. The dedicated executor (4 threads), its admission semaphore and
+* The 3 s receipt limit is a **handler wait bound**: the HTTP handler stops
+  waiting after 3 s and answers 503. The database thread and any COMMIT may
+  continue beyond it and keep their slot until they finish. An HTTP receipt
+  timeout therefore does not terminate the receipt thread. The dedicated executor (4 threads), its admission semaphore and
   its dedicated pool (`pool_size` 4, `max_overflow` 0) cap concurrent
   receipts at 4 per application process. `statement_timeout`,
   `lock_timeout` and `connect_timeout` limit server-side work and connection

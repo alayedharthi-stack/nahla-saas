@@ -523,7 +523,7 @@
           "selected_reports": 7,
           "deselected": 1111,
           "reports_total": 1118,
-          "note": "module-level skips are reported at collection, before -k deselection; only the two selected nodes executed, no unrelated test case ran"
+          "note": "module-level skips are reported at collection, before -k deselection; only the two selected test nodes executed, together with their fixtures and the session's conftest / plugin hooks, after collecting (importing) the full list; no unrelated test case ran"
         },
         "baseline": {
           "exit_code": 1,
@@ -552,14 +552,14 @@
           "selected_reports": 7,
           "deselected": 1111,
           "reports_total": 1118,
-          "note": "module-level skips are reported at collection, before -k deselection; only the two selected nodes executed, no unrelated test case ran"
+          "note": "module-level skips are reported at collection, before -k deselection; only the two selected test nodes executed, together with their fixtures and the session's conftest / plugin hooks, after collecting (importing) the full list; no unrelated test case ran"
         }
       }
     }
   ],
   "diagnostic_interpretation": {
-    "failure_1_caplog": "D4 executed only the two selected nodes (no unrelated test cases ran) and failure 1 still failed: a collection/import side effect of the full list on log capture; the responsible logger/module is NOT identified",
-    "failure_2_jsonb": "passes alone (D1b), after the billing-badge file (D2) and in D4; fails only after earlier tests execute; D2 did not reproduce it (counterevidence for that one suspect, not proof that every combination was excluded); the leaking fixture/test is NOT identified",
+    "failure_1_caplog": "passes alone (D1a); fails in D4, where only the two selected test nodes executed (no unrelated test case ran) with their fixtures and hooks inside the full list's collection context: collection-context sensitivity, not an isolated import/collection cause; the responsible logger/module is NOT identified",
+    "failure_2_jsonb": "passes alone (D1b), in the two-file D2 run and in D4; fails only when earlier tests execute in the full list. D2 did not rule out the billing-badge file: backend/tests/test_admin_tenant_list_billing_badge.py registers a module-level, never-removed Base.metadata before_create listener that rewrites JSONB column types to JSON (verified in source, identical at both SHAs), so it remains a verified suspect including module-alias and ordering interactions; the two-file D2 run was insufficient to reproduce the failure. The polluting fixture/test is NOT identified",
     "gate_effect": "diagnostics do not replace or waive the FAILED gate"
   },
   "root_suite": {
@@ -1013,10 +1013,17 @@
     "post_restore_checks": "git status clean; worktree hash equals HEAD blob; preserved diff applies to HEAD (git apply --check); HEAD + diff reproduces each preserved copy byte for byte",
     "diff_differences_between_shas": "recorded base_sha and random dedup_msg_id values only"
   },
+  "evidence_limits": [
+    "the 3 s receipt limit is a handler wait bound: the database thread and any COMMIT may continue beyond it and keep their slot until they finish",
+    "statement / lock / connect timeouts do not guarantee termination of a network-stalled client receive or an in-flight COMMIT",
+    "a redelivery joins a still-open request; a completed request is never reused",
+    "manifest comparison is parsed-object equality, not a byte comparison",
+    "no real Shopify store, subscription, live delivery or erasure was exercised"
+  ],
   "unresolved": [
     "owner 65-file gate FAILED (no waiver)",
-    "logger/module behind failure 1 (caplog) not identified",
-    "fixture/test leaking into failure 2 (JSONB) not identified",
+    "logger/module behind failure 1 (caplog) not identified; D4 shows collection-context sensitivity only",
+    "fixture/test polluting failure 2 (JSONB) not identified; the billing-badge before_create JSONB->JSON listener is a verified, not excluded, suspect",
     "root skip / xfail identities not compared (root run had no -rs / JUnit); only counts match",
     "D3 skip identities not recorded"
   ]
