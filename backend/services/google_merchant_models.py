@@ -15,7 +15,8 @@ and every invariant below on PostgreSQL.
 ``google_merchant_connections`` — one tenant ↔ one Merchant account binding.
   * ``UNIQUE(tenant_id)`` and ``UNIQUE(account_id)`` hold for every status: a
     disabled or revoked row stays as the account tombstone (rows are never
-    deleted), so another tenant can never claim the account.
+    deleted, neither by DELETE nor by TRUNCATE), so another tenant can never
+    claim the account.
   * tenant, account, language and feed label are immutable; the API data
     source is bound exactly once (NULL → value) and is then immutable.
   * ``credential_enc`` is a future ``gmc1:`` envelope column only; nothing
@@ -32,13 +33,21 @@ evidence, outbox and idempotency in one row.
   * a dispatched operation (id, action, full request snapshot, its SHA-256,
     idempotency key, generation) is frozen until it resolves; ``lease_fence``
     only grows and changes only when a new dispatch lease is taken, with a
-    fresh ``attempt_id``. A completion from a superseded attempt cannot match.
+    fresh ``attempt_id``, under a still-bound connection; the fresh attempt
+    starts with no outcome or retry time, and a live attempt keeps its owner.
+    A completion from a superseded attempt cannot match.
+  * an attempt's outcome (a 429 with its retry time, or a rejection code) is
+    written only by the transition that ends that live attempt, names it
+    (``attempt_id``) and is then frozen; new work carries none.
   * ``admitted_generation`` is a high-water mark that never decreases, also
     across rejected or superseded operations.
   * an expired dispatch lease can only go to read-back; only the live lease
-    holder may record a definitive 429 (back to ``pending``) or rejection.
-  * ownership and applied evidence change only through confirmation; owned,
-    claiming and in-flight rows cannot be deleted.
+    holder may record a definitive 429 (back to ``pending``) or rejection. Lease
+    liveness is judged by ``clock_timestamp()`` with the row locked, never by
+    the transaction-start ``now()``.
+  * ownership and applied evidence change only through confirmation; ledger
+    rows are never deleted (neither DELETE nor TRUNCATE), so every identity
+    keeps its high-water generation and applied-key history as a tombstone.
 
 PostgreSQL semantics are assumed (JSONB, PL/pgSQL, ``sha256``).
 """
@@ -253,6 +262,11 @@ class GoogleMerchantOfferLedger(GoogleMerchantBase):
             name="ck_google_merchant_offer_ledger_lease",
         ),
         CheckConstraint(
+            "(last_outcome IS NULL AND last_error_code IS NULL AND next_attempt_at IS NULL)"
+            " OR (op_state <> 'dispatching' AND attempt_id IS NOT NULL)",
+            name="ck_google_merchant_offer_ledger_attempt_outcome",
+        ),
+        CheckConstraint(
             f"({_all(_APPLIED_COLUMNS, 'IS NULL')}) OR ({_all(_APPLIED_COLUMNS, 'IS NOT NULL')})",
             name="ck_google_merchant_offer_ledger_applied_shape",
         ),
@@ -301,7 +315,8 @@ CONNECTIONS_GUARD_SQL = f"""
 CREATE FUNCTION {CONNECTIONS_GUARD_FUNCTION}() RETURNS trigger
 LANGUAGE plpgsql AS $guard$
 BEGIN
-  IF TG_OP = 'DELETE' THEN
+  -- Row DELETE and statement TRUNCATE alike: TRUNCATE never fires row triggers.
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
     RAISE EXCEPTION 'google_merchant_connections rows are retained as account tombstones'
       USING ERRCODE = 'restrict_violation';
   END IF;
@@ -339,6 +354,9 @@ $guard$;
 CREATE TRIGGER {CONNECTIONS_GUARD_TRIGGER}
   BEFORE INSERT OR UPDATE OR DELETE ON {CONNECTIONS_TABLE}
   FOR EACH ROW EXECUTE FUNCTION {CONNECTIONS_GUARD_FUNCTION}();
+CREATE TRIGGER {CONNECTIONS_GUARD_TRIGGER}_truncate
+  BEFORE TRUNCATE ON {CONNECTIONS_TABLE}
+  FOR EACH STATEMENT EXECUTE FUNCTION {CONNECTIONS_GUARD_FUNCTION}();
 """
 
 LEDGER_GUARD_SQL = f"""
@@ -348,16 +366,16 @@ DECLARE
   op_same boolean;
   applied_same boolean;
   attempt_same boolean;
+  outcome_same boolean;
+  evidence_same boolean;
   new_op boolean;
   live_lease boolean;
   ok boolean := false;
 BEGIN
-  IF TG_OP = 'DELETE' THEN
-    IF OLD.ownership <> 'released' OR OLD.op_state <> 'idle' THEN
-      RAISE EXCEPTION 'google_merchant_offer_ledger evidence is retained'
-        USING ERRCODE = 'restrict_violation';
-    END IF;
-    RETURN OLD;
+  -- Row DELETE and statement TRUNCATE alike: TRUNCATE never fires row triggers.
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION 'google_merchant_offer_ledger rows are retained as identity, generation and evidence tombstones'
+      USING ERRCODE = 'restrict_violation';
   END IF;
 
   IF TG_OP = 'INSERT' THEN
@@ -404,7 +422,14 @@ BEGIN
                   (OLD.applied_attributes, OLD.applied_fingerprint, OLD.applied_generation, OLD.applied_idempotency_key);
   attempt_same := NEW.attempt_id IS NOT DISTINCT FROM OLD.attempt_id AND NEW.lease_fence = OLD.lease_fence
                   AND NEW.attempts = OLD.attempts AND NEW.dispatched_at IS NOT DISTINCT FROM OLD.dispatched_at;
-  live_lease := OLD.lease_expires_at IS NOT NULL AND OLD.lease_expires_at > now();
+  -- Outcome evidence of an attempt (and the 429 retry time) is written only by
+  -- the transition that ends that live attempt, and is then frozen.
+  evidence_same := (NEW.last_outcome, NEW.last_error_code) IS NOT DISTINCT FROM (OLD.last_outcome, OLD.last_error_code);
+  outcome_same := evidence_same AND NEW.next_attempt_at IS NOT DISTINCT FROM OLD.next_attempt_at;
+  -- The real clock, not the transaction start time: a transaction begun before
+  -- expiry (or one that waited on the row lock past it) must not see a live
+  -- lease. This trigger runs with the row already locked.
+  live_lease := OLD.lease_expires_at IS NOT NULL AND OLD.lease_expires_at > clock_timestamp();
   -- A newly admitted, never-dispatched operation with a fresh id and key and a
   -- generation above the retained high-water mark.
   new_op := NEW.op_state = 'pending'
@@ -425,11 +450,15 @@ BEGIN
       RAISE EXCEPTION 'google_merchant_offer_ledger admits work only under a bound connection'
         USING ERRCODE = 'restrict_violation';
     END IF;
+    -- New work has no attempt yet, so it carries no attempt outcome either.
+    NEW.last_outcome := NULL;
+    NEW.last_error_code := NULL;
+    NEW.next_attempt_at := NULL;
   END IF;
 
   IF OLD.op_state = 'idle' THEN
     IF NEW.op_state = 'idle' THEN
-      ok := applied_same AND NEW.ownership = OLD.ownership AND attempt_same
+      ok := applied_same AND NEW.ownership = OLD.ownership AND attempt_same AND outcome_same
             AND NEW.admitted_generation = OLD.admitted_generation;
     ELSE
       ok := new_op;
@@ -438,7 +467,7 @@ BEGIN
     IF NEW.op_state = 'pending' THEN
       -- Same operation (e.g. rescheduled after a 429), or replacement of an
       -- operation that was never dispatched.
-      ok := (op_same AND applied_same AND attempt_same AND NEW.ownership = OLD.ownership
+      ok := (op_same AND applied_same AND attempt_same AND outcome_same AND NEW.ownership = OLD.ownership
              AND NEW.admitted_generation = OLD.admitted_generation)
             OR (new_op AND OLD.attempts = 0 AND OLD.dispatched_at IS NULL AND OLD.attempt_id IS NULL);
     ELSIF NEW.op_state = 'dispatching' THEN
@@ -446,6 +475,20 @@ BEGIN
             AND NEW.admitted_generation = OLD.admitted_generation
             AND NEW.lease_fence = OLD.lease_fence + 1 AND NEW.attempts = OLD.attempts + 1
             AND NEW.attempt_id IS NOT NULL AND NEW.attempt_id IS DISTINCT FROM OLD.attempt_id;
+      IF ok THEN
+        -- A fresh dispatch is new external work: the connection must still be
+        -- bound, read under the same shared lock that serializes it against a
+        -- concurrent disable or revoke.
+        PERFORM 1 FROM {CONNECTIONS_TABLE} WHERE id = NEW.connection_id AND status = 'bound' FOR SHARE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'google_merchant_offer_ledger dispatches only under a bound connection'
+            USING ERRCODE = 'restrict_violation';
+        END IF;
+        -- A fresh attempt never inherits the previous attempt's outcome or retry time.
+        NEW.last_outcome := NULL;
+        NEW.last_error_code := NULL;
+        NEW.next_attempt_at := NULL;
+      END IF;
     END IF;
   ELSIF OLD.op_state = 'dispatching' THEN
     IF op_same AND applied_same AND attempt_same AND NEW.ownership = OLD.ownership
@@ -453,20 +496,22 @@ BEGIN
       IF NEW.op_state = 'readback_required' THEN
         ok := true;  -- the reply, a crash or an expired lease: read back, never resend
       ELSIF NEW.op_state = 'dispatching' THEN
-        ok := live_lease;  -- lease renewal by the live holder only
+        -- Renewal by the live holder only; the owner of a live attempt never
+        -- changes (a new owner needs a new fenced attempt, or reconciliation).
+        ok := live_lease AND NEW.lease_owner = OLD.lease_owner;
       ELSIF NEW.op_state = 'pending' THEN
-        ok := live_lease AND NEW.last_outcome = '{RATE_LIMITED_OUTCOME}' AND NEW.next_attempt_at IS NOT NULL;
+        ok := live_lease AND NEW.last_outcome = '{RATE_LIMITED_OUTCOME}' AND NEW.next_attempt_at > OLD.dispatched_at;
       ELSIF NEW.op_state = 'rejected' THEN
         ok := live_lease AND NEW.last_error_code IS NOT NULL;
       END IF;
     END IF;
   ELSIF OLD.op_state IN ('readback_required', 'unresolved') THEN
     IF NEW.op_state IN ('readback_required', 'unresolved') THEN
-      ok := op_same AND applied_same AND attempt_same AND NEW.ownership = OLD.ownership
+      ok := op_same AND applied_same AND attempt_same AND evidence_same AND NEW.ownership = OLD.ownership
             AND NEW.admitted_generation = OLD.admitted_generation;
     ELSIF NEW.op_state = 'idle' THEN
       -- Confirmation by read-back: the applied evidence is exactly this operation.
-      ok := attempt_same AND NEW.admitted_generation = OLD.admitted_generation
+      ok := attempt_same AND evidence_same AND NEW.admitted_generation = OLD.admitted_generation
             AND NEW.applied_fingerprint IS NOT NULL
             AND NEW.applied_idempotency_key = OLD.op_idempotency_key
             AND NEW.applied_generation = OLD.op_generation
@@ -475,11 +520,11 @@ BEGIN
     END IF;
   ELSIF OLD.op_state = 'rejected' THEN
     IF NEW.op_state = 'rejected' THEN
-      ok := op_same AND applied_same AND attempt_same AND NEW.ownership = OLD.ownership
+      ok := op_same AND applied_same AND attempt_same AND outcome_same AND NEW.ownership = OLD.ownership
             AND NEW.admitted_generation = OLD.admitted_generation;
     ELSIF NEW.op_state = 'idle' THEN
       -- A definitive rejection had no effect: close it; an unconfirmed claim is released.
-      ok := applied_same AND attempt_same AND NEW.admitted_generation = OLD.admitted_generation
+      ok := applied_same AND attempt_same AND outcome_same AND NEW.admitted_generation = OLD.admitted_generation
             AND ((OLD.ownership = 'claiming' AND NEW.ownership = 'released')
                  OR (OLD.ownership <> 'claiming' AND NEW.ownership = OLD.ownership));
     ELSE
@@ -498,6 +543,9 @@ $guard$;
 CREATE TRIGGER {LEDGER_GUARD_TRIGGER}
   BEFORE INSERT OR UPDATE OR DELETE ON {LEDGER_TABLE}
   FOR EACH ROW EXECUTE FUNCTION {LEDGER_GUARD_FUNCTION}();
+CREATE TRIGGER {LEDGER_GUARD_TRIGGER}_truncate
+  BEFORE TRUNCATE ON {LEDGER_TABLE}
+  FOR EACH STATEMENT EXECUTE FUNCTION {LEDGER_GUARD_FUNCTION}();
 """
 
 GOOGLE_MERCHANT_TABLES = (GoogleMerchantConnection.__table__, GoogleMerchantOfferLedger.__table__)

@@ -39,6 +39,23 @@ for _p in (_REPO, _REPO / "backend", _REPO / "database"):
 ADMIN_URL = (os.environ.get("NAHLA_RELIABILITY_PG_ADMIN_DSN") or "").strip()
 if not ADMIN_URL and os.environ.get("NAHLA_RELIABILITY_REQUIRE_PG") == "1":
     raise RuntimeError("NAHLA_RELIABILITY_REQUIRE_PG=1 but NAHLA_RELIABILITY_PG_ADMIN_DSN is not set")
+
+# Disposable local servers only: the DSN must name a loopback host, and neither
+# its query nor the libpq environment may redirect the connection elsewhere.
+# Checked at import, before any database is created; the DSN is never echoed.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_REDIRECTS = frozenset({"host", "hostaddr", "service"})
+
+
+def _refuse_non_loopback(dsn: str, environ) -> None:
+    url = make_url(dsn)
+    if (url.host not in _LOOPBACK_HOSTS or _REDIRECTS & set(url.query)
+            or environ.get("PGHOSTADDR") or environ.get("PGSERVICE")):
+        raise RuntimeError("NAHLA_RELIABILITY_PG_ADMIN_DSN must target a disposable loopback PostgreSQL")
+
+
+if ADMIN_URL:
+    _refuse_non_loopback(ADMIN_URL, os.environ)
 pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)")
 
 from services.google_merchant_models import (  # noqa: E402
@@ -116,14 +133,14 @@ def _drop(name: str) -> None:
 @pytest.fixture(scope="module")
 def template_db():
     name = _fresh_db("gmc_tmpl")
-    eng = create_engine(_url(name), poolclass=NullPool, future=True)
     try:
-        with eng.begin() as conn:
-            _base_tables(conn)
-            _run_migration(conn)
-    finally:
-        eng.dispose()
-    try:
+        eng = create_engine(_url(name), poolclass=NullPool, future=True)
+        try:
+            with eng.begin() as conn:
+                _base_tables(conn)
+                _run_migration(conn)
+        finally:
+            eng.dispose()
         yield name
     finally:
         _drop(name)
@@ -224,11 +241,15 @@ def _set(pg, rid: int, *, where: str = "", bump: bool = True, **cols) -> int:
     return _sql(pg, f"UPDATE {LEDGER} SET {', '.join(assignments)} WHERE id = :rid {where}", rid=rid, **cols)
 
 
+_DISPATCH = (f"UPDATE {LEDGER} SET op_state = 'dispatching', lease_fence = lease_fence + 1,"
+             " attempts = attempts + 1, attempt_id = :a, dispatched_at = clock_timestamp(), lease_owner = 'worker-a',"
+             " lease_expires_at = clock_timestamp() + make_interval(secs => :s), {extra} version = version + 1"
+             " WHERE id = :rid")
+
+
 def _dispatch(pg, rid: int, attempt: str, *, lease_seconds: int = 300) -> int:
-    return _sql(pg, f"UPDATE {LEDGER} SET op_state = 'dispatching', lease_fence = lease_fence + 1,"
-                    " attempts = attempts + 1, attempt_id = :a, dispatched_at = now(), lease_owner = 'worker-a',"
-                    " lease_expires_at = now() + make_interval(secs => :s), version = version + 1 WHERE id = :rid",
-                rid=rid, a=attempt, s=lease_seconds)
+    """A fresh dispatch: new fence and attempt id (the database clears the previous attempt's outcome)."""
+    return _sql(pg, _DISPATCH.format(extra=""), rid=rid, a=attempt, s=lease_seconds)
 
 
 _LEASE_CLEARED = "lease_owner = NULL, lease_expires_at = NULL"
@@ -319,14 +340,15 @@ def _schema(eng) -> dict:
                     " WHERE tgrelid = CAST(:t AS regclass) AND NOT tgisinternal"), {"t": t}).all()),
             }
         out["functions"] = sorted(conn.execute(text(
-            "SELECT proname, prosrc FROM pg_proc WHERE proname = ANY(:n)"),
+            "SELECT proname, pg_get_functiondef(oid) FROM pg_proc WHERE proname = ANY(:n)"),
             {"n": list(GOOGLE_MERCHANT_GUARD_FUNCTIONS)}).all())
     return out
 
 
 def test_migration_schema_equals_model_metadata():
-    by_migration, by_model = _fresh_db("gmc_mig"), _fresh_db("gmc_mod")
+    by_migration, by_model = _fresh_db("gmc_mig"), None
     try:
+        by_model = _fresh_db("gmc_mod")
         e1 = create_engine(_url(by_migration), poolclass=NullPool, future=True)
         e2 = create_engine(_url(by_model), poolclass=NullPool, future=True)
         with e1.begin() as conn:
@@ -346,13 +368,32 @@ def test_migration_schema_equals_model_metadata():
             " feed_label) MATCH FULL ON UPDATE RESTRICT ON DELETE RESTRICT")
         assert ledger["uq_google_merchant_offer_ledger_identity"] == (
             "UNIQUE (account_id, content_language, feed_label, offer_id)")
-        indexes = dict(a[LEDGER]["indexes"])
-        assert "lower((offer_id)::text)" in indexes["ux_google_merchant_offer_ledger_identity_lower"]
-        assert len(a[CONN]["triggers"]) == len(a[LEDGER]["triggers"]) == 1
-        assert [name for name, _src in a["functions"]] == sorted(GOOGLE_MERCHANT_GUARD_FUNCTIONS)
+        assert ledger["ck_google_merchant_offer_ledger_attempt_outcome"] == (
+            "CHECK ((((last_outcome IS NULL) AND (last_error_code IS NULL) AND (next_attempt_at IS NULL))"
+            " OR (((op_state)::text <> 'dispatching'::text) AND (attempt_id IS NOT NULL))))")
+        assert dict(a[LEDGER]["indexes"])["ux_google_merchant_offer_ledger_identity_lower"] == (
+            "CREATE UNIQUE INDEX ux_google_merchant_offer_ledger_identity_lower ON public.google_merchant_offer_ledger"
+            " USING btree (account_id, content_language, feed_label, lower((offer_id)::text))")
+        for table, trigger, function in ((CONN, "trg_google_merchant_connections_guard",
+                                          "google_merchant_connections_guard"),
+                                         (LEDGER, "trg_google_merchant_offer_ledger_guard",
+                                          "google_merchant_offer_ledger_guard")):
+            assert a[table]["triggers"] == [
+                (trigger, f"CREATE TRIGGER {trigger} BEFORE INSERT OR DELETE OR UPDATE"
+                          f" ON public.{table} FOR EACH ROW EXECUTE FUNCTION {function}()"),
+                (f"{trigger}_truncate", f"CREATE TRIGGER {trigger}_truncate BEFORE TRUNCATE"
+                                        f" ON public.{table} FOR EACH STATEMENT EXECUTE FUNCTION {function}()"),
+            ]
+        functions = dict(a["functions"])
+        assert sorted(functions) == sorted(GOOGLE_MERCHANT_GUARD_FUNCTIONS)
+        for name, definition in functions.items():
+            assert definition.startswith(f"CREATE OR REPLACE FUNCTION public.{name}()\n RETURNS trigger\n"
+                                         " LANGUAGE plpgsql\nAS $function$"), name
+        assert "clock_timestamp()" in functions["google_merchant_offer_ledger_guard"]
     finally:
         _drop(by_migration)
-        _drop(by_model)
+        if by_model:
+            _drop(by_model)
 
 
 def _names(eng):
@@ -559,6 +600,9 @@ def test_account_stays_claimed_across_inactive_states_and_rows_are_never_deleted
     _fails(pg, f"INSERT INTO {CONN} (tenant_id, account_id, content_language, feed_label, status)"
                " VALUES (:t, :a, 'ar', 'SA', 'authorized')", {UNIQUE}, t=ta, a=ACCOUNT_B)
     _fails(pg, f"DELETE FROM {CONN} WHERE id = :id", {RESTRICT}, id=cid)
+    _fails(pg, f"DELETE FROM {CONN}", {RESTRICT})
+    # TRUNCATE fires no row trigger; the statement trigger refuses it.
+    _fails(pg, f"TRUNCATE {CONN} CASCADE", {RESTRICT})
     _fails(pg, "DELETE FROM tenants WHERE id = :id", {FOREIGN_KEY, RESTRICT}, id=ta)
     assert _crow(pg, cid)["account_id"] == ACCOUNT_A
 
@@ -826,9 +870,9 @@ def test_lease_fence_is_monotonic_and_a_stale_completion_cannot_land(pg):
 def test_an_expired_lease_can_only_go_to_read_back(pg):
     ca, _cb = _bound_pair(pg)
     rid = _claim(pg, ca, "SKU-1")
-    _dispatch(pg, rid, "a1", lease_seconds=1)
-    _sql(pg, f"UPDATE {LEDGER} SET lease_expires_at = now() - interval '5 seconds', version = version + 1"
-             " WHERE id = :rid AND lease_expires_at > now()", rid=rid)
+    _dispatch(pg, rid, "a1", lease_seconds=60)
+    assert _sql(pg, f"UPDATE {LEDGER} SET lease_expires_at = clock_timestamp() - interval '5 seconds',"
+                    " version = version + 1 WHERE id = :rid AND lease_expires_at > clock_timestamp()", rid=rid) == 1
     to_pending = (f"UPDATE {LEDGER} SET op_state = 'pending', {_LEASE_CLEARED}, last_outcome = 'rate_limited',"
                   " next_attempt_at = now(), version = version + 1 WHERE id = :rid")
     to_rejected = (f"UPDATE {LEDGER} SET op_state = 'rejected', {_LEASE_CLEARED}, last_error_code = 'invalid',"
@@ -918,7 +962,7 @@ def test_admitted_generation_high_water_survives_supersede_rejection_and_replay(
     # Once dispatched (even if returned to pending by a 429) it cannot be replaced.
     _dispatch(pg, rid, "a1")
     _sql(pg, f"UPDATE {LEDGER} SET op_state = 'pending', {_LEASE_CLEARED}, last_outcome = 'rate_limited',"
-             " next_attempt_at = now(), version = version + 1 WHERE id = :rid", rid=rid)
+             " next_attempt_at = now() + interval '30 seconds', version = version + 1 WHERE id = :rid", rid=rid)
     _fails(pg, f"UPDATE {LEDGER} SET op_id = :op_id, op_snapshot = :op_snapshot, op_snapshot_hash = :op_snapshot_hash,"
                " op_idempotency_key = :op_idempotency_key, op_generation = :op_generation,"
                " admitted_generation = :op_generation, attempts = 0, attempt_id = NULL, dispatched_at = NULL,"
@@ -990,5 +1034,304 @@ def test_evidence_is_retained(pg):
     _sql(pg, f"UPDATE {LEDGER} SET op_state = 'idle', op_id = NULL, op_action = NULL, op_snapshot = NULL,"
              " op_snapshot_hash = NULL, op_idempotency_key = NULL, op_generation = NULL, ownership = 'released',"
              " version = version + 1 WHERE id = :rid", rid=released)
-    assert _sql(pg, f"DELETE FROM {LEDGER} WHERE id = :rid", rid=released) == 1
-    assert _sql(pg, f"SELECT count(*) AS n FROM {LEDGER}")[0]["n"] == 2
+    # A resolved, released row is a tombstone as well: never deleted.
+    _fails(pg, f"DELETE FROM {LEDGER} WHERE id = :rid", {RESTRICT}, rid=released)
+    _fails(pg, f"DELETE FROM {LEDGER}", {RESTRICT})
+    for statement in (f"TRUNCATE {LEDGER}", f"TRUNCATE {LEDGER}, {CONN}", f"TRUNCATE {CONN} CASCADE"):
+        _fails(pg, statement, {RESTRICT})
+    assert _sql(pg, f"SELECT count(*) AS n FROM {LEDGER}")[0]["n"] == 3
+    assert _sql(pg, f"SELECT count(*) AS n FROM {CONN}")[0]["n"] == 2
+
+
+def test_tombstones_keep_the_high_water_mark_against_reinsert_and_stale_generations(pg):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-T", generation=1)
+    _dispatch(pg, rid, "a1")
+    _readback(pg, rid)
+    _confirm(pg, rid, "owned")
+    _new_op(pg, rid, 2, "delete", "owned")
+    _dispatch(pg, rid, "a2")
+    _readback(pg, rid)
+    _confirm(pg, rid, "released")
+    tomb = _row(pg, rid)
+    assert (tomb["ownership"], tomb["op_state"], tomb["admitted_generation"], tomb["applied_generation"]) == (
+        "released", "idle", 2, 2)
+    _fails(pg, f"DELETE FROM {LEDGER} WHERE id = :rid", {RESTRICT}, rid=rid)
+    _fails(pg, f"TRUNCATE {LEDGER}", {RESTRICT})
+    # The identity cannot be re-created from generation 1 (or by a case variant).
+    for offer_id in ("SKU-T", "sku-t"):
+        _fails(pg, _INSERT_LEDGER, {UNIQUE}, **_scope(pg, ca), offer_id=offer_id, **_op(f"re-{offer_id}", 1))
+    # Work on the retained row stays above the high-water mark and never replays the applied key.
+    renew = (f"UPDATE {LEDGER} SET op_state = 'pending', op_id = :op_id, op_action = 'insert',"
+             " op_snapshot = :op_snapshot, op_snapshot_hash = :op_snapshot_hash,"
+             " op_idempotency_key = :op_idempotency_key, op_generation = :op_generation,"
+             " admitted_generation = :op_generation, ownership = 'claiming', attempts = 0, attempt_id = NULL,"
+             " dispatched_at = NULL, version = version + 1 WHERE id = :rid")
+    for generation in (1, 2):
+        _fails(pg, renew, {RESTRICT, CHECK}, rid=rid, **_op(f"stale{generation}", generation))
+    replay = _op("replay", 3)
+    replay["op_idempotency_key"] = tomb["applied_idempotency_key"]
+    _fails(pg, renew, {RESTRICT}, rid=rid, **replay)
+    assert _sql(pg, renew, rid=rid, **_op("fresh", 3)) == 1
+    assert _row(pg, rid)["admitted_generation"] == 3
+
+
+_EXPIRED_USE = {
+    "rate_limited": (f"UPDATE {LEDGER} SET op_state = 'pending', {_LEASE_CLEARED}, last_outcome = 'rate_limited',"
+                     " next_attempt_at = clock_timestamp() + interval '1 minute', version = version + 1"
+                     " WHERE id = :rid"),
+    "rejected": (f"UPDATE {LEDGER} SET op_state = 'rejected', {_LEASE_CLEARED}, last_error_code = 'invalid_argument',"
+                 " version = version + 1 WHERE id = :rid"),
+    "renewal": (f"UPDATE {LEDGER} SET lease_expires_at = clock_timestamp() + interval '5 minutes',"
+                " version = version + 1 WHERE id = :rid"),
+}
+
+
+@pytest.mark.parametrize("use", sorted(_EXPIRED_USE))
+@pytest.mark.parametrize("mode", ["long_transaction", "lock_wait"])
+def test_a_transaction_started_before_expiry_cannot_use_an_expired_lease(pg, mode, use):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-1")
+    _dispatch(pg, rid, "a1", lease_seconds=3)
+    late = pg.engine.connect()
+    tx = late.begin()
+    box = {}
+    try:
+        # The late transaction starts while the lease is still live: its now() stays before expiry.
+        assert late.execute(text(f"SELECT now() < lease_expires_at FROM {LEDGER} WHERE id = :rid"),
+                            {"rid": rid}).scalar()
+        if mode == "long_transaction":
+            late.execute(text("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM (lease_expires_at"
+                              f" - clock_timestamp()))) + 0.3) FROM {LEDGER} WHERE id = :rid"), {"rid": rid})
+            assert late.execute(text(f"SELECT now() < lease_expires_at AND clock_timestamp() > lease_expires_at"
+                                     f" FROM {LEDGER} WHERE id = :rid"), {"rid": rid}).scalar()
+            try:
+                late.execute(text(_EXPIRED_USE[use]), {"rid": rid})
+                box["ok"] = True
+            except DBAPIError as exc:
+                box["code"] = exc.orig.pgcode
+        else:
+            holder = pg.engine.connect()
+            held = holder.begin()
+            holder.execute(text(f"SELECT 1 FROM {LEDGER} WHERE id = :rid FOR UPDATE"), {"rid": rid})
+
+            def contender():
+                try:
+                    late.execute(text(_EXPIRED_USE[use]), {"rid": rid})
+                    box["ok"] = True
+                except DBAPIError as exc:
+                    box["code"] = exc.orig.pgcode
+
+            thread = threading.Thread(target=contender)
+            thread.start()
+            try:
+                _wait_for_lock_wait(pg)
+                remaining = holder.execute(text("SELECT EXTRACT(EPOCH FROM (lease_expires_at - clock_timestamp()))"
+                                                f" FROM {LEDGER} WHERE id = :rid"), {"rid": rid}).scalar()
+                time.sleep(max(0.0, float(remaining)) + 0.3)
+            finally:
+                held.commit()
+                holder.close()
+            thread.join(30)
+            assert not thread.is_alive()
+    finally:
+        tx.rollback()
+        late.close()
+    assert box == {"code": RESTRICT}
+    row = _row(pg, rid)
+    assert (row["op_state"], row["lease_fence"], row["last_outcome"], row["last_error_code"]) == (
+        "dispatching", 1, None, None)
+    assert _readback(pg, rid) == 1  # an expired lease is reconcile-only
+
+
+_DISPATCH_RETURNING = _DISPATCH.format(extra="") + " RETURNING id"
+_DISABLE = f"UPDATE {CONN} SET status = :s, credential_enc = NULL, version = version + 1 WHERE id = :cid RETURNING id"
+
+
+@pytest.mark.parametrize("status", ["disabled", "revoked"])
+def test_dispatch_requires_a_currently_bound_connection_but_recovery_continues(pg, status):
+    ca, _cb = _bound_pair(pg)
+    waiting = _claim(pg, ca, "SKU-1")
+    inflight = _claim(pg, ca, "SKU-2")
+    _dispatch(pg, inflight, "b1")
+    _sql(pg, _DISABLE, s=status, cid=ca)
+    _fails(pg, _DISPATCH_RETURNING, {RESTRICT}, rid=waiting, a="a1", s=300)
+    row = _row(pg, waiting)
+    assert (row["op_state"], row["attempts"], row["lease_fence"]) == ("pending", 0, 0)
+    # Already-dispatched (ambiguous) work stays recoverable, read-only.
+    assert _readback(pg, inflight) == 1
+    assert _confirm(pg, inflight, "owned") == 1
+
+
+@pytest.mark.parametrize("first", ["disable", "dispatch"])
+def test_disable_and_dispatch_serialize_on_the_connection_lock(pg, first):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-1")
+    disable = (_DISABLE, {"s": "disabled", "cid": ca})
+    dispatch = (_DISPATCH_RETURNING, {"rid": rid, "a": "a1", "s": 300})
+    one, two = (disable, dispatch) if first == "disable" else (dispatch, disable)
+    first_rows, second = _race(pg, one[0], two[0], one[1], two[1])
+    assert len(first_rows) == 1
+    row = _row(pg, rid)
+    if first == "disable":
+        assert second == {"error": RESTRICT}
+        assert (row["op_state"], row["attempts"], row["lease_fence"]) == ("pending", 0, 0)
+    else:
+        assert len(second.get("rows", [])) == 1
+        assert (row["op_state"], row["attempts"], row["lease_fence"]) == ("dispatching", 1, 1)
+    assert _crow(pg, ca)["status"] == "disabled"
+
+
+def test_attempt_outcomes_are_cleared_and_bound_to_the_current_attempt(pg):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-1")
+    _dispatch(pg, rid, "a1")
+    # Attempt 1 records a 429 whose retry time is already due.
+    assert _sql(pg, f"UPDATE {LEDGER} SET op_state = 'pending', {_LEASE_CLEARED}, last_outcome = 'rate_limited',"
+                    " next_attempt_at = clock_timestamp(), version = version + 1 WHERE id = :rid", rid=rid) == 1
+    first = _row(pg, rid)
+    assert (first["attempt_id"], first["last_outcome"]) == ("a1", "rate_limited")
+    # The outcome is frozen with its attempt.
+    for assignment in ("last_outcome = 'timeout'", "last_error_code = 'invalid'",
+                       "next_attempt_at = next_attempt_at + interval '1 hour'"):
+        _fails(pg, f"UPDATE {LEDGER} SET {assignment}, version = version + 1 WHERE id = :rid", {RESTRICT}, rid=rid)
+    # A fresh dispatch clears it in the database; the caller writes nothing about it.
+    assert _sql(pg, _DISPATCH.format(extra=""), rid=rid, a="a2", s=300) == 1
+    second = _row(pg, rid)
+    assert (second["attempt_id"], second["last_outcome"], second["last_error_code"], second["next_attempt_at"]) == (
+        "a2", None, None, None)
+    assert second["dispatched_at"] > first["next_attempt_at"]
+    # Nothing is recorded early while the attempt is in flight.
+    for assignment in ("last_outcome = 'rate_limited'", "last_error_code = 'invalid'", "next_attempt_at = :old"):
+        _fails(pg, f"UPDATE {LEDGER} SET {assignment}, version = version + 1 WHERE id = :rid", {CHECK},
+               rid=rid, old=first["next_attempt_at"])
+    # Attempt 2 returns to pending only with its own outcome and a retry time after its own dispatch.
+    back = f"UPDATE {LEDGER} SET op_state = 'pending', {_LEASE_CLEARED}{{extra}}, version = version + 1 WHERE id = :rid"
+    for extra in ("", ", last_outcome = 'rate_limited'", ", next_attempt_at = :later",
+                  ", last_outcome = 'rate_limited', next_attempt_at = :old"):
+        _fails(pg, back.format(extra=extra), {RESTRICT}, rid=rid, old=first["next_attempt_at"],
+               later=second["lease_expires_at"])
+    _fails(pg, f"UPDATE {LEDGER} SET op_state = 'rejected', {_LEASE_CLEARED}, version = version + 1 WHERE id = :rid",
+           {RESTRICT}, rid=rid)
+    assert _sql(pg, _EXPIRED_USE["rate_limited"], rid=rid) == 1
+    third = _row(pg, rid)
+    assert (third["attempt_id"], third["last_outcome"]) == ("a2", "rate_limited")
+    assert third["next_attempt_at"] > second["dispatched_at"]
+    # Even a dispatch that tries to carry attempt 2's outcome forward starts clean.
+    carry = "last_outcome = 'rate_limited', last_error_code = 'invalid', next_attempt_at = :old,"
+    assert _sql(pg, _DISPATCH.format(extra=carry), rid=rid, a="a3", s=300, old=third["next_attempt_at"]) == 1
+    carried = _row(pg, rid)
+    assert (carried["attempt_id"], carried["last_outcome"], carried["last_error_code"],
+            carried["next_attempt_at"]) == ("a3", None, None, None)
+    # Attempt 3 is rejected; the terminal code stays with attempt 3, also once the claim is closed.
+    assert _sql(pg, _EXPIRED_USE["rejected"], rid=rid) == 1
+    _fails(pg, f"UPDATE {LEDGER} SET last_error_code = 'other', version = version + 1 WHERE id = :rid",
+           {RESTRICT}, rid=rid)
+    close = (f"UPDATE {LEDGER} SET op_state = 'idle', op_id = NULL, op_action = NULL, op_snapshot = NULL,"
+             " op_snapshot_hash = NULL, op_idempotency_key = NULL, op_generation = NULL, ownership = 'released',"
+             " {extra} version = version + 1 WHERE id = :rid")
+    _fails(pg, close.format(extra="last_error_code = NULL,"), {RESTRICT}, rid=rid)
+    assert _sql(pg, close.format(extra=""), rid=rid) == 1
+    closed = _row(pg, rid)
+    assert (closed["attempt_id"], closed["last_error_code"]) == ("a3", "invalid_argument")
+    # New work has no attempt, so the database drops the previous operation's outcome.
+    assert _new_op(pg, rid, 2, "insert", "claiming", last_error_code="invalid_argument") == 1
+    fresh = _row(pg, rid)
+    assert (fresh["attempt_id"], fresh["last_outcome"], fresh["last_error_code"], fresh["next_attempt_at"]) == (
+        None, None, None, None)
+    # Outcome evidence never exists without the attempt it belongs to.
+    params = {**_scope(pg, ca), "offer_id": "SKU-2", **_op("unbound", 1)}
+    _fails(pg, _INSERT_LEDGER.replace(") VALUES", ", last_outcome) VALUES").replace(
+        ":op_generation)", ":op_generation, 'rate_limited')"), {CHECK}, **params)
+
+
+_TAKEOVERS = {
+    "owner_only": "lease_owner = 'worker-b'",
+    "owner_and_lease": "lease_owner = 'worker-b', lease_expires_at = clock_timestamp() + interval '5 minutes'",
+    "new_fenced_attempt": ("lease_owner = 'worker-b', lease_fence = lease_fence + 1, attempts = attempts + 1,"
+                           " attempt_id = 'b1', dispatched_at = clock_timestamp(),"
+                           " lease_expires_at = clock_timestamp() + interval '5 minutes'"),
+}
+
+
+def _takeover(kind: str, *, compare_and_set: bool = False) -> str:
+    where = " AND version = :v AND lease_owner = 'worker-a'" if compare_and_set else ""
+    return (f"UPDATE {LEDGER} SET {_TAKEOVERS[kind]}, version = version + 1 WHERE id = :rid{where}"
+            " RETURNING id")
+
+
+_RENEW = (f"UPDATE {LEDGER} SET lease_expires_at = clock_timestamp() + interval '10 minutes',"
+          " version = version + 1 WHERE id = :rid RETURNING id")
+
+
+def _assert_attempt_of_worker_a(pg, rid: int) -> None:
+    row = _row(pg, rid)
+    assert (row["op_state"], row["lease_owner"], row["attempt_id"], row["lease_fence"], row["attempts"]) == (
+        "dispatching", "worker-a", "a1", 1, 1)
+
+
+def test_a_live_attempt_keeps_its_owner_and_is_handed_over_only_by_reconciliation(pg):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-1")
+    _dispatch(pg, rid, "a1")
+    before = _row(pg, rid)
+    assert len(_sql(pg, _RENEW, rid=rid)) == 1  # the holder renews
+    renewed = _row(pg, rid)
+    assert renewed["lease_expires_at"] > before["lease_expires_at"]
+    for kind in sorted(_TAKEOVERS):
+        _fails(pg, _takeover(kind), {RESTRICT}, rid=rid)
+    _assert_attempt_of_worker_a(pg, rid)
+    # Expired, the attempt still cannot change hands; it can only be read back.
+    assert _sql(pg, f"UPDATE {LEDGER} SET lease_expires_at = clock_timestamp() - interval '1 second',"
+                    " version = version + 1 WHERE id = :rid", rid=rid) == 1
+    for kind in sorted(_TAKEOVERS):
+        _fails(pg, _takeover(kind), {RESTRICT}, rid=rid)
+    _fails(pg, _RENEW, {RESTRICT}, rid=rid)
+    assert _readback(pg, rid) == 1
+    row = _row(pg, rid)
+    assert (row["op_state"], row["lease_owner"], row["attempt_id"], row["lease_fence"]) == (
+        "readback_required", None, "a1", 1)
+
+
+@pytest.mark.parametrize("compare_and_set", [False, True], ids=["guarded", "compare_and_set"])
+@pytest.mark.parametrize("kind", sorted(_TAKEOVERS))
+def test_a_concurrent_takeover_cannot_replace_the_renewing_owner(pg, kind, compare_and_set):
+    ca, _cb = _bound_pair(pg)
+    rid = _claim(pg, ca, "SKU-1")
+    _dispatch(pg, rid, "a1")
+    seen = _row(pg, rid)["version"]
+    renewal, takeover = _race(pg, _RENEW, _takeover(kind, compare_and_set=compare_and_set),
+                              {"rid": rid}, {"rid": rid, "v": seen})
+    assert len(renewal) == 1
+    # worker-b waited on worker-a's row lock; afterwards the guard (or a stale
+    # compare-and-set) leaves worker-a's attempt in place.
+    assert takeover == ({"rows": []} if compare_and_set else {"error": RESTRICT})
+    _assert_attempt_of_worker_a(pg, rid)
+    assert _row(pg, rid)["version"] == seen + 1
+
+
+_REMOTE_TARGETS = [
+    pytest.param("postgresql://u:p@db.example.invalid:5432/postgres", {}, id="remote_name"),
+    pytest.param("postgresql://u:p@192.0.2.10:5432/postgres", {}, id="remote_address"),
+    pytest.param("postgresql://u:p@/postgres?host=/var/run/postgresql", {}, id="no_url_host"),
+    pytest.param("postgresql://u:p@127.0.0.1/postgres?hostaddr=192.0.2.10", {}, id="query_hostaddr"),
+    pytest.param("postgresql://u:p@127.0.0.1/postgres?host=db.example.invalid", {}, id="query_host"),
+    pytest.param("postgresql://u:p@127.0.0.1/postgres?service=remote", {}, id="query_service"),
+    pytest.param("postgresql://u:p@127.0.0.1/postgres", {"PGHOSTADDR": "192.0.2.10"}, id="env_hostaddr"),
+    pytest.param("postgresql://u:p@127.0.0.1/postgres", {"PGSERVICE": "remote"}, id="env_service"),
+]
+
+
+@pytest.mark.parametrize("dsn,environ", _REMOTE_TARGETS)
+def test_disposable_target_guard_refuses_anything_but_loopback(dsn, environ):
+    with pytest.raises(RuntimeError, match="loopback") as info:
+        _refuse_non_loopback(dsn, environ)
+    assert "u:p@" not in str(info.value)
+
+
+def test_disposable_target_guard_accepts_loopback_and_holds_for_this_run():
+    for dsn in ("postgresql://u:p@127.0.0.1:5433/postgres", "postgresql://u:p@localhost/postgres",
+                "postgresql://u:p@[::1]:5433/postgres"):
+        _refuse_non_loopback(dsn, {})
+    _refuse_non_loopback(ADMIN_URL, os.environ)
+    assert make_url(_url("gmc_any")).host == make_url(ADMIN_URL).host

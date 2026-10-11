@@ -1145,7 +1145,7 @@
       "id": "google_merchant_ledger",
       "kind": "proof",
       "module": "backend/tests/test_google_merchant_schema_pg.py",
-      "origin": "Dormant Google Merchant connection binding and offer ledger: migration 0124 schema equivalence, refusal, locked-empty downgrade and the real alembic graph from production-shaped heads {0111, 0113, 0120} (real upgrades, no stamp) through 0123 -> 0124 -> 0123 with unrelated heads retained and a refused downgrade keeping heads and evidence; startup create_all absence; account tombstone and concurrent claims; immutable connection identity and one-time source binding; exact-character format checks; NOT NULL MATCH FULL scope with frozen re-parenting; exact and case-safe offer identity with a first-enqueue race; frozen dispatched operations, monotonic lease fence and stale completions; live-lease-only 429/rejection with expired leases read-back only; confirmation-bound evidence; admitted-generation high-water retention; retained evidence",
+      "origin": "Dormant Google Merchant connection binding and offer ledger: migration 0124 schema equivalence, refusal, locked-empty downgrade and the real alembic graph from production-shaped heads {0111, 0113, 0120} (real upgrades, no stamp) through 0123 -> 0124 -> 0123 with unrelated heads retained and a refused downgrade keeping heads and evidence; startup create_all absence; account tombstone and concurrent claims; immutable connection identity and one-time source binding; exact-character format checks; NOT NULL MATCH FULL scope with frozen re-parenting; exact and case-safe offer identity with a first-enqueue race; frozen dispatched operations, monotonic lease fence and stale completions; live-lease-only 429/rejection with expired leases read-back only; lease liveness by clock_timestamp() under a long transaction and a lock wait; confirmation-bound evidence; admitted-generation high-water retention; rows of both tables never deleted or truncated, the ledger tombstone holding the high-water mark and applied key against reinsert and stale generations; dispatch only under a currently bound connection, serialized against disable/revoke, with in-flight work recoverable read-only; attempt outcomes cleared by the database on a fresh dispatch and bound to the attempt that ended; a live attempt's owner frozen against direct and concurrent takeover; exact catalog snapshot (function, key, index and trigger definitions); loopback-only disposable target guard",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
@@ -1244,7 +1244,35 @@
         "backend/tests/test_google_merchant_schema_pg.py::test_admitted_generation_high_water_survives_supersede_rejection_and_replay",
         "backend/tests/test_google_merchant_schema_pg.py::test_applied_key_cannot_be_replayed_as_new_work",
         "backend/tests/test_google_merchant_schema_pg.py::test_new_work_requires_a_bound_connection_but_resolution_continues",
-        "backend/tests/test_google_merchant_schema_pg.py::test_evidence_is_retained"
+        "backend/tests/test_google_merchant_schema_pg.py::test_evidence_is_retained",
+        "backend/tests/test_google_merchant_schema_pg.py::test_tombstones_keep_the_high_water_mark_against_reinsert_and_stale_generations",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[long_transaction-rate_limited]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[long_transaction-rejected]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[long_transaction-renewal]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[lock_wait-rate_limited]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[lock_wait-rejected]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_transaction_started_before_expiry_cannot_use_an_expired_lease[lock_wait-renewal]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_dispatch_requires_a_currently_bound_connection_but_recovery_continues[disabled]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_dispatch_requires_a_currently_bound_connection_but_recovery_continues[revoked]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disable_and_dispatch_serialize_on_the_connection_lock[disable]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disable_and_dispatch_serialize_on_the_connection_lock[dispatch]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_attempt_outcomes_are_cleared_and_bound_to_the_current_attempt",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_live_attempt_keeps_its_owner_and_is_handed_over_only_by_reconciliation",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[new_fenced_attempt-guarded]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[new_fenced_attempt-compare_and_set]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[owner_and_lease-guarded]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[owner_and_lease-compare_and_set]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[owner_only-guarded]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_a_concurrent_takeover_cannot_replace_the_renewing_owner[owner_only-compare_and_set]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[remote_name]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[remote_address]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[no_url_host]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[query_hostaddr]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[query_host]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[query_service]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[env_hostaddr]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[env_service]",
+        "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_accepts_loopback_and_holds_for_this_run"
       ]
     }
   ]

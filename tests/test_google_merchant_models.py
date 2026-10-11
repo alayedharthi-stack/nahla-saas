@@ -148,6 +148,18 @@ def test_guard_functions_are_byte_identical():
     assert "%" not in gm.CONNECTIONS_GUARD_SQL + gm.LEDGER_GUARD_SQL
 
 
+def test_guards_judge_leases_by_the_real_clock_and_never_delete_or_truncate_rows():
+    guards = gm.CONNECTIONS_GUARD_SQL + gm.LEDGER_GUARD_SQL
+    # now() is frozen at transaction start; lease liveness must use the real clock.
+    assert "now()" not in guards
+    assert "OLD.lease_expires_at > clock_timestamp()" in gm.LEDGER_GUARD_SQL
+    for table, sql in ((gm.CONNECTIONS_TABLE, gm.CONNECTIONS_GUARD_SQL), (gm.LEDGER_TABLE, gm.LEDGER_GUARD_SQL)):
+        branch = sql.split("IF TG_OP IN ('DELETE', 'TRUNCATE') THEN", 1)[1].split("END IF;", 1)[0]
+        assert "RAISE EXCEPTION" in branch and "RETURN OLD" not in sql
+        # Row triggers never fire on TRUNCATE; a statement trigger refuses it.
+        assert f"BEFORE TRUNCATE ON {table}\n  FOR EACH STATEMENT EXECUTE FUNCTION" in sql
+
+
 def test_declared_invariants_are_present():
     connections = {c.name for c in gm.GoogleMerchantConnection.__table__.constraints}
     assert {
@@ -162,6 +174,7 @@ def test_declared_invariants_are_present():
         "fk_google_merchant_offer_ledger_scope", "uq_google_merchant_offer_ledger_identity",
         "ck_google_merchant_offer_ledger_op_shape", "ck_google_merchant_offer_ledger_op_snapshot_hash",
         "ck_google_merchant_offer_ledger_lease", "ck_google_merchant_offer_ledger_generations",
+        "ck_google_merchant_offer_ledger_attempt_outcome",
     } <= ledger
     identity = next(c for c in ledger_table.constraints if c.name == "uq_google_merchant_offer_ledger_identity")
     # Offer identity is independent of data source and connection.
