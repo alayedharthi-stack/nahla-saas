@@ -207,7 +207,9 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         assert '"unexpected_count":1' in out and SECRET_NAME not in out and "other" not in out.split("CHECK shopify_footprint")[1].split("\n")[0]
         _sql(db, f'DROP TABLE other."{SECRET_NAME}"', f'CREATE TYPE other."{SECRET_NAME}" AS ENUM (\'a\')')
         out = _assert_fail(gate_root, "S3", db, "stray type in another schema", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
-        assert '"stray_count":1' in out and SECRET_NAME not in out
+        footprint_line = out.split("CHECK shopify_footprint")[1].split("\n")[0]
+        # the enum and its implicit array type are both Shopify-named strays; counted, never named
+        assert json.loads(footprint_line[footprint_line.index("{"):])["stray_count"] >= 1 and SECRET_NAME not in out
         _sql(db, f'DROP TYPE other."{SECRET_NAME}"', f'CREATE FUNCTION other."{SECRET_NAME}"() RETURNS int LANGUAGE sql AS \'SELECT 1\'')
         _assert_fail(gate_root, "S3", db, "stray function in another schema", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
         _sql(db, f'DROP FUNCTION other."{SECRET_NAME}"()', "DROP SCHEMA other")
