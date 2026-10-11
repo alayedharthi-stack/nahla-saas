@@ -4,7 +4,7 @@ import { shopifyConnectionApi } from '../../api/shopifyConnection'
 import { getSessionBindingKey, isImpersonating, isImpersonatingSupport } from '../../auth'
 import { useLanguage } from '../../i18n/context'
 import type { Lang } from '../../i18n/types'
-import { isShopifyConnectionUiEnabled } from '../../lib/platformFeatureFlags'
+import { isShopifyCatalogImportUiEnabled, isShopifyConnectionUiEnabled } from '../../lib/platformFeatureFlags'
 import { createConnectionController } from '../../lib/shopifyConnection/connectionController'
 import {
   type ConnectionView,
@@ -18,14 +18,16 @@ import {
 } from '../../lib/shopifyConnection/model'
 import Badge from '../ui/Badge'
 import ConfirmModal from '../ui/ConfirmModal'
+import ShopifyCatalogImportStep from './ShopifyCatalogImportStep'
 import { watchSessionSignals } from './shopifySessionSignals'
 
 /**
  * Shopify connection card on /integrations (dormant: hidden unless the
  * dashboard flag is on AND the backend status route answers).
  *
- * Shows the store *authorization* only. Product import does not exist in
- * this release and is always shown as not started — never inferred.
+ * Shows the store *authorization*. The product import step is static "not
+ * started" unless the separate default-off import UI flag is on, in which
+ * case it shows only the server's committed import state — never inferred.
  * All mutating actions go through the authenticated API; the authorize URL
  * is validated against the requested shop before the browser leaves.
  */
@@ -207,11 +209,29 @@ export default function ShopifyConnectionCard() {
                 <span className="text-slate-800">{copy.steps.authorization}</span>
                 <span className="text-slate-500" data-testid="shopify-step-authorization" data-step={steps.authorization}>— {authLabel}</span>
               </li>
-              <li className="flex items-center gap-2">
-                <Circle className="w-4 h-4 text-slate-300" />
-                <span className="text-slate-800">{copy.steps.productImport}</span>
-                <span className="text-slate-500" data-testid="shopify-step-import" data-step={steps.productImport}>— {copy.steps.productImportNotStarted}</span>
-              </li>
+              {(() => {
+                const staticImportStep = (
+                  <li className="flex items-center gap-2">
+                    <Circle className="w-4 h-4 text-slate-300" />
+                    <span className="text-slate-800">{copy.steps.productImport}</span>
+                    <span className="text-slate-500" data-testid="shopify-step-import" data-step={steps.productImport}>— {copy.steps.productImportNotStarted}</span>
+                  </li>
+                )
+                return isShopifyCatalogImportUiEnabled() && state.load === 'ready'
+                  ? (
+                    <ShopifyCatalogImportStep
+                      copy={copy}
+                      lang={lang}
+                      readOnly={state.readOnly}
+                      sessionKey={getSessionBindingKey}
+                      parentStatus={state.status}
+                      parentBusy={state.disconnect.phase === 'working'
+                        || state.start.phase === 'starting' || state.start.phase === 'redirecting'}
+                      fallback={staticImportStep}
+                    />
+                  )
+                  : staticImportStep
+              })()}
             </ol>
           </div>
 

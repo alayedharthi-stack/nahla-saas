@@ -554,6 +554,11 @@ from routers.shopify_connection import router as _shopify_connection_router  # n
 from routers.shopify_connection import webhook_router as _shopify_webhook_router  # noqa: E402
 app.include_router(_shopify_connection_router)
 app.include_router(_shopify_webhook_router)
+# Dormant, read-only Shopify catalog import into its own provider-scoped
+# mirror: 404 unless NAHLA_SHOPIFY_CONNECTION_ENABLED and
+# NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED are both set; writes no shared catalog.
+from routers.shopify_catalog_import import router as _shopify_catalog_import_router  # noqa: E402
+app.include_router(_shopify_catalog_import_router)
 app.include_router(_merchant_catalog_router)
 app.include_router(_admin_catalog_router)
 app.include_router(_support_access_router)

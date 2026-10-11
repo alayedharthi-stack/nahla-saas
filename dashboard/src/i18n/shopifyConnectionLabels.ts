@@ -8,6 +8,7 @@
  * The copy separates the store *authorization* (the only thing this release
  * does) from *product import*, which does not exist yet and is never implied.
  */
+import type { ImportReasonKey } from '../lib/shopifyConnection/catalogImport'
 import type { MessageKey } from '../lib/shopifyConnection/model'
 
 export interface ShopifyConnectionLabels {
@@ -85,6 +86,24 @@ export interface ShopifyConnectionLabels {
     backToIntegrations: string
   }
   messages: Record<MessageKey, string>
+  /** Catalog import step (behind its own default-off flag). */
+  catalogImport: {
+    notStarted: string
+    importing: string
+    complete: string
+    error: string
+    unknown: string
+    start: string
+    starting: string
+    refresh: string
+    lastSuccess: string
+    apiVersion: string
+    previousInstallation: string
+    inventoryNotRead: string
+    inventoryRead: string
+    mirrorNote: string
+    reasons: Record<ImportReasonKey, string>
+  }
 }
 
 export const shopifyConnectionAr: ShopifyConnectionLabels = {
@@ -179,6 +198,33 @@ export const shopifyConnectionAr: ShopifyConnectionLabels = {
     unexpectedResponse: 'تعذّر بدء الربط بأمان. حاول مرة أخرى لاحقاً.',
     generic: 'حدث خطأ. تحقّق من الحالة قبل المحاولة مرة أخرى.',
   },
+  catalogImport: {
+    notStarted: 'لم يبدأ',
+    importing: 'جارٍ الاستيراد…',
+    complete: 'مكتمل — في نسخة Shopify الخاصة بنحلة',
+    error: 'لم يكتمل',
+    unknown: 'الحالة غير مؤكدة',
+    start: 'استيراد المنتجات',
+    starting: 'جارٍ البدء…',
+    refresh: 'تحديث الحالة',
+    lastSuccess: 'آخر استيراد مكتمل: {time} — {products} منتج، {variants} خيار.',
+    apiVersion: 'إصدار واجهة Shopify المستخدم: {version}',
+    previousInstallation: 'هذا الاستيراد من ربط سابق للمتجر.',
+    inventoryNotRead: 'لم يُستورد المخزون: صلاحية قراءة المخزون غير ممنوحة.',
+    inventoryRead: 'المخزون حسب الموقع: {locations} موقع، {levels} سجل.',
+    mirrorNote: 'نسخة للقراءة فقط: لا تُعرض للعملاء ولا تُرسل إلى واتساب أو Meta في هذه المرحلة.',
+    reasons: {
+      connection: 'الربط مع المتجر لم يعد فعّالاً أو تغيّر. أعد الربط ثم حاول مجدداً.',
+      permission: 'الصلاحيات الممنوحة لا تكفي أو لم تعد صالحة. أعد تفويض المتجر.',
+      tooLarge: 'الكتالوج أكبر مما يدعمه الاستيراد حالياً.',
+      changed: 'تغيّر الكتالوج أثناء الاستيراد. أعد المحاولة بعد قليل.',
+      interrupted: 'توقّف الاستيراد قبل اكتماله. يمكنك البدء من جديد.',
+      unavailable: 'Shopify غير متاح مؤقتاً. أعد المحاولة لاحقاً.',
+      inProgress: 'يوجد استيراد قيد التنفيذ لهذا المتجر.',
+      sessionChanged: 'تغيّرت الجلسة أو الصلاحيات. سجّل الدخول من حساب التاجر وحاول مجدداً.',
+      generic: 'تعذّر إكمال الاستيراد. لم يتغيّر آخر استيراد مكتمل.',
+    },
+  },
 }
 
 export const shopifyConnectionEn: ShopifyConnectionLabels = {
@@ -272,5 +318,32 @@ export const shopifyConnectionEn: ShopifyConnectionLabels = {
     uncertain: 'We could not confirm the result. Check the status before trying again.',
     unexpectedResponse: 'The connection could not be started safely. Try again later.',
     generic: 'Something went wrong. Check the status before trying again.',
+  },
+  catalogImport: {
+    notStarted: 'Not started',
+    importing: 'Importing…',
+    complete: "Complete — in Nahlah's Shopify copy",
+    error: 'Not completed',
+    unknown: 'Status not confirmed',
+    start: 'Import products',
+    starting: 'Starting…',
+    refresh: 'Refresh status',
+    lastSuccess: 'Last complete import: {time} — {products} products, {variants} variants.',
+    apiVersion: 'Shopify API version used: {version}',
+    previousInstallation: 'This import is from an earlier connection of the store.',
+    inventoryNotRead: 'Inventory was not read: inventory read permission is not granted.',
+    inventoryRead: 'Inventory by location: {locations} locations, {levels} records.',
+    mirrorNote: 'Read-only copy: not shown to customers or sent to WhatsApp or Meta at this stage.',
+    reasons: {
+      connection: 'The store connection is no longer active or has changed. Reconnect, then try again.',
+      permission: 'The granted permissions are insufficient or no longer valid. Re-authorize the store.',
+      tooLarge: 'The catalog is larger than the import currently supports.',
+      changed: 'The catalog changed during the import. Try again shortly.',
+      interrupted: 'The import stopped before completing. You can start again.',
+      unavailable: 'Shopify is temporarily unavailable. Try again later.',
+      inProgress: 'An import is already running for this store.',
+      sessionChanged: 'Your session or permissions changed. Sign in with the merchant account and try again.',
+      generic: 'The import could not be completed. The last complete import is unchanged.',
+    },
   },
 }
