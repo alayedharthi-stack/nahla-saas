@@ -179,18 +179,33 @@ cherry-picked in order (`c4ecda0`, `3affff6`, `7ae59f4`). `git diff
 their blob ids equals the blob at `7ae59f4`
 (`158cfa71…`, `e19fbba0…`, `2318fb2d…`, `42a1dbf5…`, `62465548…`); the rest of
 the tree is identical to `3681ebd` (`git ls-tree -r` comparison with those
-five paths removed). The full blob ids, the tree digests and the
-cherry-pick ancestry are in the JSON (`temporary_head_verification`), as
-are the sorted-case and case-outcome digests of the five JUnit files and the
-41 skipped identities with reasons (`junit_digests`, `skipped_41`).
+five paths removed: sha256 over UTF-8 of the default-format
+`git ls-tree -r` lines, in git's output order, joined by LF with no trailing
+LF). The full blob ids, both digests over the remaining 3463 entries and
+the cherry-pick ancestry are in the JSON (`temporary_head_verification`).
+Verification limit: the privacy-source remainder digest can be reproduced
+independently from GitHub (and was, by the parent); the temporary head
+exists only in this session's local worktree, so its digest, the blob
+equalities and the combined-tree equality are controller-evidenced, not
+independently fetched.
+
+Skip-reason semantics: "identical skip reasons" above means the raw JUnit
+`<skipped message=...>` attribute. For the five collection-time module skips
+pytest writes the generic attribute `collection skipped`; the module's
+actual guard reason (`PostgreSQL integration tests require
+A1_PG_INTEGRATION_REQUIRED=1`) appears only in the element text, from which
+the JSON parses it and labels it as parsed. Equality for those five is
+claimed on the raw attribute and the parsed element text as retained, not on
+a normalized human-readable reason (`skipped_41`; the sorted-case and
+case-outcome digests of the five JUnit files are in `junit_digests`).
 
 ### JUnit comparisons (case = JUnit `classname` + `name`)
 
 | Comparison | Cases | Identities | Outcome changes | Skipped |
 |---|---|---|---|---|
-| original baseline JUnit (`08428cb`, 09:02:41 → 09:10:39Z) vs `base_gate` | 1118 → 1118 | same set | none | identical identities and reasons |
-| `base_gate` vs `fix_gate` | 1118 → 1119 | +1: `test_salla_embedded_reconcile_telemetry::test_requests_here_run_under_the_app_log_redaction` | the two isolation failures → passed | identical identities and reasons |
-| original #1205 candidate JUnit (`3681ebd`, 08:55:00 → 09:02:41Z) vs `compat_gate` | 1118 → 1119 | +1, the same canary | the two isolation failures → passed | identical identities and reasons |
+| original baseline JUnit (`08428cb`, 09:02:41 → 09:10:39Z) vs `base_gate` | 1118 → 1118 | same set | none | identical identities and raw JUnit message attributes |
+| `base_gate` vs `fix_gate` | 1118 → 1119 | +1: `test_salla_embedded_reconcile_telemetry::test_requests_here_run_under_the_app_log_redaction` | the two isolation failures → passed | identical identities and raw JUnit message attributes |
+| original #1205 candidate JUnit (`3681ebd`, 08:55:00 → 09:02:41Z) vs `compat_gate` | 1118 → 1119 | +1, the same canary | the two isolation failures → passed | identical identities and raw JUnit message attributes |
 | `fix_gate` vs `compat_gate` | 1119 → 1119 | same set | none | identical |
 
 The 37 cases that skipped as PostgreSQL-unavailable in the post-reboot

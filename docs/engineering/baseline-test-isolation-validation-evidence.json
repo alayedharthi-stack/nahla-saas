@@ -305,13 +305,14 @@
      ],
      "all_changed_blobs_equal_frozen_7ae59f4": true,
      "rest_of_tree": {
-      "method": "sha256 of `git ls-tree -r <sha>` lines with the changed paths removed",
+      "method": "sha256 over UTF-8 of the `git ls-tree -r <sha>` output lines (default format '<mode> <type> <object>\\t<path>', in git's output order) after removing the lines whose path is one of files_changed_privacy_source_to_temporary_head, joined by LF with NO trailing LF",
       "temporary_head_digest": "2c16f1ac6e41ac4281f1e9b24fa92c3aed8c0097dbd1db99d60671161e571082",
       "privacy_source_digest": "2c16f1ac6e41ac4281f1e9b24fa92c3aed8c0097dbd1db99d60671161e571082",
       "entries": 3463,
       "identical": true
      },
-     "pushed_to_any_remote_branch": false
+     "pushed_to_any_remote_branch": false,
+     "independent_verification_limit": "the privacy-source remainder digest over 3463 entries can be and was independently reproduced from GitHub (3681ebd is published); the temporary head exists only in this session's local worktree, so the temporary-head digest, the blob equalities and the combined-tree equality are controller-evidenced, not independently fetched from GitHub"
     }
    },
    "compat_privacy_dbfree": {
@@ -986,220 +987,284 @@
    }
   },
   "skipped_41": {
-   "source": "base_gate JUnit; identical identities and reasons in the original baseline JUnit, fix_gate and compat_gate (see comparisons)",
+   "source": "base_gate JUnit (identities and raw message attributes equal in the original baseline JUnit, fix_gate and compat_gate; see comparisons)",
+   "reason_semantics": "raw_junit_message_attribute is the JUnit <skipped message=...> attribute as retained. For the five collection-time module skips pytest writes the generic attribute 'collection skipped'; the module's actual skip reason and guard appear only in the element text, from which reason_parsed_from_element_text is parsed and labelled as such (the retained raw text is '(<module path>, <line>, Skipped: <reason>)'). Equality claims for those five are made on the raw attribute and on the parsed element-text reason as retained, not on a normalized human-readable reason. The #1205 evidence JSON recorded the parsed element-text reason for the same five rows.",
    "columns": [
     "junit_classname",
     "junit_name",
-    "reason"
+    "raw_junit_message_attribute",
+    "collection_time_module_skip",
+    "reason_parsed_from_element_text (collection-time rows only)"
    ],
    "rows": [
-    [
-     "",
-     "backend.tests.test_salla_cart_recovery_postgres",
-     "collection skipped"
-    ],
-    [
-     "",
-     "backend.tests.test_salla_commerce_reconciler_postgres",
-     "collection skipped"
-    ],
-    [
-     "",
-     "backend.tests.test_salla_coupons_poller_race_postgres",
-     "collection skipped"
-    ],
-    [
-     "",
-     "backend.tests.test_salla_delete_401_branch_closure_postgres",
-     "collection skipped"
-    ],
-    [
-     "",
-     "backend.tests.test_salla_delete_401_refresh_postgres",
-     "collection skipped"
-    ],
-    [
-     "backend.tests.test_meta_catalog_claim_guard_pg",
-     "test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_claim_guard_pg",
-     "test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_catalog_nonce_is_consumed_exactly_once_under_concurrency",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_consent_enabled_on_pre_0120_database_fails_closed",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_create_all_table_is_adopted_unchanged",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_drifted_table_fails_closed_and_changes_nothing[extra_check]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_drifted_table_fails_closed_and_changes_nothing[extra_column]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_drifted_table_fails_closed_and_changes_nothing[token_nullable]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_fresh_database_gets_the_table_and_downgrade_removes_only_it",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_full_callback_on_postgres_and_concurrent_replay",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_consent_pg",
-     "test_two_tenants_persisting_one_catalog_concurrently_one_wins",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_identity_postgres",
-     "test_canonical_sibling_bind_gates_postgres",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used."
-    ],
-    [
-     "backend.tests.test_meta_catalog_identity_postgres",
-     "test_legacy_identity_keys_from_persisted_variants",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used."
-    ],
-    [
-     "backend.tests.test_meta_catalog_onboarding_postgres",
-     "test_advisory_lock_serializes_two_sessions",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_meta_catalog_onboarding_postgres",
-     "test_concurrent_ensure_creates_exactly_one_catalog",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_meta_catalog_onboarding_postgres",
-     "test_lock_failure_raises_and_does_not_create",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_meta_catalog_onboarding_postgres",
-     "test_two_tenants_cannot_claim_the_same_catalog",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_meta_catalog_onboarding_postgres",
-     "test_waiter_observes_catalog_id_committed_while_waiting",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_meta_catalog_stale_repair_lock_pg",
-     "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_stale_repair_lock_pg",
-     "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_stale_repair_lock_pg",
-     "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_stale_repair_lock_pg",
-     "test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_meta_catalog_stale_repair_lock_pg",
-     "test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]",
-     "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"
-    ],
-    [
-     "backend.tests.test_salla_embedded_identity_binding.TestBindingUpsertIdempotentAndRebind",
-     "test_rebind_revokes_previous_active_binding",
-     "rebind upsert requires PostgreSQL partial unique active index"
-    ],
-    [
-     "backend.tests.test_salla_merchant_ai_layer3_dialogue",
-     "test_layer3_full_dialogue_suite",
-     "OPENAI_API_KEY not set — skip full Layer3 suite"
-    ],
-    [
-     "backend.tests.test_salla_merchant_ai_layer3_dialogue",
-     "test_layer3_live_compose_one_turn",
-     "OPENAI_API_KEY not set — Layer3 live Luna compose blocked"
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_audit_fails_closed_without_delete",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_catalog_id_switch_allows_same_variant_key",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_cross_tenant_and_cross_catalog_same_meta_item_allowed",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_duplicate_meta_item_id_in_same_catalog_is_rejected",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_duplicate_retailer_id_in_same_catalog_is_rejected",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_duplicate_salla_variant_id_in_same_catalog_is_rejected",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_salla_variant_catalog_identity_postgres",
-     "test_two_workers_cannot_bind_same_variant_twice",
-     "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."
-    ],
-    [
-     "backend.tests.test_tenant_merchant_clone_operator",
-     "test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards",
-     "tenant clone PostgreSQL source/target databases unavailable"
-    ]
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_cart_recovery_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_cart_recovery_postgres.py",
+     "module_skip_line": 33
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_commerce_reconciler_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_commerce_reconciler_postgres.py",
+     "module_skip_line": 31
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_coupons_poller_race_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_coupons_poller_race_postgres.py",
+     "module_skip_line": 31
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_delete_401_branch_closure_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_delete_401_branch_closure_postgres.py",
+     "module_skip_line": 113
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_delete_401_refresh_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_delete_401_refresh_postgres.py",
+     "module_skip_line": 103
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_claim_guard_pg",
+     "junit_name": "test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_claim_guard_pg",
+     "junit_name": "test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_catalog_nonce_is_consumed_exactly_once_under_concurrency",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_consent_enabled_on_pre_0120_database_fails_closed",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_create_all_table_is_adopted_unchanged",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[extra_check]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[extra_column]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[token_nullable]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_fresh_database_gets_the_table_and_downgrade_removes_only_it",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_full_callback_on_postgres_and_concurrent_replay",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_two_tenants_persisting_one_catalog_concurrently_one_wins",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_identity_postgres",
+     "junit_name": "test_canonical_sibling_bind_gates_postgres",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_identity_postgres",
+     "junit_name": "test_legacy_identity_keys_from_persisted_variants",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_advisory_lock_serializes_two_sessions",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_concurrent_ensure_creates_exactly_one_catalog",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_lock_failure_raises_and_does_not_create",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_two_tenants_cannot_claim_the_same_catalog",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_waiter_observes_catalog_id_committed_while_waiting",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_embedded_identity_binding.TestBindingUpsertIdempotentAndRebind",
+     "junit_name": "test_rebind_revokes_previous_active_binding",
+     "raw_junit_message_attribute": "rebind upsert requires PostgreSQL partial unique active index",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_merchant_ai_layer3_dialogue",
+     "junit_name": "test_layer3_full_dialogue_suite",
+     "raw_junit_message_attribute": "OPENAI_API_KEY not set — skip full Layer3 suite",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_merchant_ai_layer3_dialogue",
+     "junit_name": "test_layer3_live_compose_one_turn",
+     "raw_junit_message_attribute": "OPENAI_API_KEY not set — Layer3 live Luna compose blocked",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_audit_fails_closed_without_delete",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_catalog_id_switch_allows_same_variant_key",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_cross_tenant_and_cross_catalog_same_meta_item_allowed",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_meta_item_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_retailer_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_salla_variant_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_two_workers_cannot_bind_same_variant_twice",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_tenant_merchant_clone_operator",
+     "junit_name": "test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards",
+     "raw_junit_message_attribute": "tenant clone PostgreSQL source/target databases unavailable",
+     "collection_time_module_skip": false
+    }
    ],
-   "sorted_rows_digest": "c36f161387883fec5e0b848822f438e255b1fe9d735f6f3c45f827acff1bbbf7",
+   "count": 41,
+   "collection_time_module_skips": 5,
+   "sorted_rows_digest": {
+    "format": "sha256 over UTF-8 of '<classname>\\t<name>\\t<raw message attribute>\\n' per row, rows sorted, concatenated",
+    "value": "c36f161387883fec5e0b848822f438e255b1fe9d735f6f3c45f827acff1bbbf7"
+   },
    "equal_to_original_baseline_rows": true
   }
  },
