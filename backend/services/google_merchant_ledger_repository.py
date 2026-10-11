@@ -124,12 +124,29 @@ def _snapshot_action(row):
     return action
 
 
+def idempotency_key_for(scope: OfferScope, generation: int) -> str:
+    """Key for one exact identity/generation slot, not a global caller token.
+
+    History is protected by the retained per-offer generation high-water mark.
+    A key cannot be transferred to another identity or a later generation. The
+    schema retains only the latest applied key, not an arbitrary key history.
+    """
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise LedgerConflict("generation_invalid")
+    identity = ["nahla.google-merchant.ledger.v1", scope.tenant_id, scope.account_id,
+                scope.data_source_id, scope.content_language, scope.feed_label,
+                scope.offer_id, generation]
+    return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+
+
 def admit(conn, connection_id: int, plan: LifecyclePlan, action: PlannedAction, *,
           op_id: str, idempotency_key: str, generation: int, max_age_s: int) -> OperationRef:
     """Admit one planner action; serialize account identity/casefold checks.
 
     Same unresolved operation/key/snapshot/generation is idempotent.
-    Completed keys remain reserved and cannot be admitted again.
+    Keys must identify the exact scope/generation slot. Completed generations
+    remain reserved by the per-offer high-water mark; arbitrary global token
+    history is not retained. A fresh generation requires its own derived key.
     A different operation never overwrites pending or uncertain work. No commit.
     """
     if (plan.binding is None or plan.binding_reasons or action not in plan.executable
@@ -150,6 +167,10 @@ def admit(conn, connection_id: int, plan: LifecyclePlan, action: PlannedAction, 
         raise LedgerConflict("plan_or_binding_not_fresh")
     if _integrity_reason(binding, action):
         raise LedgerConflict("action_integrity_failed")
+    scope = OfferScope(plan.tenant_id, binding.account_id, binding.data_source_id,
+                       binding.content_language, binding.feed_label, action.offer_id)
+    if idempotency_key != idempotency_key_for(scope, generation):
+        raise LedgerConflict("idempotency_scope_generation_mismatch")
     candidates = conn.execute(text(f"SELECT * FROM {LEDGER} WHERE account_id=:account "
                                    "AND content_language=:language AND feed_label=:label FOR UPDATE"),
                               {"account": binding.account_id, "language": binding.content_language,
@@ -215,13 +236,18 @@ def record_outcome(conn, ref: OperationRef, response: TransportResponse, *, retr
     row = _locked(conn, ref)
     if row is None or row["op_state"] != "dispatching":
         return None
-    kind = classify_response(response, write=True, now=_now(conn)).kind
+    # A transport error makes write delivery uncertain even if a partial or
+    # contradictory response also carries an HTTP status. It cannot grant
+    # resend permission or definitively close an ownership claim.
+    effective = TransportResponse(None, error=response.error) if response.error is not None else response
+    classification = classify_response(effective, write=True, now=_now(conn))
+    kind = classification.kind
     # Check the real database clock with the row locked, not transaction now().
     live = conn.execute(text("SELECT :expiry > clock_timestamp()"), {"expiry": row["lease_expires_at"]}).scalar_one()
     values = {"op_state": "readback_required", "lease_owner": None, "lease_expires_at": None,
               "last_outcome": kind, "last_error_code": None, "next_attempt_at": None}
     if live and kind == RESP_RATE_LIMITED:
-        delay = max(retry_delay_s, classify_response(response, write=True, now=_now(conn)).retry_after_s or 0)
+        delay = max(retry_delay_s, classification.retry_after_s or 0)
         due = conn.execute(text("SELECT clock_timestamp()+make_interval(secs=>:seconds)"), {"seconds": delay}).scalar_one()
         values.update(op_state="pending", next_attempt_at=due)
     elif live and kind in (RESP_PERMANENT_AUTH, RESP_PERMANENT_PERMISSION, RESP_PERMANENT_VALIDATION):

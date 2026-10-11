@@ -1315,7 +1315,15 @@
         "backend/tests/test_google_merchant_ledger_repository_pg.py::test_readback_wrong_request_and_cross_tenant_completion_refused",
         "backend/tests/test_google_merchant_ledger_repository_pg.py::test_owned_patch_rejection_keeps_prior_evidence",
         "backend/tests/test_google_merchant_ledger_repository_pg.py::test_caller_rollback_and_planner_records_are_scoped",
-        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_autocommit_and_missing_transaction_refused"
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_autocommit_and_missing_transaction_refused",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_completed_key_cannot_transfer_to_other_identity[offer]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_completed_key_cannot_transfer_to_other_identity[account]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_historical_key_cannot_replay_at_old_or_new_generation",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[429]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[400]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[401]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[403]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[404]"
       ]
     }
   ]

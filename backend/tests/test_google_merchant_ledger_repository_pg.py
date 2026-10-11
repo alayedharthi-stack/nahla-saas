@@ -19,10 +19,10 @@ from sqlalchemy.pool import NullPool
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 from services import google_merchant_ledger_repository as repo
-from services.google_merchant_lifecycle_v1 import LifecyclePlan, PlannedAction, action_snapshot
+from services.google_merchant_lifecycle_v1 import LifecyclePlan, PlannedAction, OfferScope, action_snapshot
 from services.google_merchant_protocol_v1 import (
     MerchantApiBinding, TransportResponse, insert_request, patch_request,
-    delete_request, get_product_request,
+    delete_request, get_product_request, RESP_UNCERTAIN_WRITE,
 )
 
 DSN = os.environ.get("NAHLA_RELIABILITY_PG_ADMIN_DSN", "")
@@ -68,9 +68,9 @@ def pg():
 ATTRS = {"title": "Blue cotton shirt", "description": "A cotton shirt", "link": "https://example.test/shirt", "imageLink": "https://example.test/shirt.jpg", "price": {"amountMicros": "25000000", "currencyCode": "USD"}, "availability": "IN_STOCK"}
 
 
-def plan(c, *, offer="SHIRT-1", action="INSERT", attrs=None, removed=()):
+def plan(c, *, offer="SHIRT-1", action="INSERT", attrs=None, removed=(), tenant=1, account="700100", source="880011"):
     now = repo._now(c)
-    b = MerchantApiBinding(1, "700100", "880011", "API", "en", "US", now)
+    b = MerchantApiBinding(tenant, account, source, "API", "en", "US", now)
     desired = dict(ATTRS) if attrs is None else attrs
     if action == "INSERT":
         request = insert_request(b, {"offerId": offer, "contentLanguage": "en", "feedLabel": "US", "productAttributes": desired}, offer_id=offer)
@@ -80,12 +80,14 @@ def plan(c, *, offer="SHIRT-1", action="INSERT", attrs=None, removed=()):
         desired = None
         request = delete_request(b, offer)
     a = PlannedAction(offer, action, (), request, desired, removed, action_snapshot(offer, action, request, desired, removed))
-    return LifecyclePlan(1, b, now, (), (a,)), a
+    return LifecyclePlan(tenant, b, now, (), (a,)), a
 
 
-def admit(c, *, token="one", generation=1, **kw):
+def admit(c, *, token="one", generation=1, key=None, connection_id=1, **kw):
     p, a = plan(c, **kw)
-    return repo.admit(c, 1, p, a, op_id=hashlib.sha256(token.encode()).hexdigest(), idempotency_key=hashlib.sha256(("key-"+token).encode()).hexdigest(), generation=generation, max_age_s=60)
+    b = p.binding
+    expected = repo.idempotency_key_for(OfferScope(p.tenant_id, b.account_id, b.data_source_id, b.content_language, b.feed_label, a.offer_id), generation)
+    return repo.admit(c, connection_id, p, a, op_id=hashlib.sha256(token.encode()).hexdigest(), idempotency_key=expected if key is None else key, generation=generation, max_age_s=60)
 
 
 def dispatch(c, ref):
@@ -326,3 +328,53 @@ def test_autocommit_and_missing_transaction_refused(pg):
         c.execute(text("SELECT 1"))
         with pytest.raises(repo.LedgerConflict, match="transaction"):
             repo.planner_records(c, tenant_id=1, connection_id=1)
+
+
+@pytest.mark.parametrize("target", ["offer", "account"])
+def test_completed_key_cannot_transfer_to_other_identity(pg, target):
+    with pg.begin() as c:
+        first = owned(c)
+        completed_key = row(c, first)["applied_idempotency_key"]
+        kw = {"offer": "SHIRT-2"}
+        if target == "account":
+            c.execute(text("INSERT INTO google_merchant_connections (tenant_id,account_id,content_language,feed_label,status) VALUES (2,'700200','en','US','authorized')"))
+            c.execute(text("UPDATE google_merchant_connections SET data_source_id='880022',status='bound',binding_verified_at=clock_timestamp(),version=version+1 WHERE tenant_id=2"))
+            kw = {"tenant": 2, "account": "700200", "source": "880022", "connection_id": 2}
+        with pytest.raises(repo.LedgerConflict, match="scope_generation_mismatch"):
+            admit(c, token="other", key=completed_key, **kw)
+        assert c.execute(text("SELECT count(*) FROM google_merchant_offer_ledger")).scalar_one() == 1
+        # A distinct identity has its own slot key and can be admitted normally.
+        second = admit(c, token="other", **kw)
+        assert row(c, second)["op_idempotency_key"] != completed_key
+
+
+def test_historical_key_cannot_replay_at_old_or_new_generation(pg):
+    with pg.begin() as c:
+        first = owned(c)
+        key_one = row(c, first)["applied_idempotency_key"]
+        changed = dict(ATTRS, title="Green cotton shirt")
+        second = admit(c, token="second", generation=2, action="PATCH", attrs=changed)
+        second = repo.record_outcome(c, dispatch(c, second).ref, TransportResponse(200), retry_delay_s=1)
+        second = readback(c, second, attrs=changed)
+        key_two = row(c, second)["applied_idempotency_key"]
+        assert key_two != key_one
+        with pytest.raises(repo.LedgerConflict, match="stale_generation"):
+            admit(c, token="old", generation=1, key=key_one, action="PATCH")
+        with pytest.raises(repo.LedgerConflict, match="scope_generation_mismatch"):
+            admit(c, token="new", generation=3, key=key_one, action="PATCH")
+        third = admit(c, token="third", generation=3, action="PATCH")
+        assert row(c, third)["op_idempotency_key"] not in {key_one, key_two}
+
+
+@pytest.mark.parametrize("status", [429, 400, 401, 403, 404])
+def test_error_bearing_write_status_never_grants_retry_or_rejection(pg, status):
+    with pg.begin() as c:
+        d = dispatch(c, admit(c))
+        ref = repo.record_outcome(c, d.ref, TransportResponse(status, {"Retry-After": "1"}, error="timeout"), retry_delay_s=1)
+        r = row(c, ref)
+        assert r["op_state"] == "readback_required"
+        assert r["ownership"] == "claiming"
+        assert r["last_outcome"] == RESP_UNCERTAIN_WRITE
+        assert r["last_error_code"] is None and r["next_attempt_at"] is None
+        assert dispatch(c, ref) is None
+        assert repo.close_rejected(c, ref) is None
