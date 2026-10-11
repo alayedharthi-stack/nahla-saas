@@ -51,6 +51,10 @@ SHOPIFY_CATALOG_ALEMBIC_HEAD = "0122"
 # branch and replace 0122 as its head. Additive, never applied by normal
 # bootstrap; 0122 itself remains a valid explicit upgrade target.
 SHOPIFY_PRIVACY_ALEMBIC_HEAD = "0123"
+# The dormant Google Merchant connection binding and offer ledger extend the
+# Shopify privacy branch and replace 0123 as its head. Additive, never applied
+# by normal bootstrap; 0123 itself remains a valid explicit upgrade target.
+GOOGLE_MERCHANT_ALEMBIC_HEAD = "0124"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -68,7 +72,8 @@ CATALOG_RETIREMENTS_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS
 CATALOG_CONSENT_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {CATALOG_CONSENT_ALEMBIC_HEAD}
 SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CONNECTION_ALEMBIC_HEAD}
 SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CATALOG_ALEMBIC_HEAD}
-REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_PRIVACY_ALEMBIC_HEAD}
+SHOPIFY_PRIVACY_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_PRIVACY_ALEMBIC_HEAD}
+REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {GOOGLE_MERCHANT_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -82,6 +87,7 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     CATALOG_CONSENT_REPOSITORY_ALEMBIC_HEADS,
     SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS,
     SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS,
+    SHOPIFY_PRIVACY_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -97,8 +103,9 @@ def repository_heads_expected(heads) -> bool:
     ``{0092, 0111, 0114, 0115, 0118}``, catalog consent
     ``{0092, 0111, 0114, 0115, 0120}``, the Shopify connection foundation
     ``{0092, 0111, 0114, 0115, 0121}``, the Shopify catalog mirror
-    ``{0092, 0111, 0114, 0115, 0122}`` and the Shopify privacy requests
-    ``{0092, 0111, 0114, 0115, 0123}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115, 0122}``, the Shopify privacy requests
+    ``{0092, 0111, 0114, 0115, 0123}`` and the Google Merchant ledger
+    ``{0092, 0111, 0114, 0115, 0124}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS
