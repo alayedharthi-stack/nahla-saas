@@ -1,0 +1,95 @@
+{
+  "api": {
+    "build": {
+      "buildCommand": "",
+      "buildEnvironment": "V3",
+      "builder": "DOCKERFILE",
+      "dockerfilePath": "Dockerfile"
+    },
+    "healthcheck_path": "/healthz",
+    "healthcheck_timeout": 180,
+    "legacy_predeploy_command_sha256": [
+      "283dfa7c5f7249785ccf22c8cd336dd9ca69c1fb2b0155926e1532c4ffcee499"
+    ],
+    "predeploy_timeout": 360,
+    "rollback": {
+      "canRedeploy": true,
+      "canRollback": true,
+      "createdAt": "2026-10-10T13:37:48.226Z",
+      "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "id": "cb02ce9e-dfdd-404d-b26c-5fb4d22bf1ff",
+      "meta": {
+        "branch": "ops/tenant1-haiku-20260921-f9021b59",
+        "commitHash": "462ede1aff602cad84e9569be859cca0087b190d",
+        "commitMessage": "Merge reviewed primary catalog transfer (#1200)\n\nTransfer primary catalog consent and Salla lifecycle without AI changes",
+        "reason": "deploy"
+      },
+      "regions": [
+        "us-east4-eqdc4a"
+      ],
+      "serviceId": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+      "snapshotId": "40f812e4-8672-43f9-9b17-234d476dd0ce",
+      "status": "SUCCESS",
+      "updatedAt": "2026-10-10T13:38:37.414Z",
+      "url": null
+    },
+    "service_id": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+    "source": {
+      "branch": "ops/tenant1-haiku-20260921-f9021b59",
+      "commitSha": "462ede1aff602cad84e9569be859cca0087b190d",
+      "repo": "alayedharthi-stack/nahla-saas",
+      "rootDirectory": ""
+    }
+  },
+  "current_backup_card_verified": false,
+  "dashboard": {
+    "build": {
+      "buildCommand": "",
+      "buildEnvironment": "V3",
+      "builder": "RAILPACK"
+    },
+    "rollback": {
+      "canRedeploy": true,
+      "canRollback": true,
+      "createdAt": "2026-10-10T09:35:40.716Z",
+      "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "id": "5a31b5ec-309b-445e-9162-c4f9520cb3c6",
+      "meta": {
+        "branch": "ops/tenant1-haiku-20260921-f9021b59",
+        "commitHash": "462ede1aff602cad84e9569be859cca0087b190d",
+        "commitMessage": "Merge reviewed primary catalog transfer (#1200)\n\nTransfer primary catalog consent and Salla lifecycle without AI changes",
+        "reason": "deploy"
+      },
+      "regions": [
+        "us-east4-eqdc4a"
+      ],
+      "serviceId": "446edf49-05bf-4578-b403-72e1e86b384c",
+      "snapshotId": "4925b913-2d0a-40a6-aa4a-3f3c3f026e97",
+      "status": "SUCCESS",
+      "updatedAt": "2026-10-10T09:36:50.035Z",
+      "url": null
+    },
+    "service_id": "446edf49-05bf-4578-b403-72e1e86b384c",
+    "source": {
+      "branch": "ops/tenant1-haiku-20260921-f9021b59",
+      "commitSha": "462ede1aff602cad84e9569be859cca0087b190d",
+      "repo": "alayedharthi-stack/nahla-saas",
+      "rootDirectory": "dashboard"
+    },
+    "start_command": "npm run preview -- --port $PORT --host 0.0.0.0"
+  },
+  "effective_runtime_flags_verified": false,
+  "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "legacy_full_settings_snapshot_location": "owner-held local private snapshot; not committed",
+  "live_database_state_verified": false,
+  "observed_at_utc": "2026-10-11T22:29:14Z",
+  "postgres": {
+    "configured_image": "ghcr.io/railwayapp-templates/postgres-ssl:18",
+    "private_target": "postgres-ancu.railway.internal:5432/railway",
+    "service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+    "volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65"
+  },
+  "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+  "staged_changes_present": false,
+  "variable_values_read": false
+}
