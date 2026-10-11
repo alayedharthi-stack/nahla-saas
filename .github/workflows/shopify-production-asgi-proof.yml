@@ -1,0 +1,151 @@
+name: Shopify production image ASGI proof
+
+on:
+  push:
+    branches: [codex/shopify-production-asgi-proof-20261011]
+    paths:
+      - .github/workflows/shopify-production-asgi-proof.yml
+      - scripts/proof_shopify_production_asgi.py
+
+permissions:
+  contents: read
+
+jobs:
+  production-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CANDIDATE_SHA: 193d1bdca04a84f093d5ae1bfbbde45d9e2c88fe
+      ACCEPTED_SHA: 7031e3efec639625dd537026d5a80376f3d679c9
+      LEGACY_SHA: 462ede1aff602cad84e9569be859cca0087b190d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fetch exact frozen source and separate test driver
+        id: sources
+        run: |
+          set -euo pipefail
+          for kind in candidate accepted legacy driver; do
+            git init "$kind"
+            git -C "$kind" config core.autocrlf false
+            git -C "$kind" remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+            case "$kind" in
+              candidate) revision="$CANDIDATE_SHA" ;;
+              accepted) revision="$ACCEPTED_SHA" ;;
+              legacy) revision="$LEGACY_SHA" ;;
+              driver) revision="$GITHUB_SHA" ;;
+            esac
+            git -C "$kind" fetch --no-tags --depth=1 origin "$revision"
+            git -C "$kind" checkout --detach FETCH_HEAD
+            test "$(git -C "$kind" rev-parse HEAD)" = "$revision"
+            git -C "$kind" show -s --format="$kind=%H tree=%T"
+          done
+          for kind in accepted legacy; do
+            for file in Dockerfile requirements.txt .dockerignore nixpacks.toml start.sh; do
+              cmp "candidate/$file" "$kind/$file"
+            done
+          done
+          git -C driver fetch --no-tags --depth=1 origin "$CANDIDATE_SHA"
+          git -C driver diff --exit-code "$CANDIDATE_SHA" HEAD -- \
+            backend database integrations modules dashboard requirements.txt Dockerfile nixpacks.toml start.sh \
+            scripts/operators scripts/preflight_check.py scripts/cleanup_salla_duplicates.py
+          python3 - <<'PY'
+          import base64, pathlib
+          values = {
+              'ENVIRONMENT': 'production', 'DATABASE_URL': 'postgresql://proof:proof@127.0.0.1:1/nahla_asgi_proof',
+              'JWT_SECRET': 'b'*64, 'ADMIN_PASSWORD': 'AsgiProofSyntheticPassword2026!',
+              'WHATSAPP_VERIFY_TOKEN': 'asgi-proof-synthetic-verify-token',
+              'TOTP_ENC_KEY': base64.urlsafe_b64encode(b'x'*32).decode(),
+              'PYTHONPATH': '/app:/app/backend:/app/database', 'PYTHONDONTWRITEBYTECODE': '1',
+              'NAHLA_RAW_ASGI_LOG': 'all', 'NAHLA_DISABLE_SCHEDULERS': '1',
+          }
+          for flag in ('CONNECTION', 'CATALOG_IMPORT', 'CATALOG_INVENTORY',
+                       'PRIVACY_INTAKE', 'PRIVACY_WORKER', 'PRIVACY_DESTRUCTIVE'):
+              values['NAHLA_SHOPIFY_'+flag+'_ENABLED'] = '0'
+          pathlib.Path('proof.env').write_text(''.join(k+'='+v+'\n' for k,v in values.items()))
+          PY
+
+      - name: Resolve real Docker base and build unmodified production Dockerfile
+        id: build
+        run: |
+          set -euo pipefail
+          docker pull python:3.11-slim
+          docker image inspect python:3.11-slim --format 'BASE_IMAGE_ID={{.Id}} BASE_REPO_DIGESTS={{json .RepoDigests}}'
+          docker build --progress=plain --tag nahla-asgi-proof:candidate candidate
+          docker image inspect nahla-asgi-proof:candidate --format 'CANDIDATE_IMAGE_ID={{.Id}}'
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:candidate python --version
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:candidate python -m pip check
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:candidate python -m pip freeze
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:candidate python scripts/preflight_check.py
+
+      - name: Compare baseline production build if candidate build fails
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          docker build --progress=plain --tag nahla-asgi-proof:legacy legacy
+          docker image inspect nahla-asgi-proof:legacy --format 'LEGACY_IMAGE_ID={{.Id}}'
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:legacy python --version
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:legacy python -m pip check
+          docker run --rm --network none --env-file proof.env nahla-asgi-proof:legacy python scripts/preflight_check.py
+
+      - name: Full candidate and two baselines in identical production dependencies
+        if: success() && steps.build.outcome == 'success'
+        run: |
+          set -uo pipefail
+          failed=0
+          # Requirements and Dockerfile were byte-compared above. Reuse the
+          # cached production dependency layers, with each source baked by
+          # its own unmodified Dockerfile; no baseline bind-mount distortion.
+          for kind in accepted legacy; do
+            docker build --progress=plain --tag "nahla-asgi-proof:$kind" "$kind" || exit 1
+            docker image inspect "nahla-asgi-proof:$kind" --format "$kind IMAGE_ID={{.Id}}"
+          done
+          for kind in candidate accepted legacy; do
+            docker image inspect "nahla-asgi-proof:$kind" --format '{{json .RootFS.Layers}}' > "$kind-layers.json"
+          done
+          python3 - <<'PY'
+          import json, pathlib
+          layers = [json.loads(pathlib.Path(k+'-layers.json').read_text()) for k in ('candidate','accepted','legacy')]
+          assert all(l[:-2] == layers[0][:-2] for l in layers)
+          print('PRODUCTION_DEPENDENCY_LAYERS identical', json.dumps(layers[0][:-2]))
+          PY
+          if [ "$?" -ne 0 ]; then exit 1; fi
+          for kind in candidate accepted legacy; do
+            case "$kind" in
+              candidate) revision="$CANDIDATE_SHA" ;;
+              accepted) revision="$ACCEPTED_SHA" ;;
+              legacy) revision="$LEGACY_SHA" ;;
+            esac
+            docker run --rm --network none \
+              --env-file proof.env --env "PROOF_MODE=$kind" --env "PROOF_SOURCE_SHA=$revision" \
+              --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_production_asgi.py,target=/proof.py,readonly" \
+              "nahla-asgi-proof:$kind" python -B /proof.py 2>&1 | tee "$kind-asgi.log"
+            if [ "${PIPESTATUS[0]}" -ne 0 ]; then failed=1; fi
+          done
+          python3 - <<'PY'
+          import json, pathlib
+          reports = []
+          for kind in ('candidate', 'accepted', 'legacy'):
+              lines = pathlib.Path(kind+'-asgi.log').read_text().splitlines()
+              report = json.loads(next(line.removeprefix('ASGI_REPORT ') for line in lines if line.startswith('ASGI_REPORT ')))
+              assert report['status'] == 'passed', (kind, report['error_type'])
+              assert len(report['cases']) == 8, (kind, report['cases'])
+              reports.append(report)
+          assert len({r['non_shopify_routes_sha256'] for r in reports}) == 1
+          assert len({json.dumps(r['dependency_versions'], sort_keys=True) for r in reports}) == 1
+          print('ASGI_BASELINE_COMPARISON PASS identical non-Shopify route graph and production dependencies')
+          print('ASGI_TOTAL 24 passed / 0 skipped / 0 failed')
+          PY
+          if [ "$?" -ne 0 ]; then failed=1; fi
+          exit "$failed"
+
+      - name: Record final immutable source identities
+        if: always() && steps.sources.outcome == 'success'
+        run: |
+          set -euo pipefail
+          for kind in candidate accepted legacy driver; do
+            git -C "$kind" diff --exit-code
+            test -z "$(git -C "$kind" status --porcelain)"
+            git -C "$kind" show -s --format="$kind=%H tree=%T"
+          done
