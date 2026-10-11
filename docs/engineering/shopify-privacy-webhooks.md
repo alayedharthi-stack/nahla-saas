@@ -64,7 +64,10 @@ slice does not claim its own fetch succeeded.
    * `POST /webhooks/shopify/privacy` (one URI for all three; topic from the
      header, still checked against the signed body)
 
-   Order: bounded streamed body (413) → secret present, else **401** (fail
+   Order: bounded streamed body (413; the bound is the foundation's 64 KiB,
+   because its verified HMAC helper is reused unchanged — about 4,500 order
+   ids; a larger genuine delivery would be refused and redelivered, so
+   raising it is a rollout prerequisite) → secret present, else **401** (fail
    closed, never "dev accept") → single `X-Shopify-Hmac-Sha256`, raw-body
    HMAC via the foundation's `verify_webhook_hmac` (401) → `Content-Type:
    application/json` (415) → topic header in the closed set and equal to the
@@ -80,14 +83,16 @@ slice does not claim its own fetch succeeded.
 
    | topic | required | forbidden |
    |---|---|---|
-   | `customers/data_request` | `data_request` object, `customer` object | `orders_to_redact` |
-   | `customers/redact` | `customer` object | `data_request`, `orders_requested` |
+   | `customers/data_request` | `shop_id`, `shop_domain`, `customer` object, `orders_requested` array (bounded, may be empty), `data_request` object with positive `id` | `orders_to_redact` |
+   | `customers/redact` | `shop_id`, `shop_domain`, `customer` object, `orders_to_redact` array (bounded, may be empty) | `data_request`, `orders_requested` |
    | `shop/redact` | `shop_id`, `shop_domain` | `customer`, `orders_requested`, `orders_to_redact`, `data_request` |
 
-   A retained signed `customers/data_request` body therefore can never become
-   a redact or `shop/redact` request by changing the unsigned path or header.
-   A `customer` object may carry only an email (or only a phone); the id is
-   optional.
+   A body with markers of two topics or an incomplete set classifies as
+   nothing and is refused. A retained signed `customers/data_request` body
+   therefore can never become a redact or `shop/redact` request by changing
+   the unsigned path or header, and no signed body is actionable under a
+   topic it was not built for. A `customer` object may carry only an email
+   (or only a phone); the id is optional and nothing of it is stored.
 
 3. **Storage** — new `ShopifyPrivacyBase` metadata (not `models.Base`, not the
    foundation's or the mirror's metadata) and revision **0123** (after 0122),
@@ -100,8 +105,11 @@ slice does not claim its own fetch succeeded.
      state, fixed reason code, counts-only proposed action, audit version,
      eligible / closed generation, worker lease, attempts, backoff, the
      30-day deadline, completion evidence.
-   * `shopify_privacy_deliveries` — capped per-request delivery log (unsigned
-     webhook id and triggered-at kept for diagnostics only, never evidence).
+   * `shopify_privacy_deliveries` — capped per-request delivery log. The
+     unsigned webhook id is kept only when it is a canonical UUID and the
+     triggered-at only as a strictly parsed timestamp; anything else (an
+     email- or token-shaped value, free text) is neither stored nor logged.
+     Diagnostics only, never evidence.
    * `shopify_privacy_request_events` — append-only, PII-free transitions.
 
    **Not stored:** the raw body, customer email, phone, customer id, order
@@ -111,14 +119,21 @@ slice does not claim its own fetch succeeded.
 
 4. **Idempotency, replay and reinstall** (our state decides, never an
    unsigned timestamp or delivery id):
-   * a delivery attaches to the **open** request with the same topic, signed
-     shop identity and body digest (partial unique index; concurrent
-     deliveries resolve to one row);
-   * a closed request absorbs an identical body only while the shop's
-     connection is still at the generation the request closed at; after a
-     reinstall (generation bump) an identical body opens a **new** request,
-     so an old `shop/redact` neither erases the new installation nor
-     permanently suppresses a later genuine one.
+   * every state except `completed` is **open**; a delivery attaches to the
+     open request with the same topic, signed shop identity and body digest
+     (partial unique index; concurrent deliveries resolve to one row). No
+     closed request ever absorbs a delivery, so nothing can be swallowed by
+     an earlier outcome; an identical body after a completion opens a new
+     request;
+   * each delivery bumps `delivery_count` and records the connection
+     generation observed at that moment (our own state). An assessed,
+     blocked or reviewed request becomes due again; a worker evaluating it
+     meanwhile is fenced by the count at write time and must start over, so
+     old open/leased work can never close away a newer delivery;
+   * a "do not erase" conclusion for an active installation needs a
+     revalidation probe requested **after the latest delivery**; an earlier
+     retained probe never covers a later delivery. A reinstall is detected by
+     generation (the foundation bumps it on every claim and every tombstone).
 
 5. **Worker** (flag `NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED`, default off; not
    queued at startup without it). Claims due requests with `FOR UPDATE SKIP
@@ -130,17 +145,27 @@ slice does not claim its own fetch succeeded.
      touched, nothing is rebound);
    * any legacy `shopify` footprint (see the audit) or schema drift of the
      audited stores → `manual_review` — never a broad "no data" outcome;
-   * customer requests on a matched shop with no legacy footprint →
-     `assessed`, outcome bounded to the audited Shopify stores at a recorded
-     audit version (`no_customer_data_in_audited_shopify_scope`), blocked on
-     the generic-data mapping policy; never "no customer data in the tenant";
-   * `shop/redact` while the connection is `active` / `quarantined` →
-     request one foundation revalidation probe (existing durable reconcile
-     path) and wait (`awaiting_evidence`); a retained probe → `not_applicable`;
-     a reinstall → `superseded`; only a Shopify-confirmed `uninstalled`
-     connection of the same generation, with no in-flight authorization,
-     shop lease or live import run, yields a counts-only proposed action in
-     `blocked_policy`.
+   * customer requests with no legacy footprint → `assessed` with the
+     bounded outcome `no_structured_shopify_customer_data_in_audited_scope`
+     at audit version `shopify-product-only-schema-audit-v1`: the
+     product-only integration schema stores no structured Shopify customer
+     or order resource. Catalog free text (titles, options, SKUs, vendors,
+     location names, media alt text) is **not** assessed for personal data,
+     the generic-customer mapping is unresolved and no legal fulfilment is
+     asserted — never "no customer data in the tenant or platform";
+   * `shop/redact` while the connection is `active` / `quarantined` at the
+     generation observed by the latest delivery → one foundation revalidation
+     probe (existing durable reconcile path) per newer delivery, then
+     `awaiting_evidence`; a retained probe → `manual_review` /
+     `active_installation_retained`; a delivery observed before the current
+     installation → `manual_review` / `reinstalled_after_last_delivery`.
+     Both stay **open** with the 30-day deadline visible: they prove that
+     erasing the current installation is unsafe, not that the obligation is
+     inapplicable or fulfilled (historic / retained shop data stays an owner
+     decision). Only a Shopify-confirmed `uninstalled` connection whose
+     tombstone generation matches the latest delivery's installation, with
+     no in-flight authorization, shop lease or live import run, yields a
+     counts-only proposed action in `blocked_policy`.
 
 6. **Destructive scaffolding** — a fixture-tested provider-owned cleanup
    helper (mirror rows, staged rows and import runs of exactly one
@@ -169,7 +194,11 @@ slice does not claim its own fetch succeeded.
 ## Data-flow audit (repository at `08428cb`)
 
 Shopify-owned stores written by the dormant slices (audited, versioned as
-`shopify-privacy-audit-v1`):
+`shopify-product-only-schema-audit-v1`; the worker compares the live columns
+with this snapshot and routes any drift to manual review). The audit attests
+the absence of **structured** Shopify customer / order resources only:
+catalog text is free-form and may contain personal data entered by a
+merchant.
 
 | table | customer fields | shop data |
 |---|---|---|

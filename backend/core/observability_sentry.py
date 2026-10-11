@@ -47,6 +47,7 @@ _SENSITIVE_HEADERS = frozenset({
     "x-salla-signature",
     "x-zid-signature",
     "x-meta-signature",
+    "x-shopify-hmac-sha256",
 })
 
 _INITIALISED = False
@@ -102,6 +103,10 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     path = (request.get("url") or "")
     if isinstance(path, str) and ("/auth/login" in path or "/auth/reset-password" in path):
         request["data"] = "[scrubbed]"
+    elif isinstance(path, str) and "/webhooks/shopify/" in path:
+        # Shopify webhook bodies carry shop and customer personal data
+        # (privacy compliance requests: email, phone, order ids).
+        request["data"] = "[scrubbed]"
     elif request.get("data") is not None:
         request["data"] = redact_value(request["data"])
     return request
@@ -128,6 +133,8 @@ _WITHHELD_FRAME_MODULES = (
     "routers.shopify_connection",
     "services.shopify_catalog",
     "routers.shopify_catalog_import",
+    "services.shopify_privacy",
+    "routers.shopify_privacy_webhooks",
     "cryptography",
 )
 _WITHHELD_FRAME_FILES = tuple(
