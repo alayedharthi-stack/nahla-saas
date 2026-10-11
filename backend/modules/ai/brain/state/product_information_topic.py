@@ -113,6 +113,38 @@ def detect_product_attribute_question(message: str) -> bool:
     return False
 
 
+def _current_turn_scoped_to_product(message: str, state: Any) -> bool:
+    """True when this turn is structurally about a catalog product.
+
+    Stale ``current_product_focus`` is not enough. Reuses the existing
+    canonical-referent + current-turn scope contract — no phrase map.
+    """
+    try:
+        from modules.ai.brain.commerce.commerce_focus_owner import (  # noqa: PLC0415
+            canonical_product_referent,
+            has_structured_catalog_identity,
+        )
+        from modules.ai.brain.product_discovery_gate import (  # noqa: PLC0415
+            _turn_scoped_to_canonical_referent,
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — missing referent helpers fail closed
+        return False
+
+    referent = canonical_product_referent(state)
+    if not has_structured_catalog_identity(referent):
+        return False
+    try:
+        return bool(
+            _turn_scoped_to_canonical_referent(
+                message or "",
+                referent,
+                state=state,
+            )
+        )
+    except Exception:  # noqa: BLE001  # noqa: silent-ok — unproven scope must not own
+        return False
+
+
 def detect_product_information_topic_shift(
     message: str,
     *,
@@ -146,11 +178,17 @@ def detect_product_information_topic_shift(
         return False
     if detect_product_attribute_question(message):
         return True
+    usage_hit = bool(_PRODUCT_USAGE_RE.search(norm))
+    attribute_hit = bool(_PRODUCT_ATTRIBUTE_RE.search(norm))
     if detect_customer_owned_product_reference(message) and (
-        _PRODUCT_ATTRIBUTE_RE.search(norm) or _PRODUCT_USAGE_RE.search(norm)
+        usage_hit or attribute_hit
     ):
         return True
-    return bool(_PRODUCT_INFO_RE.search(norm))
+    if not (usage_hit or attribute_hit):
+        return False
+    # A usage-shaped lexical match is not ownership by itself. The current
+    # turn must be scoped to a product via existing referent contracts.
+    return _current_turn_scoped_to_product(message, state)
 
 
 def resolve_product_information_llm_topic(message: str) -> str:
@@ -163,9 +201,15 @@ def recent_unresolved_product_information(
     history: Sequence[dict],
     *,
     current_message: str = "",
+    state: Any = None,
+    intent: Any = None,
 ) -> bool:
     """True when a recent inbound usage question is still open."""
-    if detect_product_information_topic_shift(current_message):
+    if detect_product_information_topic_shift(
+        current_message,
+        state=state,
+        intent=intent,
+    ):
         return True
 
     rows = list(history or [])[-6:]
@@ -181,7 +225,7 @@ def recent_unresolved_product_information(
             continue
         if direction not in {"inbound", "in", "user", "customer", ""}:
             continue
-        if detect_product_information_topic_shift(body):
+        if detect_product_information_topic_shift(body, state=state, intent=intent):
             saw_info = True
         elif saw_info:
             try:
@@ -203,7 +247,12 @@ def product_information_blocks_checkout(ctx: Any) -> bool:
     if detect_product_information_topic_shift(msg, state=state, intent=intent):
         return True
     history = getattr(ctx, "history", None) or []
-    if not recent_unresolved_product_information(history, current_message=msg):
+    if not recent_unresolved_product_information(
+        history,
+        current_message=msg,
+        state=state,
+        intent=intent,
+    ):
         return False
     stage = str(getattr(state, "stage", "") or "")
     op = getattr(state, "order_prep", None)
