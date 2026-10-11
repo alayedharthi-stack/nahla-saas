@@ -39,6 +39,14 @@ nothing.
 
 ## 1. Staging schema preflight (read-only, on an approved staging clone)
 
+> **Topology note.** This section's gate requires a single `alembic_version`
+> row `0120`. The owner-approved production observation is three rows
+> `{0111, 0113, 0120}` (three applied branches), which this gate refuses by
+> design. The closed procedure for exactly that topology, with the same
+> clone/backup/flags-OFF prerequisites, a fail-closed exact-row preflight and
+> branch-qualified rollback, is
+> [`shopify-multihead-migration-plan.md`](shopify-multihead-migration-plan.md).
+
 Live and staging Alembic / schema state is **unverified** by this port, and
 the repository's bootstrap pin (`0093`) is a code contract, **not** an
 observation of any live database. `alembic upgrade 0121` upgrades from

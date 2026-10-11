@@ -62,6 +62,7 @@ from services.shopify_connection.oauth import ShopIdentity, ShopifyApiError, Tok
 from services.shopify_connection.webhooks import SignedShopIdentity  # noqa: E402
 from services.shopify_privacy import audit, cleanup, store, worker  # noqa: E402
 from services.shopify_privacy.config import AUDIT_VERSION, TOPIC_PATHS  # noqa: E402
+from backend.tests import _alembic_topology_probe as topo  # noqa: E402
 from services.shopify_privacy.models import (  # noqa: E402
     MAX_DELIVERY_ROWS_PER_REQUEST,
     MAX_EVENTS_PER_REQUEST,
@@ -540,28 +541,50 @@ def test_downgrade_drops_only_the_privacy_tables():
 
 def test_alembic_chain_upgrades_0122_to_0123_and_back():
     name = _fresh_db("shpv_chain")
-    env = {**os.environ, "DATABASE_URL": _url(name)}
+    url = _url(name)
+    env = {**os.environ, "DATABASE_URL": url}
 
     def alembic(*args):
         return subprocess.run([sys.executable, "-m", "alembic", *args], cwd=str(_REPO / "database"), env=env,
                               capture_output=True, text=True, timeout=600)
 
     try:
-        for target in ("0093", "0111", "0113", "0120", "0121", "0122", "0123"):
+        # The deployed topology {0111, 0113, 0120} (three applied branch heads) is built by genuine
+        # upgrades only; nothing is stamped, merged or fabricated. Every later step asserts the exact
+        # alembic_version rows, the retained 0111/0113 rows, the non-Shopify schema by definition and
+        # synthetic sentinel rows in generic, catalog and retained-branch tables.
+        for target in ("0093", "0111", "0113", "0120"):
             proc = alembic("upgrade", target)
             assert proc.returncode == 0, proc.stderr[-3000:]
-        eng = create_engine(_url(name), poolclass=NullPool, future=True)
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0123" in versions and "0122" not in versions
+        topo.assert_rows(url, topo.S0, "S0")
+        baseline = topo.schema_snapshot(url)
+        planted = topo.plant_sentinels(url)
+        counts = topo.row_counts(url, topo.SENTINEL_TABLES)
+        topo.assert_step(url, topo.S0, baseline, planted, counts, "S0")
+
+        for target, state in (("0121", topo.S1), ("0122", topo.S2), ("0123", topo.S3)):
+            proc = alembic("upgrade", target)
+            assert proc.returncode == 0, proc.stderr[-3000:]
+            topo.assert_step(url, state, baseline, planted, counts, f"after upgrade {target}")
+        eng = create_engine(url, poolclass=NullPool, future=True)
         assert set(PRIVACY_TABLE_NAMES) <= set(inspect(eng).get_table_names())
+
         proc = alembic("downgrade", "0123@-1")
         assert proc.returncode == 0, proc.stderr[-3000:]
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0122" in versions and "0123" not in versions
+        topo.assert_step(url, topo.S2, baseline, planted, counts, "S2 after downgrade 0123@-1")
         names = set(inspect(eng).get_table_names())
         assert not (set(PRIVACY_TABLE_NAMES) & names) and "shopify_catalog_products" in names
+
+        proc = alembic("downgrade", "0122@-1")
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        topo.assert_step(url, topo.S1, baseline, planted, counts, "S1 after downgrade 0122@-1")
+        names = set(inspect(eng).get_table_names())
+        assert "shopify_catalog_products" not in names and "shopify_connections" in names
+
+        proc = alembic("downgrade", "0121@-1")
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        topo.assert_step(url, topo.S0, baseline, planted, counts, "S0 after downgrade 0121@-1")
+        assert not {t for t in inspect(eng).get_table_names() if t.startswith("shopify_")}
         eng.dispose()
     finally:
         _drop(name)
