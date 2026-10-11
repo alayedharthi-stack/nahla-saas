@@ -603,6 +603,11 @@ def test_account_stays_claimed_across_inactive_states_and_rows_are_never_deleted
     _fails(pg, f"DELETE FROM {CONN}", {RESTRICT})
     # TRUNCATE fires no row trigger; the statement trigger refuses it.
     _fails(pg, f"TRUNCATE {CONN} CASCADE", {RESTRICT})
+    # The foreign key pulls the ledger into any TRUNCATE of the connections, so
+    # prove the connections' own refusal with the ledger's trigger switched off
+    # (this throw-away database only).
+    _sql(pg, f"ALTER TABLE {LEDGER} DISABLE TRIGGER trg_google_merchant_offer_ledger_guard_truncate")
+    _fails(pg, f"TRUNCATE {CONN} CASCADE", {RESTRICT})
     _fails(pg, "DELETE FROM tenants WHERE id = :id", {FOREIGN_KEY, RESTRICT}, id=ta)
     assert _crow(pg, cid)["account_id"] == ACCOUNT_A
 
