@@ -11,7 +11,7 @@ Every slice records, for **baseline** (the exact base SHA it stacks on) and
 **candidate** (its exact tested SHA):
 
 * the affected paths;
-* each command as executed, its exit code, and the passed / failed /
+* each command as executed, its real exit code, and the passed / failed /
   skipped / errored counts (a skip in a strict suite is a failure, never a
   pass);
 * the PostgreSQL versions used (16 and 18) and the authentication mode (TCP
@@ -23,7 +23,7 @@ No assertion is removed or weakened to make a candidate pass. A baseline
 failure that also fails on the candidate is reported as pre-existing, with
 its node id.
 
-### Evidence levels
+### Evidence levels and status values
 
 | Level | Meaning |
 |---|---|
@@ -31,101 +31,260 @@ its node id.
 | **D** | integration on disposable PostgreSQL, or a local browser harness |
 | **R** | observed on a real Shopify development store |
 
-Status values: **implemented** (with a link to the proof), **planned**, or
-**NOT RUN — pending permissions** for real-store journeys. Nothing in level
-R is authorized now.
+| Status | Meaning |
+|---|---|
+| **implemented [Pn]** | an automated proof exists; `[Pn]` points to its exact node ids below |
+| **partial [Pn]** | a proof covers part of the case; the remainder is named and pending |
+| **planned** | no proof exists yet |
+| **blocked: owner choice** | the expected outcome depends on a named owner decision; not runnable as an exact expectation yet |
+| **NOT RUN — pending permissions** | a real-store journey; nothing at level R is authorized now |
 
-### Columns used below
-
-Each case lists its initial state, the events, the expected Shopify and
-Nahlah state, the expected messages with an **exact count**, the forbidden
-side effects, the evidence level it must reach, and its status today.
+Every case lists its initial state, the events, the expected Shopify and
+Nahlah state, the expected messages as exact **buyer / merchant** counts, the
+forbidden side effects, the level it must reach, and its status. Counts in
+sections C–F are expectations **under the proposed synthetic fixture policy
+in section E** — not live product behaviour.
 
 ## A. Protect the baseline (Shopify flags off)
 
-| ID | Initial state | Events | Expected state | Messages (exact) | Forbidden | Level | Status |
+| ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
 |---|---|---|---|---|---|---|---|
-| A1 | Salla tenant, Shopify flags off | Salla product, order and shipping flows | identical to baseline | as baseline | any Shopify table read or written | U + D | partly implemented: existing Salla suites run beside every Shopify Draft (baseline vs candidate recorded in each validation document) |
-| A2 | Meta catalog connected | item creation and updates | Meta item ids and updates unchanged | 0 extra | Shopify rows reaching Meta | U + D | partly implemented: existing Meta catalog suites run beside each Draft |
-| A3 | two tenants | any Shopify slice active for one | the other tenant unchanged | 0 | cross-tenant read or write | D | implemented per slice (composite tenant keys; #1202–#1205 proofs) |
-| A4 | billing subscriptions | Shopify flows | billing unchanged | 0 | billing side effects | U | partly implemented: billing suites in CI steps |
-| A5 | agent tools and conversations | Shopify flows | agent behaviour unchanged | as baseline | prompt / persona / model / dialect change | U | implemented: GOV-002 scanner and constitution suite per Draft |
-| A6 | same SKU / order number at Salla and Shopify | both providers sync | each provider row keyed by its own identity | 0 | one provider's row overwritten by the other | D | catalog: implemented (#1204 colliding raw ids); orders: planned |
-| A7 | mixed-provider tenant | Shopify connected, Salla active | both work independently | as baseline | provider confusion in shared tables | D | planned |
-| A8 | Shopify enabled, then disabled | flags turned off | routes 404, workers idle, existing work unaffected | 0 | dangling jobs or writes | U + D | implemented for #1202–#1205 (flag-off tests) |
-| A9 | heavy Shopify backlog | existing workers busy | existing work not starved | as baseline | Shopify jobs monopolising workers or the shared pool | D | planned (#1205 uses a dedicated bounded pool for receipts) |
+| A1 | Salla tenant, Shopify flags off | Salla product, order and shipping flows | identical to baseline | baseline counts | any Shopify table read or written | U + D | partial: the existing Salla suites run beside each Shopify Draft (baseline vs candidate in each validation record); a dedicated "flags off, Salla untouched" end-to-end proof is planned |
+| A2 | Meta catalog connected | item creation and updates | Meta item ids and updates unchanged | 0 / 0 extra | Shopify rows reaching Meta | U + D | partial: existing Meta catalog suites run beside each Draft; no Shopify-to-Meta path exists to test |
+| A3 | two tenants, one Shopify shop each | each slice's operations | the other tenant unchanged | 0 / 0 | cross-tenant read or write | D | implemented [P1] |
+| A4 | billing subscriptions | Shopify flows | billing unchanged | 0 / 0 | billing side effects | U | partial: billing suites run beside each Draft; no Shopify billing path exists |
+| A5 | agent tools and conversations | Shopify flows | agent behaviour unchanged | baseline counts | prompt / persona / model / dialect change | U | partial [P2]: the GOV-002 scanner and the constitution suite prove that no prohibited source changed — they do not prove conversation equivalence; baseline vs candidate agent regression runs are still required per Draft |
+| A6 | same raw numeric id at Salla and in the Shopify mirror | both writers run | each provider row keyed by its own identity | 0 / 0 | one provider overwriting the other | D | partial [P3]: proves raw-id collisions for **products**; same-SKU and same order-number collisions, and every order case, are planned |
+| A7 | mixed-provider tenant (Salla and Shopify) | both active | both independent | baseline counts | provider confusion in shared tables | D | planned |
+| A8a | Shopify flags off from the start | requests and scheduler ticks | routes 404, workers idle | 0 / 0 | any Shopify work | U | implemented [P4] |
+| A8b | Shopify enabled with queued work (receipts, reconciles, imports) | flags turned off | queued work neither runs nor corrupts state; existing work unaffected | 0 / 0 | dangling writes after disable | D | planned |
+| A9 | heavy Shopify backlog | existing workers busy | existing work not starved | baseline counts | Shopify jobs monopolising workers or the shared pool | D | partial [P5]: privacy receipts use a dedicated bounded pool and slots; a whole-system starvation proof is planned |
 
 ## B. Connection and privacy
 
-| ID | Initial state | Events | Expected state | Messages (exact) | Forbidden | Level | Status |
+| ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
 |---|---|---|---|---|---|---|---|
-| B1 | two development stores, two tenants | connect both | two isolated connections | 0 | cross-store data | D / R | D implemented (#1202); R NOT RUN — pending permissions |
-| B2 | connected store | token expiry, refresh, revocation | refresh or quarantine; never a stale credential | 0 | use of a revoked credential | D | implemented (#1202) |
-| B3 | any | invalid webhook signature | 401, nothing stored | 0 | any write | U + D | implemented (#1202 uninstall; #1205 privacy topics) |
-| B4 | unknown shop | signed delivery | receipt without tenant; manual review | 0 | attribution to a tenant by guess | D | implemented (#1205) |
-| B5 | shop owned by tenant A | claim attempt by tenant B | refused; ownership unchanged | 0 | rebinding | D | implemented (#1202) |
-| B6 | buyer fields not approved | any flow needing them | field absent, flow degrades honestly | 0 | reading or storing an unapproved field | U + D | planned (protected customer data gate) |
-| B7 | uninstall queued | late events after uninstall | quarantine then confirmed tombstone; late events change nothing | 0 | revival from a replayed event | D | implemented (#1202) |
-| B8 | connected store | `customers/data_request`, `customers/redact`, `shop/redact` | durable receipt; bounded assessment; blocked-policy proposal; no erasure without approved policy | 0 | fulfilment claims; unapproved erasure | U + D | implemented (#1205) |
-| B9 | notification records exist (later slices) | `customers/redact` | derived notification data handled under the approved retention | 0 | retention beyond policy | D | planned |
+| B1 | two tenants, two shops | connect both | two isolated connections | 0 / 0 | cross-store data | D / R | D implemented [P1]; R NOT RUN — pending permissions |
+| B2 | connected store | token expiry, rotation, revoked refresh | refresh, or quarantine and confirmed uninstall; never a stale credential | 0 / 0 | use of a revoked credential | D | implemented [P6] |
+| B3 | any | webhook with an invalid signature | 401, nothing stored | 0 / 0 | any write | U + D | implemented [P7] |
+| B4 | unknown shop | signed delivery | no tenant; open manual review | 0 / 0 | attribution by guess | D | implemented [P8] |
+| B5 | shop owned by tenant A | claim by tenant B | refused; ownership unchanged | 0 / 0 | rebinding | D | implemented [P9] |
+| B6 | buyer fields not approved | a flow that would need them | field absent; flow degrades honestly | 0 / 0 | reading or storing an unapproved field | U + D | planned |
+| B7 | uninstall queued | late events after the uninstall | quarantine then confirmed tombstone; late events change nothing | 0 / 0 | revival from a replay | D | implemented [P10] |
+| B8 | connected store | `customers/data_request`, `customers/redact`, `shop/redact` | durable receipt; bounded assessment; blocked-policy proposal; no erasure without an approved policy | 0 / 0 | fulfilment claims; unapproved erasure | U + D | implemented [P11] |
+| B9 | notification records exist (later slices) | `customers/redact` | derived notification data handled under the approved retention | 0 / 0 | retention beyond policy | D | planned; blocked: owner choice (retention) |
 
-## C. Orders (planned)
+## C. Orders (all planned; counts under the section E fixture)
 
-| ID | Initial state | Events | Expected state | Messages (exact) | Forbidden | Level | Status |
+| ID | Initial state | Events | Expected Shopify / Nahlah state | Buyer / merchant | Forbidden | Level | Status |
 |---|---|---|---|---|---|---|---|
-| C1 | order mirror empty | paid order | paid | per template table | — | D / R | planned; R NOT RUN |
-| C2 | — | authorized / pending / partially paid | each its own financial state | per table | treating any of them as paid | D | planned |
-| C3 | existing order | edit, cancel, delete | mirror follows; cancelled flows stop | per table | messages for a cancelled order | D | planned |
-| C4 | paid order | partial / full / pending / failed refund | refund reported successful **only** after its transactions are verified | per table | "refunded" from `refunds/create` alone | D | planned |
-| C5 | COD order | buyer accepts | acceptance recorded | 1 confirmation request, then 0 | inferring shipment or payment | D / R | planned; R NOT RUN |
-| C6 | COD order | buyer rejects / ambiguous reply / no response / duplicate reply | rejection, clarification or reminder per owner-set deadline | exact per case | double counting a duplicate reply | D | planned |
-| C7 | COD order modified or cancelled | buyer responds afterwards | response bound to the order version it answers | per table | confirming a cancelled order | D | planned |
-| C8 | several open orders for one phone | buyer replies | reply bound to the right order or clarified | per table | confirming the wrong order | D | planned |
-| C9 | manual payment gateway | order created | **not** COD proof | 0 | treating manual payment as COD acceptance | U | planned |
-| C10 | order with `confirmed = true` | — | inventory reservation only | 0 | treating it as buyer acceptance | U | planned |
-| C11 | COD delivered, not collected | delivery event | delivered, unpaid | per table | `orderMarkAsPaid` or "paid" claim | D | planned |
+| C1 | no order | prepaid order, `financial_status = paid` | paid | 0 / 0 (Shopify's own order confirmation; N0) | a Nahlah duplicate of the native confirmation | D / R | planned; R NOT RUN |
+| C2a | no order | card order `authorized` | authorized, not paid | 0 / 0 | treating it as paid | D | planned |
+| C2b | no order | order `pending` (non-COD manual) | pending | 0 / 0 | treating it as COD or paid | D | planned |
+| C2c | no order | `partially_paid` | partially paid | 0 / 0 | treating it as paid | D | planned |
+| C3a | open order | order edited | mirror updated; open COD request bound to the old version superseded | 0 / 0 | confirming the old version | D | planned |
+| C3b | open COD order, request sent | order cancelled | cancelled; pending COD flow stopped | 1 / 0 (N11) unless natively notified | reminders after cancellation | D | planned |
+| C3c | order mirrored | order deleted | mirror tombstone | 0 / 0 | messages for a deleted order | D | planned |
+| C4a | paid order | partial refund, transactions verified `success` | partially refunded | 1 / 0 (N10) unless natively notified | — | D | planned |
+| C4b | paid order | full refund, transactions verified `success` | refunded | 1 / 0 (N10) unless natively notified | — | D | planned |
+| C4c | paid order | `refunds/create` with pending transactions | refund pending | 0 / 0 | a "refunded" claim | D | planned |
+| C4d | paid order | refund with a failed transaction | refund failed | 0 / 1 (N12) | a "refunded" claim | D | planned |
+| C5 | COD order created, buyer opted in | — | awaiting buyer acceptance | 1 / 0 (N1) | inferring shipment or payment | D / R | planned; R NOT RUN |
+| C6a | COD request sent | buyer accepts | accepted | 0 / 1 (N3) | inferring shipment or payment | D | planned |
+| C6b | COD request sent | buyer rejects | rejected | 0 / 1 (N4) | shipping a rejected order | D | planned |
+| C6c | COD request sent | ambiguous reply | still awaiting; no acceptance recorded | 0 / 0 (clarification is the conversation's job, not a template) | recording acceptance | D | planned |
+| C6d | COD request sent | no response by the fixture deadline | reminder once, then manual follow-up | 1 / 0 (N2), at most one | more than one reminder | D | planned; blocked: owner choice for the real deadline |
+| C6e | COD accepted | the same acceptance delivered twice | accepted once | 0 / 1 total (N3 idempotent) | a second merchant message | D | planned |
+| C7a | COD request sent, order then modified | buyer accepts | acceptance bound to the old version → re-confirmation needed | 1 / 0 (N1 for the new version) | confirming the modified order with the old answer | D | planned |
+| C7b | COD request sent, order then cancelled | buyer accepts | stays cancelled | 0 / 0 | reviving the order | D | planned |
+| C8 | two open COD orders for one phone | buyer replies once | reply bound to an order only if unambiguous; otherwise awaiting | 0 / 0 when ambiguous; 0 / 1 when bound | confirming the wrong order | D | planned |
+| C9 | order with a manual payment gateway | created | not COD proof | 0 / 0 | starting the COD flow from the gateway alone | U | planned |
+| C10 | order with `confirmed = true` | — | inventory reservation only | 0 / 0 | treating it as buyer acceptance | U | planned |
+| C11 | COD order delivered, not collected | delivery event | delivered, unpaid | 1 / 0 (N7) | `orderMarkAsPaid`; a "paid" claim | D | planned |
+| C12 | COD order delivered | collection verified by the owner-chosen source | paid by verified collection | 0 / 1 (N9) | `orderMarkAsPaid` without explicit merchant authority | D | planned; blocked: owner choice (collection source, write authority) |
 
-## D. Shipping (planned)
+## D. Shipping (all planned; counts under the section E fixture)
 
-| ID | Initial state | Events | Expected state | Messages (exact) | Forbidden | Level | Status |
+| ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
 |---|---|---|---|---|---|---|---|
-| D1 | paid order | fulfillment without tracking | fulfilled, tracking unknown | per table | invented tracking | D | planned |
-| D2 | — | label printed vs carrier acceptance | distinct states | per table | "shipped" from a label alone | D | planned |
-| D3 | — | in transit / out for delivery / delivered | ordered, evidence-based | per table | regressions from stale events | D | planned |
-| D4 | — | delay / failed attempt / failure | reported honestly | per table | silent loss | D | planned |
-| D5 | multi-parcel order | one parcel delivered | parcel delivered, order **not** delivered | per table | marking the whole order delivered | D | planned |
-| D6 | — | carrier or tracking number changed | latest authoritative tracking | per table | duplicate notifications | D | planned |
-| D7 | — | fulfillment cancelled and recreated | state follows the live fulfillment | per table | messages for the cancelled one | D | planned |
-| D8 | — | stale or missing carrier events | no regression; reconciliation flagged | 0 | invented delivery | D | planned |
-| D9 | pickup or digital goods | completion | appropriate state, no carrier flow | per table | carrier messages | D | planned |
-| D10 | delivered order | return | return state | per table | reopening payment | D | planned |
+| D1 | paid order | fulfillment without tracking | fulfilled, tracking unknown | 0 / 0 | invented tracking; a dispatch message | D | planned |
+| D2a | fulfilled order | label printed only | label created, not shipped | 0 / 0 | "shipped" from a label | D | planned |
+| D2b | label printed | carrier acceptance | in carrier hands | 1 / 0 (N5) unless natively notified | — | D | planned |
+| D3a | in carrier hands | in transit | in transit | 0 / 0 | — | D | planned |
+| D3b | in transit | out for delivery | out for delivery | 0 / 0 (fixture sends none) | — | D | planned |
+| D3c | single-parcel order out for delivery | delivered | delivered | 1 / 0 (N7) | "paid" | D | planned |
+| D4a | in transit | carrier delay | delayed | 0 / 0 | silent state loss | D | planned |
+| D4b | out for delivery | failed delivery attempt | attempt failed | 1 / 1 (N8) | "delivered" | D | planned |
+| D4c | in transit | delivery failure (return to sender) | failed | 1 / 1 (N8) | "delivered" | D | planned |
+| D5a | two-parcel order | first parcel delivered | parcel 1 delivered; order not delivered | 0 / 0 | marking the order delivered | D | planned |
+| D5b | D5a | second parcel delivered | order delivered | 1 / 0 (N7, once per order) | a second delivered message | D | planned |
+| D6 | in carrier hands | carrier or tracking number changed | latest authoritative tracking | 0 / 0 | a second dispatch message | D | planned |
+| D7 | fulfillment exists | fulfillment cancelled and recreated | state follows the live fulfillment | 1 / 0 (N5 for the recreated one only, if carrier-accepted) | messages for the cancelled one | D | planned |
+| D8 | in transit | stale or missing carrier events | no regression; reconciliation flagged | 0 / 0 | an invented delivery | D | planned |
+| D9a | pickup order | ready for pickup | ready | 0 / 0 | carrier messages | D | planned; blocked: owner choice (pickup notifications) |
+| D9b | digital goods | fulfilled | fulfilled | 0 / 0 | carrier messages | D | planned |
+| D10 | delivered order | return requested and received | returned | 0 / 0 | reopening payment | D | planned |
 
-## E. Notifications (planned)
+## E. Notifications
 
-Every notification is specified in one table with these columns:
-**recipient** (buyer or merchant), **trigger**, **channel**, **language**,
-**opt-in**, **template** (approved class), **idempotency key**,
-**retry / escalation**, and **exact expected count**.
+### Proposed synthetic notification test policy
 
-Cases to cover: disabled preferences; missing or invalid phone; Arabic and
-English; time zone and currency; withdrawn consent; the WhatsApp 24-hour
-window and template constraints; provider states accepted / delivered /
-read / failed / unknown (message delivery is distinct from parcel delivery);
-Shopify native notifications, including `notifyCustomer`, accounted for so
-that no buyer receives an unintended double; and **no fallback to an
-unapproved channel**.
+**PROPOSED — pending owner approval. A test fixture, not live product
+policy.** No channel, template, recipient or send is authorized by it. It
+exists so that cases have fixed, runnable expected counts. Anything absent
+from it, or unapproved, sends **0** messages.
 
-## F. Resilience (planned unless noted)
+Fixture rules:
 
-| ID | Events | Expected | Forbidden | Level | Status |
+* **Channel:** WhatsApp approved templates only. No SMS, email or other
+  fallback; a missing or invalid phone sends 0.
+* **Language:** the buyer's recorded language (`ar` or `en`), default `ar`;
+  the merchant's dashboard language.
+* **Opt-in:** buyer messages require a recorded WhatsApp opt-in that has not
+  been withdrawn; merchant messages go to the merchant's verified staff
+  number.
+* **Templates:** synthetic fixture template ids (`fx_*`); real templates come
+  from the Nahla Templates Library, the merchant, or Meta-approved templates,
+  per AGENTS.md.
+* **Idempotency key:** `tenant : shop : order GID : notification id : order
+  version` (refunds also carry the refund GID, shipments the fulfillment
+  GID). A repeated event with the same key sends nothing.
+* **Retry / escalation:** at most 3 provider attempts on a retryable failure
+  with backoff; after the last failure, a dashboard flag only — no extra
+  message.
+* **Native suppression:** when Shopify notified the buyer natively for the
+  same event (`notifyCustomer = true` on the mutation, or the store's own
+  notification for that event), the fixture sends 0 for it. If whether
+  Shopify notified is unknown, the case is **blocked: owner choice**.
+* **WhatsApp constraints:** business-initiated messages outside the 24-hour
+  window use approved templates only.
+
+| ID | Recipient | Trigger (fact) | Template | Buyer | Merchant |
 |---|---|---|---|---|---|
-| F1 | duplicate and cross-topic duplicate deliveries | one effect | double effects | D | implemented for #1202 / #1205 topics; planned for orders |
-| F2 | out-of-order and late events (after cancel, uninstall, delete) | no regression, no revival | stale writes | D | implemented for #1202 / #1205; planned for orders |
-| F3 | crash before / after the database commit or provider acceptance | exactly-once effect, idempotent retry | lost or duplicated effects | D | implemented for #1205 receipts (late commit, blocked commit) |
-| F4 | rate limits, GraphQL errors, 5xx, token expiry | bounded retries | unbounded retries | U + D | implemented for #1204 import |
-| F5 | missing events reconciled | state repaired | historical message floods | D | planned |
-| F6 | two stores | isolation | cross-store effects | D / R | D implemented; R NOT RUN |
-| F7 | independent Shopify, Meta and WhatsApp outages | each degrades alone | cascading failure | D | planned |
+| N0 | buyer | order created and paid | none (Shopify's native confirmation) | 0 | 0 |
+| N1 | buyer | COD order created, or modified while awaiting acceptance | `fx_cod_confirm_request` | 1 | 0 |
+| N2 | buyer | no COD response by the fixture deadline (24 h) | `fx_cod_reminder` | 1 (max once) | 0 |
+| N3 | merchant | buyer accepted COD | `fx_merchant_cod_accepted` | 0 | 1 |
+| N4 | merchant | buyer rejected COD | `fx_merchant_cod_rejected` | 0 | 1 |
+| N5 | buyer | carrier accepted the parcel (not natively notified) | `fx_dispatched` | 1 | 0 |
+| N7 | buyer | whole order delivered (all parcels) | `fx_delivered` | 1 | 0 |
+| N8 | buyer and merchant | failed delivery attempt or delivery failure | `fx_delivery_issue` / `fx_merchant_delivery_issue` | 1 | 1 |
+| N9 | merchant | collection verified by the owner-chosen source | `fx_merchant_collected` | 0 | 1 |
+| N10 | buyer | refund transactions verified `success` (not natively notified) | `fx_refunded` | 1 | 0 |
+| N11 | buyer | order cancelled (not natively notified) | `fx_cancelled` | 1 | 0 |
+| N12 | merchant | refund transaction failed | `fx_merchant_refund_failed` | 0 | 1 |
+
+(N6 is intentionally absent: the fixture sends nothing for out-for-delivery.)
+
+### Notification cases (all planned)
+
+| ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
+|---|---|---|---|---|---|---|---|
+| E1 | COD order, buyer opted in, `ar` | created | request recorded with its key | 1 / 0 | a second request for the same key | D | planned |
+| E2 | as E1 | the same webhook delivered twice | one request | 1 / 0 | a duplicate send | D | planned |
+| E3 | buyer opted out (preference disabled) | COD order created | manual follow-up flag | 0 / 0 | any buyer message | D | planned |
+| E4 | phone missing | COD order created | flagged; no send | 0 / 0 | a send to a guessed number | D | planned |
+| E5 | phone invalid | COD order created | flagged; no send | 0 / 0 | a send | D | planned |
+| E6 | buyer language `en` | COD order created | English template chosen | 1 / 0 | the Arabic template | D | planned |
+| E7 | shop time zone and currency differ from the platform's | COD order created | amounts and dates rendered in the shop's currency and time zone | 1 / 0 | converted or mis-dated values | D | planned |
+| E8 | buyer withdrew consent after the request | reminder due | no reminder | 0 / 0 | a reminder | D | planned |
+| E9 | outside the 24-hour window | carrier acceptance | template message only | 1 / 0 | a free-form message | D | planned |
+| E10 | send attempted | provider: accepted, then delivered, then read | message states recorded | 1 / 0 | treating message delivery as parcel delivery | D | planned |
+| E11 | send attempted | provider: failed (retryable) three times | dashboard flag | 1 attempt-chain / 0; delivered 0 | a fourth attempt; another channel | D | planned |
+| E12 | send attempted | provider status unknown | state "unknown"; no resend | 1 / 0 | an automatic duplicate | D | planned |
+| E13 | fulfillment created with `notifyCustomer = true` | carrier acceptance | native notification relied on | 0 / 0 | a Nahlah double | D | planned |
+| E14 | refund created with Shopify notifying the buyer | transactions verified | native notification relied on | 0 / 0 | a Nahlah double | D | planned |
+| E15 | unknown whether Shopify notified | carrier acceptance | — | — | — | D | blocked: owner choice (how native notification is known) |
+| E16 | channel not approved (e.g. SMS) | any trigger | nothing sent | 0 / 0 | any send on an unapproved channel | U | planned |
+
+## F. Resilience
+
+| ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
+|---|---|---|---|---|---|---|---|
+| F1a | connected shop | identical privacy delivery repeated, concurrently and with new webhook ids | one open request; counters only | 0 / 0 | a second request | D | implemented [P12] |
+| F1b | COD order (later slice) | identical and cross-topic duplicate order webhooks | one effect | as the first event only | double effects or messages | D | planned |
+| F2a | uninstalled then reinstalled shop | old uninstall / privacy body replayed after the reinstall | new generation retained, never erased | 0 / 0 | revival, erasure of the new installation | D | implemented [P13] |
+| F2b | cancelled / deleted order (later slice) | late event after cancel, uninstall or delete | no regression | 0 / 0 | messages or state revival | D | planned |
+| F3a | connected shop | receipt COMMIT in flight at the HTTP deadline; receipt blocked past it | 503; one durable request; idempotent redelivery | 0 / 0 | a lost or doubled receipt | D | implemented [P14] — proves receipt recovery only |
+| F3b | order event processed (later slice) | crash before / after the database commit, and before / after provider (WhatsApp) acceptance | exactly-once business effect and message | per event | a lost or duplicated send | D | planned (general exactly-once across external acceptance is not proven) |
+| F4a | catalog import running | 429 / throttling, GraphQL errors, 5xx, timeouts | bounded retries, then a classified failure; last good catalog kept | 0 / 0 | unbounded retries; partial publication | U + D | implemented [P15] |
+| F4b | catalog import running | access token rotated mid-import | new credential followed, old one never reused | 0 / 0 | reuse of a retired token | D | implemented [P15] |
+| F5 | events missed during an outage (later slice) | reconciliation | state repaired | 0 / 0 for historical events | historical message floods | D | planned |
+| F6 | two shops, two tenants | operations on both | isolated | 0 / 0 | cross-store effects | D / R | D implemented [P1]; R NOT RUN — pending permissions |
+| F7 | all integrations configured (later slices) | Shopify, Meta and WhatsApp outages, each alone | each degrades alone | 0 / 0 during the outage | cascading failure; silent loss | D | planned |
+
+## Proof references
+
+Node ids are pinned: #1202–#1204 at
+[`08428cb`](https://github.com/alayedharthi-stack/nahla-saas/tree/08428cb7edf9666a0b31874e8f0256764fd11c90)
+(the #1204 head, which contains #1202 and #1203), #1205 at
+[`3681ebd`](https://github.com/alayedharthi-stack/nahla-saas/tree/3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c)
+(its tested source).
+
+* **[P1] two tenants / shops isolated** —
+  `backend/tests/test_shopify_connection_pg.py::test_connect_two_tenants_isolated`;
+  `backend/tests/test_shopify_catalog_import_pg.py::test_identical_raw_ids_in_two_tenants_and_shops_stay_isolated`;
+  `backend/tests/test_shopify_catalog_import_pg.py::test_constraints_refuse_cross_tenant_parents_and_malformed_identities`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_two_tenants_with_identical_raw_ids_stay_isolated`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_composite_key_isolates_tenants_and_checks_refuse_fabricated_states`.
+* **[P2] no prohibited source change** — the GOV-002 scanner
+  (`scripts/lint_intelligence_non_interference.py`, run from the merge base)
+  and `backend/tests/test_constitution_compliance.py` +
+  `backend/tests/test_intelligence_non_interference_guard.py`; results in each
+  Draft's validation record.
+* **[P3] product raw-id collisions with the Salla writer** —
+  `backend/tests/test_shopify_catalog_import_pg.py::test_salla_writers_with_colliding_raw_ids_never_touch_the_mirror`.
+* **[P4] flags off** —
+  `tests/test_shopify_connection_foundation.py::test_every_route_is_off_by_default`;
+  `tests/test_shopify_connection_foundation.py::test_recovery_tick_is_dormant_without_configuration`;
+  `tests/test_shopify_catalog_import.py::test_routes_are_off_by_default_and_with_only_one_flag`;
+  `tests/test_shopify_privacy_webhooks.py::test_routes_are_absent_while_the_intake_flag_is_off`;
+  `tests/test_shopify_privacy_webhooks.py::test_worker_is_dormant_without_its_flag`.
+* **[P5] dedicated bounded receipt pool** —
+  `tests/test_shopify_privacy_webhooks.py::test_exhausted_receipt_slots_answer_503_at_once_without_backlog`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_real_dedicated_pool_exhaustion_is_a_bounded_503_and_recovers`.
+* **[P6] token expiry, rotation, revocation** —
+  `backend/tests/test_shopify_connection_pg.py::test_refresh_rotation_and_concurrent_refresh`;
+  `backend/tests/test_shopify_connection_pg.py::test_expired_access_token_and_revoked_refresh_confirms_uninstall`;
+  `backend/tests/test_shopify_connection_pg.py::test_old_event_with_expired_access_token_refreshes_before_concluding`.
+* **[P7] invalid signatures** —
+  `tests/test_shopify_connection_foundation.py::test_webhook_hmac_over_raw_body`;
+  `tests/test_shopify_connection_foundation.py::test_webhook_refusals_before_any_database_access`;
+  `tests/test_shopify_privacy_webhooks.py::test_wrong_or_malformed_signatures_are_401`;
+  `tests/test_shopify_privacy_webhooks.py::test_hmac_covers_the_raw_bytes_not_the_json_value`.
+* **[P8] unknown shop** —
+  `backend/tests/test_shopify_connection_pg.py::test_unknown_shop_changes_nothing`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_unknown_and_conflicting_identity_never_mutate_or_rebind`.
+* **[P9] cross-tenant claim refused** —
+  `backend/tests/test_shopify_connection_pg.py::test_verified_ownership_survives_disconnect_and_blocks_other_tenant`.
+* **[P10] uninstall and late events** —
+  `backend/tests/test_shopify_connection_pg.py::test_genuine_uninstall_is_confirmed_and_keeps_the_tombstone`;
+  `backend/tests/test_shopify_connection_pg.py::test_delayed_old_uninstall_after_same_tenant_reinstall_is_retained`;
+  `backend/tests/test_shopify_connection_pg.py::test_identical_signed_body_across_generations_is_never_suppressed`.
+* **[P11] privacy topics** —
+  `tests/test_shopify_privacy_webhooks.py::test_valid_signed_delivery_is_acknowledged_after_the_receipt`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_http_receipts_store_no_raw_customer_value_header_or_body`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_matched_customer_request_persists_the_bounded_assessment`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_confirmed_uninstall_yields_a_counts_only_blocked_proposal`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_executor_refuses_without_flag_or_policy_and_changes_nothing`.
+* **[P12] duplicate privacy deliveries** —
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_concurrent_identical_deliveries_resolve_to_one_request`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_changed_unsigned_headers_attach_and_never_suppress`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_signed_replay_flood_is_bounded_and_lifecycle_still_progresses`.
+* **[P13] replay across reinstall** —
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_reinstall_never_erases_the_new_generation_and_never_suppresses_a_later_request`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_retained_replay_never_swallows_a_later_genuine_uninstall_with_the_same_body`;
+  `backend/tests/test_shopify_connection_pg.py::test_same_delivery_id_and_body_across_reinstall_requests_a_probe`.
+* **[P14] receipt recovery at the deadline** —
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_late_commit_or_blocked_commit_answers_503_and_the_redelivery_is_idempotent`;
+  `backend/tests/test_shopify_privacy_webhooks_pg.py::test_late_delivery_waiting_behind_a_later_one_keeps_timestamps_monotone`.
+* **[P15] import resilience** —
+  `tests/test_shopify_catalog_import.py::test_http_failures_are_bounded_and_classified`;
+  `tests/test_shopify_catalog_import.py::test_throttle_is_retried_with_bounded_waits_then_refused`;
+  `tests/test_shopify_catalog_import.py::test_graphql_errors_refuse_even_partial_data`;
+  `tests/test_shopify_catalog_import.py::test_timeouts_and_transport_errors_are_retried_then_refused`;
+  `backend/tests/test_shopify_catalog_import_pg.py::test_throttle_and_429_during_an_import_still_commit`;
+  `backend/tests/test_shopify_catalog_import_pg.py::test_a_rotated_credential_mid_import_is_followed_never_reused`.
 
 ## Real development-store journeys (launch gate)
 
@@ -146,7 +305,7 @@ unapproved channel**.
 |---|---|
 | [#1202](https://github.com/alayedharthi-stack/nahla-saas/pull/1202) | design and runbook `docs/engineering/shopify-connection-foundation.md`; validation recorded on the Draft |
 | [#1204](https://github.com/alayedharthi-stack/nahla-saas/pull/1204) | `docs/engineering/shopify-catalog-import-validation.md` |
-| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | `docs/engineering/shopify-privacy-webhooks-validation.md` on its branch (to be linked here once its final-head runs are recorded) |
+| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | `docs/engineering/shopify-privacy-webhooks-validation.md` on its branch — pending: linked here once its final-head runs are recorded |
 
 Final test links for later slices are added here only when those runs exist.
 
