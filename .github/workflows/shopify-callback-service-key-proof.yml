@@ -1,0 +1,164 @@
+name: Shopify exact GET callback service-key proof
+
+on:
+  push:
+    branches: [codex/shopify-callback-service-key-20261011]
+    paths:
+      - backend/core/middleware.py
+      - scripts/proof_shopify_callback_service_key.py
+      - .github/workflows/shopify-callback-service-key-proof.yml
+
+permissions:
+  contents: read
+
+jobs:
+  callback-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASELINE_SHA: 23013bc16e0543c1106e8662b4dda4ba772022cd
+      PG_IMAGE: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fetch exact source and verify narrow runtime AST change
+        id: sources
+        run: |
+          set -euo pipefail
+          for kind in candidate baseline; do
+            git init "$kind"
+            git -C "$kind" config core.autocrlf false
+            git -C "$kind" remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+            revision="$GITHUB_SHA"
+            if [ "$kind" = baseline ]; then revision="$BASELINE_SHA"; fi
+            git -C "$kind" fetch --no-tags --depth=1 origin "$revision"
+            git -C "$kind" checkout --detach FETCH_HEAD
+            test "$(git -C "$kind" rev-parse HEAD)" = "$revision"
+            git -C "$kind" show -s --format="$kind=%H tree=%T"
+          done
+          git -C candidate fetch --no-tags --depth=1 origin "$BASELINE_SHA"
+          test "$(git -C candidate diff --name-only "$BASELINE_SHA" HEAD -- backend database integrations modules dashboard requirements.txt Dockerfile nixpacks.toml start.sh scripts/operators scripts/preflight_check.py scripts/cleanup_salla_duplicates.py)" = 'backend/core/middleware.py'
+          for file in Dockerfile requirements.txt .dockerignore nixpacks.toml start.sh scripts/proof_shopify_production_asgi.py; do
+            cmp "candidate/$file" "baseline/$file"
+          done
+          python3 - <<'PY'
+          import ast, base64, pathlib
+          old = ast.parse(pathlib.Path('baseline/backend/core/middleware.py').read_text())
+          new = ast.parse(pathlib.Path('candidate/backend/core/middleware.py').read_text())
+          expected = ast.parse('request.method == "GET" and path == "/merchant/integrations/shopify/callback"', mode='eval').body
+          function = next(n for n in new.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'api_key_middleware')
+          matches = [(node, value) for node in ast.walk(function) if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)
+                     for value in node.values if ast.dump(value) == ast.dump(expected)]
+          assert len(matches) == 1
+          matches[0][0].values.remove(matches[0][1])
+          assert ast.dump(new) == ast.dump(old)
+          print('SOURCE_SCOPE PASS entire middleware AST differs only by exact GET callback predicate')
+          values = {'ENVIRONMENT':'production', 'DATABASE_URL':'postgresql://proof:proof@127.0.0.1:1/nahla_asgi_proof',
+                    'JWT_SECRET':'b'*64, 'ADMIN_PASSWORD':'CallbackProofSyntheticPassword2026!',
+                    'ADMIN_EMAIL':'admin@example.invalid', 'WHATSAPP_VERIFY_TOKEN':'callback-proof-synthetic-verify-token',
+                    'TOTP_ENC_KEY':base64.urlsafe_b64encode(b'x'*32).decode(),
+                    'API_SECRET_KEY':'synthetic-service-key-for-asgi-proof',
+                    'PYTHONPATH':'/app:/app/backend:/app/database', 'PYTHONDONTWRITEBYTECODE':'1',
+                    'NAHLA_DISABLE_SCHEDULERS':'1', 'NAHLA_RAW_ASGI_LOG':'all'}
+          for flag in ('CONNECTION','CATALOG_IMPORT','PRIVACY_INTAKE','PRIVACY_WORKER','PRIVACY_DESTRUCTIVE'):
+              values['NAHLA_SHOPIFY_'+flag+'_ENABLED']='0'
+          pathlib.Path('proof.env').write_text(''.join(k+'='+v+'\n' for k,v in values.items()))
+          PY
+
+      - name: Build real production Dockerfiles with identical dependency layers
+        id: build
+        run: |
+          set -euo pipefail
+          docker pull python:3.11-slim
+          docker image inspect python:3.11-slim --format 'BASE_IMAGE_ID={{.Id}} BASE_REPO_DIGESTS={{json .RepoDigests}}'
+          for kind in candidate baseline; do
+            docker build --progress=plain --tag "nahla-callback-proof:$kind" "$kind"
+            docker image inspect "nahla-callback-proof:$kind" --format "$kind IMAGE_ID={{.Id}}"
+            docker image inspect "nahla-callback-proof:$kind" --format '{{json .RootFS.Layers}}' > "$kind-layers.json"
+          done
+          python3 - <<'PY'
+          import json, pathlib
+          candidate=json.loads(pathlib.Path('candidate-layers.json').read_text())
+          baseline=json.loads(pathlib.Path('baseline-layers.json').read_text())
+          assert candidate[:-2] == baseline[:-2]
+          print('PRODUCTION_DEPENDENCY_LAYERS identical', json.dumps(candidate[:-2]))
+          PY
+          docker run --rm --network none --env-file proof.env nahla-callback-proof:candidate python --version
+          docker run --rm --network none --env-file proof.env nahla-callback-proof:candidate python -m pip check
+          docker run --rm --network none --env-file proof.env nahla-callback-proof:candidate python -m pip freeze
+          docker run --rm --network none --env-file proof.env nahla-callback-proof:candidate python scripts/preflight_check.py
+
+      - name: Full candidate ASGI with configured synthetic service key and flags off
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --env-file proof.env \
+            --env PROOF_MODE=candidate --env "PROOF_SOURCE_SHA=$GITHUB_SHA" \
+            --env "RAILWAY_GIT_COMMIT_SHA=$GITHUB_SHA" \
+            nahla-callback-proof:candidate python -B scripts/proof_shopify_production_asgi.py | tee candidate-full-asgi.log
+
+      - name: Provision only isolated disposable PostgreSQL
+        id: pg
+        run: |
+          set -euo pipefail
+          docker pull "$PG_IMAGE"
+          docker network create --internal shopify-callback-proof
+          docker run --detach --name shopify-callback-pg --network shopify-callback-proof --network-alias postgres \
+            --env POSTGRES_USER=proof --env POSTGRES_PASSWORD=proof --env POSTGRES_DB=shopify_callback_proof "$PG_IMAGE"
+          for attempt in {1..20}; do
+            if docker exec shopify-callback-pg pg_isready -U proof -d shopify_callback_proof; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Baseline 401 control and actual candidate HMAC/state/session refusal proof
+        run: |
+          set -uo pipefail
+          set +e
+          failed=0
+          for kind in baseline candidate; do
+            revision="$GITHUB_SHA"
+            if [ "$kind" = baseline ]; then revision="$BASELINE_SHA"; fi
+            docker run --rm --network shopify-callback-proof --env-file proof.env \
+              --env DATABASE_URL=postgresql://proof:proof@postgres:5432/shopify_callback_proof \
+              --env "CALLBACK_PROOF_MODE=$kind" --env "CALLBACK_SOURCE_SHA=$revision" \
+              --env "RAILWAY_GIT_COMMIT_SHA=$revision" \
+              --mount "type=bind,source=$PWD/candidate/scripts/proof_shopify_callback_service_key.py,target=/proof.py,readonly" \
+              "nahla-callback-proof:$kind" python -B /proof.py 2>&1 | tee "$kind-callback.log"
+            if [ "${PIPESTATUS[0]}" -ne 0 ]; then failed=1; fi
+          done
+          python3 - <<'PY'
+          import json, pathlib
+          def report(path, prefix):
+              return json.loads(next(line[len(prefix):] for line in pathlib.Path(path).read_text().splitlines() if line.startswith(prefix)))
+          full=report('candidate-full-asgi.log','ASGI_REPORT ')
+          baseline=report('baseline-callback.log','CALLBACK_REPORT ')
+          candidate=report('candidate-callback.log','CALLBACK_REPORT ')
+          assert full['status']=='passed' and len(full['cases'])==8
+          assert baseline['status']==candidate['status']=='passed'
+          assert len(baseline['cases'])==4 and len(candidate['cases'])==12
+          assert baseline['dormant_callback_status']==401 and candidate['dormant_callback_status']==404
+          assert baseline['synthetic_db_connects']==0 and candidate['synthetic_db_connects']>0
+          assert baseline['http_requests']==30 and candidate['http_requests']==72
+          assert not any(baseline['refused_attempt_counts'].values()) and not any(candidate['refused_attempt_counts'].values())
+          assert len({r['non_shopify_routes_sha256'] for r in (full,baseline,candidate)})==1
+          print('CALLBACK_TOTAL 8 full-ASGI checks + 12 real-PG callback groups + 4 baseline controls PASS')
+          PY
+          if [ "$?" -ne 0 ]; then failed=1; fi
+          exit "$failed"
+
+      - name: Remove only disposable proof resources
+        if: always() && steps.pg.outcome != 'skipped'
+        run: |
+          docker rm --force --volumes shopify-callback-pg || true
+          docker network rm shopify-callback-proof || true
+
+      - name: Record final clean source identity
+        if: always() && steps.sources.outcome == 'success'
+        run: |
+          set -euo pipefail
+          for kind in candidate baseline; do
+            git -C "$kind" diff --exit-code
+            test -z "$(git -C "$kind" status --porcelain)"
+            git -C "$kind" show -s --format="$kind=%H tree=%T"
+          done

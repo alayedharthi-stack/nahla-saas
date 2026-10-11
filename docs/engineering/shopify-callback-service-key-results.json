@@ -1,0 +1,359 @@
+{
+  "schema_version": 1,
+  "pr": 1218,
+  "base_pr": 1217,
+  "previous_runtime_pr": 1216,
+  "run": {
+    "id": 38179310679,
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+    "started": "2026-10-11T22:09:53Z",
+    "updated": "2026-10-11T22:11:54Z",
+    "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38179310679"
+  },
+  "job": {
+    "id": 114588288125,
+    "status": "completed",
+    "conclusion": "success",
+    "steps": [
+      {
+        "name": "Set up job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 1
+      },
+      {
+        "name": "Fetch exact source and verify narrow runtime AST change",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 2
+      },
+      {
+        "name": "Build real production Dockerfiles with identical dependency layers",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 3
+      },
+      {
+        "name": "Full candidate ASGI with configured synthetic service key and flags off",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 4
+      },
+      {
+        "name": "Provision only isolated disposable PostgreSQL",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 5
+      },
+      {
+        "name": "Baseline 401 control and actual candidate HMAC/state/session refusal proof",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 6
+      },
+      {
+        "name": "Remove only disposable proof resources",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 7
+      },
+      {
+        "name": "Record final clean source identity",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 8
+      },
+      {
+        "name": "Complete job",
+        "status": "completed",
+        "conclusion": "success",
+        "number": 9
+      }
+    ]
+  },
+  "runtime_change": {
+    "file": "backend/core/middleware.py",
+    "added_lines": 5,
+    "removed_lines": 0,
+    "exact_exception": {
+      "method": "GET",
+      "path": "/merchant/integrations/shopify/callback"
+    },
+    "entire_module_ast_equal_after_removing_only_exception": true
+  },
+  "source_before_after": [
+    {
+      "kind": "candidate",
+      "sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+      "tree": "35d472205027089ec04532acde891bbb6e633c29"
+    },
+    {
+      "kind": "baseline",
+      "sha": "23013bc16e0543c1106e8662b4dda4ba772022cd",
+      "tree": "be60e1794c1981a33e02aa89051851e86e4bc8f8"
+    },
+    {
+      "kind": "candidate",
+      "sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+      "tree": "35d472205027089ec04532acde891bbb6e633c29"
+    },
+    {
+      "kind": "baseline",
+      "sha": "23013bc16e0543c1106e8662b4dda4ba772022cd",
+      "tree": "be60e1794c1981a33e02aa89051851e86e4bc8f8"
+    }
+  ],
+  "production_build": {
+    "dockerfile_unmodified": true,
+    "base_image_id": "sha256:541096ae9b05d3b850341b78790e2ed31e94d5aa0ea086933c6ff0c09ffa2e63",
+    "base_repository_digests": [
+      "python@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
+    ],
+    "candidate_image_id": "sha256:bade0909c2e44faa79e0e8dbaa2167a7f4776a0d32af98b7319cb674d482c2f3",
+    "baseline_image_id": "sha256:f278762ed1822204073872d7aa51c476f9ba76606da5aee53ca946b077c2f030",
+    "identical_dependency_layers": [
+      "sha256:15f1c8eb1ab18eae260c7fb6296434cbe1ff0e1e30fd814ae92a80dd54005e62",
+      "sha256:56864e09c37360dbf846cf5ac9fc3090034f02e382fd0fbe4c7b576207436200",
+      "sha256:ba18d048b43a42f86dc288babadbdfe01602571200fd60c9e172deb8abf4147f",
+      "sha256:020f37c339b9fc549a11bcc5a937b81e3500281270bb62edde29022b27919d86",
+      "sha256:a77a9c9b81a577db744ce5e8e62f1c670ee817b3bec973ee8cfa41eff1b1060d",
+      "sha256:8cb593c6944d0c58cd7cf8bf0b98a23337fcdf6b2d596e4051a3aec6829a0879",
+      "sha256:efba837bf97d5bb2b01f27cdb1c222448b5de4f45269e8a3e3a995d459fc7f5a",
+      "sha256:1ae3dd21d9f2bb46a8ef6ac58c7122a72bb11e9ea33e205047ea894a88491263"
+    ],
+    "python": "3.11.17",
+    "pip_check": "passed",
+    "production_preflight": "passed"
+  },
+  "full_asgi": {
+    "type": "ASGI_REPORT",
+    "additional_threads": [
+      "AnyIO worker thread"
+    ],
+    "api_key_configured": true,
+    "cases": [
+      {
+        "name": "full_module_and_router_graph",
+        "status": "passed"
+      },
+      {
+        "name": "real_asgi_liveness",
+        "status": "passed"
+      },
+      {
+        "name": "callback_exact_public_and_protected_jwt",
+        "status": "passed"
+      },
+      {
+        "name": "two_signed_tenants_all_disabled_routes",
+        "status": "passed"
+      },
+      {
+        "name": "installed_log_filters_actual_httpx_uvicorn_raw_asgi",
+        "status": "passed"
+      },
+      {
+        "name": "sentry_before_send_no_transport",
+        "status": "passed"
+      },
+      {
+        "name": "production_resolved_encryption_library",
+        "status": "passed"
+      },
+      {
+        "name": "zero_provider_database_or_shopify_worker_attempts",
+        "status": "passed"
+      }
+    ],
+    "dependency_versions": {
+      "cryptography": "50.0.2",
+      "fastapi": "0.111.0",
+      "httpx": "0.27.0",
+      "openai-agents": "0.22.2",
+      "psycopg2-binary": "2.9.9",
+      "pydantic": "2.12.5",
+      "python-jose": "3.3.0",
+      "sentry-sdk": "2.71.0",
+      "sqlalchemy": "2.0.30",
+      "starlette": "0.37.2"
+    },
+    "hmac_log_scrubbed": true,
+    "lifespan_executed": false,
+    "mode": "candidate",
+    "non_shopify_routes_count": 643,
+    "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+    "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+    "refused_attempt_counts": {
+      "database": 0,
+      "network": 0,
+      "subprocess": 0
+    },
+    "refused_subprocess_details": [],
+    "sentry_shopify_scrubbed": true,
+    "shopify_route_count": 12,
+    "source_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+    "status": "passed"
+  },
+  "baseline_callback_controls": {
+    "type": "CALLBACK_REPORT",
+    "additional_threads": [],
+    "cases": [
+      {
+        "name": "actual_full_app_unchanged_non_shopify_routes",
+        "status": "passed"
+      },
+      {
+        "name": "baseline_reproduces_exact_get_401",
+        "status": "passed"
+      },
+      {
+        "name": "non_get_and_non_exact_paths_keep_both_gates",
+        "status": "passed"
+      },
+      {
+        "name": "other_shopify_salla_meta_protection_unchanged",
+        "status": "passed"
+      }
+    ],
+    "dormant_callback_status": 401,
+    "http_requests": 30,
+    "lifespan_executed": false,
+    "mode": "baseline",
+    "non_shopify_routes_count": 643,
+    "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+    "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+    "refused_attempt_counts": {
+      "network": 0,
+      "subprocess": 0,
+      "unexpected_database": 0
+    },
+    "source_sha": "23013bc16e0543c1106e8662b4dda4ba772022cd",
+    "status": "passed",
+    "synthetic_db_connects": 0
+  },
+  "candidate_real_pg_callback_proof": {
+    "type": "CALLBACK_REPORT",
+    "additional_threads": [],
+    "cases": [
+      {
+        "name": "actual_full_app_unchanged_non_shopify_routes",
+        "status": "passed"
+      },
+      {
+        "name": "configured_service_key_exact_get_reaches_dormant_handler",
+        "status": "passed"
+      },
+      {
+        "name": "non_get_and_non_exact_paths_keep_both_gates",
+        "status": "passed"
+      },
+      {
+        "name": "other_shopify_salla_meta_protection_unchanged",
+        "status": "passed"
+      },
+      {
+        "name": "real_pg16_actual_0121_and_synthetic_merchant_fixture",
+        "status": "passed"
+      },
+      {
+        "name": "authenticated_start_bound_nonce_signed_callback_encrypted_code_and_replay",
+        "status": "passed"
+      },
+      {
+        "name": "bad_missing_duplicate_hmac_stale_timestamp_bad_shop_fail_before_nonce_consumption",
+        "status": "passed"
+      },
+      {
+        "name": "valid_hmac_unknown_state_rejected",
+        "status": "passed"
+      },
+      {
+        "name": "expired_shop_redirect_actor_state_checks_still_enforced",
+        "status": "passed"
+      },
+      {
+        "name": "missing_secret_fails_closed_without_state_consumption",
+        "status": "passed"
+      },
+      {
+        "name": "cross_tenant_user_and_new_session_completion_refused_before_provider",
+        "status": "passed"
+      },
+      {
+        "name": "flags_off_two_tenants_no_shop_binding_or_credentials",
+        "status": "passed"
+      }
+    ],
+    "dormant_callback_status": 404,
+    "http_requests": 72,
+    "lifespan_executed": false,
+    "mode": "candidate",
+    "non_shopify_routes_count": 643,
+    "non_shopify_routes_sha256": "17fed89fc8f585bfb49d1f24df15b4b961e4ae7678f2725421540e6702f4b10b",
+    "postgres_server_version_num": 160015,
+    "python": "3.11.17 (main, Oct  6 2026, 02:02:21) [GCC 14.2.0]",
+    "refused_attempt_counts": {
+      "network": 0,
+      "subprocess": 0,
+      "unexpected_database": 0
+    },
+    "source_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+    "status": "passed",
+    "synthetic_db_connects": 2
+  },
+  "decoded_log_lf_sha256": "eec4624c6057ad29860429446f14a9bcc951a151d493ccc4c39d4372a3d64293",
+  "log_representation": {
+    "canonical_algorithm": "Encode the tool-returned decoded text as UTF-8; remove one leading UTF-8 BOM if present; replace CRLF with LF; preserve all remaining bytes, including the original terminal newline; do not strip or append newlines.",
+    "canonical_utf8_bytes": 323646,
+    "canonical_lf_count": 2871,
+    "canonical_terminal_lf_count": 1,
+    "fresh_download_with_bom": {
+      "utf8_bytes": 323649,
+      "sha256": "2292949304e988b75c567b634976ca599f9c61a77d0476516648c14c42614e17",
+      "bom_present": true,
+      "crlf_count": 0,
+      "lf_count": 2871,
+      "terminal_lf_count": 1
+    },
+    "original_saved_capture_preserved": {
+      "file": "callback-final-114588288125.log",
+      "utf8_bytes": 323650,
+      "sha256": "5b630b50f5231d1f2e633b1fe96ae7bbd5fcd305efce5bd0d615683b0c5eed37",
+      "bom_present": true,
+      "crlf_count": 0,
+      "lf_count": 2872,
+      "terminal_lf_count": 2,
+      "verified_byte_relation": "original_saved_capture == fresh_download_with_bom + one byte 0x0A",
+      "cause": "The apply_patch log capture appended one additional terminal LF. The previously published digest accurately hashed that saved copy, but its representation label was incomplete."
+    }
+  },
+  "security_source_git_blob_sha256": {
+    "backend/core/middleware.py": "5b346c833e3d97a54b4752e0151dab7e80b4aacaa367c40a0abea6064f04c7d8",
+    "backend/routers/shopify_connection.py": "87cb4860c19575c5d016c3de4b98ad071f358c2b35f4d4f6b53fe20550f10262",
+    "backend/services/shopify_connection/oauth.py": "476b4979a8aedad7b29734f3ed6aa50270a27eeba246de5a04555c610782a22d",
+    "backend/services/shopify_connection/lifecycle.py": "32f4df627cfbda44cdb532e1cfb95be1277e511486af335d9c878f3d4d214742",
+    "backend/services/shopify_connection/actor.py": "fb99067ca2a3f79b43cd1580bcd7356e2cf45c428444a81bd005cd1272ce7d44"
+  },
+  "boundaries": {
+    "credentials_and_merchants": "synthetic_only",
+    "production_environment_changes": false,
+    "live_rollout": false,
+    "live_migration": false,
+    "merge": false,
+    "purchase": false,
+    "app_settings_changes": false,
+    "provider_calls": 0,
+    "unexpected_database_attempts": 0,
+    "lifespan_executed": false,
+    "docker_full_asgi_network": "none",
+    "docker_real_pg_network": "internal",
+    "actual_migration_0121": "fixture_only via Alembic Operations context",
+    "provider_token_exchange_executed": false,
+    "shop_binding_created": false,
+    "existing_salla_meta_ai_runtime_unchanged": true,
+    "prior_guard_and_startup_tests_rerun": false,
+    "independent_review": "completed with no functional/security blocker; evidence-only log representation clarified; no activation or live-change authorization"
+  }
+}
