@@ -106,7 +106,7 @@ jobs:
           from scripts.operators import shopify_release_gate as gate
           root = Path.cwd()
           actual = gate.inventory(root)
-          assert actual == (143, '83c92152e2dd7a8c04420902e5dc9fa38087eec849cec03657fe705986fbde92'), actual
+          assert actual == (143, '1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4'), actual
           assert not gate.unexpected_initializers(root)
           digest = hashlib.sha256((root / 'scripts/operators/shopify_release_gate.py').read_bytes()).hexdigest()
           assert digest == '206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157'

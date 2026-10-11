@@ -92,9 +92,19 @@ Exact pinned full-module command:
 |---|---|
 | Gate version / inventory count | 2 / 143 |
 | Gate SHA-256 | `206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157` |
-| Inventory digest | `83c92152e2dd7a8c04420902e5dc9fa38087eec849cec03657fe705986fbde92` |
+| Canonical Git / Linux inventory digest | `1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4` |
 | Database Python digest | `b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50` |
 | Unexpected initializers | `[]` |
+
+The earlier `83c92152e2dd7a8c04420902e5dc9fa38087eec849cec03657fe705986fbde92`
+digest describes the local Windows materialization used by the reported local
+runs, not the canonical Git blobs. Ten inventory files still had CRLF bytes;
+all ten normalize exactly to their frozen Git blob, and every other inventory
+file already matches. The gate and database digests above remain unchanged.
+The initial workflow assertion mistakenly used that Windows digest. The
+canonical value above was independently reproduced from a restricted `git
+archive` of all 143 frozen inventory paths, hashing sorted `path NUL bytes NUL`
+exactly as `digest_paths` does. [Audit record](shopify-release-gate-canonical-inventory.json).
 
 ## Supported runner assessment and concrete proposed job
 
@@ -115,7 +125,8 @@ the PR or broadening existing workflow triggers is not proposed.
 A reviewable test-only YAML is included as
 [the proposed validation job](shopify-release-gate-validation.proposed.yml), intended
 for `.github/workflows/shopify-release-gate-validation.yml` on this Draft branch.
-It is **not yet installed as a workflow, triggered, or a completed proof**. Its scope is:
+This describes the initial proposal at f103ea88; its subsequent owner-approved
+activation and failed first run are recorded below. Its scope is:
 
 - Branch-specific, workflow-file-path-specific `push` trigger; standard
   `ubuntu-24.04`, two jobs, 30-minute limit each, `contents: read` only.
@@ -144,6 +155,36 @@ runners nor stored artifacts/cache. Source:
 Publishing this workflow would be a separate test-only commit, followed by
 normal push to the existing Draft branch; its job checks out frozen 1257e4c,
 not the workflow commit's moving source.
+
+## Owner-approved CI activation: first attempt
+
+The owner explicitly approved publishing and running the proposed public test
+workflow. Its exact reviewed YAML was installed in a separate test-only commit
+`d06cbf2bcdd5d461a510659dbf0ebafe72e90f93`; functional source remains frozen at
+1257e4c. [Run 38171280991](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171280991)
+started at 20:13:19 UTC on 2026-10-11 and both jobs reached terminal failure.
+
+| Job | Observed setup and result |
+|---|---|
+| [PostgreSQL 16 / 114564237735](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171280991/job/114564237735) | Disposable 16.15; exact source SHA/tree and legacy checkout fetched; isolated Python 3.12.10; twelve exact package versions installed; `pip check` clean. Inventory assertion failed at 20:14:04 UTC. DB-free and PG suites skipped by step conditions: **zero test cases executed**. Containers stopped. |
+| [PostgreSQL 18 / 114564237598](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171280991/job/114564237598) | Disposable 18.6; same source/tree, interpreter and dependency setup. Inventory assertion failed at 20:14:02 UTC. Both test steps skipped: **zero test cases executed**. Containers stopped. |
+
+Both jobs computed `(143, 1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4)`.
+The assertion carried the earlier local Windows inventory digest. The fresh
+Linux checkout and exact frozen Git archive agree; this is a workflow/evidence
+pinning mistake, not evidence of a changed functional source. The failure is
+retained. No guard was bypassed and no current Unix/PG suite pass is claimed.
+
+The proposed YAML now has a **single-line correction** to that expected
+canonical digest. All other YAML bytes remain those reviewed at f103ea88.
+The active workflow is still the original d06cbf2b version; the correction
+has not been activated or rerun pending parent review under the instruction
+to activate only independently reviewed YAML. Gate SHA, tree pin, count,
+library binding, all tests, zero-skip checks and permissions remain intact.
+
+Existing [GOV-002](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171281902)
+and [merge-freeze](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171281925)
+checks completed successfully at d06cbf2b. They do not replace the unrun suites.
 
 ## Acceptance versus rollout
 
