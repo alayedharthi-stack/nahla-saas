@@ -1,0 +1,2186 @@
+{
+ "schema": "nahla.baseline-test-isolation.validation-evidence/v1",
+ "status": "evidence only: sanitized subset derived from retained artifacts; not itself a test run",
+ "pull_request": 1207,
+ "frozen_source_sha": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+ "baseline_sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+ "privacy_source_sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+ "changed_files_vs_baseline": [
+  "backend/tests/_log_redaction_isolation.py",
+  "backend/tests/test_log_redaction_meta_credentials.py",
+  "backend/tests/test_log_redaction_test_isolation.py",
+  "backend/tests/test_meta_catalog_consent.py",
+  "backend/tests/test_salla_embedded_reconcile_telemetry.py"
+ ],
+ "commits": [
+  "c4ecda002477ae876dd7404d99c9415b80fe0993 test(isolation): restore the log-redaction filters and JSONB column types tests leave behind",
+  "3affff6d18eebcf632ef118b0e8b46616913147f test(isolation): consent fixture removes its redaction filters even if setup fails",
+  "7ae59f4d8635efa84b50b14d0da379cc5b4ad928 test(isolation): log-redaction credential tests remove the filters they install"
+ ],
+ "environment": {
+  "python": "3.12.3",
+  "pytest": "9.1.1",
+  "postgresql": {
+   "version": "16.15",
+   "source": "Ubuntu package postgresql-16 16.15-0ubuntu0.24.04.1",
+   "listen": "127.0.0.1:5433",
+   "auth": "TCP host scram-sha-256 on loopback only; synthetic CI role; credentials omitted",
+   "restore": {
+    "reboot_utc": "2026-10-11T09:49:30Z",
+    "restarted_utc": "2026-10-11T10:36:14Z",
+    "stale_postmaster_pid_dead": true,
+    "crash_recovery": "redo from the 09:31:19Z checkpoint; system identifier unchanged",
+    "evidence": [
+     "correct synthetic CI password over TCP: connected",
+     "server_version_num 160015 | password_encryption scram-sha-256 | server 127.0.0.1/32 5433",
+     "role password stored as SCRAM-SHA-256: True",
+     "pg_hba host rules: [('scram-sha-256', '127.0.0.1'), ('scram-sha-256', '::1'), ('scram-sha-256', '127.0.0.1'), ('scram-sha-256', '::1')]",
+     "system identifier: 7695297279087089957",
+     "wrong password refused: True"
+    ]
+   }
+  },
+  "environment_variables_unset_for_every_stage": [
+   "NAHLA_RELIABILITY_REQUIRE_PG",
+   "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+   "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+   "LEGACY_MIG_PG_TEST_DATABASE_URL",
+   "A1_PG_TEST_DATABASE_URL",
+   "DATABASE_URL"
+  ],
+  "postgresql_reached_via": "test fixture default service URL on 127.0.0.1:5433 (legacy_migration_drift_postgres_fixtures.DEFAULT_SERVICE_URL); no PG variable set"
+ },
+ "owner_regression_gate": {
+  "file_list": {
+   "count": 65,
+   "ordered": [
+    "backend/tests/test_admin_tenant_list_billing_badge.py",
+    "backend/tests/test_billing_partner_override.py",
+    "backend/tests/test_billing_scenarios.py",
+    "backend/tests/test_constitution_compliance.py",
+    "backend/tests/test_fixed_tenant_policy.py",
+    "backend/tests/test_intelligence_non_interference_guard.py",
+    "backend/tests/test_intelligence_non_interference_source_locations.py",
+    "backend/tests/test_manual_billing_grant.py",
+    "backend/tests/test_meta_catalog_auto_sync.py",
+    "backend/tests/test_meta_catalog_claim_guard_pg.py",
+    "backend/tests/test_meta_catalog_consent.py",
+    "backend/tests/test_meta_catalog_consent_pg.py",
+    "backend/tests/test_meta_catalog_identity.py",
+    "backend/tests/test_meta_catalog_identity_postgres.py",
+    "backend/tests/test_meta_catalog_import_guards.py",
+    "backend/tests/test_meta_catalog_linking.py",
+    "backend/tests/test_meta_catalog_localized_price_verification.py",
+    "backend/tests/test_meta_catalog_onboarding.py",
+    "backend/tests/test_meta_catalog_onboarding_postgres.py",
+    "backend/tests/test_meta_catalog_push_one.py",
+    "backend/tests/test_meta_catalog_reconcile.py",
+    "backend/tests/test_meta_catalog_stale_repair_lock_pg.py",
+    "backend/tests/test_meta_catalog_variant_eligibility.py",
+    "backend/tests/test_meta_catalog_variant_payload_preview.py",
+    "backend/tests/test_p0b_tenant_commerce_permissions.py",
+    "backend/tests/test_salla_adapter_sale_price_normalize.py",
+    "backend/tests/test_salla_broad_browse_global_fallback_guard.py",
+    "backend/tests/test_salla_broad_browse_ownership.py",
+    "backend/tests/test_salla_cart_recovery_postgres.py",
+    "backend/tests/test_salla_check_session.py",
+    "backend/tests/test_salla_cod_in_progress_gate.py",
+    "backend/tests/test_salla_commerce_reconciler_postgres.py",
+    "backend/tests/test_salla_compose_trusted_singleton_handoff.py",
+    "backend/tests/test_salla_coupons_poller_race_postgres.py",
+    "backend/tests/test_salla_customer_address_candidates_pg.py",
+    "backend/tests/test_salla_delete_401_branch_closure_postgres.py",
+    "backend/tests/test_salla_delete_401_refresh_postgres.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "backend/tests/test_salla_embedded_diag.py",
+    "backend/tests/test_salla_embedded_identity_binding.py",
+    "backend/tests/test_salla_embedded_reconcile_completion_handoff.py",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_integration_resolver_ambiguity.py",
+    "backend/tests/test_salla_merchant_ai_e2e_acceptance.py",
+    "backend/tests/test_salla_merchant_ai_layer2_e2e.py",
+    "backend/tests/test_salla_merchant_ai_layer3_dialogue.py",
+    "backend/tests/test_salla_oauth_callback_reconcile.py",
+    "backend/tests/test_salla_pr888_remaining_remediation.py",
+    "backend/tests/test_salla_pr888_remediation.py",
+    "backend/tests/test_salla_presented_identity_product_card.py",
+    "backend/tests/test_salla_product_discovery_direct_presentation.py",
+    "backend/tests/test_salla_realtime_commerce.py",
+    "backend/tests/test_salla_sale_price_display.py",
+    "backend/tests/test_salla_shipment_tracking.py",
+    "backend/tests/test_salla_shipment_tracking_migration_preflight.py",
+    "backend/tests/test_salla_shipment_tracking_pg.py",
+    "backend/tests/test_salla_tenant_guard.py",
+    "backend/tests/test_salla_tenant_reconcile.py",
+    "backend/tests/test_salla_variant_catalog_identity.py",
+    "backend/tests/test_salla_variant_catalog_identity_postgres.py",
+    "backend/tests/test_salla_variant_option_summary_fallback.py",
+    "backend/tests/test_salla_variant_sync.py",
+    "backend/tests/test_salla_webhook_identity.py",
+    "backend/tests/test_tenant_config_hygiene.py",
+    "backend/tests/test_tenant_merchant_clone_operator.py"
+   ],
+   "digest": {
+    "algorithm": "sha256",
+    "value": "ff606274c0bb84b57bee3310306ff00f80057c12b1cbaa05bde959b8a06460e1",
+    "format": "UTF-8 bytes of the repository-relative paths in the listed order, each followed by one LF"
+   }
+  },
+  "command": {
+   "cwd": "repository root",
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "--junitxml=<out>/<label>_junit.xml",
+    "<the 65 paths of file_list.ordered, in order>"
+   ]
+  },
+  "runs": {
+   "base_gate": {
+    "exit_code": 1,
+    "started_utc": "2026-10-11T10:41:51Z",
+    "pytest_summary": "2 failed, 1075 passed, 41 skipped, 2088 warnings in 441.31s (0:07:21)",
+    "postgresql_stable_during_stage": true,
+    "argv": [
+     "python",
+     "-m",
+     "pytest",
+     "-q",
+     "-p",
+     "no:cacheprovider",
+     "--junitxml=<scratch>/base_gate_junit.xml",
+     "<the 65 paths of owner_regression_gate.file_list.ordered, in order>"
+    ],
+    "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "env_unset": [
+     "NAHLA_RELIABILITY_REQUIRE_PG",
+     "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+     "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+     "LEGACY_MIG_PG_TEST_DATABASE_URL",
+     "A1_PG_TEST_DATABASE_URL",
+     "DATABASE_URL"
+    ],
+    "python": "venv 3.12.3 (pytest 9.1.1)",
+    "finished_utc": "2026-10-11T10:49:21Z",
+    "tree_after": {
+     "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+     "porcelain_entries": 0
+    },
+    "sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "note": "clean baseline"
+   },
+   "fix_gate": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T10:49:21Z",
+    "pytest_summary": "1078 passed, 41 skipped, 2087 warnings in 440.82s (0:07:20)",
+    "postgresql_stable_during_stage": true,
+    "argv": [
+     "python",
+     "-m",
+     "pytest",
+     "-q",
+     "-p",
+     "no:cacheprovider",
+     "--junitxml=<scratch>/fix_gate_junit.xml",
+     "<the 65 paths, in order>"
+    ],
+    "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "env_unset": [
+     "NAHLA_RELIABILITY_REQUIRE_PG",
+     "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+     "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+     "LEGACY_MIG_PG_TEST_DATABASE_URL",
+     "A1_PG_TEST_DATABASE_URL",
+     "DATABASE_URL"
+    ],
+    "python": "venv 3.12.3 (pytest 9.1.1)",
+    "finished_utc": "2026-10-11T10:56:50Z",
+    "tree_after": {
+     "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+     "porcelain_entries": 0
+    },
+    "sha": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "note": "repair head"
+   },
+   "compat_gate": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T10:56:52Z",
+    "pytest_summary": "1078 passed, 41 skipped, 2088 warnings in 447.07s (0:07:27)",
+    "postgresql_stable_during_stage": true,
+    "argv": [
+     "python",
+     "-m",
+     "pytest",
+     "-q",
+     "-p",
+     "no:cacheprovider",
+     "--junitxml=<scratch>/compat_gate_junit.xml",
+     "<the 65 paths, in order>"
+    ],
+    "cwd": "repository root of the checkout at <temporary head>",
+    "env_unset": [
+     "NAHLA_RELIABILITY_REQUIRE_PG",
+     "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+     "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+     "LEGACY_MIG_PG_TEST_DATABASE_URL",
+     "A1_PG_TEST_DATABASE_URL",
+     "DATABASE_URL"
+    ],
+    "python": "venv 3.12.3 (pytest 9.1.1)",
+    "finished_utc": "2026-10-11T11:04:28Z",
+    "tree_after": {
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "porcelain_entries": 0
+    },
+    "sha": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+    "note": "privacy source 3681ebd + the isolation commits (temporary local head, never pushed)",
+    "temporary_head": {
+     "base": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+     "cherry_pick_rc": 0,
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "changed_files_vs_privacy_source": [
+      "backend/tests/_log_redaction_isolation.py",
+      "backend/tests/test_log_redaction_meta_credentials.py",
+      "backend/tests/test_log_redaction_test_isolation.py",
+      "backend/tests/test_meta_catalog_consent.py",
+      "backend/tests/test_salla_embedded_reconcile_telemetry.py"
+     ]
+    },
+    "temporary_head_verification": {
+     "temporary_head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "privacy_source": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+     "ancestry_newest_first": [
+      "3a1bcfa3d2267b006b63ffea98a55ee32f405ead parent=acd1d3ee32c4a91a5c007a7632b95210dab1fd75",
+      "acd1d3ee32c4a91a5c007a7632b95210dab1fd75 parent=2949b3d2c5acfe0b50b09e60831ab243913411c1",
+      "2949b3d2c5acfe0b50b09e60831ab243913411c1 parent=3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+      "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c parent=6c3aba0766c9c43fc371192ce0612d7dcd4bd54c"
+     ],
+     "repair_commits_cherry_picked_in_order": [
+      "c4ecda002477ae876dd7404d99c9415b80fe0993",
+      "3affff6d18eebcf632ef118b0e8b46616913147f",
+      "7ae59f4d8635efa84b50b14d0da379cc5b4ad928"
+     ],
+     "files_changed_privacy_source_to_temporary_head": [
+      "backend/tests/_log_redaction_isolation.py",
+      "backend/tests/test_log_redaction_meta_credentials.py",
+      "backend/tests/test_log_redaction_test_isolation.py",
+      "backend/tests/test_meta_catalog_consent.py",
+      "backend/tests/test_salla_embedded_reconcile_telemetry.py"
+     ],
+     "changed_file_blobs": [
+      {
+       "path": "backend/tests/_log_redaction_isolation.py",
+       "temporary_head_blob": "158cfa7115d5be713a8afa3e88a5dad768aad3f0",
+       "frozen_7ae59f4_blob": "158cfa7115d5be713a8afa3e88a5dad768aad3f0",
+       "equal": true
+      },
+      {
+       "path": "backend/tests/test_log_redaction_meta_credentials.py",
+       "temporary_head_blob": "e19fbba0674d22c1d24c40c3a5f1e919dbc0ce3b",
+       "frozen_7ae59f4_blob": "e19fbba0674d22c1d24c40c3a5f1e919dbc0ce3b",
+       "equal": true
+      },
+      {
+       "path": "backend/tests/test_log_redaction_test_isolation.py",
+       "temporary_head_blob": "2318fb2d7de4848fb5327bb87a127c7afacd0eb6",
+       "frozen_7ae59f4_blob": "2318fb2d7de4848fb5327bb87a127c7afacd0eb6",
+       "equal": true
+      },
+      {
+       "path": "backend/tests/test_meta_catalog_consent.py",
+       "temporary_head_blob": "42a1dbf5463306c6f4ea73aa2ada9fbbc72b365d",
+       "frozen_7ae59f4_blob": "42a1dbf5463306c6f4ea73aa2ada9fbbc72b365d",
+       "equal": true
+      },
+      {
+       "path": "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+       "temporary_head_blob": "624655481c169414caf359d22f5a953b42bfad03",
+       "frozen_7ae59f4_blob": "624655481c169414caf359d22f5a953b42bfad03",
+       "equal": true
+      }
+     ],
+     "all_changed_blobs_equal_frozen_7ae59f4": true,
+     "rest_of_tree": {
+      "method": "sha256 over UTF-8 of the `git ls-tree -r <sha>` output lines (default format '<mode> <type> <object>\\t<path>', in git's output order) after removing the lines whose path is one of files_changed_privacy_source_to_temporary_head, joined by LF with NO trailing LF",
+      "temporary_head_digest": "2c16f1ac6e41ac4281f1e9b24fa92c3aed8c0097dbd1db99d60671161e571082",
+      "privacy_source_digest": "2c16f1ac6e41ac4281f1e9b24fa92c3aed8c0097dbd1db99d60671161e571082",
+      "entries": 3463,
+      "identical": true
+     },
+     "pushed_to_any_remote_branch": false,
+     "independent_verification_limit": "the privacy-source remainder digest over 3463 entries can be and was independently reproduced from GitHub (3681ebd is published); the temporary head exists only in this session's local worktree, so the temporary-head digest, the blob equalities and the combined-tree equality are controller-evidenced, not independently fetched from GitHub"
+    }
+   },
+   "compat_privacy_dbfree": {
+    "exit_code": 0,
+    "started_utc": "2026-10-11T11:04:29Z",
+    "pytest_summary": "130 passed, 1 warning in 14.36s",
+    "postgresql_stable_during_stage": true,
+    "argv": [
+     "python",
+     "-m",
+     "pytest",
+     "-q",
+     "-p",
+     "no:cacheprovider",
+     "tests/test_shopify_privacy_webhooks.py"
+    ],
+    "cwd": "repository root of the checkout at <temporary head>",
+    "env_unset": [
+     "NAHLA_RELIABILITY_REQUIRE_PG",
+     "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+     "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+     "LEGACY_MIG_PG_TEST_DATABASE_URL",
+     "A1_PG_TEST_DATABASE_URL",
+     "DATABASE_URL"
+    ],
+    "python": "venv 3.12.3 (pytest 9.1.1)",
+    "finished_utc": "2026-10-11T11:04:45Z",
+    "tree_after": {
+     "head": "3a1bcfa3d2267b006b63ffea98a55ee32f405ead",
+     "porcelain_entries": 0
+    }
+   }
+  },
+  "comparisons": {
+   "original_baseline_junit_vs_base_gate": {
+    "a_cases": 1118,
+    "b_cases": 1118,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [],
+    "outcome_changes": [],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "base_gate_vs_fix_gate": {
+    "a_cases": 1118,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [
+     [
+      "backend.tests.test_salla_embedded_reconcile_telemetry",
+      "test_requests_here_run_under_the_app_log_redaction"
+     ]
+    ],
+    "outcome_changes": [
+     [
+      "backend.tests.test_salla_embedded_app_identity",
+      "test_rejection_emits_structured_log",
+      "failure",
+      "passed"
+     ],
+     [
+      "backend.tests.test_salla_shipment_tracking",
+      "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+      "failure",
+      "passed"
+     ]
+    ],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "original_privacy_candidate_junit_vs_compat_gate": {
+    "a_cases": 1118,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1075,
+     "failure": 2,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [
+     [
+      "backend.tests.test_salla_embedded_reconcile_telemetry",
+      "test_requests_here_run_under_the_app_log_redaction"
+     ]
+    ],
+    "outcome_changes": [
+     [
+      "backend.tests.test_salla_embedded_app_identity",
+      "test_rejection_emits_structured_log",
+      "failure",
+      "passed"
+     ],
+     [
+      "backend.tests.test_salla_shipment_tracking",
+      "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+      "failure",
+      "passed"
+     ]
+    ],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "fix_gate_vs_compat_gate": {
+    "a_cases": 1119,
+    "b_cases": 1119,
+    "a_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "b_outcomes": {
+     "passed": 1078,
+     "failure": 0,
+     "error": 0,
+     "skipped": 41
+    },
+    "only_in_a": [],
+    "only_in_b": [],
+    "outcome_changes": [],
+    "skipped_identities_equal": true,
+    "skip_reason_changes": []
+   },
+   "formerly_pg_skipped_37": {
+    "selection": "JUnit (classname, name) pairs skipped in the post-reboot probe readback of 08428cb and PASSED in the restored-PostgreSQL base_gate; the raw JUnit pair is authoritative",
+    "node_id_derivation": "pytest_node_id_derived maps the JUnit classname to the longest module path present in the 7ae59f4 tree, appending any remaining components as class names and the test name; it is derived, not read from pytest",
+    "count": 37,
+    "aggregate_outcomes": {
+     "base_gate": {
+      "passed": 37,
+      "failure": 0,
+      "error": 0,
+      "skipped": 0,
+      "absent": 0
+     },
+     "fix_gate": {
+      "passed": 37,
+      "failure": 0,
+      "error": 0,
+      "skipped": 0,
+      "absent": 0
+     },
+     "compat_gate": {
+      "passed": 37,
+      "failure": 0,
+      "error": 0,
+      "skipped": 0,
+      "absent": 0
+     }
+    },
+    "assertions_checked_at_build": [
+     "count == 37",
+     "passed == 37 in base_gate",
+     "passed == 37 in fix_gate",
+     "passed == 37 in compat_gate"
+    ],
+    "probe_skip_reasons_summary": {
+     "PostgreSQL DSN is not configured": 4,
+     "PostgreSQL not available": 2,
+     "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"": 31
+    },
+    "cases": [
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_0110_creates_the_table_on_a_database_at_0109",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_creates_the_table_on_a_database_at_0109",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_0110_downgrade_removes_only_this_revision",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_downgrade_removes_only_this_revision",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_0110_reconciles_a_create_all_materialised_table",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_0110_reconciles_a_create_all_materialised_table",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_concurrent_refresh_between_offer_and_selection_is_refused",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_concurrent_refresh_between_offer_and_selection_is_refused",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_failed_optional_read_leaves_the_caller_transaction_usable",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_failed_optional_read_leaves_the_caller_transaction_usable",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_later_legitimate_revision_still_lands_after_the_race",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_after_the_race",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_later_legitimate_revision_still_lands_from_a_retained_session",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_later_legitimate_revision_still_lands_from_a_retained_session",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_rejected_provenance_insert_still_commits_the_confirmed_address",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_retained_row_does_not_let_a_stale_refresh_win",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_let_a_stale_refresh_win",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_retained_row_does_not_survive_taking_authority",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_retained_row_does_not_survive_taking_authority",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_selection_arriving_after_a_refresh_refuses_the_changed_revision",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_selection_arriving_after_a_refresh_refuses_the_changed_revision",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_stale_refresh_that_arrives_after_a_newer_one_is_refused",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_stale_refresh_that_arrives_after_a_newer_one_is_refused",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_writer_that_cannot_take_authority_refuses",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_writer_that_cannot_take_authority_refuses",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_a_writer_without_authority_still_recovers_from_the_constraint",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_a_writer_without_authority_still_recovers_from_the_constraint",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_absent_provenance_table_still_commits_the_confirmed_address",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_absent_provenance_table_still_commits_the_confirmed_address",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_another_tenant_never_sees_or_selects_the_address",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_another_tenant_never_sees_or_selects_the_address",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_committed_selection_is_the_only_adoption_evidence",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_committed_selection_is_the_only_adoption_evidence",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_evidence_is_absent_before_commit_present_after_and_gone_after_rollback",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_import_survives_commit_a_fresh_session_and_a_new_conversation",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_import_survives_commit_a_fresh_session_and_a_new_conversation",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_one_provenance_row_per_address_is_enforced_by_the_schema",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_one_provenance_row_per_address_is_enforced_by_the_schema",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_orm_metadata_matches_the_migrated_schema",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_orm_metadata_matches_the_migrated_schema",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_repeated_import_across_sessions_stays_one_row",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_repeated_import_across_sessions_stays_one_row",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_rolled_back_import_yields_no_durable_save_evidence",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_rolled_back_import_yields_no_durable_save_evidence",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_selected_address_reaches_checkout_in_a_new_conversation",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_selected_address_reaches_checkout_in_a_new_conversation",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_selection_committed_between_refresh_read_and_write_is_preserved",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_selection_committed_between_refresh_read_and_write_is_preserved",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_several_candidates_never_resolve_to_an_implicit_default",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_several_candidates_never_resolve_to_an_implicit_default",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_the_revision_constraint_is_scoped_to_the_store_connection",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_revision_constraint_is_scoped_to_the_store_connection",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_the_same_store_still_cannot_duplicate_one_revision",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_same_store_still_cannot_duplicate_one_revision",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_the_second_concurrent_first_import_returns_the_winning_row",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_the_second_concurrent_first_import_returns_the_winning_row",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_two_concurrent_first_imports_commit_one_address",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_concurrent_first_imports_commit_one_address",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_customer_address_candidates_pg",
+      "junit_name": "test_two_stores_racing_the_first_import_yield_one_owner",
+      "pytest_node_id_derived": "backend/tests/test_salla_customer_address_candidates_pg.py::test_two_stores_racing_the_first_import_yield_one_owner",
+      "probe_skip_reason": "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_embedded_identity_binding.TestMigration0100SallaEmbeddedIdentityBindings",
+      "junit_name": "test_upgrade_0099_to_0100_creates_binding_schema",
+      "pytest_node_id_derived": "backend/tests/test_salla_embedded_identity_binding.py::TestMigration0100SallaEmbeddedIdentityBindings::test_upgrade_0099_to_0100_creates_binding_schema",
+      "probe_skip_reason": "PostgreSQL not available",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_embedded_identity_binding.TestMigration0100SallaEmbeddedIdentityBindings",
+      "junit_name": "test_upgrade_0100_is_idempotent",
+      "pytest_node_id_derived": "backend/tests/test_salla_embedded_identity_binding.py::TestMigration0100SallaEmbeddedIdentityBindings::test_upgrade_0100_is_idempotent",
+      "probe_skip_reason": "PostgreSQL not available",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_shipment_tracking_pg",
+      "junit_name": "test_0112_enforces_salla_shipment_identity_per_tenant",
+      "pytest_node_id_derived": "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_enforces_salla_shipment_identity_per_tenant",
+      "probe_skip_reason": "PostgreSQL DSN is not configured",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_shipment_tracking_pg",
+      "junit_name": "test_0112_rejects_absent_order_shipments_without_alembic_stamp",
+      "pytest_node_id_derived": "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_rejects_absent_order_shipments_without_alembic_stamp",
+      "probe_skip_reason": "PostgreSQL DSN is not configured",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_shipment_tracking_pg",
+      "junit_name": "test_0112_rejects_missing_or_wrong_preexisting_foundation_without_stamp",
+      "pytest_node_id_derived": "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_rejects_missing_or_wrong_preexisting_foundation_without_stamp",
+      "probe_skip_reason": "PostgreSQL DSN is not configured",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     },
+     {
+      "junit_classname": "backend.tests.test_salla_shipment_tracking_pg",
+      "junit_name": "test_0112_requires_migration_before_current_orm_tracking_query",
+      "pytest_node_id_derived": "backend/tests/test_salla_shipment_tracking_pg.py::test_0112_requires_migration_before_current_orm_tracking_query",
+      "probe_skip_reason": "PostgreSQL DSN is not configured",
+      "outcomes": {
+       "original_baseline_junit": "passed",
+       "base_gate": "passed",
+       "fix_gate": "passed",
+       "compat_gate": "passed"
+      }
+     }
+    ]
+   }
+  },
+  "junit_digests": {
+   "format": {
+    "algorithm": "sha256 over UTF-8",
+    "case_line": "<classname>\\t<name>",
+    "case_outcome_line": "<classname>\\t<name>\\t<outcome>, outcome = failure | error | skipped | passed",
+    "ordering": "lines sorted by Unicode code point, each followed by one LF, concatenated; identical to the #1205 evidence JSON format"
+   },
+   "original_privacy_candidate_junit_3681ebd_08:55-09:02Z": {
+    "cases": 1118,
+    "sorted_case_digest": "1eb928f8f3d7fb48be430487109a55475c293150792e79b8361d8591ec160dec",
+    "sorted_case_outcome_digest": "0d18187ca382b7b35d8fbddf94728459ea8313ba370e6bbcf79a704bf997615a"
+   },
+   "original_baseline_junit_08428cb_09:02-09:10Z": {
+    "cases": 1118,
+    "sorted_case_digest": "1eb928f8f3d7fb48be430487109a55475c293150792e79b8361d8591ec160dec",
+    "sorted_case_outcome_digest": "0d18187ca382b7b35d8fbddf94728459ea8313ba370e6bbcf79a704bf997615a"
+   },
+   "base_gate": {
+    "cases": 1118,
+    "sorted_case_digest": "1eb928f8f3d7fb48be430487109a55475c293150792e79b8361d8591ec160dec",
+    "sorted_case_outcome_digest": "0d18187ca382b7b35d8fbddf94728459ea8313ba370e6bbcf79a704bf997615a"
+   },
+   "fix_gate": {
+    "cases": 1119,
+    "sorted_case_digest": "e9f94e99a82ee068b38dfcca3e590d2ed6be7c53929f171cc487337b67ed1bb6",
+    "sorted_case_outcome_digest": "46c841e9695d08bb6606b7ba2d9619cb874f9c5b1c7d280f3eec546dcffd47be"
+   },
+   "compat_gate": {
+    "cases": 1119,
+    "sorted_case_digest": "e9f94e99a82ee068b38dfcca3e590d2ed6be7c53929f171cc487337b67ed1bb6",
+    "sorted_case_outcome_digest": "46c841e9695d08bb6606b7ba2d9619cb874f9c5b1c7d280f3eec546dcffd47be"
+   }
+  },
+  "skipped_41": {
+   "source": "base_gate JUnit (identities and raw message attributes equal in the original baseline JUnit, fix_gate and compat_gate; see comparisons)",
+   "reason_semantics": "raw_junit_message_attribute is the JUnit <skipped message=...> attribute as retained. For the five collection-time module skips pytest writes the generic attribute 'collection skipped'; the module's actual skip reason and guard appear only in the element text, from which reason_parsed_from_element_text is parsed and labelled as such (the retained raw text is '(<module path>, <line>, Skipped: <reason>)'). Equality claims for those five are made on the raw attribute and on the parsed element-text reason as retained, not on a normalized human-readable reason. The #1205 evidence JSON recorded the parsed element-text reason for the same five rows.",
+   "columns": [
+    "junit_classname",
+    "junit_name",
+    "raw_junit_message_attribute",
+    "collection_time_module_skip",
+    "reason_parsed_from_element_text (collection-time rows only)"
+   ],
+   "rows": [
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_cart_recovery_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_cart_recovery_postgres.py",
+     "module_skip_line": 33
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_commerce_reconciler_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_commerce_reconciler_postgres.py",
+     "module_skip_line": 31
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_coupons_poller_race_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_coupons_poller_race_postgres.py",
+     "module_skip_line": 31
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_delete_401_branch_closure_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_delete_401_branch_closure_postgres.py",
+     "module_skip_line": 113
+    },
+    {
+     "junit_classname": "",
+     "junit_name": "backend.tests.test_salla_delete_401_refresh_postgres",
+     "raw_junit_message_attribute": "collection skipped",
+     "collection_time_module_skip": true,
+     "reason_parsed_from_element_text": "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+     "module_path_parsed_from_element_text": "backend/tests/test_salla_delete_401_refresh_postgres.py",
+     "module_skip_line": 103
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_claim_guard_pg",
+     "junit_name": "test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_claim_guard_pg",
+     "junit_name": "test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_catalog_nonce_is_consumed_exactly_once_under_concurrency",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_consent_enabled_on_pre_0120_database_fails_closed",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_create_all_table_is_adopted_unchanged",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[extra_check]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[extra_column]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_drifted_table_fails_closed_and_changes_nothing[token_nullable]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_fresh_database_gets_the_table_and_downgrade_removes_only_it",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_full_callback_on_postgres_and_concurrent_replay",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_consent_pg",
+     "junit_name": "test_two_tenants_persisting_one_catalog_concurrently_one_wins",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_identity_postgres",
+     "junit_name": "test_canonical_sibling_bind_gates_postgres",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_identity_postgres",
+     "junit_name": "test_legacy_identity_keys_from_persisted_variants",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_advisory_lock_serializes_two_sessions",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_concurrent_ensure_creates_exactly_one_catalog",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_lock_failure_raises_and_does_not_create",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_two_tenants_cannot_claim_the_same_catalog",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_onboarding_postgres",
+     "junit_name": "test_waiter_observes_catalog_id_committed_while_waiting",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_meta_catalog_stale_repair_lock_pg",
+     "junit_name": "test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]",
+     "raw_junit_message_attribute": "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_embedded_identity_binding.TestBindingUpsertIdempotentAndRebind",
+     "junit_name": "test_rebind_revokes_previous_active_binding",
+     "raw_junit_message_attribute": "rebind upsert requires PostgreSQL partial unique active index",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_merchant_ai_layer3_dialogue",
+     "junit_name": "test_layer3_full_dialogue_suite",
+     "raw_junit_message_attribute": "OPENAI_API_KEY not set — skip full Layer3 suite",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_merchant_ai_layer3_dialogue",
+     "junit_name": "test_layer3_live_compose_one_turn",
+     "raw_junit_message_attribute": "OPENAI_API_KEY not set — Layer3 live Luna compose blocked",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_audit_fails_closed_without_delete",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_catalog_id_switch_allows_same_variant_key",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_cross_tenant_and_cross_catalog_same_meta_item_allowed",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_meta_item_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_retailer_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_duplicate_salla_variant_id_in_same_catalog_is_rejected",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_salla_variant_catalog_identity_postgres",
+     "junit_name": "test_two_workers_cannot_bind_same_variant_twice",
+     "raw_junit_message_attribute": "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored.",
+     "collection_time_module_skip": false
+    },
+    {
+     "junit_classname": "backend.tests.test_tenant_merchant_clone_operator",
+     "junit_name": "test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards",
+     "raw_junit_message_attribute": "tenant clone PostgreSQL source/target databases unavailable",
+     "collection_time_module_skip": false
+    }
+   ],
+   "count": 41,
+   "collection_time_module_skips": 5,
+   "sorted_rows_digest": {
+    "format": "sha256 over UTF-8 of '<classname>\\t<name>\\t<raw message attribute>\\n' per row, rows sorted, concatenated",
+    "value": "c36f161387883fec5e0b848822f438e255b1fe9d735f6f3c45f827acff1bbbf7"
+   },
+   "equal_to_original_baseline_rows": true
+  }
+ },
+ "focused_coverage": {
+  "focus_head": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:04:45Z",
+   "pytest_summary": "3 failed, 253 passed, 627 warnings in 16.70s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "-rA",
+    "--junitxml=<scratch>/focus_head_junit.xml",
+    "backend/tests/test_log_redaction.py",
+    "backend/tests/test_log_redaction_leak_proof.py",
+    "backend/tests/test_log_redaction_meta_credentials.py",
+    "tests/test_log_redaction_uvicorn_access_compat.py",
+    "backend/tests/test_meta_catalog_consent.py",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "backend/tests/test_salla_shipment_tracking.py",
+    "backend/tests/test_log_redaction_test_isolation.py"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:06Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed": [
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction",
+      "name": "test_graph_error_sanitized_no_token_in_message"
+     },
+     "error_lines": [
+      "E       ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (tests/../backend/services/meta_catalog_sync_confirm.py)"
+     ],
+     "source_location": [
+      "backend/tests/test_log_redaction.py",
+      "53",
+      "ImportError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_exception_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    }
+   ],
+   "failed_count": 3
+  },
+  "focus_base": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:06Z",
+   "pytest_summary": "5 failed, 247 passed, 627 warnings in 17.00s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "-rA",
+    "--junitxml=<scratch>/focus_base_junit.xml",
+    "backend/tests/test_log_redaction.py",
+    "backend/tests/test_log_redaction_leak_proof.py",
+    "backend/tests/test_log_redaction_meta_credentials.py",
+    "tests/test_log_redaction_uvicorn_access_compat.py",
+    "backend/tests/test_meta_catalog_consent.py",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "backend/tests/test_salla_shipment_tracking.py"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:28Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed": [
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction",
+      "name": "test_graph_error_sanitized_no_token_in_message"
+     },
+     "error_lines": [
+      "E       ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (tests/../backend/services/meta_catalog_sync_confirm.py)"
+     ],
+     "source_location": [
+      "backend/tests/test_log_redaction.py",
+      "53",
+      "ImportError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_log_redaction_meta_credentials",
+      "name": "test_exact_token_refresh_exception_path_logs_no_credential"
+     },
+     "error_lines": [
+      "E           AttributeError: <module 'services.whatsapp_platform.token_manager' from 'tests/../backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     ],
+     "source_location": [
+      "/usr/lib/python3.12/unittest/mock.py",
+      "1431",
+      "AttributeError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_salla_embedded_app_identity",
+      "name": "test_rejection_emits_structured_log"
+     },
+     "error_lines": [],
+     "source_location": [
+      "backend/tests/test_salla_embedded_app_identity.py",
+      "93",
+      "AssertionError"
+     ]
+    },
+    {
+     "junit": {
+      "classname": "backend.tests.test_salla_shipment_tracking",
+      "name": "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+     },
+     "error_lines": [
+      "E       AssertionError: assert False"
+     ],
+     "source_location": [
+      "backend/tests/test_salla_shipment_tracking.py",
+      "250",
+      "AssertionError"
+     ]
+    }
+   ],
+   "failed_count": 5
+  },
+  "files": [
+   "backend/tests/test_log_redaction.py",
+   "backend/tests/test_log_redaction_leak_proof.py",
+   "backend/tests/test_log_redaction_meta_credentials.py",
+   "tests/test_log_redaction_uvicorn_access_compat.py",
+   "backend/tests/test_meta_catalog_consent.py",
+   "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+   "backend/tests/test_salla_embedded_app_identity.py",
+   "backend/tests/test_salla_shipment_tracking.py",
+   "(head only) backend/tests/test_log_redaction_test_isolation.py"
+  ],
+  "standalone_failures_retained": {
+   "status": "FAILED alone at both 08428cb and the repair head; not leakage; not changed by this PR",
+   "cases": [
+    {
+     "node_id": "backend/tests/test_log_redaction.py::test_graph_error_sanitized_no_token_in_message",
+     "error": "ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (backend/services/meta_catalog_sync_confirm.py)",
+     "name_actually_defined_at": "backend/services/native_meta_sync_orchestrator.py:144"
+    },
+    {
+     "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+     "error": "AttributeError: <module 'services.whatsapp_platform.token_manager' from 'backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider' (raised by unittest.mock.patch.object)",
+     "name_actually_defined_at": "backend/services/whatsapp_platform/provider_utils.py:53"
+    },
+    {
+     "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_exception_path_logs_no_credential",
+     "error": "same AttributeError on token_manager.wa_provider",
+     "name_actually_defined_at": "backend/services/whatsapp_platform/provider_utils.py:53"
+    }
+   ],
+   "history_limit": "shallow clone: the commit at which each name diverged cannot be established",
+   "alone_runs": {
+    "status": "each of the three nodes run alone; FAILED everywhere; runtime names independently confirmed missing in source; no fix applied",
+    "controls_08428cb_and_3affff6": "run ~10:38Z before 7ae59f4 existed: alone at 08428cb and alone at 3affff6, each 1 failed (console logs retained)",
+    "verification_at_7ae59f4": [
+     {
+      "node_id": "backend/tests/test_log_redaction.py::test_graph_error_sanitized_no_token_in_message",
+      "argv": [
+       "python",
+       "-m",
+       "pytest",
+       "-q",
+       "-p",
+       "no:cacheprovider",
+       "backend/tests/test_log_redaction.py::test_graph_error_sanitized_no_token_in_message"
+      ],
+      "cwd": "detached checkout of 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+      "env_unset": [
+       "NAHLA_RELIABILITY_REQUIRE_PG",
+       "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+       "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+       "LEGACY_MIG_PG_TEST_DATABASE_URL",
+       "A1_PG_TEST_DATABASE_URL",
+       "DATABASE_URL"
+      ],
+      "timing": "start=2026-10-11T11:15:32Z end=2026-10-11T11:15:35Z rc=1",
+      "pytest_summary": "1 failed in 1.44s",
+      "first_error_line": "ImportError: cannot import name '_sanitize_sync_error' from 'services.meta_catalog_sync_confirm' (backend/services/meta_catalog_sync_confirm.py)"
+     },
+     {
+      "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+      "argv": [
+       "python",
+       "-m",
+       "pytest",
+       "-q",
+       "-p",
+       "no:cacheprovider",
+       "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential"
+      ],
+      "cwd": "detached checkout of 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+      "env_unset": [
+       "NAHLA_RELIABILITY_REQUIRE_PG",
+       "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+       "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+       "LEGACY_MIG_PG_TEST_DATABASE_URL",
+       "A1_PG_TEST_DATABASE_URL",
+       "DATABASE_URL"
+      ],
+      "timing": "start=2026-10-11T11:15:35Z end=2026-10-11T11:15:36Z rc=1",
+      "pytest_summary": "1 failed in 0.79s",
+      "first_error_line": "AttributeError: <module 'services.whatsapp_platform.token_manager' from 'backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     },
+     {
+      "node_id": "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_exception_path_logs_no_credential",
+      "argv": [
+       "python",
+       "-m",
+       "pytest",
+       "-q",
+       "-p",
+       "no:cacheprovider",
+       "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_exception_path_logs_no_credential"
+      ],
+      "cwd": "detached checkout of 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+      "env_unset": [
+       "NAHLA_RELIABILITY_REQUIRE_PG",
+       "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+       "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+       "LEGACY_MIG_PG_TEST_DATABASE_URL",
+       "A1_PG_TEST_DATABASE_URL",
+       "DATABASE_URL"
+      ],
+      "timing": "start=2026-10-11T11:15:36Z end=2026-10-11T11:15:38Z rc=1",
+      "pytest_summary": "1 failed in 0.90s",
+      "first_error_line": "AttributeError: <module 'services.whatsapp_platform.token_manager' from 'backend/services/whatsapp_platform/token_manager.py'> does not have the attribute 'wa_provider'"
+     }
+    ]
+   }
+  }
+ },
+ "reproductions": {
+  "repro_base_R1": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:51Z",
+   "pytest_summary": "1 failed, 9 deselected, 9 warnings in 9.36s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "-k",
+    "test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:04Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R1d": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:04Z",
+   "pytest_summary": "1 failed, 1 passed, 3 warnings in 1.94s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_meta_catalog_consent.py::test_unmarked_database_is_refused",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:07Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R2": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:07Z",
+   "pytest_summary": "1 failed, 1 passed, 5 warnings in 2.13s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_meta_catalog_consent.py::test_unmarked_database_is_refused",
+    "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:11Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+   ]
+  },
+  "repro_base_R3a": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:11Z",
+   "pytest_summary": "2 failed in 1.04s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:13Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R3b": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:13Z",
+   "pytest_summary": "1 failed, 1 passed in 0.87s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_uvicorn_access_log_redacts_inbound_query_secrets",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:14Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_base_R3c": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:06:14Z",
+   "pytest_summary": "1 failed, 1 passed in 0.77s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_install_covers_root_handlers_and_named_loggers",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 08428cb7edf9666a0b31874e8f0256764fd11c90",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:16Z",
+   "tree_after": {
+    "head": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ]
+  },
+  "repro_head_R1": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:28Z",
+   "pytest_summary": "1 passed, 10 deselected, 9 warnings in 8.52s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+    "backend/tests/test_salla_embedded_app_identity.py",
+    "-k",
+    "test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:39Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R1d": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:40Z",
+   "pytest_summary": "2 passed, 3 warnings in 1.92s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_meta_catalog_consent.py::test_unmarked_database_is_refused",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:43Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R2": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:43Z",
+   "pytest_summary": "2 passed, 5 warnings in 2.00s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_meta_catalog_consent.py::test_unmarked_database_is_refused",
+    "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:46Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R3a": {
+   "exit_code": 1,
+   "started_utc": "2026-10-11T11:05:46Z",
+   "pytest_summary": "1 failed, 1 passed in 1.11s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:48Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": [
+    "backend/tests/test_log_redaction_meta_credentials.py::test_exact_token_refresh_path_logs_no_credential"
+   ]
+  },
+  "repro_head_R3b": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:48Z",
+   "pytest_summary": "2 passed in 0.83s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_uvicorn_access_log_redacts_inbound_query_secrets",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:50Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "repro_head_R3c": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:05:50Z",
+   "pytest_summary": "2 passed in 0.70s",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_log_redaction_meta_credentials.py::test_install_covers_root_handlers_and_named_loggers",
+    "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:05:51Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "failed_node_ids": []
+  },
+  "legend": {
+   "R1": "telemetry file + embedded-identity file, -k test_rejection_emits_structured_log",
+   "R1d": "consent test_unmarked_database_is_refused then the structured-log target",
+   "R2": "consent test_unmarked_database_is_refused then the JSONB target",
+   "R3a/R3b/R3c": "meta_credentials installer test (token refresh path / uvicorn access log / install covers root) then the structured-log target"
+  }
+ },
+ "governance": {
+  "lint": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:16Z",
+   "pytest_summary": null,
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "scripts/lint_no_silent_except.py"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:28Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "last_line": "no-silent-except: OK (624 pre-existing, all baselined)"
+  },
+  "gov002": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:28Z",
+   "pytest_summary": null,
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "<scanner from 08428cb:scripts/lint_intelligence_non_interference.py>",
+    "--repo",
+    ".",
+    "--base",
+    "08428cb7edf9666a0b31874e8f0256764fd11c90",
+    "--head",
+    "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "--trusted-base-scanner"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:06:29Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "output_flags": {
+    "INTELLIGENCE_NON_INTERFERENCE_POLICY": "ACTIVE",
+    "TRUSTED_BASE_SCANNER_REQUIRED": "yes",
+    "BOOTSTRAP_HEAD_TRUST_EXCEPTION": "no",
+    "GOV002_BOOTSTRAP": "no",
+    "SINGLE_USE_SCOPE": "PER_SCAN",
+    "PERSISTENT_CONSUMPTION": "NO",
+    "MODEL_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "FINDINGS": "none"
+   }
+  },
+  "constitution": {
+   "exit_code": 0,
+   "started_utc": "2026-10-11T11:06:29Z",
+   "pytest_summary": "98 passed in 144.30s (0:02:24)",
+   "postgresql_stable_during_stage": true,
+   "argv": [
+    "python",
+    "-m",
+    "pytest",
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "backend/tests/test_constitution_compliance.py",
+    "backend/tests/test_intelligence_non_interference_guard.py"
+   ],
+   "cwd": "repository root of the checkout at 7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+   "env_unset": [
+    "NAHLA_RELIABILITY_REQUIRE_PG",
+    "NAHLA_RELIABILITY_PG_ADMIN_DSN",
+    "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED",
+    "LEGACY_MIG_PG_TEST_DATABASE_URL",
+    "A1_PG_TEST_DATABASE_URL",
+    "DATABASE_URL"
+   ],
+   "python": "venv 3.12.3 (pytest 9.1.1)",
+   "finished_utc": "2026-10-11T11:08:55Z",
+   "tree_after": {
+    "head": "7ae59f4d8635efa84b50b14d0da379cc5b4ad928",
+    "porcelain_entries": 0
+   },
+   "last_line": "98 passed in 144.30s (0:02:24)"
+  }
+ },
+ "superseded_no_postgresql_runs": {
+  "reason": "the machine rebooted at 2026-10-11T09:49:30Z and stopped the disposable PostgreSQL clusters; runs before the restore had no PostgreSQL and 37 PostgreSQL-backed cases skipped",
+  "baseline_probe_configuration": {
+   "pytest_summary": "2 failed, 1038 passed, 78 skipped",
+   "extra_skips_vs_original_baseline": 37,
+   "extra_skip_reasons": {
+    "PostgreSQL unavailable for legacy migration drift tests: (psycopg2.OperationalError) connection to server at \"127.0.0.1\"": 31,
+    "PostgreSQL not available": 2,
+    "PostgreSQL DSN is not configured": 4
+   },
+   "other_outcome_changes": []
+  },
+  "head_3affff6_plain_command": {
+   "pytest_summary": "1041 passed, 78 skipped",
+   "status": "superseded; not acceptance"
+  },
+  "cancelled_before_start": [
+   "queued no-PostgreSQL duplicate gates (plain baseline, privacy source) and the no-PostgreSQL compat stage; no active test was interrupted"
+  ]
+ },
+ "assertion_retention": {
+  "backend/tests/test_meta_catalog_consent.py": {
+   "assert_statements_ast": {
+    "baseline": 191,
+    "head": 191
+   },
+   "test_functions": {
+    "baseline": 90,
+    "head": 90
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "none",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_log_redaction_meta_credentials.py": {
+   "assert_statements_ast": {
+    "baseline": 42,
+    "head": 42
+   },
+   "test_functions": {
+    "baseline": 16,
+    "head": 16
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "none",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_salla_embedded_reconcile_telemetry.py": {
+   "assert_statements_ast": {
+    "baseline": 5,
+    "head": 7
+   },
+   "test_functions": {
+    "baseline": 3,
+    "head": 4
+   },
+   "baseline_assert_sequence_preserved_in_head": true,
+   "head_additions": "one canary test with 2 assert statements, inserted before the original tests",
+   "note": "counted with ast.Assert in source order; helper calls such as _assert_no_canary(...) are not assert statements"
+  },
+  "backend/tests/test_salla_embedded_app_identity.py": {
+   "byte_identical_to_baseline": true
+  },
+  "backend/tests/test_salla_shipment_tracking.py": {
+   "byte_identical_to_baseline": true
+  }
+ },
+ "stage_order": [
+  "base_gate @ 2026-10-11T10:41:51Z",
+  "fix_gate @ 2026-10-11T10:49:21Z",
+  "compat_gate @ 2026-10-11T10:56:52Z",
+  "compat_privacy_dbfree @ 2026-10-11T11:04:29Z",
+  "focus_head @ 2026-10-11T11:04:45Z",
+  "focus_base @ 2026-10-11T11:05:06Z",
+  "repro_head_R1 @ 2026-10-11T11:05:28Z",
+  "repro_head_R1d @ 2026-10-11T11:05:40Z",
+  "repro_head_R2 @ 2026-10-11T11:05:43Z",
+  "repro_head_R3a @ 2026-10-11T11:05:46Z",
+  "repro_head_R3b @ 2026-10-11T11:05:48Z",
+  "repro_head_R3c @ 2026-10-11T11:05:50Z",
+  "repro_base_R1 @ 2026-10-11T11:05:51Z",
+  "repro_base_R1d @ 2026-10-11T11:06:04Z",
+  "repro_base_R2 @ 2026-10-11T11:06:07Z",
+  "repro_base_R3a @ 2026-10-11T11:06:11Z",
+  "repro_base_R3b @ 2026-10-11T11:06:13Z",
+  "repro_base_R3c @ 2026-10-11T11:06:14Z",
+  "lint @ 2026-10-11T11:06:16Z",
+  "gov002 @ 2026-10-11T11:06:28Z",
+  "constitution @ 2026-10-11T11:06:29Z"
+ ]
+}
