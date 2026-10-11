@@ -44,6 +44,12 @@ Event loop and budget
   at the deadline may still complete after the 503 — Shopify's redelivery
   then attaches to the same open request (idempotent), so the outcome is a
   duplicate delivery count, never a lost or falsely acknowledged receipt.
+  The HTTP timeout does not terminate a database thread: a thread stalled on
+  the network (no answer from the server) is not ended by the server-side
+  statement timeout and may stay blocked until the operating system gives up
+  on the connection. The four-slot bound and the dedicated pool keep such
+  threads from multiplying (further deliveries are answered 503 at once) —
+  a mitigation, not cancellation or a hard network termination.
 
 Never logged, stored or reflected: the body, raw / unvalidated header values,
 the HMAC, the secret, a customer email / phone / id or order ids. The unsigned

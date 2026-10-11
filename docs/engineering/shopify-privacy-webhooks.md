@@ -92,7 +92,13 @@ slice does not claim its own fetch succeeded.
    before the receipt SQL and before committing (rolling back when passed),
    and a commit already in flight may still complete after the 503 — the
    redelivery then attaches to the same open request (a duplicate count,
-   never a lost or falsely acknowledged receipt).
+   never a lost or falsely acknowledged receipt). The HTTP timeout does
+   **not** terminate a database thread: a thread stalled on the network is
+   not ended by the server-side statement timeout and may stay blocked until
+   the operating system abandons the connection. The four-slot bound and the
+   dedicated pool stop such threads from multiplying (later deliveries get an
+   immediate 503) — a mitigation, not cancellation or hard network
+   termination.
 
 2. **Signed-body topic classification** (no header ever decides an action):
 

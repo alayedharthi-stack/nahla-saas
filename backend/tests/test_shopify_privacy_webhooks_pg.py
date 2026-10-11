@@ -859,40 +859,186 @@ def test_real_dedicated_pool_exhaustion_is_a_bounded_503_and_recovers(pg, monkey
         engine.dispose()
 
 
+def _held_commit_sessions(pg):
+    """A session factory whose next COMMIT is held (after every statement of
+    the transaction ran, so its row locks are held) until released."""
+    from sqlalchemy import event
+
+    factory = sessionmaker(bind=pg.engine, expire_on_commit=False, future=True)
+    gate = SimpleNamespace(armed=True, entered=threading.Event(), release=threading.Event(), pid=None)
+
+    def hold(session):
+        if gate.armed:
+            gate.armed = False
+            gate.pid = session.connection().exec_driver_sql("SELECT pg_backend_pid()").scalar()
+            gate.entered.set()
+            assert gate.release.wait(30), "held commit never released"
+
+    event.listen(factory, "before_commit", hold)
+    return factory, gate
+
+
+def _wait_until_blocked_by(pg, blocker_pid, timeout=1.2):
+    """Positive evidence: a backend waits on a lock held by ``blocker_pid``."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        rows = _sql(pg, "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+                        " AND :b = ANY(pg_blocking_pids(pid))", b=blocker_pid)
+        if rows:
+            return [r["pid"] for r in rows]
+        time.sleep(0.02)
+    return []
+
+
 def test_late_delivery_waiting_behind_a_later_one_keeps_timestamps_monotone(pg):
     fake = FakeShopify()
     connect(pg, Merchant(pg, "a"), SHOES, fake)
     data = body("customers/redact", SHOES)
-    later = datetime.now(timezone.utc) + timedelta(seconds=30)
-    _, rid = deliver(pg, "customers/redact", SHOES, data, now=later)
-    _, again = deliver(pg, "customers/redact", SHOES, data, now=later - timedelta(seconds=20))  # started earlier
+    received = datetime.now(timezone.utc) + timedelta(seconds=30)
+    _, rid = deliver(pg, "customers/redact", SHOES, data, now=received)
+    # Reversed supplied clocks without contention: clamped to the row.
+    _, again = deliver(pg, "customers/redact", SHOES, data, now=received - timedelta(seconds=20))
     r = req(pg, rid)
-    assert again == rid and r["last_delivery_at"] >= r["received_at"] == later
-    # Real lock wait: the first delivery's transaction holds the open row; the
-    # second, stamped before it, waits and is stamped at write time.
-    data2 = body("customers/redact", SHOES)
-    holder = pg.Session()
-    payload = parse_privacy_body(data2, "customers/redact")
-    store_wall = store.wall_clock
+    assert again == rid and r["last_delivery_at"] == r["received_at"] == received
+    # Real lock wait with reversed supplied clocks: delivery A (the later clock)
+    # holds the open row and is paused just before its COMMIT; delivery B (the
+    # earlier clock) must wait on A's backend, then stamp no earlier than A.
+    t_early, t_late = received - timedelta(seconds=25), received + timedelta(minutes=5)
+    held, gate = _held_commit_sessions(pg)
+    payload = parse_privacy_body(data, "customers/redact")
+    digest = hashlib.sha256(data).hexdigest()
+    box = {}
+
+    def delivery_a():
+        try:
+            with held() as db:
+                box["a"] = store.record_receipt(db, payload=payload, body_sha256=digest, webhook_id=None,
+                                                triggered_at=None, now=t_late)
+        except BaseException as exc:  # noqa: BLE001 — surfaced below
+            box["a_error"] = exc
+
+    def delivery_b():
+        try:
+            box["b"] = deliver(pg, "customers/redact", SHOES, data, now=t_early)
+        except BaseException as exc:  # noqa: BLE001 — surfaced below
+            box["b_error"] = exc
+
+    ta, tb = threading.Thread(target=delivery_a), threading.Thread(target=delivery_b)
     try:
-        holder.execute(text("SET LOCAL lock_timeout = '10s'"))
-        early = datetime.now(timezone.utc)
-        result = {}
-
-        def second():
-            result["v"] = deliver(pg, "customers/redact", SHOES, data2)
-
-        th = threading.Thread(target=second)
-        th.start()
-        time.sleep(0.3)
-        store.record_receipt(holder, payload=payload, body_sha256=hashlib.sha256(data2).hexdigest(), webhook_id=None,
-                             triggered_at=None, now=early + timedelta(seconds=5))
-        th.join(20)
-        r2 = req(pg, result["v"][1])
-        assert r2["delivery_count"] == 2 and r2["last_delivery_at"] >= r2["received_at"]
+        ta.start()
+        assert gate.entered.wait(20)              # A holds the row lock, uncommitted
+        tb.start()
+        waiters = _wait_until_blocked_by(pg, gate.pid)
+        assert waiters and tb.is_alive() and "b" not in box, "B never waited on A's row lock"
     finally:
-        store.wall_clock = store_wall
-        holder.close()
+        gate.release.set()                        # A commits its later stamp (also on failure)
+        ta.join(20)
+        if tb.is_alive() or tb.ident is not None:
+            tb.join(20)
+    assert "a_error" not in box and "b_error" not in box, (box.get("a_error"), box.get("b_error"))
+    assert box["a"] == ("duplicate", rid) and box["b"] == ("duplicate", rid)
+    r = req(pg, rid)
+    assert r["delivery_count"] == 4
+    assert r["last_delivery_at"] == t_late and r["last_delivery_at"] >= r["received_at"]
+
+
+_COMMIT_LOCK_KEY = 7_100_424_242
+
+
+def _install_commit_hold_trigger(pg):
+    """Fixture only (disposable database): a deferred constraint trigger on new
+    privacy requests that, at COMMIT, waits on an advisory lock."""
+    _sql(pg, f"""
+        CREATE FUNCTION fixture_hold_privacy_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            PERFORM pg_advisory_xact_lock({_COMMIT_LOCK_KEY});
+            RETURN NULL;
+        END $$""")
+    _sql(pg, "CREATE CONSTRAINT TRIGGER fixture_hold_privacy_commit AFTER INSERT ON shopify_privacy_requests"
+             " DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fixture_hold_privacy_commit()")
+
+
+def test_late_commit_or_blocked_commit_answers_503_and_the_redelivery_is_idempotent(pg, monkeypatch):
+    """(1) PostgreSQL is executing the receipt's COMMIT at the deadline (a
+    fixture deferred trigger waits on an advisory lock during COMMIT): the
+    delivery is answered 503, the request stays invisible until the COMMIT
+    completes, and Shopify's redelivery attaches to that one request.
+    (2) A receipt blocked on the row past the deadline rolls back instead of
+    committing: nothing changes and the redelivery attaches. One request
+    throughout."""
+    fake = FakeShopify()
+    connect(pg, Merchant(pg, "a"), SHOES, fake)
+    client, router_module = _http_client(pg, monkeypatch)
+    from services.shopify_privacy import config
+
+    def slots_idle():
+        end = time.monotonic() + 10
+        while router_module._SLOTS._value != config.RECEIPT_WORKERS and time.monotonic() < end:
+            time.sleep(0.01)
+        return router_module._SLOTS._value == config.RECEIPT_WORKERS
+
+    data = body("shop/redact", SHOES)
+    headers = _signed(data, "shop/redact", SHOES)
+    lock_holder = pg.engine.connect()
+    row_holder = None
+    row_tx = None
+    poster = None
+    try:
+        # (1) COMMIT in flight at the deadline, completing after the 503.
+        _install_commit_hold_trigger(pg)
+        holder_pid = lock_holder.execute(text("SELECT pg_backend_pid()")).scalar()
+        lock_holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _COMMIT_LOCK_KEY})
+        monkeypatch.setattr(router_module, "RECEIPT_BUDGET_SECONDS", 0.5)
+        started = time.monotonic()
+        resp = client.post(TOPIC_PATHS["shop/redact"], content=data, headers=headers)
+        assert resp.status_code == 503 and resp.json() == {"error": "retry"}
+        assert time.monotonic() - started < 1.5
+        committing = _sql(pg, "SELECT pid FROM pg_stat_activity WHERE state = 'active' AND query = 'COMMIT'"
+                              " AND wait_event_type = 'Lock' AND :h = ANY(pg_blocking_pids(pid))", h=holder_pid)
+        assert len(committing) == 1, "the receipt's backend is not executing COMMIT behind the fixture lock"
+        assert count(pg, "shopify_privacy_requests") == 0          # uncommitted: invisible
+        lock_holder.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _COMMIT_LOCK_KEY})
+        assert slots_idle()
+        rows = _sql(pg, "SELECT id, delivery_count FROM shopify_privacy_requests")
+        assert len(rows) == 1 and rows[0]["delivery_count"] == 1    # the late COMMIT landed, exactly once
+        rid = rows[0]["id"]
+        monkeypatch.setattr(router_module, "RECEIPT_BUDGET_SECONDS", config.RECEIPT_BUDGET_SECONDS)
+        assert client.post(TOPIC_PATHS["shop/redact"], content=data, headers=headers).status_code == 200
+        assert req(pg, rid)["delivery_count"] == 2 and count(pg, "shopify_privacy_requests") == 1
+
+        # (2) blocked on the row past the deadline: rolled back, never committed late.
+        monkeypatch.setattr(router_module, "RECEIPT_BUDGET_SECONDS", 0.3)
+        row_holder = pg.engine.connect()
+        row_tx = row_holder.begin()
+        row_pid = row_holder.execute(text("SELECT pg_backend_pid()")).scalar()
+        row_holder.execute(text("SELECT id FROM shopify_privacy_requests WHERE id = :i FOR UPDATE"), {"i": rid})
+        box = {}
+        poster = threading.Thread(target=lambda: box.setdefault(
+            "resp", client.post(TOPIC_PATHS["shop/redact"], content=data, headers=headers)))
+        poster.start()
+        assert _wait_until_blocked_by(pg, row_pid), "the receipt never waited on the row"
+        poster.join(10)
+        assert box["resp"].status_code == 503
+        row_tx.rollback()                 # released after the 503, before the receipt's own lock timeout
+        row_tx = None
+        assert slots_idle()
+        assert req(pg, rid)["delivery_count"] == 2                   # rolled back, not committed late
+        monkeypatch.setattr(router_module, "RECEIPT_BUDGET_SECONDS", config.RECEIPT_BUDGET_SECONDS)
+        assert client.post(TOPIC_PATHS["shop/redact"], content=data, headers=headers).status_code == 200
+        assert req(pg, rid)["delivery_count"] == 3 and count(pg, "shopify_privacy_requests") == 1
+    finally:
+        try:
+            lock_holder.execute(text("SELECT pg_advisory_unlock_all()"))
+        finally:
+            lock_holder.close()
+        if row_tx is not None:
+            row_tx.rollback()
+        if row_holder is not None:
+            row_holder.close()
+        if poster is not None:
+            poster.join(10)
+        slots_idle()
+        router_module.set_receipt_session_factory(None)
 
 
 def test_signed_replay_flood_is_bounded_and_lifecycle_still_progresses(pg):

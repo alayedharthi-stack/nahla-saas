@@ -1125,6 +1125,7 @@
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_storage_without_revision_0123_is_a_503",
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_real_dedicated_pool_exhaustion_is_a_bounded_503_and_recovers",
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_late_delivery_waiting_behind_a_later_one_keeps_timestamps_monotone",
+        "backend/tests/test_shopify_privacy_webhooks_pg.py::test_late_commit_or_blocked_commit_answers_503_and_the_redelivery_is_idempotent",
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_signed_replay_flood_is_bounded_and_lifecycle_still_progresses",
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_matched_customer_request_persists_the_bounded_assessment",
         "backend/tests/test_shopify_privacy_webhooks_pg.py::test_any_legacy_shopify_footprint_blocks_the_no_data_outcome[customer_name_provenance]",
