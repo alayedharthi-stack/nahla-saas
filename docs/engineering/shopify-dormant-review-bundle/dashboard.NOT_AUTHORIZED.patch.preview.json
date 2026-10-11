@@ -1,0 +1,18 @@
+{
+  "services": {
+    "446edf49-05bf-4578-b403-72e1e86b384c": {
+      "source": {
+        "branch": "codex/shopify-callback-service-key-20261011",
+        "commitSha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09"
+      },
+      "variables": {
+        "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+          "value": "0"
+        },
+        "VITE_SHOPIFY_CONNECTION_UI": {
+          "value": "0"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "approval": {
+    "approved": false,
+    "approved_at_utc": null,
+    "independent_review_ref": "PR1218 source accepted by independent review; exact execution approval remains pending",
+    "reviewer": null,
+    "valid_until_utc": null
+  },
+  "db_recovery_evidence": {
+    "backup": {
+      "card_timestamp_utc": null,
+      "completed": false,
+      "observed_at_utc": null,
+      "observed_by": null,
+      "restore_available": false,
+      "service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+      "size_mb": null,
+      "volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65"
+    },
+    "restore_verification_ref": null,
+    "restore_verified": false,
+    "restore_verified_at_utc": null
+  },
+  "deployment_rollback_snapshot": {
+    "railway_deployment_id": "cb02ce9e-dfdd-404d-b26c-5fb4d22bf1ff",
+    "source_sha": "462ede1aff602cad84e9569be859cca0087b190d",
+    "verified_by": null,
+    "verified_redeployable_at_utc": null
+  },
+  "phase": "S0",
+  "record_version": 2,
+  "release_sha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "runtime_inventory_count": 143,
+  "runtime_inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+  "target": {
+    "db": "postgres-ancu.railway.internal:5432/railway",
+    "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+    "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+    "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
+  }
+}

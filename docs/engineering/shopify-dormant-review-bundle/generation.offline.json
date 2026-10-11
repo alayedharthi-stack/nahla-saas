@@ -1,0 +1,31 @@
+{
+  "bootstraps_executed": false,
+  "canonical_source_kind": "partial Git-byte inventory export; not deployable checkout",
+  "network_or_database_calls": 0,
+  "phases": {
+    "S0": {
+      "approval_reason": "approval_missing",
+      "approval_status": "FAIL",
+      "bootstrap_source_sha256": "d3c233660b7955faf5a05df7376dd301a7d8d44bcb630148a7e45b96445e97df",
+      "preview_command_sha256": "245ad06f7e9ba03b64a8c1e0802cadfe0cb144983f94494e9602fa35793f2012",
+      "unapproved_payload_sha256": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad"
+    },
+    "S3": {
+      "approval_reason": "approval_missing",
+      "approval_status": "FAIL",
+      "bootstrap_source_sha256": "d278fd4c11b089f7e5364ddbb168e8906f8d8dc5dd162acfe56906ac8c59a23f",
+      "preview_command_sha256": "c24ac24cba62cf461dfd722dd57fc4bc8f24ef9753d066f88d72be1b8667871d",
+      "unapproved_payload_sha256": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967"
+    }
+  },
+  "runtime_inventory": {
+    "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+    "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "gate_version": 2,
+    "inventory_count": 143,
+    "inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+    "unexpected_initializers": []
+  },
+  "source_release": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "strict_cli_can_render_current_payloads": false
+}

@@ -1,0 +1,49 @@
+{
+  "artifact_sha256": {
+    "README.md": "730098b4c2fe065cdc5c788f7f1c330a9c02d1373769b18c6ee5d75f43af7468",
+    "api.S0.NOT_AUTHORIZED.patch.preview.json": "a04dcf68da2e3e74a5a38be974085d67d085d2c0c35d9059575d923053964fe1",
+    "api.S3.NOT_AUTHORIZED.patch.preview.json": "d6d4ca25f1f398d7265e3930c82d8f2240a552e9ce6988889323e738cf1393cc",
+    "approval.S0.UNAPPROVED.json": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad",
+    "approval.S3.UNAPPROVED.json": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967",
+    "authorizations.json": "58ef789cbb548b2f313a879233f9dff4c5b428194a168207e06319bf30e92e27",
+    "bootstrap.S0.NOT_AUTHORIZED.preview.py": "d3c233660b7955faf5a05df7376dd301a7d8d44bcb630148a7e45b96445e97df",
+    "bootstrap.S3.NOT_AUTHORIZED.preview.py": "d278fd4c11b089f7e5364ddbb168e8906f8d8dc5dd162acfe56906ac8c59a23f",
+    "dashboard.NOT_AUTHORIZED.patch.preview.json": "916dbfba417c4af89e9589495db3611e5f6a146b6fbd49a2bd6176b328730ac5",
+    "generation.offline.json": "ca81528b63be93cb851b7f137b6af1f5d78231caed49d3680df3bda434ec57dc",
+    "inventory.git-bytes.json": "eee4c7f966a2d42700e5d3df8cae0e5632d93111a349b2c59f6ab9fb6de04d57",
+    "migration.NOT_AUTHORIZED.plan.json": "7859e149793794501ffa32f05f64c4ce228a1c7c13fe174773684d997179c7f5",
+    "predeploy.S0.NOT_AUTHORIZED.preview.txt": "d91fe636a3ad9a76004393af208fb4ceb9aa68a837dae31fa4ccecf43c6ef392",
+    "predeploy.S3.NOT_AUTHORIZED.preview.txt": "7f16c0cf666a5aa63224ec01dd43fc970a26ef68dfb44b04071292e37f4b7fa2",
+    "railway.metadata.readonly.json": "a467cd3a9e5d2d546193ca49be7947a3b37848d0200ce9b112a2813af62b58d0"
+  },
+  "backup_restore_target_selected": false,
+  "environment_created": false,
+  "live_changes_performed": false,
+  "owner_execution_authorization": false,
+  "phase_previews": {
+    "S0": {
+      "preview_command_sha256_utf8_no_terminal_lf": "245ad06f7e9ba03b64a8c1e0802cadfe0cb144983f94494e9602fa35793f2012",
+      "unapproved_payload_bytes": 1415,
+      "unapproved_payload_sha256": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad"
+    },
+    "S3": {
+      "preview_command_sha256_utf8_no_terminal_lf": "c24ac24cba62cf461dfd722dd57fc4bc8f24ef9753d066f88d72be1b8667871d",
+      "unapproved_payload_bytes": 1415,
+      "unapproved_payload_sha256": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967"
+    }
+  },
+  "release_sha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "runtime_changes_since_test": false,
+  "runtime_inventory": {
+    "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+    "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "gate_version": 2,
+    "inventory_count": 143,
+    "inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+    "unexpected_initializers": []
+  },
+  "selected_source_branch": "codex/shopify-callback-service-key-20261011",
+  "status": "REVIEW_ONLY_NOT_AUTHORIZED",
+  "tested_runtime_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+  "tests_rerun": false
+}

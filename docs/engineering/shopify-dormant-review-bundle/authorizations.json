@@ -1,0 +1,42 @@
+{
+  "source_review_status": "Independent source/evidence reviews accept the foundation/guard/startup repair and exact callback fix; log byte representation is clarified. Review acceptance is not a live-change authorization.",
+  "already_covered_by_owner_scope": [
+    {"scope": "Relevant Claude coding tasks using included subscription capacity or up to USD50 existing credit", "status": "authorized", "limits": "No new subscription/purchase; no unrelated private data or credentials."},
+    {"scope": "Reversible local code work and focused Draft PRs in alayedharthi-stack/nahla-saas", "status": "authorized", "limits": "Preserve AI/Salla behavior; no live rollout implied."},
+    {"scope": "Publishing and running the public GitHub test workflow", "status": "explicitly authorized", "limits": "Synthetic data/credentials, existing disposable CI route; no platform deployment."},
+    {"scope": "Evidence-only correction and preparation of this concrete offline dormant bundle", "status": "authorized", "limits": "No environment creation or live changes before exact bundle review."}
+  ],
+  "not_granted_by_those_authorizations": [
+    "Merge/release to the default branch, production source/command/variable changes or deployment.",
+    "Restore of an actual production backup to a selected private disposable target or live schema migration/rollback.",
+    "Selecting irreversible Shopify distribution, live app permissions/settings/client credentials or activation.",
+    "New subscriptions, purchases, services, environments or unapproved charges."
+  ],
+  "remaining_action_time_execution_records": [
+    {"record": "S0 API dormant deployment and separate dashboard build/source approval", "approved": false, "binds": ["exact e345ecf6 release", "source/command/approval payload together", "existing project/environment/services/private DB", "runtime and compiled flags OFF", "fresh eligible backup", "verified rollback deployments", "unchanged normal startup provider side-effect boundary"]},
+    {"record": "Selected backup restore rehearsal and controlled S0-to-S3 window", "approved": false, "binds": ["exact backup service/volume/card and private disposable restore target", "verified restore evidence", "all deployment actors excluded and queued/inflight work drained", "explicit 0121/0122/0123 commands with per-step audits", "branch-qualified recovery/rollback", "no deployment at S1/S2"]},
+    {"record": "S3 dormant deployment before releasing exclusion", "approved": false, "binds": ["same exact release and fresh S3 external payload/command", "S3 schema audit", "eligible backup within 72 hours and verified restore", "actual startup DB completion and service health"]}
+  ],
+  "later_separate_activation_scope": {
+    "approved": false,
+    "app_id": "434031788033",
+    "organization_id": "240110284",
+    "partner_id": "5246037",
+    "dev_store": "nahlah-dev.myshopify.com",
+    "design": "Reviewed standalone authorization-code flow with explicit authenticated Nahlah tenant completion; grant/install behavior still needs real dev-store proof.",
+    "callback_uri": "https://api.nahlah.ai/merchant/integrations/shopify/callback",
+    "dashboard_complete_uri": "https://app.nahlah.ai/integrations/shopify/complete",
+    "uninstall_uri": "https://api.nahlah.ai/webhooks/shopify/app-uninstalled",
+    "privacy_uris": ["https://api.nahlah.ai/webhooks/shopify/privacy/customers-data-request", "https://api.nahlah.ai/webhooks/shopify/privacy/customers-redact", "https://api.nahlah.ai/webhooks/shopify/privacy/shop-redact"],
+    "initial_scope": ["read_products"],
+    "version_alignment_proposal": "Explicitly align connection SHOPIFY_ADMIN_API_VERSION with catalog/webhook 2026-10 after approval; no live setting changed.",
+    "app_home_uri": null,
+    "app_home_note": "Choose/review the exact authenticated entry and unauthenticated install/login journey; current shell home/embedding-off is not a final install architecture.",
+    "credentials": "Owner provisions dedicated SHOPIFY_TOKEN_ENC_KEY and client values out of band; never retrieve/share existing secrets.",
+    "activation_gate": "Current release gate refuses enabled Shopify flags; a separately reviewed activation policy is required.",
+    "merchant_binding": "Fresh regular authenticated merchant tenant; never infer/reuse tenant67/33 or rebind by email/domain.",
+    "future_read_inventory": "Requires separately approved read_inventory reauthorization; not part of this dormant bundle.",
+    "public_distribution": "Eligibility, privacy retention/mapping/fulfillment operations and unrelated-merchant journey remain separate before irreversible selection.",
+    "meta_whatsapp": "Later separate integration; unchanged by this bundle."
+  }
+}

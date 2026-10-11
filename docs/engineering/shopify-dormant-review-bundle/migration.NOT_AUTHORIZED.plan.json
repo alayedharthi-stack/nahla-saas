@@ -1,0 +1,50 @@
+{
+  "status": "REVIEW_ONLY_NOT_AUTHORIZED",
+  "release_sha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+  "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "execution_service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+  "database_service": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+  "database_volume": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
+  "database_target": "postgres-ancu.railway.internal:5432/railway",
+  "database_url": "existing private service binding; entered/resolved out of band, never copied into this bundle",
+  "owner_execution_approval": false,
+  "deployment_exclusion_verified": false,
+  "queued_and_inflight_predeploys_drained": false,
+  "restore_verified": false,
+  "restore_verification_target": null,
+  "advisory_lock_key": 8182734029736770447,
+  "lock_limit": "Only cooperating holders contend. The plain migration commands below do not acquire or hold this key; lock possession does not replace enforced deployment exclusion.",
+  "states": {
+    "S0": ["0111", "0113", "0120"],
+    "S1": ["0111", "0113", "0121"],
+    "S2": ["0111", "0113", "0122"],
+    "S3": ["0111", "0113", "0123"]
+  },
+  "normal_deployment_allowed_states": ["S0", "S3"],
+  "readonly_audit_cwd": "/app",
+  "readonly_topology_audit_argv": ["python", "scripts/audit_alembic_topology_readonly.py", "--expect", "REPLACE_WITH_EXACT_BEFORE_OR_AFTER_ROWS"],
+  "readonly_footprint_audits": [
+    ["python", "scripts/audit_shopify_catalog_collisions_readonly.py"],
+    ["python", "scripts/audit_shopify_privacy_readonly.py"]
+  ],
+  "forward": [
+    {"before": "S0", "after": "S1", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "upgrade", "0121"]},
+    {"before": "S1", "after": "S2", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "upgrade", "0122"]},
+    {"before": "S2", "after": "S3", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "upgrade", "0123"]}
+  ],
+  "rollback": [
+    {"before": "S3", "after": "S2", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "downgrade", "0123@-1"]},
+    {"before": "S2", "after": "S1", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "downgrade", "0122@-1"]},
+    {"before": "S1", "after": "S0", "cwd": "/app/database", "argv": ["python", "-m", "alembic", "downgrade", "0121@-1"]}
+  ],
+  "before_and_after_every_step": [
+    "Verify approved execution source/platform/private driver target and effective flags; reject libpq target overrides.",
+    "Read exact version row multiset for the named state; duplicates, unknown rows or any mismatch stop.",
+    "Audit expected Shopify schema definitions/constraints, retained definitions and relation identities against the accepted expectations.",
+    "Preserve retained 0111/0113 branches and existing tenant/Salla data; no repair/relabel operation is authorized.",
+    "Stop on any nonzero exit or failed audit, retain deployment exclusion and obtain the applicable approved recovery step."
+  ],
+  "legacy_redeploy_boundary": "462ede1 and its legacy predeploy command may be restored only after exact S0 is verified. The current S3 command/payload cannot accompany a S0 rollback. Restore matching source/command/payload settings together.",
+  "never": ["head", "heads", "bare relative downgrade", "unqualified parent downgrade", "stamp", "merge", "direct version row edits", "enable Shopify flags", "new environment"]
+}
