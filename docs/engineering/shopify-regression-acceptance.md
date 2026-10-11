@@ -43,7 +43,23 @@ Every case lists its initial state, the events, the expected Shopify and
 Nahlah state, the expected messages as exact **buyer / merchant** counts, the
 forbidden side effects, the level it must reach, and its status. Counts in
 sections C–F are expectations **under the proposed synthetic fixture policy
-in section E** — not live product behaviour.
+in section E** — not live product behaviour — and cover only the events of
+that row (messages sent before its initial state are not counted).
+
+### Count metrics
+
+Four metrics are kept apart and never substituted for one another:
+
+| Metric | Meaning |
+|---|---|
+| **logical** | distinct notifications decided to be sent (one per idempotency key) |
+| **attempts** | provider send attempts made for them |
+| **accepted** | attempts the provider positively acknowledged |
+| **delivered** | messages the provider reported delivered (message delivery, never parcel delivery) |
+
+An attempt with an unknown outcome is counted under **unknown**, never as
+accepted or delivered. Unless a row states otherwise, the **buyer /
+merchant** column gives **logical** counts.
 
 ## A. Protect the baseline (Shopify flags off)
 
@@ -82,7 +98,7 @@ in section E** — not live product behaviour.
 | C2a | no order | card order `authorized` | authorized, not paid | 0 / 0 | treating it as paid | D | planned |
 | C2b | no order | order `pending` (non-COD manual) | pending | 0 / 0 | treating it as COD or paid | D | planned |
 | C2c | no order | `partially_paid` | partially paid | 0 / 0 | treating it as paid | D | planned |
-| C3a | open order | order edited | mirror updated; open COD request bound to the old version superseded | 0 / 0 | confirming the old version | D | planned |
+| C3a | open COD order, request sent | edit that is **not** a meaningful revision (for example a note or a tag) | mirror updated; the pending request stays valid | 0 / 0 | a new confirmation request (meaningful revisions are C7a) | D | planned |
 | C3b | open COD order, request sent | order cancelled | cancelled; pending COD flow stopped | 1 / 0 (N11) unless natively notified | reminders after cancellation | D | planned |
 | C3c | order mirrored | order deleted | mirror tombstone | 0 / 0 | messages for a deleted order | D | planned |
 | C4a | paid order | partial refund, transactions verified `success` | partially refunded | 1 / 0 (N10) unless natively notified | — | D | planned |
@@ -97,7 +113,8 @@ in section E** — not live product behaviour.
 | C6e | COD accepted | the same acceptance delivered twice | accepted once | 0 / 1 total (N3 idempotent) | a second merchant message | D | planned |
 | C7a | COD request sent, order then modified | buyer accepts | acceptance bound to the old version → re-confirmation needed | 1 / 0 (N1 for the new version) | confirming the modified order with the old answer | D | planned |
 | C7b | COD request sent, order then cancelled | buyer accepts | stays cancelled | 0 / 0 | reviving the order | D | planned |
-| C8 | two open COD orders for one phone | buyer replies once | reply bound to an order only if unambiguous; otherwise awaiting | 0 / 0 when ambiguous; 0 / 1 when bound | confirming the wrong order | D | planned |
+| C8a | two open COD orders for one phone, requests sent for both | one reply that cannot be bound to either order | both still awaiting acceptance | 0 / 0 | confirming either order | D | planned |
+| C8b | as C8a | one reply correlated unambiguously to order 1 (for example, an answer to order 1's request) | order 1 accepted; order 2 still awaiting | 0 / 1 (N3 for order 1) | confirming order 2 | D | planned; blocked: owner choice (which correlation evidence counts as unambiguous) |
 | C9 | order with a manual payment gateway | created | not COD proof | 0 / 0 | starting the COD flow from the gateway alone | U | planned |
 | C10 | order with `confirmed = true` | — | inventory reservation only | 0 / 0 | treating it as buyer acceptance | U | planned |
 | C11 | COD order delivered, not collected | delivery event | delivered, unpaid | 1 / 0 (N7) | `orderMarkAsPaid`; a "paid" claim | D | planned |
@@ -146,9 +163,17 @@ Fixture rules:
 * **Templates:** synthetic fixture template ids (`fx_*`); real templates come
   from the Nahla Templates Library, the merchant, or Meta-approved templates,
   per AGENTS.md.
-* **Idempotency key:** `tenant : shop : order GID : notification id : order
-  version` (refunds also carry the refund GID, shipments the fulfillment
-  GID). A repeated event with the same key sends nothing.
+* **Idempotency key:** notification-specific — see the `Key` column of the
+  table below. Only the business fact a notification reports is part of its
+  key: COD confirmation and reconfirmation use the **meaningful order
+  revision** (in this fixture: a change to line items, quantities, total or
+  delivery address); dispatch uses the **fulfillment identity** plus its
+  carrier-acceptance fact; whole-order delivery uses the **order** plus its
+  delivery-completion fact; refunds use the **refund identity**. Unrelated
+  order edits, tracking number or carrier changes and repeated events do not
+  change any key and therefore send nothing. The live identity choices
+  (which order changes are meaningful, which carrier event ids exist) are
+  **pending owner and design decisions**.
 * **Retry / escalation:** at most 3 provider attempts on a retryable failure
   with backoff; after the last failure, a dashboard flag only — no extra
   message.
@@ -159,20 +184,22 @@ Fixture rules:
 * **WhatsApp constraints:** business-initiated messages outside the 24-hour
   window use approved templates only.
 
-| ID | Recipient | Trigger (fact) | Template | Buyer | Merchant |
-|---|---|---|---|---|---|
-| N0 | buyer | order created and paid | none (Shopify's native confirmation) | 0 | 0 |
-| N1 | buyer | COD order created, or modified while awaiting acceptance | `fx_cod_confirm_request` | 1 | 0 |
-| N2 | buyer | no COD response by the fixture deadline (24 h) | `fx_cod_reminder` | 1 (max once) | 0 |
-| N3 | merchant | buyer accepted COD | `fx_merchant_cod_accepted` | 0 | 1 |
-| N4 | merchant | buyer rejected COD | `fx_merchant_cod_rejected` | 0 | 1 |
-| N5 | buyer | carrier accepted the parcel (not natively notified) | `fx_dispatched` | 1 | 0 |
-| N7 | buyer | whole order delivered (all parcels) | `fx_delivered` | 1 | 0 |
-| N8 | buyer and merchant | failed delivery attempt or delivery failure | `fx_delivery_issue` / `fx_merchant_delivery_issue` | 1 | 1 |
-| N9 | merchant | collection verified by the owner-chosen source | `fx_merchant_collected` | 0 | 1 |
-| N10 | buyer | refund transactions verified `success` (not natively notified) | `fx_refunded` | 1 | 0 |
-| N11 | buyer | order cancelled (not natively notified) | `fx_cancelled` | 1 | 0 |
-| N12 | merchant | refund transaction failed | `fx_merchant_refund_failed` | 0 | 1 |
+Keys below omit the common prefix `tenant : shop :`.
+
+| ID | Recipient | Trigger (fact) | Template | Key | Buyer | Merchant |
+|---|---|---|---|---|---|---|
+| N0 | buyer | order created and paid | none (Shopify's native confirmation) | — | 0 | 0 |
+| N1 | buyer | COD order created, or meaningfully revised while awaiting acceptance | `fx_cod_confirm_request` | `order GID : N1 : meaningful revision` | 1 | 0 |
+| N2 | buyer | no COD response by the fixture deadline (24 h) | `fx_cod_reminder` | `order GID : N2 : meaningful revision` | 1 (max once per revision) | 0 |
+| N3 | merchant | buyer accepted COD | `fx_merchant_cod_accepted` | `order GID : N3 : meaningful revision` | 0 | 1 |
+| N4 | merchant | buyer rejected COD | `fx_merchant_cod_rejected` | `order GID : N4 : meaningful revision` | 0 | 1 |
+| N5 | buyer | carrier accepted a fulfillment's parcel (not natively notified) | `fx_dispatched` | `fulfillment GID : N5 : carrier-accepted` | 1 | 0 |
+| N7 | buyer | whole order delivered (all parcels) | `fx_delivered` | `order GID : N7 : delivery-complete` | 1 (once per order) | 0 |
+| N8 | buyer and merchant | failed delivery attempt, or delivery failure | `fx_delivery_issue` / `fx_merchant_delivery_issue` | `fulfillment GID : N8 : attempt-failed` or `: delivery-failed` | 1 | 1 |
+| N9 | merchant | collection verified by the owner-chosen source | `fx_merchant_collected` | `order GID : N9 : collected` | 0 | 1 |
+| N10 | buyer | refund transactions verified `success` (not natively notified) | `fx_refunded` | `refund GID : N10` | 1 | 0 |
+| N11 | buyer | order cancelled (not natively notified) | `fx_cancelled` | `order GID : N11 : cancelled` | 1 | 0 |
+| N12 | merchant | refund transaction failed | `fx_merchant_refund_failed` | `refund GID : N12` | 0 | 1 |
 
 (N6 is intentionally absent: the fixture sends nothing for out-for-delivery.)
 
@@ -189,9 +216,9 @@ Fixture rules:
 | E7 | shop time zone and currency differ from the platform's | COD order created | amounts and dates rendered in the shop's currency and time zone | 1 / 0 | converted or mis-dated values | D | planned |
 | E8 | buyer withdrew consent after the request | reminder due | no reminder | 0 / 0 | a reminder | D | planned |
 | E9 | outside the 24-hour window | carrier acceptance | template message only | 1 / 0 | a free-form message | D | planned |
-| E10 | send attempted | provider: accepted, then delivered, then read | message states recorded | 1 / 0 | treating message delivery as parcel delivery | D | planned |
-| E11 | send attempted | provider: failed (retryable) three times | dashboard flag | 1 attempt-chain / 0; delivered 0 | a fourth attempt; another channel | D | planned |
-| E12 | send attempted | provider status unknown | state "unknown"; no resend | 1 / 0 | an automatic duplicate | D | planned |
+| E10 | one buyer notification due | provider: accepted, then delivered, then read | message states recorded | buyer: logical 1, attempts 1, accepted 1, delivered 1; merchant 0 | treating message delivery as parcel delivery | D | planned |
+| E11 | one buyer notification due | provider: retryable failure on all three attempts | dashboard flag | buyer: logical 1, attempts 3, accepted 0, delivered 0; merchant 0 | a fourth attempt; another channel | D | planned |
+| E12 | one buyer notification due | provider outcome unknown (timeout without acknowledgement) | state "unknown"; no automatic resend | buyer: logical 1, attempts 1, accepted 0 claimed, delivered 0 claimed, unknown 1; merchant 0 | claiming accepted or delivered; an automatic duplicate | D | planned |
 | E13 | fulfillment created with `notifyCustomer = true` | carrier acceptance | native notification relied on | 0 / 0 | a Nahlah double | D | planned |
 | E14 | refund created with Shopify notifying the buyer | transactions verified | native notification relied on | 0 / 0 | a Nahlah double | D | planned |
 | E15 | unknown whether Shopify notified | carrier acceptance | — | — | — | D | blocked: owner choice (how native notification is known) |
@@ -202,16 +229,22 @@ Fixture rules:
 | ID | Initial state | Events | Expected state | Buyer / merchant | Forbidden | Level | Status |
 |---|---|---|---|---|---|---|---|
 | F1a | connected shop | identical privacy delivery repeated, concurrently and with new webhook ids | one open request; counters only | 0 / 0 | a second request | D | implemented [P12] |
-| F1b | COD order (later slice) | identical and cross-topic duplicate order webhooks | one effect | as the first event only | double effects or messages | D | planned |
+| F1b | no order (later slice) | COD order created (`orders/create`), then the same creation state again via `orders/updated` and a redelivered `orders/create` | one COD request | 1 / 0 total (N1 once) | a second N1; a second order row | D | planned |
 | F2a | uninstalled then reinstalled shop | old uninstall / privacy body replayed after the reinstall | new generation retained, never erased | 0 / 0 | revival, erasure of the new installation | D | implemented [P13] |
 | F2b | cancelled / deleted order (later slice) | late event after cancel, uninstall or delete | no regression | 0 / 0 | messages or state revival | D | planned |
 | F3a | connected shop | receipt COMMIT in flight at the HTTP deadline; receipt blocked past it | 503; one durable request; idempotent redelivery | 0 / 0 | a lost or doubled receipt | D | implemented [P14] — proves receipt recovery only |
-| F3b | order event processed (later slice) | crash before / after the database commit, and before / after provider (WhatsApp) acceptance | exactly-once business effect and message | per event | a lost or duplicated send | D | planned (general exactly-once across external acceptance is not proven) |
+| F3b-1 | COD order event (later slice), provider available | crash **before** the commit that records the notification decision; event redelivered | decision recorded once on retry | buyer: logical 1, attempts 1, accepted 1 | a lost decision; two sends | D | planned |
+| F3b-2 | as F3b-1 | crash **after** that commit, **before** the provider send; recovery runs | one send from the recorded decision | buyer: logical 1, attempts 1, accepted 1 | a lost send; a second logical notification | D | planned |
+| F3b-3 | as F3b-1 | provider **accepted** the message, then a crash **before** the acceptance was recorded | acceptance unknown to Nahlah until reconciled | buyer: logical 1, attempts 1, accepted 0 claimed, unknown 1 until reconciliation | a blind resend | D | blocked: design — provider-side reconciliation (status lookup or provider idempotency) is not designed |
+| F3b-4 | as F3b-1 | provider outcome unknown (timeout, provider unavailable) | state "unknown"; no automatic resend | buyer: logical 1, attempts 1, accepted 0 claimed, unknown 1 | a blind resend; claiming delivery | D | blocked: design — unavailable-provider reconciliation is not designed |
 | F4a | catalog import running | 429 / throttling, GraphQL errors, 5xx, timeouts | bounded retries, then a classified failure; last good catalog kept | 0 / 0 | unbounded retries; partial publication | U + D | implemented [P15] |
 | F4b | catalog import running | access token rotated mid-import | new credential followed, old one never reused | 0 / 0 | reuse of a retired token | D | implemented [P15] |
 | F5 | events missed during an outage (later slice) | reconciliation | state repaired | 0 / 0 for historical events | historical message floods | D | planned |
 | F6 | two shops, two tenants | operations on both | isolated | 0 / 0 | cross-store effects | D / R | D implemented [P1]; R NOT RUN — pending permissions |
 | F7 | all integrations configured (later slices) | Shopify, Meta and WhatsApp outages, each alone | each degrades alone | 0 / 0 during the outage | cascading failure; silent loss | D | planned |
+
+General exactly-once external messaging is **not implemented and not
+guaranteed** by any Draft; F3a covers only the durable privacy receipt.
 
 ## Proof references
 
