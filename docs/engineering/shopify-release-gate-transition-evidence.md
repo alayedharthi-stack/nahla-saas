@@ -1,4 +1,12 @@
-# Shopify release gate — frozen-source validation evidence (Draft PR #1214, corrected source)
+# Shopify release gate: retained historical Claude validation report
+
+**Superseded guard report.** These runs concern `2ab3042d` and the earlier
+guard. Independent review subsequently changed its import boundary,
+snapshot target validation and effective read-only check. The old PostgreSQL
+passes do not establish validation of the modified guard. Current local
+results and remaining blockers are in
+[shopify-release-gate-independent-review-evidence.md](shopify-release-gate-independent-review-evidence.md).
+Draft #1214 remains unaccepted pending that validation and independent review.
 
 Tested source: commit `2ab3042d331ce9c7cbef77d75e4e834de25f40d5` (tree `d9a81d86084d07366856b04d28e4b3b29eba8989`), branch `claude/shopify-release-gate-transition-20261011`, stacked on PR #1211 at `8308c16e39a18745239e869e6996c7aeaf680fd4`. The working tree was clean (porcelain 0) before and after every run and the HEAD was re-verified after each run; this document is a docs-only addition on top of that commit and changes no tested file.
 
