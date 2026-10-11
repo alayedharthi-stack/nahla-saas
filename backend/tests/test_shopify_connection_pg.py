@@ -67,6 +67,7 @@ from services.shopify_connection.oauth import (  # noqa: E402
     compute_query_hmac,
 )
 from services.shopify_connection.webhooks import SignedShopIdentity  # noqa: E402
+from backend.tests import _alembic_topology_probe as topo  # noqa: E402
 
 _MIGRATION_PATH = _REPO / "database" / "migrations" / "versions" / "0121_shopify_connection_foundation.py"
 
@@ -503,29 +504,56 @@ def test_downgrade_drops_only_the_shopify_tables():
 
 def test_alembic_chain_upgrades_0120_to_0121_and_back():
     name = _fresh_db("shp_chain")
-    env = {**os.environ, "DATABASE_URL": _url(name)}
+    url = _url(name)
+    env = {**os.environ, "DATABASE_URL": url}
 
     def alembic(*args):
         return subprocess.run([sys.executable, "-m", "alembic", *args], cwd=str(_REPO / "database"), env=env,
                               capture_output=True, text=True, timeout=600)
 
     try:
-        for target in ("0093", "0111", "0113", "0120", "0121"):
+        # The deployed topology {0111, 0113, 0120} (three applied branch heads) is built by genuine
+        # upgrades only; nothing is stamped, merged or fabricated. Every later step asserts the exact
+        # alembic_version rows, the retained 0111/0113 rows, the non-Shopify schema by definition and
+        # synthetic sentinel rows in generic, catalog and retained-branch tables.
+        for target in ("0093", "0111", "0113", "0120"):
             proc = alembic("upgrade", target)
             assert proc.returncode == 0, proc.stderr[-3000:]
-        eng = create_engine(_url(name), poolclass=NullPool, future=True)
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0121" in versions and "0120" not in versions
+        topo.assert_rows(url, topo.S0, "S0")
+        baseline = topo.schema_snapshot(url)
+        planted = topo.plant_sentinels(url)
+        counts = topo.row_counts(url, topo.SENTINEL_TABLES)
+        topo.assert_step(url, topo.S0, baseline, planted, counts, "S0")
+
+        def audit(expect: str):
+            return subprocess.run([sys.executable, str(_REPO / "scripts" / "audit_alembic_topology_readonly.py"), "--expect", expect],
+                                  cwd=str(_REPO), env=env, capture_output=True, text=True, timeout=600)
+
+        # the read-only preflight accepts exactly S0 and fails closed on the next state or a subset
+        assert audit("0111,0113,0120").returncode == 0
+        assert audit("0111,0113,0121").returncode == 1
+        assert audit("0111,0120").returncode == 1
+
+        proc = alembic("upgrade", "0121")
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        topo.assert_step(url, topo.S1, baseline, planted, counts, "S1 after upgrade 0121")
+        eng = create_engine(url, poolclass=NullPool, future=True)
         assert set(SHOPIFY_TABLE_NAMES) <= set(inspect(eng).get_table_names())
+        assert audit("0111,0113,0121").returncode == 0 and audit("0111,0113,0120").returncode == 1
+
         proc = alembic("downgrade", "0121@-1")
         assert proc.returncode == 0, proc.stderr[-3000:]
-        with eng.connect() as conn:
-            versions = set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars())
-        assert "0120" in versions and "0121" not in versions
+        topo.assert_step(url, topo.S0, baseline, planted, counts, "S0 after downgrade 0121@-1")
         assert not (set(SHOPIFY_TABLE_NAMES) & set(inspect(eng).get_table_names()))
         assert "meta_catalog_authorizations" in inspect(eng).get_table_names()
+        assert audit("0111,0113,0120").returncode == 0
         eng.dispose()
+        # negative control, last: same-name CHECK / foreign-key / index-predicate definition changes must be
+        # detected by the definition snapshot (and vanish again once restored); the database is dropped after
+        topo.assert_definition_changes_are_detected(url, baseline)
+        # negative control: a seeded column the projection never listed (query_digest, granted_scopes,
+        # source_observed_at) must fail the whole-row digest check and pass again once restored exactly
+        topo.assert_sentinel_mutations_are_detected(url, planted)
     finally:
         _drop(name)
 
