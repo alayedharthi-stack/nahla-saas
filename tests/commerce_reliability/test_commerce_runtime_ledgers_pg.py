@@ -1172,6 +1172,8 @@ def _wait_for_lock_waiters(engine, expected: int) -> None:
     deadline = time.monotonic() + 30
     with engine.connect() as conn:
         while True:
+            # pg_stat_activity caches its backend list per transaction; refresh so a waiter connected later is counted.
+            conn.execute(text("SELECT pg_stat_clear_snapshot()"))
             waiting = int(conn.execute(text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
                 "AND pid <> pg_backend_pid() AND wait_event_type = 'Lock'")).scalar())
