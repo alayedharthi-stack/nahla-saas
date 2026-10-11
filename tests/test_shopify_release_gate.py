@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -340,23 +341,30 @@ def test_render_round_trips_and_pins_every_literal(tmp_path):
     root = harness.build_root(tmp_path / "root")
     approval = harness.approval_for(root, "S3", DB)
     report = render.inventory_report(root)
-    command = harness.rendered(root, "S3", DB, approval)
+    # This is a static production-command round trip, independent of the
+    # operator host's executable spelling and filesystem separators.
+    command = render.render_command(root, python="python", release_sha=harness.SYNTHETIC_RELEASE_SHA, phase="S3",
+                                    approval_sha256=harness.payload_sha(approval), db=DB,
+                                    backup_service=harness.SYNTHETIC_BACKUP["service"], backup_volume=harness.SYNTHETIC_BACKUP["volume"],
+                                    container_root=k.CONTAINER_ROOT, **harness.SYNTHETIC_IDENTITY)
     source = render.decode_command(command)
     assert source == render.render_source(root, release_sha=harness.SYNTHETIC_RELEASE_SHA, phase="S3", approval_sha256=harness.payload_sha(approval),
                                           db=DB, backup_service=harness.SYNTHETIC_BACKUP["service"], backup_volume=harness.SYNTHETIC_BACKUP["volume"],
-                                          container_root=str(root), **harness.SYNTHETIC_IDENTITY)
+                                          container_root=k.CONTAINER_ROOT, **harness.SYNTHETIC_IDENTITY)
     for literal in (report["gate_sha256"], report["inventory_digest"], str(report["inventory_count"]), harness.SYNTHETIC_RELEASE_SHA,
                     harness.payload_sha(approval), '"S3"', DB, *harness.SYNTHETIC_IDENTITY.values(), *harness.SYNTHETIC_BACKUP.values(),
                     '"scripts/__init__.py"', '"scripts/operators/__init__.py"', '"PGHOST"'):
         assert literal in source, literal
     assert "postgresql://" not in source and "password" not in source.lower() and "import scripts" not in source
     imports = {alias.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Import) for alias in node.names}
-    assert imports == {"base64", "hashlib", "os", "sys"} and not any(isinstance(n, ast.ImportFrom) for n in ast.walk(ast.parse(source)))
+    assert imports == {"base64", "hashlib", "os", "sys", "importlib.machinery"}
+    assert not any(isinstance(n, ast.ImportFrom) for n in ast.walk(ast.parse(source)))
     argv_match = re.search(r"^ARGV = (\[.*\])$", source, re.M)
     args = gate.build_parser().parse_args(json.loads(argv_match.group(1)))
     assert (args.phase, args.release_sha, args.inventory_digest, args.inventory_count, args.approval_sha256) == (
         "S3", harness.SYNTHETIC_RELEASE_SHA, report["inventory_digest"], str(report["inventory_count"]), harness.payload_sha(approval))
-    assert command.startswith(f'{sys.executable} -I -c "import base64,sys;exec(') and "$" not in command
+    assert args.root == k.CONTAINER_ROOT
+    assert command.startswith('python -I -c "import base64,sys;exec(') and "$" not in command
 
 
 @pytest.mark.parametrize("kwargs, error", [
@@ -477,6 +485,86 @@ def test_snapshot_refuses_inherited_target_before_connection(monkeypatch, name):
     with pytest.raises(render.RenderRefusal) as failure:
         render.snapshot("postgresql://u:p@disposable.internal/test", source_sha=harness.SYNTHETIC_RELEASE_SHA)
     assert failure.value.token == "snapshot_environment_override" and calls == []
+
+
+@pytest.mark.parametrize("host", ["unreachable.invalid,postgres-ancu.railway.internal",
+                                  "postgres-ancu.railway.internal,unreachable.invalid",
+                                  "disposable-a.invalid,disposable-b.invalid", ",disposable.invalid", "disposable.invalid,"])
+def test_snapshot_refuses_every_host_list_before_read_engine_construction(monkeypatch, host):
+    for variable in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
+    calls = []
+    monkeypatch.setattr(gate, "_engine", lambda url: calls.append(url))
+    with pytest.raises(render.RenderRefusal, match="snapshot_multiple_hosts"):
+        render.snapshot("postgresql://u:p@" + host + "/test", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert calls == []
+
+
+def test_snapshot_refuses_existing_host_with_dns_root_dot_without_connection(monkeypatch):
+    for variable in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(variable, raising=False)
+    calls = []
+    monkeypatch.setattr(gate, "_engine", lambda url: calls.append(url))
+    with pytest.raises(render.RenderRefusal, match="refusing_existing_platform_database"):
+        render.snapshot("postgresql://u:p@postgres-ancu.railway.internal./railway", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert calls == []
+
+
+def _distribution_metadata(site, name, version, module=None):
+    info = site / (name.replace("-", "_") + "-" + version + ".dist-info")
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    if module:
+        origin = site / module / "__init__.py"
+        origin.parent.mkdir()
+        origin.write_text(f"__version__ = {version!r}\n", encoding="utf-8")
+        (info / "RECORD").write_text(f"{module}/__init__.py,,\n", encoding="utf-8")
+
+
+def test_repository_distribution_metadata_cannot_mask_mismatched_installed_pins(tmp_path, monkeypatch):
+    root, site = tmp_path / "repository", tmp_path / "installed-site"
+    for name, pinned in k.LIBRARY_PINS.items():
+        _distribution_metadata(root, name, pinned)
+        _distribution_metadata(site, name, "0.0")
+    monkeypatch.syspath_prepend(str(root))
+    # Demonstrate the vulnerable unrestricted discovery sees the advertised
+    # repository versions, while the guarded discovery must refuse them.
+    assert {name: gate.importlib.metadata.version(name) for name in k.LIBRARY_PINS} == dict(k.LIBRARY_PINS)
+    monkeypatch.setattr(gate.sysconfig, "get_paths", lambda: {"purelib": str(site), "platlib": str(site)})
+    check = gate.check_libraries(root)
+    assert check.reason == k.R_LIBRARY_PIN_MISMATCH
+    assert check.detail == {"mismatched": sorted(k.LIBRARY_PINS)}
+
+
+@pytest.mark.parametrize("defect", ["foreign_origin", "wrong_imported_version", "missing_record"])
+def test_library_pin_is_bound_to_recorded_import_origin_and_actual_version(tmp_path, monkeypatch, defect):
+    root, site = tmp_path / "repository", tmp_path / "installed-site"
+    names = {"alembic": "alembic", "sqlalchemy": "sqlalchemy", "psycopg2-binary": "psycopg2"}
+    for name, pinned in k.LIBRARY_PINS.items():
+        _distribution_metadata(site, name, pinned, names[name])
+    monkeypatch.setattr(gate.sysconfig, "get_paths", lambda: {"purelib": str(site), "platlib": str(site)})
+    origins = {name: site / name / "__init__.py" for name in names.values()}
+    versions = {names[name]: pinned for name, pinned in k.LIBRARY_PINS.items()}
+    imported = []
+    monkeypatch.setattr(gate.importlib.util, "find_spec", lambda name: SimpleNamespace(origin=str(origins[name])))
+
+    def load(name):
+        imported.append(name)
+        return SimpleNamespace(__file__=str(origins[name]), __version__=versions[name])
+
+    monkeypatch.setattr(gate.importlib, "import_module", load)
+    assert gate.check_libraries(root).status == k.PASS
+    imported.clear()
+    if defect == "foreign_origin":
+        origins["sqlalchemy"] = root / "sqlalchemy.py"
+    elif defect == "wrong_imported_version":
+        versions["sqlalchemy"] = "0.0"
+    else:
+        next(site.glob("sqlalchemy-*.dist-info/RECORD")).unlink()
+    check = gate.check_libraries(root)
+    assert check.reason == k.R_LIBRARY_PIN_MISMATCH and check.detail == {"mismatched": ["sqlalchemy"]}
+    if defect != "wrong_imported_version":
+        assert "sqlalchemy" not in imported
 
 
 def test_snapshot_uses_only_the_validated_explicit_target_and_refuses_current_host(monkeypatch):

@@ -120,7 +120,11 @@ is refused.
 Source-side (no connection): `root`; `release_sha`; `inventory`
 (`initializer_unexpected`, `inventory_file_missing`,
 `inventory_count_mismatch`, `inventory_digest_mismatch`); `libraries`
-(Alembic 1.13.1, SQLAlchemy 2.0.30, psycopg2-binary 2.9.9);
+(Alembic 1.13.1, SQLAlchemy 2.0.30, psycopg2-binary 2.9.9; distribution
+discovery restricted to interpreter `purelib`/`platlib` outside the repository,
+with each imported origin recorded by its selected distribution and the
+package's actual runtime version matching the pin; repository `.dist-info`
+advertisements cannot satisfy this check);
 `migration_preflight` (AST only, before the script directory loads any
 migration module: every file declares exactly one string `revision` id, a
 single string or null `down_revision`, no `depends_on`, no `branch_labels`;
@@ -191,7 +195,9 @@ and validates the effective driver target with the same strict parser before
 opening a connection. Query overrides (including `host`, `hostaddr`, `dbname`,
 `port`, `service`), malformed targets and the existing platform database host
 are refused before `_engine`; an accepted disposable target is bound to an
-explicit host, port and database. No forbidden-target probe is made.
+explicit single host, port and database. All comma-separated authority host
+lists are refused, including a failover list with the existing database host;
+its DNS root-dot spelling is refused too. No forbidden-target probe is made.
 
 ## 5. Source / state / phase matrix
 
@@ -326,8 +332,10 @@ re-rendered command (its SHA-256 is pinned there).
 The disposable tests exercise only Alembic Step C (`upgrade 0093`). They do
 not run the full startup path: Salla cleanup, `create_all`, and safe alters
 remain unverified at each Shopify state. Reports of unchanged rows/schema
-below apply to Step C only. Full startup compatibility is an acceptance gap,
-not established by the gate or those tests.
+below apply to Step C only. Full startup compatibility is not established by
+the gate or those tests. Its experiment is separate from the essential guard
+suite and optional for guard review; a later rollout decision must explicitly
+assess the unverified startup steps rather than infer compatibility from Step C.
 
 * **New-source Step C**: the application's background bootstrap
   (`alembic upgrade 0093`, pinned by `bootstrap_migration_contract`) is a
@@ -455,7 +463,8 @@ verified; (5) the Shopify configuration plan (§9) is confirmed against the
 official pages cited by the coordinator before any shell setting changes;
 (6) the effective read-only default, source-only import controls and snapshot
 target refusals are tested on the exact proposed source; (7) full startup
-compatibility is verified separately from Step C; (8) deployment exclusion
+compatibility status is recorded separately from Step C, with any optional
+startup experiment labelled as such; (8) deployment exclusion
 is enforceable and its drain evidence is recorded before the manual window.
 Prior PostgreSQL runs on an earlier guard do not establish these checks on
 the modified guard; the current evidence document distinguishes them.

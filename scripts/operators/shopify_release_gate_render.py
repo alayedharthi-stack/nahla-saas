@@ -321,7 +321,12 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
     target, _refusal = gate.parse_database_url(database_url, environment)
     if target is None:
         raise RenderRefusal("database_url_malformed")
-    if target["host"] == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
+    # libpq interprets an authority host list as failover destinations. A
+    # disposable snapshot must name one host, never a list with a hidden
+    # existing-platform member. Refuse before constructing the read engine.
+    if "," in target["host"]:
+        raise RenderRefusal("snapshot_multiple_hosts")
+    if target["host"].rstrip(".") == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
         raise RenderRefusal("refusing_existing_platform_database")
     bound_url = gate.explicit_url(database_url, target)
     if bound_url is None:

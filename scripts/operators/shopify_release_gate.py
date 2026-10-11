@@ -54,11 +54,13 @@ import base64
 import datetime as _dt
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import logging
 import os
 import signal
 import sys
+import sysconfig
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
@@ -186,14 +188,46 @@ def check_inventory(root: Path, expected_count: int, expected_digest: str) -> Tu
     return Check("inventory", k.PASS, detail={"count": count, "digest": digest}), (count, digest)
 
 
-def check_libraries() -> Check:
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def check_libraries(root: Optional[Path] = None) -> Check:
+    """Bind pins to installed distributions and imported origins, never repository metadata."""
+    repository = root or _OWN_ROOT
+    configured = sysconfig.get_paths()
+    trusted = sorted({str(Path(configured[key]).resolve()) for key in ("purelib", "platlib")
+                      if configured.get(key) and not _within(Path(configured[key]), repository)})
+    modules = {"alembic": "alembic", "sqlalchemy": "sqlalchemy", "psycopg2-binary": "psycopg2"}
     mismatched: List[str] = []
     for name, pinned in k.LIBRARY_PINS.items():
         try:
-            installed = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
-            installed = None
-        if installed != pinned:
+            distributions = list(importlib.metadata.Distribution.discover(name=name, path=trusted))
+            if len(distributions) != 1 or distributions[0].version != pinned:
+                mismatched.append(name)
+                continue
+            distribution = distributions[0]
+            dependency_root = Path(distribution.locate_file("")).resolve()
+            if str(dependency_root) not in trusted:
+                mismatched.append(name)
+                continue
+            spec = importlib.util.find_spec(modules[name])
+            origin = Path(spec.origin).resolve() if spec and spec.origin else None
+            recorded = {str(p).replace("\\", "/") for p in distribution.files or ()}
+            if (origin is None or _within(origin, repository) or not _within(origin, dependency_root)
+                    or origin.relative_to(dependency_root).as_posix() not in recorded):
+                mismatched.append(name)
+                continue
+            imported = importlib.import_module(modules[name])
+            # psycopg2 appends build capabilities after the version number.
+            actual_version = str(getattr(imported, "__version__", "")).split(" ", 1)[0]
+            if Path(imported.__file__).resolve() != origin or actual_version != pinned:
+                mismatched.append(name)
+        except Exception:  # noqa: BLE001 - refuse discovery/import failures by allow-listed package name only
             mismatched.append(name)
     if mismatched:
         return Check("libraries", k.FAIL, k.R_LIBRARY_PIN_MISMATCH, {"mismatched": sorted(mismatched)})
@@ -745,7 +779,7 @@ def main(argv: Optional[Sequence[str]] = None, environ: Optional[Mapping[str, st
             if stop(check_root(root)) or stop(check_release_sha(env, args.release_sha)):
                 break
             inventory_check, runtime = check_inventory(root, args.inventory_count, args.inventory_digest)
-            if stop(inventory_check) or stop(check_libraries()) or stop(preflight_migration_files(root)):
+            if stop(inventory_check) or stop(check_libraries(root)) or stop(preflight_migration_files(root)):
                 break
             graph_check, known = check_graph(root, phase_def)
             if stop(graph_check):
