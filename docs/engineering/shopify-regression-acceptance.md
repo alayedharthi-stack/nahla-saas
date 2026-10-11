@@ -252,9 +252,9 @@ Node ids are pinned: #1202–#1204 at
 [`08428cb`](https://github.com/alayedharthi-stack/nahla-saas/tree/08428cb7edf9666a0b31874e8f0256764fd11c90)
 (the #1204 head, which contains #1202 and #1203), #1205 at
 [`3681ebd`](https://github.com/alayedharthi-stack/nahla-saas/tree/3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c)
-— the **pinned proof source**; its final execution evidence is **pending**
-until full terminal logs of the final-head runs exist (pre-commit focused
-runs are not final evidence).
+— the **pinned proof source**; its final-head execution evidence is
+recorded in [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/fdb6fbb044708ac2343e33fafe1442f6dfec5f58/docs/engineering/shopify-privacy-webhooks-validation.md)
+(docs-only commit `fdb6fbb`; tested source `3681ebd`, baseline `08428cb`).
 
 * **[P1] two tenants / shops isolated** —
   `backend/tests/test_shopify_connection_pg.py::test_connect_two_tenants_isolated`;
@@ -340,7 +340,7 @@ runs are not final evidence).
 |---|---|
 | [#1202](https://github.com/alayedharthi-stack/nahla-saas/pull/1202) | design and runbook `docs/engineering/shopify-connection-foundation.md`; validation recorded on the Draft |
 | [#1204](https://github.com/alayedharthi-stack/nahla-saas/pull/1204) | `docs/engineering/shopify-catalog-import-validation.md` |
-| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | `docs/engineering/shopify-privacy-webhooks-validation.md` on its branch — pending: linked here once its final-head runs are recorded |
+| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/fdb6fbb044708ac2343e33fafe1442f6dfec5f58/docs/engineering/shopify-privacy-webhooks-validation.md) at `fdb6fbb` (tested source `3681ebd`, baseline `08428cb`): strict PG16.15 and PG18.6 SCRAM **PROVEN 815/815**; 17 `lint-and-test` steps RC 0 at both SHAs; owner 65-file regression gate **FAILED** at candidate and baseline alike (RC 1 — 2 failed, 1075 passed, 41 skipped; identical JUnit identities: reproduced baseline debt, not a pass) |
 
 Final test links for later slices are added here only when those runs exist.
 
