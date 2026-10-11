@@ -227,7 +227,9 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         assert '"public.shopify_privacy_request_events_id_seq"' in out.split("CHECK shopify_footprint")[1].split("\n")[0]
         _sql(db, "DROP TABLE shopify_privacy_request_events")
         out = _assert_fail(gate_root, "S3", db, "partial footprint", check="shopify_footprint", reason=k.R_FOOTPRINT_MISSING)
-        assert '"missing":["shopify_privacy_request_events"]' in out
+        footprint_line = out.split("CHECK shopify_footprint")[1].split("\n")[0]
+        missing = json.loads(footprint_line[footprint_line.index("{"):])["missing"]
+        assert missing == ["shopify_privacy_request_events", "public.shopify_privacy_request_events_id_seq"]
         assert _alembic(db, "downgrade", "0123@-1").returncode == 0 and _alembic(db, "upgrade", "0123").returncode == 0
         _assert_pass(gate_root, "S3", db, "S3 rebuilt")
         # a same-name UNIQUE on the wrong columns (the connection key itself carries dependent composite
