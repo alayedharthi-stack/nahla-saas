@@ -26,7 +26,9 @@ from services.google_merchant_products_v1 import (
     InvalidTargetError,
     OFFER_STATUS_BLOCKED,
     OFFER_STATUS_PASSES_OFFLINE_CHECKS,
+    OfferPreview,
     map_product,
+    mark_duplicate_identities,
 )
 
 DRY_RUN_FLAG_ENV = "GOOGLE_MERCHANT_DRY_RUN"
@@ -84,7 +86,7 @@ def build_dry_run_preview(db: Session, target: GoogleMerchantTarget) -> Dict[str
         return {"enabled": False, "tenant_id": target.tenant_id}
 
     Product, ProductVariant = _models()
-    offers: List[Dict[str, Any]] = []
+    offer_rows: List[OfferPreview] = []
     exclusions: List[Dict[str, Any]] = []
     orphan_variant_ids: List[Any] = []
 
@@ -109,8 +111,13 @@ def build_dry_run_preview(db: Session, target: GoogleMerchantTarget) -> Dict[str
 
         for product in products:
             mapped = map_product(target, product, by_product.get(product.id, []))
-            offers.extend(o.to_dict() for o in mapped.offers)
+            offer_rows.extend(mapped.offers)
             exclusions.extend(e.to_dict() for e in mapped.exclusions)
+
+    # Final identities must be unique across the COMPLETE tenant preview;
+    # every colliding offer is blocked before any summary is computed.
+    duplicate_offers = mark_duplicate_identities(offer_rows)
+    offers: List[Dict[str, Any]] = [o.to_dict() for o in offer_rows]
 
     issue_counts: Counter = Counter()
     for offer in offers:
@@ -132,6 +139,7 @@ def build_dry_run_preview(db: Session, target: GoogleMerchantTarget) -> Dict[str
             "offers_blocked": status_counts.get(OFFER_STATUS_BLOCKED, 0),
             "offers_passing_offline_checks": status_counts.get(OFFER_STATUS_PASSES_OFFLINE_CHECKS, 0),
             "exclusions_total": len(exclusions),
+            "duplicate_identity_offers": duplicate_offers,
             "issue_counts": dict(sorted(issue_counts.items())),
         },
         "data_gaps": [dict(gap) for gap in NORMALIZATION_DATA_GAPS],

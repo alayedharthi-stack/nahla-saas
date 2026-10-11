@@ -29,7 +29,10 @@ from services.google_merchant_dry_run import (  # noqa: E402
     build_dry_run_preview,
     google_merchant_dry_run_enabled,
 )
-from services.google_merchant_products_v1 import GoogleMerchantTarget  # noqa: E402
+from services.google_merchant_products_v1 import (  # noqa: E402
+    CrossTenantRowError,
+    GoogleMerchantTarget,
+)
 
 
 def _make_db():
@@ -176,3 +179,79 @@ def test_preview_never_flushes_or_commits_caller_state(monkeypatch, seeded):
     db.rollback()
     assert db.query(Product).filter(Product.external_id == "7999").count() == 0
     assert db.query(Product).filter(Product.external_id == "7001").one().title == "عسل سدر"
+
+
+def test_malformed_product_does_not_break_healthy_preview(monkeypatch, seeded):
+    monkeypatch.setenv(DRY_RUN_FLAG_ENV, "true")
+    db, honey_tenant, _ = seeded
+    bad = _product(db, honey_tenant, external_id="7666", title="رابط تالف", price="40",
+                   meta={"product_url": "https://[bad", "additional_images": ["https://[bad"]})
+    _variant(db, bad, retailer_id="7666", price="40", currency="SAR", is_default=True)
+
+    preview = build_dry_run_preview(
+        db, GoogleMerchantTarget(tenant_id=honey_tenant.id, content_language="ar", feed_label="SA"),
+    )
+    offers = {o["offer_id"]: o for o in preview["offers"]}
+    assert offers["7666"]["status"] == "blocked"
+    codes = {i["code"] for i in offers["7666"]["issues"]}
+    assert {"link_invalid", "additional_image_link_invalid"} <= codes
+    assert offers["7001"]["status"] == "passes_offline_checks"
+    assert {"5550-901", "5550-902"} <= set(offers)
+
+
+def test_cross_tenant_error_is_not_suppressed(monkeypatch, seeded):
+    monkeypatch.setenv(DRY_RUN_FLAG_ENV, "true")
+    db, honey_tenant, _ = seeded
+
+    def _leak(*_args, **_kwargs):
+        raise CrossTenantRowError("variant_tenant_mismatch")
+
+    monkeypatch.setattr("services.google_merchant_dry_run.map_product", _leak)
+    with pytest.raises(CrossTenantRowError):
+        build_dry_run_preview(
+            db, GoogleMerchantTarget(tenant_id=honey_tenant.id, content_language="ar", feed_label="SA"),
+        )
+
+
+def test_mixed_batch_isolation_and_duplicate_identities(monkeypatch, seeded):
+    """Malformed, conflicting and colliding rows are blocked; healthy rows are not."""
+    monkeypatch.setenv(DRY_RUN_FLAG_ENV, "true")
+    db, honey_tenant, generic_tenant = seeded
+    for title in ("نسخة أولى", "نسخة ثانية"):
+        dup = _product(db, honey_tenant, external_id="DUP", title=title, price="50")
+        _variant(db, dup, retailer_id="DUP", price="50", currency="SAR", is_default=True)
+    clash = _product(db, honey_tenant, external_id="5550-901", title="يتعارض مع متغير", price="60")
+    _variant(db, clash, retailer_id="5550-901", price="60", currency="SAR", is_default=True)
+    conflict = _product(db, honey_tenant, external_id="7444", title="سعر متعارض", price="120",
+                        meta={"regular_price": "150", "sale_price": "0"})
+    _variant(db, conflict, retailer_id="7444", price="120", currency="SAR", is_default=True)
+    bad = _product(db, honey_tenant, external_id="7666", title="رابط تالف", price="40",
+                   meta={"image_url": "https://shop.test:99999/x.jpg"})
+    _variant(db, bad, retailer_id="7666", price="40", currency="SAR", is_default=True)
+    # The same id in ANOTHER tenant is not a collision for this tenant.
+    other = _product(db, generic_tenant, external_id="7001", title="منتج مستأجر آخر", price="9")
+    _variant(db, other, retailer_id="7001", price="9", currency="SAR", is_default=True)
+
+    preview = build_dry_run_preview(
+        db, GoogleMerchantTarget(tenant_id=honey_tenant.id, content_language="ar", feed_label="SA"),
+    )
+    by_status: dict = {}
+    for offer in preview["offers"]:
+        by_status.setdefault(offer["status"], []).append(offer["offer_id"])
+        codes = {i["code"] for i in offer["issues"]}
+        if offer["offer_id"] in ("DUP", "5550-901"):
+            assert "duplicate_offer_identity" in codes
+        if offer["offer_id"] == "7444":
+            assert "price_conflict_unresolved" in codes
+            assert "price" not in offer["product_input"]["productAttributes"]
+        if offer["offer_id"] == "7666":
+            assert "image_link_invalid" in codes
+
+    assert sorted(by_status["blocked"]) == ["5550-901", "5550-901", "7444", "7666", "DUP", "DUP"]
+    assert sorted(by_status["passes_offline_checks"]) == ["5550-902", "7001"]
+    summary = preview["summary"]
+    assert summary["offers_total"] == 8
+    assert summary["offers_blocked"] == 6
+    assert summary["offers_passing_offline_checks"] == 2
+    assert summary["duplicate_identity_offers"] == 4
+    assert summary["issue_counts"]["blocking:duplicate_offer_identity"] == 4

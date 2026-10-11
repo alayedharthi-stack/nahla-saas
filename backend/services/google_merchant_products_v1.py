@@ -28,7 +28,9 @@ Truth rules
   ``nahla_*`` ids are never offered as Google identities.
 * Prices are exact ``Decimal`` → micros. Floats are refused, nothing is
   rounded, and currency is read only from the same row as the price —
-  never defaulted and never borrowed from another row.
+  never defaulted and never borrowed from another row. An effective price
+  that neither the regular price nor a proven sale explains is blocking
+  and no price is emitted.
 * Missing brand / GTIN / MPN / description stay missing and are
   reported. GTIN / MPN are emitted only when stored source metadata
   already carries a value that passes validation.
@@ -90,7 +92,6 @@ SPEC_LIMITS: Mapping[str, int] = {
     "feed_label": 20,
 }
 INT64_MAX = 2**63 - 1
-MICROS_PER_UNIT = Decimal(1_000_000)
 
 _CONTENT_LANGUAGE_RE = re.compile(r"^[a-z]{2}$")
 _FEED_LABEL_RE = re.compile(r"^[A-Z0-9_-]{1,20}$")
@@ -98,7 +99,10 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _PRICE_TEXT_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
 _GTIN_RE = re.compile(r"^(?:[0-9]{8}|[0-9]{12,14})$")
 _HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
-_UNSAFE_ID_CHARS = frozenset("/%~")
+# RFC 3986 unreserved characters minus "~" (the resource-key separator).
+# Any other character in an offer id means only the encoded name is given.
+_PLAIN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_INT64_DIGITS = 19
 _SYNTHETIC_VARIANT_ID_PREFIX = "nahla_v_"
 
 # GS1 prefixes (on the GTIN-13 view) Google does not accept: restricted
@@ -242,9 +246,15 @@ def _resource_key(content_language: str, feed_label: str, offer_id: str) -> str:
 
 
 def product_input_plain_id(content_language: str, feed_label: str, offer_id: str) -> Optional[str]:
-    """``contentLanguage~feedLabel~offerId``, or None when the offer id needs encoding."""
-    if any(ch in _UNSAFE_ID_CHARS for ch in offer_id):
-        return None
+    """``contentLanguage~feedLabel~offerId`` only when every part is plain-safe.
+
+    Conservative: any character outside RFC 3986 "unreserved" (and any
+    ``~``) means None; the encoded name is the canonical id. The offer id
+    itself is never escaped or altered.
+    """
+    for part in (content_language, feed_label, offer_id):
+        if not _PLAIN_ID_RE.match(part or ""):
+            return None
     return _resource_key(content_language, feed_label, offer_id)
 
 
@@ -282,6 +292,8 @@ def parse_price_amount(value: Any) -> Tuple[Optional[Decimal], Optional[str]]:
     if isinstance(value, Mapping):
         return parse_price_amount(value.get("amount"))
     if isinstance(value, int):
+        if value.bit_length() > 128:
+            return None, "price_out_of_range"
         amount = Decimal(value)
     elif isinstance(value, Decimal):
         if not value.is_finite():
@@ -302,12 +314,45 @@ def parse_price_amount(value: Any) -> Tuple[Optional[Decimal], Optional[str]]:
     return amount, None
 
 
+def micros_or_error(amount: Decimal) -> Tuple[Optional[int], Optional[str]]:
+    """Exact int64 micros for *amount*, else ``(None, error_code)``.
+
+    Pure integer arithmetic on the Decimal sign/digits/exponent tuple: no
+    decimal context is used, so the ambient precision can never round a
+    value. Any non-zero digit below one micro is ``price_precision``;
+    anything beyond int64 is ``price_out_of_range``. Never builds a huge
+    integer from an extreme exponent or digit count.
+    """
+    if not isinstance(amount, Decimal) or not amount.is_finite():
+        return None, "price_unparseable"
+    sign, digit_tuple, exponent = amount.as_tuple()
+    digits = list(digit_tuple)
+    shift = exponent + 6
+    if shift < 0:
+        cut = -shift
+        if cut >= len(digits):
+            if any(digits):
+                return None, "price_precision"
+            return 0, None
+        if any(digits[-cut:]):
+            return None, "price_precision"
+        digits = digits[:-cut]
+        shift = 0
+    while len(digits) > 1 and digits[0] == 0:
+        digits.pop(0)
+    if not any(digits):
+        return 0, None
+    if len(digits) + shift > _INT64_DIGITS:
+        return None, "price_out_of_range"
+    micros = int("".join(str(d) for d in digits)) * 10**shift
+    if micros > INT64_MAX:
+        return None, "price_out_of_range"
+    return (-micros if sign else micros), None
+
+
 def to_micros(amount: Decimal) -> Optional[int]:
-    """Exact micros for *amount*, or None when it would need rounding."""
-    scaled = amount * MICROS_PER_UNIT
-    if scaled != scaled.to_integral_value():
-        return None
-    return int(scaled)
+    """Exact int64 micros for *amount*, or None when not exactly representable."""
+    return micros_or_error(amount)[0]
 
 
 def _price_json(micros: int, currency: Optional[str]) -> Dict[str, str]:
@@ -342,10 +387,11 @@ def _resolve_prices(src: _PriceSource, issues: List[Issue], provenance: Dict[str
         else:
             issues.append(Issue("currency_invalid", SEVERITY_BLOCKING, "price"))
 
+    # ``price`` is the row's current/effective price; ``regular_price`` the
+    # explicit list price. Salla reports 0 for an unset regular price.
     regular_raw, regular_field = src.price, "price"
     if _present(src.regular_price):
         explicit, explicit_err = parse_price_amount(src.regular_price)
-        # Salla reports 0 when no separate regular price is set.
         if not (explicit_err == "price_not_positive" and explicit == 0):
             regular_raw, regular_field = src.regular_price, "regular_price"
     if not _present(regular_raw):
@@ -355,42 +401,55 @@ def _resolve_prices(src: _PriceSource, issues: List[Issue], provenance: Dict[str
     if err:
         issues.append(Issue(err, SEVERITY_BLOCKING, "price"))
         return attrs
-    regular_micros = to_micros(regular)
-    if regular_micros is None:
-        issues.append(Issue("price_precision", SEVERITY_BLOCKING, "price"))
+    regular_micros, micros_err = micros_or_error(regular)
+    if micros_err:
+        issues.append(Issue(micros_err, SEVERITY_BLOCKING, "price"))
         return attrs
-    if regular_micros > INT64_MAX:
-        issues.append(Issue("price_out_of_range", SEVERITY_BLOCKING, "price"))
-        return attrs
-    attrs["price"] = _price_json(regular_micros, currency)
-    provenance["price"] = f"{src.origin}.{regular_field}"
 
+    # Sale candidate: a positive sale price strictly below an explicit regular.
+    sale: Optional[Decimal] = None
+    sale_issue: Optional[Issue] = None
+    if _present(src.sale_price):
+        candidate, sale_err = parse_price_amount(src.sale_price)
+        if sale_err == "price_not_positive" and candidate == 0:
+            pass  # Salla reports 0 when no sale is running.
+        elif sale_err:
+            sale_issue = Issue("sale_price_invalid", SEVERITY_WARNING, "sale_price", sale_err)
+        elif regular_field != "regular_price":
+            if candidate != regular:
+                # Only one of price/sale_price can be what the customer pays.
+                issues.append(Issue("price_conflict_unresolved", SEVERITY_BLOCKING, "price"))
+                return attrs
+            sale_issue = Issue("sale_price_ambiguous", SEVERITY_WARNING, "sale_price")
+        elif candidate >= regular:
+            sale_issue = Issue("sale_price_not_below_regular", SEVERITY_WARNING, "sale_price")
+        else:
+            sale = candidate
+
+    # The effective price must be explained by the regular price or by the
+    # proven sale; anything else is an unresolved conflict and fails closed
+    # (no price is emitted, so no misleading offer can look ready).
     if regular_field == "regular_price" and _present(src.price):
         current, current_err = parse_price_amount(src.price)
-        if current_err is None and current != regular:
-            sale_for_compare, sale_err = (
-                parse_price_amount(src.sale_price) if _present(src.sale_price) else (None, "absent")
-            )
-            if sale_err is not None or current != sale_for_compare:
-                issues.append(Issue("price_fields_inconsistent", SEVERITY_WARNING, "price"))
+        if current_err is None and current == regular:
+            if sale is not None:
+                sale_issue = Issue("sale_price_not_effective", SEVERITY_WARNING, "sale_price")
+                sale = None
+        elif not (current_err is None and sale is not None and current == sale):
+            if sale_issue is not None:
+                issues.append(sale_issue)
+            issues.append(Issue("price_conflict_unresolved", SEVERITY_BLOCKING, "price"))
+            return attrs
 
-    if not _present(src.sale_price):
+    if sale_issue is not None:
+        issues.append(sale_issue)
+    attrs["price"] = _price_json(regular_micros, currency)
+    provenance["price"] = f"{src.origin}.{regular_field}"
+    if sale is None:
         return attrs
-    sale, sale_err = parse_price_amount(src.sale_price)
-    if sale_err == "price_not_positive" and sale == 0:
-        return attrs  # Salla reports 0 when no sale is running.
-    if sale_err:
-        issues.append(Issue("sale_price_invalid", SEVERITY_WARNING, "sale_price", sale_err))
-        return attrs
-    if regular_field != "regular_price":
-        issues.append(Issue("sale_price_ambiguous", SEVERITY_WARNING, "sale_price"))
-        return attrs
-    if sale >= regular:
-        issues.append(Issue("sale_price_not_below_regular", SEVERITY_WARNING, "sale_price"))
-        return attrs
-    sale_micros = to_micros(sale)
-    if sale_micros is None:
-        issues.append(Issue("sale_price_precision", SEVERITY_BLOCKING, "sale_price"))
+    sale_micros, sale_micros_err = micros_or_error(sale)
+    if sale_micros_err:
+        issues.append(Issue(f"sale_{sale_micros_err}", SEVERITY_BLOCKING, "sale_price"))
         return attrs
     attrs["salePrice"] = _price_json(sale_micros, currency)
     provenance["salePrice"] = f"{src.origin}.sale_price"
@@ -503,8 +562,22 @@ def _brand(product: Any, issues: List[Issue], provenance: Dict[str, str]) -> Dic
 
 
 def _url_issue(url: str) -> Optional[str]:
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    """``"invalid"`` / ``"not_https"`` / None for a stored URL. Never raises.
+
+    Invalid: control characters, any unescaped whitespace, unparseable
+    authority (e.g. ``https://[bad``), invalid port, non-http(s) scheme or
+    missing host. Non-ASCII path characters are left to Google.
+    """
+    if not isinstance(url, str) or not url:
+        return "invalid"
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in url):
+        return "invalid"
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 — raises ValueError for a non-numeric / out-of-range port
+    except ValueError:
+        return "invalid"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
         return "invalid"
     if parts.scheme != "https":
         return "not_https"
@@ -570,7 +643,10 @@ def _images(product: Any, variant: Any, genuine: bool, issues: List[Issue], prov
         extra: List[str] = []
         for item in extra_raw:
             url = coerce_image_url(item)
-            if not url or url == primary or url in extra or _url_issue(url) == "invalid":
+            if not url or url == primary or url in extra:
+                continue
+            if _url_issue(url) == "invalid":
+                issues.append(Issue("additional_image_link_invalid", SEVERITY_BLOCKING, "additional_image_links"))
                 continue
             extra.append(url)
         if len(extra) > SPEC_LIMITS["additional_image_links"]:
@@ -611,7 +687,8 @@ def _text_attrs(product: Any, issues: List[Issue], provenance: Dict[str, str]) -
     return attrs
 
 
-def _variant_attributes(variant: Any, grouped: bool, issues: List[Issue], provenance: Dict[str, str]) -> Dict[str, Any]:
+def _variant_attributes(variant: Any, issues: List[Issue], provenance: Dict[str, str]) -> Dict[str, Any]:
+    """Real variant attributes; independent of how many siblings are live."""
     attrs: Dict[str, Any] = {}
     options = getattr(variant, "options", None) if variant is not None else None
     unmapped = 0
@@ -625,7 +702,7 @@ def _variant_attributes(variant: Any, grouped: bool, issues: List[Issue], proven
                 provenance[name] = f"variant.options.{key}"
             else:
                 unmapped += 1
-    if grouped and not attrs:
+    if not attrs:
         issues.append(Issue(
             "variant_attributes_unmapped", SEVERITY_WARNING, "item_group_id",
             f"unmapped_option_keys={unmapped}",
@@ -746,7 +823,6 @@ def _build_offer(
     variant: Any,
     *,
     genuine: bool,
-    grouped: bool,
     offer_id: str,
     identity_origin: str,
 ) -> OfferPreview:
@@ -791,14 +867,15 @@ def _build_offer(
     attrs.update(_brand(product, issues, provenance))
     attrs.update(_collect_identifiers(price_row, origin, issues, provenance))
 
-    if grouped:
+    if genuine:
+        # Family identity is the parent; it stays stable when siblings retire.
         group_id = str(getattr(product, "external_id", "") or "").strip()
         if group_id:
             attrs["itemGroupId"] = group_id
             provenance["itemGroupId"] = "product.external_id"
         else:
             issues.append(Issue("item_group_id_unavailable", SEVERITY_WARNING, "item_group_id"))
-        attrs.update(_variant_attributes(variant, grouped, issues, provenance))
+        attrs.update(_variant_attributes(variant, issues, provenance))
 
     if catalog_status_of(product) == CATALOG_STATUS_REMOVED_FROM_META:
         issues.append(Issue("meta_channel_status_ignored", SEVERITY_INFO))
@@ -850,7 +927,6 @@ def map_product(target: GoogleMerchantTarget, product: Any, variants: Sequence[A
                 result.exclusions.append(Exclusion(product_id, getattr(row, "id", None), EXCLUDED_VARIANT_RETIRED))
             else:
                 live.append(row)
-        grouped = len(live) >= 2
         for row in live:
             offer_id, origin = _offer_identity(product, row, genuine=True)
             if not offer_id:
@@ -858,8 +934,9 @@ def map_product(target: GoogleMerchantTarget, product: Any, variants: Sequence[A
                 continue
             result.offers.append(_build_offer(
                 target, product, row,
-                genuine=True, grouped=grouped, offer_id=offer_id, identity_origin=origin,
+                genuine=True, offer_id=offer_id, identity_origin=origin,
             ))
+        mark_duplicate_identities(result.offers)
         return result
 
     if is_salla_source(product) and (
@@ -881,9 +958,43 @@ def map_product(target: GoogleMerchantTarget, product: Any, variants: Sequence[A
         return result
     result.offers.append(_build_offer(
         target, product, default_row,
-        genuine=False, grouped=False, offer_id=offer_id, identity_origin=origin,
+        genuine=False, offer_id=offer_id, identity_origin=origin,
     ))
     return result
+
+
+def _identity_key(offer: OfferPreview) -> Tuple[str, str, str]:
+    body = offer.product_input
+    return (
+        str(body.get("contentLanguage", "")),
+        str(body.get("feedLabel", "")),
+        # Conservative: ids differing only by letter case are treated as one
+        # identity, so a case-only difference can never silently overwrite.
+        offer.offer_id.casefold(),
+    )
+
+
+def mark_duplicate_identities(offers: Sequence[OfferPreview]) -> int:
+    """Block EVERY offer whose final identity collides with another one.
+
+    Run over one product (inside :func:`map_product`) and over a complete
+    tenant preview. Idempotent. Returns the number of colliding offers.
+    """
+    counts: Dict[Tuple[str, str, str], int] = {}
+    for offer in offers:
+        key = _identity_key(offer)
+        counts[key] = counts.get(key, 0) + 1
+    colliding = 0
+    for offer in offers:
+        total = counts[_identity_key(offer)]
+        if total < 2:
+            continue
+        colliding += 1
+        if not any(i.code == "duplicate_offer_identity" for i in offer.issues):
+            offer.issues.append(Issue(
+                "duplicate_offer_identity", SEVERITY_BLOCKING, "offer_id", f"offers_sharing_identity={total}",
+            ))
+    return colliding
 
 
 __all__ = [
@@ -898,6 +1009,8 @@ __all__ = [
     "OfferPreview",
     "SPEC_LIMITS",
     "map_product",
+    "mark_duplicate_identities",
+    "micros_or_error",
     "parse_price_amount",
     "product_input_encoded_id",
     "product_input_plain_id",

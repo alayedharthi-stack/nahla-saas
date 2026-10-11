@@ -11,6 +11,8 @@ structure, identity, issues and state — never prose.
 """
 from __future__ import annotations
 
+import base64
+import decimal
 import json
 import sys
 from decimal import Decimal
@@ -31,6 +33,8 @@ from services.google_merchant_products_v1 import (  # noqa: E402
     GoogleMerchantTarget,
     InvalidTargetError,
     map_product,
+    mark_duplicate_identities,
+    micros_or_error,
     parse_price_amount,
     product_input_encoded_id,
     product_input_plain_id,
@@ -240,13 +244,28 @@ class TestVariants:
         assert "5550-902" not in [o.offer_id for o in mapped.offers]
         assert (22, "variant_retired_at_source") in [(e.local_variant_id, e.reason) for e in mapped.exclusions]
 
-    def test_single_live_variant_is_not_grouped(self):
+    def test_lone_live_variant_keeps_family_group_and_attributes(self):
         p, variants = _shirt_rows()
         for v in variants[1:3]:
             v.extra_metadata = {"deleted_at": "2026-10-01T00:00:00Z"}
         mapped = map_product(TARGET, p, variants)
         assert len(mapped.offers) == 1
-        assert "itemGroupId" not in mapped.offers[0].product_input["productAttributes"]
+        attrs = mapped.offers[0].product_input["productAttributes"]
+        assert attrs["itemGroupId"] == "5550"
+        assert (attrs["size"], attrs["color"]) == ("M", "Blue")
+
+    def test_single_genuine_variant_family_keeps_attributes(self):
+        p = _product(id=3, external_id="6600", title="حذاء رياضي أبيض")
+        only = _variant(id=31, product_id=3, salla_variant_id="77", retailer_id="6600-77",
+                        options={"size": "42", "color": "White"})
+        attrs = map_product(TARGET, p, [only]).offers[0].product_input["productAttributes"]
+        assert attrs["itemGroupId"] == "6600"
+        assert (attrs["size"], attrs["color"]) == ("42", "White")
+
+    def test_simple_sku_never_grouped(self):
+        p = _product(external_id="7001")
+        attrs = map_product(TARGET, p, [_default_for(p)]).offers[0].product_input["productAttributes"]
+        assert "itemGroupId" not in attrs and "size" not in attrs
 
     def test_merchant_language_option_names_not_translated(self):
         p, variants = _shirt_rows()
@@ -315,6 +334,37 @@ class TestPrice:
     def test_rejected_inputs(self, value, code):
         assert parse_price_amount(value)[1] == code
 
+    @pytest.mark.parametrize("value,expected", [
+        ("1." + "0" * 5000, (1000000, None)),
+        ("0.000001", (1, None)),
+        ("0.0000001", (None, "price_precision")),
+        ("1.00000000000000000000000000001", (None, "price_precision")),
+        ("0." + "0" * 40 + "1", (None, "price_precision")),
+        ("9223372036854.775807", (2**63 - 1, None)),
+        ("9223372036854.775808", (None, "price_out_of_range")),
+        ("9" * 400, (None, "price_out_of_range")),
+    ])
+    def test_exact_integer_micros_and_int64_bounds(self, value, expected):
+        amount, err = parse_price_amount(value)
+        assert err is None
+        assert micros_or_error(amount) == expected
+
+    @pytest.mark.parametrize("prec", [3, 28, 60])
+    def test_ambient_decimal_precision_never_changes_result(self, prec):
+        with decimal.localcontext() as ctx:
+            ctx.prec = prec
+            assert micros_or_error(Decimal("129.99"))[0] == 129990000
+            assert micros_or_error(Decimal("1.00000000000000000000000000001"))[1] == "price_precision"
+            offer = map_product(TARGET, _product(price="199.99", meta={
+                "regular_price": "199.99", "sale_price": "199.98"}), []).offers[0]
+            assert offer.product_input["productAttributes"]["price"]["amountMicros"] == "199990000"
+            assert "salePrice" not in offer.product_input["productAttributes"]
+
+    def test_extreme_decimal_inputs_do_not_hang_or_round(self):
+        assert micros_or_error(Decimal("1E+999999999"))[1] == "price_out_of_range"
+        assert micros_or_error(Decimal("1E-999999999"))[1] == "price_precision"
+        assert parse_price_amount(10**60)[1] == "price_out_of_range"
+
     def test_sub_micro_precision_is_blocking_not_rounded(self):
         p = _product(price="1.0000001")
         offer = map_product(TARGET, p, []).offers[0]
@@ -366,6 +416,128 @@ class TestPrice:
     def test_lowercase_currency_is_invalid_not_rewritten(self):
         offer = map_product(TARGET, _product(meta={"currency": "sar"}), []).offers[0]
         assert "currency_invalid" in _codes(offer)
+
+
+class TestEffectivePriceConflict:
+    """Effective (current) price must be explained by regular or a proven sale."""
+
+    def _offer(self, *, price="129", **meta):
+        return map_product(TARGET, _product(price=price, meta=meta), []).offers[0]
+
+    @pytest.mark.parametrize("meta,sale_code", [
+        ({"regular_price": "199"}, None),
+        ({"regular_price": "199", "sale_price": "abc"}, "sale_price_invalid"),
+        ({"regular_price": "199", "sale_price": "250"}, "sale_price_not_below_regular"),
+        ({"regular_price": "199", "sale_price": "150"}, None),
+        ({"regular_price": "199", "sale_price": "0"}, None),
+    ])
+    def test_unexplained_effective_price_fails_closed(self, meta, sale_code):
+        offer = self._offer(**meta)
+        attrs = offer.product_input["productAttributes"]
+        assert "price" not in attrs and "salePrice" not in attrs
+        assert _severity(offer, "price_conflict_unresolved") == "blocking"
+        assert offer.status == OFFER_STATUS_BLOCKED
+        if sale_code:
+            assert sale_code in _codes(offer)
+
+    def test_valid_sale_matching_effective_price(self):
+        offer = self._offer(regular_price="199", sale_price="129")
+        attrs = offer.product_input["productAttributes"]
+        assert attrs["price"] == {"amountMicros": "199000000", "currencyCode": "SAR"}
+        assert attrs["salePrice"] == {"amountMicros": "129000000", "currencyCode": "SAR"}
+        assert offer.status == OFFER_STATUS_PASSES_OFFLINE_CHECKS
+
+    def test_no_sale_effective_equals_regular(self):
+        offer = self._offer(price="199", regular_price="199")
+        assert offer.product_input["productAttributes"]["price"]["amountMicros"] == "199000000"
+        assert "price_conflict_unresolved" not in _codes(offer)
+        assert offer.status == OFFER_STATUS_PASSES_OFFLINE_CHECKS
+
+    def test_sale_not_in_effect_is_not_emitted(self):
+        offer = self._offer(price="199", regular_price="199", sale_price="129")
+        attrs = offer.product_input["productAttributes"]
+        assert attrs["price"]["amountMicros"] == "199000000"
+        assert "salePrice" not in attrs
+        assert _severity(offer, "sale_price_not_effective") == "warning"
+
+    def test_no_explicit_regular_with_different_sale_fails_closed(self):
+        offer = self._offer(price="199", sale_price="129")
+        assert "price" not in offer.product_input["productAttributes"]
+        assert offer.status == OFFER_STATUS_BLOCKED
+
+    def test_regular_and_sale_without_effective_price(self):
+        offer = self._offer(price=None, regular_price="199", sale_price="129")
+        attrs = offer.product_input["productAttributes"]
+        assert attrs["price"]["amountMicros"] == "199000000"
+        assert attrs["salePrice"]["amountMicros"] == "129000000"
+
+    def test_generic_variant_effective_regular_conflict_fails_closed(self):
+        p, variants = _shirt_rows()
+        variants[0].price = "129"
+        variants[0].extra_metadata = {"regular_price": "199"}
+        offer = map_product(TARGET, p, variants).offers[0]
+        assert "price" not in offer.product_input["productAttributes"]
+        assert offer.provenance.get("price") is None
+        assert offer.status == OFFER_STATUS_BLOCKED
+
+    def test_precision_beyond_decimal_context_is_not_rounded(self):
+        assert to_micros(Decimal("1.00000000000000000000000000001")) is None
+        offer = self._offer(price="1.00000000000000000000000000001")
+        assert _severity(offer, "price_precision") == "blocking"
+
+
+class TestMalformedUrls:
+    """Malformed stored URLs are item-scoped blocking issues, never crashes."""
+
+    BAD = "https://[bad"
+
+    def test_malformed_product_link(self):
+        offer = map_product(TARGET, _product(meta={"product_url": self.BAD}), []).offers[0]
+        assert "link" not in offer.product_input["productAttributes"]
+        assert _severity(offer, "link_invalid") == "blocking"
+        assert offer.status == OFFER_STATUS_BLOCKED
+
+    def test_malformed_variant_link_does_not_fall_back(self):
+        p, variants = _shirt_rows()
+        variants[0].extra_metadata = {"product_url": self.BAD}
+        offer = map_product(TARGET, p, variants).offers[0]
+        assert "link" not in offer.product_input["productAttributes"]
+        assert _severity(offer, "link_invalid") == "blocking"
+
+    def test_malformed_main_image(self):
+        offer = map_product(TARGET, _product(meta={"image_url": self.BAD}), []).offers[0]
+        assert "imageLink" not in offer.product_input["productAttributes"]
+        assert _severity(offer, "image_link_invalid") == "blocking"
+
+    def test_malformed_variant_image(self):
+        p, variants = _shirt_rows()
+        variants[0].image_url = self.BAD
+        offer = map_product(TARGET, p, variants).offers[0]
+        assert "imageLink" not in offer.product_input["productAttributes"]
+        assert _severity(offer, "image_link_invalid") == "blocking"
+
+    @pytest.mark.parametrize("url", [
+        "https://shop.test/p\x01", "https://shop.test/p\x7f", "https://shop.test:99999/p",
+        "https://shop.test:abc/p", "https://shop.test/a b", "https://shop.test/a\tb",
+        "https:///p", "javascript:alert(1)", "https://[bad", "",
+    ])
+    def test_invalid_link_forms_are_item_scoped_blocking(self, url):
+        offer = map_product(TARGET, _product(meta={"product_url": url}), []).offers[0]
+        assert "link" not in offer.product_input["productAttributes"]
+        assert {"link_invalid", "link_missing"} & _codes(offer)
+        assert offer.status == OFFER_STATUS_BLOCKED
+
+    def test_non_ascii_path_left_to_google(self):
+        offer = map_product(TARGET, _product(meta={"product_url": "https://shop.test/عسل-سدر"}), []).offers[0]
+        assert offer.product_input["productAttributes"]["link"] == "https://shop.test/عسل-سدر"
+        assert "link_invalid" not in _codes(offer)
+
+    def test_malformed_additional_image(self):
+        ok = "https://cdn.example-store.test/p/extra.jpg"
+        offer = map_product(TARGET, _product(meta={"additional_images": [self.BAD, ok]}), []).offers[0]
+        assert offer.product_input["productAttributes"]["additionalImageLinks"] == [ok]
+        assert _severity(offer, "additional_image_link_invalid") == "blocking"
+        assert offer.status == OFFER_STATUS_BLOCKED
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -463,18 +635,63 @@ class TestResourceIds:
         assert product_input_plain_id("en", "US", "sku/123") is None
         assert product_input_plain_id("ar", "SA", "5550-901") == "ar~SA~5550-901"
 
-    @pytest.mark.parametrize("offer_id", ["a~b", "a%2F", "a/b"])
-    def test_unsafe_offer_ids_only_encoded(self, offer_id):
+    @pytest.mark.parametrize("offer_id", [
+        "a~b", "a%2F", "a/b", "sku?123", "sku#1", "a&b", "a+b", "a:b", "a b", "عسل-1",
+    ])
+    def test_reserved_characters_only_encoded_and_offer_id_untouched(self, offer_id):
         p = _product(external_id=offer_id)
         out = map_product(TARGET, p, []).offers[0].to_dict()
         assert out["product_input_id"] is None
-        assert out["product_input_id_encoded"]
+        assert out["offer_id"] == offer_id
+        assert out["product_input"]["offerId"] == offer_id
+        encoded = out["product_input_id_encoded"]
+        assert "=" not in encoded
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        assert decoded == f"ar~SA~{offer_id}"
+
+    @pytest.mark.parametrize("offer_id", ["5550-901", "SKU_1.2", "abc-DEF_9"])
+    def test_unreserved_offer_ids_have_plain_name(self, offer_id):
+        out = map_product(TARGET, _product(external_id=offer_id), []).offers[0].to_dict()
+        assert out["product_input_id"] == f"ar~SA~{offer_id}"
 
     def test_offer_id_limits_block(self):
         long_offer = map_product(TARGET, _product(external_id="9" * 51), []).offers[0]
         assert _severity(long_offer, "offer_id_too_long") == "blocking"
         spaced = map_product(TARGET, _product(external_id="12  34"), []).offers[0]
         assert spaced.status == OFFER_STATUS_BLOCKED
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Duplicate final identities
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestDuplicateIdentity:
+
+    def test_same_product_variant_collision_blocks_both(self):
+        p = _product(id=4, source="nahla_native", external_id="TSHIRT")
+        rows = [
+            _variant(id=41, product_id=4, retailer_id="TS-1", options={"size": "M"}),
+            _variant(id=42, product_id=4, retailer_id="TS-1", options={"size": "L"}),
+            _variant(id=43, product_id=4, retailer_id="TS-2", options={"size": "XL"}),
+        ]
+        offers = map_product(TARGET, p, rows).offers
+        status = {o.local_variant_id: o.status for o in offers}
+        assert status == {41: OFFER_STATUS_BLOCKED, 42: OFFER_STATUS_BLOCKED,
+                          43: OFFER_STATUS_PASSES_OFFLINE_CHECKS}
+        assert "duplicate_offer_identity" in _codes(offers[0])
+
+    def test_cross_product_and_case_only_collisions(self):
+        a = map_product(TARGET, _product(id=1, external_id="DUP"), []).offers
+        b = map_product(TARGET, _product(id=2, external_id="DUP"), []).offers
+        c = map_product(TARGET, _product(id=3, external_id="dup"), []).offers
+        d = map_product(TARGET, _product(id=4, external_id="UNIQUE"), []).offers
+        everything = a + b + c + d
+        assert mark_duplicate_identities(everything) == 3
+        assert mark_duplicate_identities(everything) == 3  # idempotent
+        assert [o.status for o in a + b + c] == [OFFER_STATUS_BLOCKED] * 3
+        assert sum(i.code == "duplicate_offer_identity" for i in a[0].issues) == 1
+        assert d[0].status == OFFER_STATUS_PASSES_OFFLINE_CHECKS
 
 
 # ─────────────────────────────────────────────────────────────────────
