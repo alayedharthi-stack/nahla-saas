@@ -80,6 +80,57 @@
   },
   "effective_runtime_flags_verified": false,
   "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "fresh_readonly_crosscheck": {
+    "api_backend_shopify_flags": "all five absent; effective OFF",
+    "api_rollback": {
+      "can_redeploy": true,
+      "can_rollback": true,
+      "deployment_id": "cb02ce9e-dfdd-404d-b26c-5fb4d22bf1ff",
+      "snapshot_id": "40f812e4-8672-43f9-9b17-234d476dd0ce"
+    },
+    "api_source": "462ede1aff602cad84e9569be859cca0087b190d",
+    "backup": {
+      "completed": true,
+      "newer_backup_observed": false,
+      "restore_available": true,
+      "size_mb": 647,
+      "timestamp_utc": "2026-10-11T16:54:10.145Z"
+    },
+    "dashboard_rollback": {
+      "can_redeploy": true,
+      "can_rollback": true,
+      "deployment_id": "5a31b5ec-309b-445e-9162-c4f9520cb3c6",
+      "snapshot_id": "4925b913-2d0a-40a6-aa4a-3f3c3f026e97"
+    },
+    "dashboard_source": "462ede1aff602cad84e9569be859cca0087b190d",
+    "dashboard_vite_shopify_flags": "both absent from current service variables",
+    "existing_preflight_predicates_would_pass": true,
+    "existing_skip_preflight": "ON; unchanged",
+    "historical_dashboard_build_flag_values_verified": false,
+    "live_changes": false,
+    "observed_on_utc": "2026-10-11",
+    "persistent_ssh_grant_added": false,
+    "postgres_server_version_num": 180006,
+    "primary": true,
+    "provider_secrets_exported": false,
+    "retained_canonical_sha256": "d4a6915c412b91a17f1d743c8fd53c8d6e09a46402124099505420fc39a2d867",
+    "retained_difference_against_old_snapshot": {
+      "column": "created_at",
+      "expected": "CURRENT_TIMESTAMP",
+      "field": "server_default",
+      "observed": null,
+      "table": "whatsapp_oauth_nonces"
+    },
+    "shopify_sequence_count": 0,
+    "shopify_stray_count": 0,
+    "shopify_table_count": 0,
+    "source": "existing official CLI 4.36.1 read-only relay plus parent working-browser metadata",
+    "version_rows": [
+      "0111",
+      "0113",
+      "0120"
+    ]
+  },
   "legacy_full_settings_snapshot_location": "owner-held local private snapshot; not committed",
   "live_database_state_verified": false,
   "observed_at_utc": "2026-10-11T22:29:14Z",

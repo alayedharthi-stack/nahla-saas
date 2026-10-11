@@ -2,16 +2,16 @@ import base64, hashlib, os, sys
 import importlib.machinery
 P = "[shopify-release-gate]"
 R = "/app"
-REL = "e345ecf6f637b54b9c26d95906fb6143e0a48f09"
+REL = "94da9e2bcb41248180808e791d98f384c46f5779"
 IDS = {"RAILWAY_ENVIRONMENT_ID": "ede962ce-3042-4dae-94de-623837e83ed9", "RAILWAY_PROJECT_ID": "f0090862-0a40-4293-bd5d-e94df58762b5", "RAILWAY_SERVICE_ID": "686b36c5-a926-4e58-912a-5e9d13fbc2e7"}
 LIBPQ = ["PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGPASSFILE", "PGCONNECT_TIMEOUT"]
 FIXED = ["backend/services/shopify_catalog/config.py", "backend/services/shopify_connection/config.py", "backend/services/shopify_privacy/config.py", "database/alembic.ini", "requirements.txt", "scripts/operators/__init__.py", "scripts/operators/bootstrap_migration_contract.py", "scripts/operators/commerce_runtime_pilot_migration.py", "scripts/operators/commerce_runtime_pilot_migration_contract.py", "scripts/operators/shopify_release_gate.py", "scripts/operators/shopify_release_gate_contract.py", "scripts/operators/shopify_release_schema_expectations.json"]
 ABSENT = ["scripts/__init__.py"]
 N = 143
-DIG = "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4"
+DIG = "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d"
 GSHA = "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157"
-ASHA = "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad"
-ARGV = ["--root", "/app", "--phase", "S0", "--release-sha", "e345ecf6f637b54b9c26d95906fb6143e0a48f09", "--inventory-digest", "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4", "--inventory-count", "143", "--approval-sha256", "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad", "--expect-project", "f0090862-0a40-4293-bd5d-e94df58762b5", "--expect-environment", "ede962ce-3042-4dae-94de-623837e83ed9", "--expect-service", "686b36c5-a926-4e58-912a-5e9d13fbc2e7", "--expect-db", "postgres-ancu.railway.internal:5432/railway", "--expect-backup-service", "b77b3d27-47b0-4a3a-83fd-44def66a3a84", "--expect-backup-volume", "009bd0d5-85ed-4de4-99fc-94ea963c9d65"]
+ASHA = "2cce74574c5ad0849b4d8595e0a1409740edb50164fe35bc1dd73615112d92e6"
+ARGV = ["--root", "/app", "--phase", "S0", "--release-sha", "94da9e2bcb41248180808e791d98f384c46f5779", "--inventory-digest", "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d", "--inventory-count", "143", "--approval-sha256", "2cce74574c5ad0849b4d8595e0a1409740edb50164fe35bc1dd73615112d92e6", "--expect-project", "f0090862-0a40-4293-bd5d-e94df58762b5", "--expect-environment", "ede962ce-3042-4dae-94de-623837e83ed9", "--expect-service", "686b36c5-a926-4e58-912a-5e9d13fbc2e7", "--expect-db", "postgres-ancu.railway.internal:5432/railway", "--expect-backup-service", "b77b3d27-47b0-4a3a-83fd-44def66a3a84", "--expect-backup-volume", "009bd0d5-85ed-4de4-99fc-94ea963c9d65"]
 
 
 def fail(reason):

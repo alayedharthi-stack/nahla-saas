@@ -2,7 +2,7 @@
   "approval": {
     "approved": false,
     "approved_at_utc": null,
-    "independent_review_ref": "PR1218 source accepted by independent review; exact execution approval remains pending",
+    "independent_review_ref": "PR1220 exact adopted nonce baseline awaits independent review; action-time record unfilled",
     "reviewer": null,
     "valid_until_utc": null
   },
@@ -29,9 +29,9 @@
   },
   "phase": "S0",
   "record_version": 2,
-  "release_sha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "release_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
   "runtime_inventory_count": 143,
-  "runtime_inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+  "runtime_inventory_digest": "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d",
   "target": {
     "db": "postgres-ancu.railway.internal:5432/railway",
     "environment": "ede962ce-3042-4dae-94de-623837e83ed9",

@@ -1,49 +1,64 @@
 {
+  "application_code_changes_since_prior_accepted_runtime": false,
   "artifact_sha256": {
-    "README.md": "730098b4c2fe065cdc5c788f7f1c330a9c02d1373769b18c6ee5d75f43af7468",
-    "api.S0.NOT_AUTHORIZED.patch.preview.json": "a04dcf68da2e3e74a5a38be974085d67d085d2c0c35d9059575d923053964fe1",
-    "api.S3.NOT_AUTHORIZED.patch.preview.json": "d6d4ca25f1f398d7265e3930c82d8f2240a552e9ce6988889323e738cf1393cc",
-    "approval.S0.UNAPPROVED.json": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad",
-    "approval.S3.UNAPPROVED.json": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967",
-    "authorizations.json": "58ef789cbb548b2f313a879233f9dff4c5b428194a168207e06319bf30e92e27",
-    "bootstrap.S0.NOT_AUTHORIZED.preview.py": "d3c233660b7955faf5a05df7376dd301a7d8d44bcb630148a7e45b96445e97df",
-    "bootstrap.S3.NOT_AUTHORIZED.preview.py": "d278fd4c11b089f7e5364ddbb168e8906f8d8dc5dd162acfe56906ac8c59a23f",
-    "dashboard.NOT_AUTHORIZED.patch.preview.json": "916dbfba417c4af89e9589495db3611e5f6a146b6fbd49a2bd6176b328730ac5",
-    "generation.offline.json": "ca81528b63be93cb851b7f137b6af1f5d78231caed49d3680df3bda434ec57dc",
-    "inventory.git-bytes.json": "eee4c7f966a2d42700e5d3df8cae0e5632d93111a349b2c59f6ab9fb6de04d57",
-    "migration.NOT_AUTHORIZED.plan.json": "7859e149793794501ffa32f05f64c4ce228a1c7c13fe174773684d997179c7f5",
-    "predeploy.S0.NOT_AUTHORIZED.preview.txt": "d91fe636a3ad9a76004393af208fb4ceb9aa68a837dae31fa4ccecf43c6ef392",
-    "predeploy.S3.NOT_AUTHORIZED.preview.txt": "7f16c0cf666a5aa63224ec01dd43fc970a26ef68dfb44b04071292e37f4b7fa2",
-    "railway.metadata.readonly.json": "a467cd3a9e5d2d546193ca49be7947a3b37848d0200ce9b112a2813af62b58d0"
+    "README.md": "f5bc2180a7a7073c748894c7b3a5bbb544d3cc47d91c773c32fe2c5bbcc9ae92",
+    "api.S0.NOT_AUTHORIZED.patch.preview.json": "5ade67d7e346b93e2dbe5979c44da952ca07b3b27044b6936b62a3efd4a3cfb8",
+    "api.S3.NOT_AUTHORIZED.patch.preview.json": "e951ce2518cdc0c7c6e7719598d29eec24cbad3cc2a1d45b7b0008c2baca7db0",
+    "approval.S0.UNAPPROVED.json": "2cce74574c5ad0849b4d8595e0a1409740edb50164fe35bc1dd73615112d92e6",
+    "approval.S3.UNAPPROVED.json": "0e96bf07ab298fbf832229e810839c760124ae86e1e387126af9bbc352f3cbe4",
+    "authorizations.json": "02f1345d43716b45e2e29751cbaf3984141bea224178a022644e76ffccd0604b",
+    "bootstrap.S0.NOT_AUTHORIZED.preview.py": "ac0b04828a9b205413e20759c1e71ec248bce7951f3e0617e3fdb0fcca825c36",
+    "bootstrap.S3.NOT_AUTHORIZED.preview.py": "c6a9c43ec36c0e037ef82e00d99ab5fcff921bf1e349eeee5ea18e491d89a20e",
+    "dashboard.NOT_AUTHORIZED.patch.preview.json": "81031178ae09236b8c60a222ed9476129f7464dbba6bbf24c054061568205816",
+    "generation.offline.json": "ecc9c3d7a7fa124a62100dab6b2f74f73af237f96ccfaf899ebf98bea8c7522c",
+    "inventory.git-bytes.json": "a26ca5179edfbc895592df010cd26e7268fa018a76d6025c3a45c8624f727218",
+    "migration.NOT_AUTHORIZED.plan.json": "53e589bb21ac4c9cde23e02b72cddf48845b4ac38586257d1206565b3b18ddd2",
+    "predeploy.S0.NOT_AUTHORIZED.preview.txt": "3490e085281a863c6287c4028f127bb9ca92048b010029c8c6cd37fc6b392d20",
+    "predeploy.S3.NOT_AUTHORIZED.preview.txt": "882465ccfb1902324e3da1c51a28126782dac0c793f6e0c45fad400e92251173",
+    "railway.metadata.readonly.json": "e40e387dc55d32d27dbcf38eefd18a18bf2e30f9d79fc451bbb3ccaa5ef369f7"
   },
   "backup_restore_target_selected": false,
+  "comparator_and_normalization_changed": false,
   "environment_created": false,
+  "expectation_data_changed": true,
+  "external_execution_records_filled": false,
+  "focused_proof": {
+    "errors": 0,
+    "failures": 0,
+    "job_id": 114608624899,
+    "result_path": "../shopify-live-nonce-baseline-results.json",
+    "run_id": 38186099701,
+    "skipped": 0,
+    "source_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
+    "status": "PASS",
+    "tests": 5
+  },
+  "focused_proof_source": "94da9e2bcb41248180808e791d98f384c46f5779",
+  "full_application_tests_rerun": false,
   "live_changes_performed": false,
-  "owner_execution_authorization": false,
   "phase_previews": {
     "S0": {
-      "preview_command_sha256_utf8_no_terminal_lf": "245ad06f7e9ba03b64a8c1e0802cadfe0cb144983f94494e9602fa35793f2012",
-      "unapproved_payload_bytes": 1415,
-      "unapproved_payload_sha256": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad"
+      "preview_command_sha256_utf8_no_terminal_lf": "4737cf4cb1e8b0fae651b9bb09bfc3938e84d846418e0a5419a462695c5358c5",
+      "unfilled_payload_bytes": 1419,
+      "unfilled_payload_sha256": "2cce74574c5ad0849b4d8595e0a1409740edb50164fe35bc1dd73615112d92e6"
     },
     "S3": {
-      "preview_command_sha256_utf8_no_terminal_lf": "c24ac24cba62cf461dfd722dd57fc4bc8f24ef9753d066f88d72be1b8667871d",
-      "unapproved_payload_bytes": 1415,
-      "unapproved_payload_sha256": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967"
+      "preview_command_sha256_utf8_no_terminal_lf": "e2a2145ebe8aac3f7de49df195f0ed96a87553743f4e1aca03bdb3cc032a3a7c",
+      "unfilled_payload_bytes": 1419,
+      "unfilled_payload_sha256": "0e96bf07ab298fbf832229e810839c760124ae86e1e387126af9bbc352f3cbe4"
     }
   },
-  "release_sha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
-  "runtime_changes_since_test": false,
+  "prior_accepted_runtime_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
+  "prior_owner_authorization_reconciliation": "parent-held earlier approval exists; exact corrected action not yet bound to an external record",
+  "release_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
   "runtime_inventory": {
     "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
     "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
     "gate_version": 2,
     "inventory_count": 143,
-    "inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+    "inventory_digest": "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d",
     "unexpected_initializers": []
   },
-  "selected_source_branch": "codex/shopify-callback-service-key-20261011",
-  "status": "REVIEW_ONLY_NOT_AUTHORIZED",
-  "tested_runtime_sha": "47d2dcb29c6798aa9f12c6ad1537c0f1937174ff",
-  "tests_rerun": false
+  "selected_source_branch": "codex/shopify-live-nonce-baseline-20261011",
+  "status": "REVIEW_ONLY_NOT_AUTHORIZED"
 }
