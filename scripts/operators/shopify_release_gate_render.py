@@ -1,38 +1,47 @@
 #!/usr/bin/env python3
-"""Render the trusted pre-deploy command for the Shopify release gate, and its inputs.
+"""Render the trusted pre-deploy bootstrap for the Shopify release gate, and its inputs.
 
 Everything here runs on an operator checkout, never in the deployed container,
 and never against the existing platform database. Subcommands:
 
 ``inventory --root <checkout>``
-    Prints the runtime and full inventory counts and digests and the gate
-    module's SHA-256 (JSON). The approval record binds to the runtime digest.
+    Prints the inventory count and digest, the gate module's SHA-256 and the
+    digest of the migration files (JSON). The approval record binds to the
+    inventory digest and count.
 
-``render --root <checkout> --release-sha <40 hex> --phase <S0..S3>``
-    Prints the one-line pre-deploy command. It pins, as literals: the gate
-    module's SHA-256 (verified by the command before the gate runs), the
-    release commit, the full inventory digest and count, the phase, the
-    platform identity (project, environment, service) and the database
-    target. Identity and target default to the existing platform target in the
-    contract and may be overridden for a disposable rehearsal.
+``render --root <checkout> --release-sha <40 hex> --phase S0|S3 --approval-file <filled payload>``
+    Validates the filled approval payload offline against the checkout, the
+    release, the target and the phase, then prints the one-line pre-deploy
+    command: ``python -I -c`` running a standard-library-only bootstrap
+    (base64-embedded; ``--format source`` prints it readable) that carries,
+    as literals, the container root, the release commit, the platform
+    identity, the libpq variables to refuse, the fixed inventory files, the
+    initializers that must be absent, the inventory digest and count, the gate
+    module's SHA-256, the approval payload's SHA-256, the phase and the
+    database and backup targets — verifies all of it **before importing
+    anything from the repository**, then ``exec``s the gate.
 
-``snapshot --database-url <disposable DSN> --out <path> --source-sha <40 hex>``
-    Writes the canonical schema expectations the gate compares the retained
-    relations with. Read-only. Refuses the existing platform database host.
+``snapshot --database-url <disposable S3 DSN> --out <path> --source-sha <40 hex>``
+    Writes the canonical schema expectations (retained relations and the
+    S3 Shopify relations) from a disposable database built at ``source-sha``
+    with every Shopify revision applied. Read-only. Refuses the existing
+    platform database host.
 
-``approval-check --root <checkout> --phase <S0..S3>``
-    Evaluates the approval record offline against the checkout's runtime
-    inventory and prints the gate's verdict for it (no database).
+``approval-check --approval-file <payload> --root <checkout> --release-sha <40 hex> --phase S0|S3``
+    Evaluates the payload offline and prints the gate's verdict for it.
+
+Every failure is reported as a closed token or an exception type; a DSN,
+a path argument or an exception body is never printed.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
 import json
-import shlex
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[2]
@@ -44,127 +53,292 @@ from scripts.operators import shopify_release_gate_contract as k  # noqa: E402
 
 PYTHON_IN_IMAGE = "python"
 
+# The bootstrap. Standard library only; every ``{name}`` is a JSON literal
+# substituted by ``render_command``. It imports nothing from the repository
+# until every pin has been verified, and then replaces itself with the gate.
+BOOTSTRAP_TEMPLATE = r'''import base64, hashlib, os, sys
+P = {prefix}
+R = {root}
+REL = {release}
+IDS = {identity}
+LIBPQ = {libpq}
+FIXED = {fixed}
+ABSENT = {absent}
+N = {count}
+DIG = {digest}
+GSHA = {gate_sha}
+ASHA = {approval_sha}
+ARGV = {argv}
+
+
+def fail(reason):
+    print(P + " BOOTSTRAP FAIL reason=" + reason, flush=True)
+    sys.exit(2)
+
+
+if not os.path.isdir(os.path.join(R, "database")):
+    fail("root_missing")
+if os.environ.get("RAILWAY_GIT_COMMIT_SHA", "").strip().lower() != REL:
+    fail("release_sha_mismatch")
+for name, value in IDS.items():
+    if os.environ.get(name, "").strip() != value:
+        fail("identity_mismatch")
+if any(os.environ.get(name, "").strip() for name in LIBPQ):
+    fail("libpq_environment_override")
+for relative in ABSENT:
+    if os.path.lexists(os.path.join(R, relative)):
+        fail("initializer_unexpected")
+paths = set(FIXED)
+for dirpath, _dirnames, filenames in os.walk(os.path.join(R, "database")):
+    for filename in filenames:
+        if filename.endswith(".py"):
+            paths.add(os.path.relpath(os.path.join(dirpath, filename), R).replace(os.sep, "/"))
+if len(paths) != N:
+    fail("inventory_count_mismatch")
+digest = hashlib.sha256()
+try:
+    for relative in sorted(paths):
+        with open(os.path.join(R, relative), "rb") as handle:
+            data = handle.read()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(data)
+        digest.update(b"\0")
+except OSError:
+    fail("inventory_file_missing")
+if digest.hexdigest() != DIG:
+    fail("inventory_digest_mismatch")
+gate_path = os.path.join(R, "scripts/operators/shopify_release_gate.py")
+try:
+    with open(gate_path, "rb") as handle:
+        gate_sha = hashlib.sha256(handle.read()).hexdigest()
+except OSError:
+    fail("inventory_file_missing")
+if gate_sha != GSHA:
+    fail("gate_digest_mismatch")
+payload = os.environ.get("NAHLA_SHOPIFY_RELEASE_APPROVAL_B64", "").strip()
+if not payload:
+    fail("approval_payload_missing")
+try:
+    raw = base64.b64decode(payload, validate=True)
+except (ValueError, TypeError):
+    fail("approval_payload_malformed")
+if hashlib.sha256(raw).hexdigest() != ASHA:
+    fail("approval_payload_pin_mismatch")
+print(P + " BOOTSTRAP PASS gate_version=2 inventory_count=" + str(N), flush=True)
+os.execv(sys.executable, [sys.executable, "-I", gate_path] + ARGV)
+'''
+
 
 def inventory_report(root: Path) -> Dict[str, Any]:
-    runtime_count, runtime_digest = gate.runtime_inventory(root)
-    full_count, full_digest = gate.full_inventory(root)
+    count, digest = gate.inventory(root)
     return {
         "gate_version": k.GATE_VERSION,
         "gate_sha256": gate.file_sha256(root / k.GATE_RELATIVE_PATH),
-        "runtime_inventory_count": runtime_count,
-        "runtime_inventory_digest": runtime_digest,
-        "full_inventory_count": full_count,
-        "full_inventory_digest": full_digest,
+        "inventory_count": count,
+        "inventory_digest": digest,
         "database_py_digest": gate.database_py_digest(root),
+        "unexpected_initializers": gate.unexpected_initializers(root),
     }
 
 
-def render_command(root: Path, *, release_sha: str, phase: str, project: str, environment: str, service: str,
-                   db: str, python: str = PYTHON_IN_IMAGE, container_root: str = k.CONTAINER_ROOT) -> str:
-    """The exact pre-deploy command: verify the gate file's digest, then exec the gate with every pin as a literal."""
+def load_approval(path: Path) -> Dict[str, Any]:
+    """The filled payload bytes and record. Errors are closed tokens."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise ValueError("approval_file_unreadable")
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise ValueError("approval_file_malformed")
+    return {"raw": raw, "record": record, "sha256": __import__("hashlib").sha256(raw).hexdigest(),
+            "b64": base64.b64encode(raw).decode("ascii")}
+
+
+def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase: str, identity: Mapping[str, str], db: str,
+                     backup_service: str, backup_volume: str, now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
+    count, digest = gate.inventory(root)
+    loaded = load_approval(approval_file)
+    target = dict(k.parse_db_target(db) or {})
+    if not target:
+        raise ValueError("db_target_malformed")
+    bound_target = {"project": identity["project"], "environment": identity["environment"], "service": identity["service"],
+                    "db": k.target_label(target)}
+    status, reason, detail = k.evaluate_approval(
+        loaded["record"], phase_name=phase, release_sha=release_sha, runtime_digest=digest, runtime_count=count,
+        target=bound_target, backup_service=backup_service, backup_volume=backup_volume,
+        now=now or _dt.datetime.now(_dt.timezone.utc))
+    return {"phase": phase, "status": status, "reason": reason, "inventory_count": count, "inventory_digest": digest,
+            "approval_sha256": loaded["sha256"], "approval_b64": loaded["b64"], "detail": detail}
+
+
+def _check_tokens(*values: str) -> None:
+    for value in values:
+        if not isinstance(value, str) or not value or any(c in value for c in "'\"$`\\") or any(c.isspace() for c in value):
+            raise ValueError("token_not_renderable")
+
+
+def render_source(root: Path, *, release_sha: str, phase: str, approval_sha256: str, project: str, environment: str, service: str,
+                  db: str, backup_service: str, backup_volume: str, container_root: str = k.CONTAINER_ROOT) -> str:
+    """The bootstrap program with every literal substituted (readable form)."""
     if k.phase(phase) is None:
-        raise ValueError("unknown_phase")
+        raise ValueError("phase_not_deployable" if phase in k.INTERMEDIATE_STATES else "unknown_phase")
     if not k.RELEASE_SHA_RE.match(release_sha):
         raise ValueError("release_sha_malformed")
+    if not k.DIGEST_RE.match(approval_sha256):
+        raise ValueError("approval_sha_malformed")
     if k.parse_db_target(db) is None:
         raise ValueError("db_target_malformed")
-    for value in (project, environment, service):
+    for value in (project, environment, service, backup_service, backup_volume):
         if not k.UUID_RE.match(value):
             raise ValueError("identity_malformed")
+    _check_tokens(container_root, db)
     report = inventory_report(root)
-    gate_path = f"{container_root}/{k.GATE_RELATIVE_PATH}"
+    if report["unexpected_initializers"]:
+        raise ValueError("initializer_unexpected")
     argv = [
         "--root", container_root, "--phase", phase, "--release-sha", release_sha,
-        "--inventory-digest", report["full_inventory_digest"], "--inventory-count", str(report["full_inventory_count"]),
+        "--inventory-digest", report["inventory_digest"], "--inventory-count", str(report["inventory_count"]),
+        "--approval-sha256", approval_sha256,
         "--expect-project", project, "--expect-environment", environment, "--expect-service", service, "--expect-db", db,
+        "--expect-backup-service", backup_service, "--expect-backup-volume", backup_volume,
     ]
-    for token in argv + [gate_path, python]:
-        if "'" in token or '"' in token or "$" in token or "`" in token or "\\" in token or any(c.isspace() for c in token):
-            raise ValueError("token_not_renderable")
-    inner = (
-        "import hashlib,os,sys;"
-        f"p='{gate_path}';"
-        "sys.exit(2) if not os.path.isfile(p) else None;"
-        "h=hashlib.sha256(open(p,'rb').read()).hexdigest();"
-        f"print('{k.LOG_PREFIX} trusted_command gate_version={k.GATE_VERSION} gate_sha256_match='+str(h=='{report['gate_sha256']}'),flush=True);"
-        f"sys.exit(2) if h!='{report['gate_sha256']}' else os.execv(sys.executable,[sys.executable,'-I',p,{','.join(repr(a) for a in argv)}])"
-    )
-    return f'{python} -I -c "{inner}"'
+    literals = {
+        "prefix": k.LOG_PREFIX, "root": container_root, "release": release_sha,
+        "identity": {k.IDENTITY_ENVS["project"]: project, k.IDENTITY_ENVS["environment"]: environment, k.IDENTITY_ENVS["service"]: service},
+        "libpq": list(k.LIBPQ_TARGET_ENV_VARS), "fixed": sorted(set(k.LEGACY_FIXED_FILES) | set(k.RUNTIME_EXTRA_FILES)),
+        "absent": list(k.MUST_BE_ABSENT), "count": report["inventory_count"], "digest": report["inventory_digest"],
+        "gate_sha": report["gate_sha256"], "approval_sha": approval_sha256, "argv": argv,
+    }
+    source = BOOTSTRAP_TEMPLATE
+    for name, value in literals.items():
+        source = source.replace("{" + name + "}", json.dumps(value, sort_keys=True))
+    return source
+
+
+def render_command(root: Path, *, python: str = PYTHON_IN_IMAGE, **kwargs: Any) -> str:
+    """The exact one-line pre-deploy command: the bootstrap source, base64-embedded, run by ``python -I``."""
+    _check_tokens(python)
+    source = render_source(root, **kwargs)
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    return f'{python} -I -c "import base64,sys;exec(compile(base64.b64decode(\'{encoded}\'),\'release-gate-bootstrap\',\'exec\'))"'
+
+
+def decode_command(command: str) -> str:
+    """The bootstrap source embedded in a rendered command (for review)."""
+    start = command.index("b64decode('") + len("b64decode('")
+    end = command.index("'", start)
+    return base64.b64decode(command[start:end]).decode("utf-8")
 
 
 def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] = None, root: Optional[Path] = None) -> Dict[str, Any]:
-    """Canonical schema expectations read from a disposable database built at ``source_sha`` (read-only)."""
-    from sqlalchemy.engine import make_url
-
-    parsed = make_url(database_url)
-    if str(parsed.host or "").lower() == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
-        raise ValueError("refusing_existing_platform_database")
-    engine = gate._engine(database_url)
+    """Canonical schema expectations read from a disposable S3 database built at ``source_sha`` (read-only)."""
     try:
-        with engine.connect().execution_options(postgresql_readonly=True) as conn:
-            observed = gate.observe_retained(conn)
-            server_version = str(gate._scalar(conn, "SHOW server_version"))
-            conn.rollback()
-    finally:
-        engine.dispose()
-    missing = sorted(set(k.RETAINED_FULL_DEFINITION_TABLES) - set(observed["tables"]))
-    if missing or observed["nonce"] is None or set(observed["pk_types"]) != set(k.PK_TYPE_PINS) \
-            or len(observed["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS):
-        raise ValueError("database_is_not_a_complete_s0_build")
-    observed = json.loads(json.dumps(observed))  # JSON shape (lists), exactly as the file will hold it
-    return {
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(database_url)
+        host = str(parsed.host or "").lower()
+    except Exception as exc:  # noqa: BLE001 - the type only; the URL is never printed
+        raise ValueError("database_url_malformed") from exc
+    if host == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
+        raise ValueError("refusing_existing_platform_database")
+    try:
+        engine = gate._engine(database_url)
+        try:
+            with engine.connect().execution_options(postgresql_readonly=True) as conn:
+                retained = gate.observe_retained(conn)
+                footprint = gate.observe_footprint(conn, k.DEPLOY_PHASES["S3"])
+                server_version = str(gate._scalar(conn, "SHOW server_version"))
+                conn.rollback()
+        finally:
+            engine.dispose()
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the type only
+        raise ValueError("snapshot_" + type(exc).__name__.lower()) from exc
+    missing_retained = sorted(set(k.RETAINED_FULL_DEFINITION_TABLES) - set(retained["tables"]))
+    missing_shopify = sorted(set(k.SHOPIFY_TABLES) - set(footprint["definitions"]))
+    if (missing_retained or retained["nonce"] is None or set(retained["pk_types"]) != set(k.PK_TYPE_PINS)
+            or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]):
+        raise ValueError("database_is_not_a_complete_s3_build")
+    return k.normalize({
         "expectations_version": k.EXPECTATIONS_VERSION,
         "generated_from_source_sha": source_sha,
         "database_py_digest": gate.database_py_digest(root or _REPO_ROOT),
         "generated_at_utc": generated_at or _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
         "server_version": server_version,
-        "tables": observed["tables"],
-        "nonce": observed["nonce"],
-        "pk_types": observed["pk_types"],
-        "unique_definitions": observed["unique_definitions"],
-        "sequences": observed["sequences"],
-    }
+        "retained": retained,
+        "shopify_s3": {"tables": footprint["definitions"]},
+    })
 
 
-def approval_check(root: Path, phase: str, now: Optional[_dt.datetime] = None) -> Dict[str, Any]:
-    runtime = gate.runtime_inventory(root)
-    record = gate.read_json(root / k.APPROVAL_RELATIVE_PATH)
-    status, reason, detail = k.evaluate_approval(record, phase, runtime_digest=runtime[1], runtime_count=runtime[0],
-                                                 now=now or _dt.datetime.now(_dt.timezone.utc))
-    return {"phase": phase, "status": status, "reason": reason, "runtime_inventory_count": runtime[0],
-            "runtime_inventory_digest": runtime[1], "detail": detail}
+def _add_target_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project", default=k.EXISTING_PLATFORM_TARGET["project"])
+    parser.add_argument("--environment", default=k.EXISTING_PLATFORM_TARGET["environment"])
+    parser.add_argument("--service", default=k.EXISTING_PLATFORM_TARGET["service"])
+    parser.add_argument("--db", default=k.EXISTING_PLATFORM_TARGET["db"])
+    parser.add_argument("--backup-service", default=k.EXISTING_PLATFORM_TARGET["backup_service"])
+    parser.add_argument("--backup-volume", default=k.EXISTING_PLATFORM_TARGET["backup_volume"])
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # noqa: D401 - argparse hook; never echoes an argument value
+        print(json.dumps({"error": "invalid_arguments"}))
+        raise SystemExit(k.EXIT_USAGE)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="shopify_release_gate_render")
+    parser = _Parser(prog="shopify_release_gate_render", add_help=False)
     sub = parser.add_subparsers(dest="command", required=True)
-    inv = sub.add_parser("inventory")
+    inv = sub.add_parser("inventory", add_help=False)
     inv.add_argument("--root", default=str(_REPO_ROOT))
-    ren = sub.add_parser("render")
+    ren = sub.add_parser("render", add_help=False)
     ren.add_argument("--root", default=str(_REPO_ROOT))
     ren.add_argument("--release-sha", required=True)
     ren.add_argument("--phase", required=True)
-    ren.add_argument("--project", default=k.EXISTING_PLATFORM_TARGET["project"])
-    ren.add_argument("--environment", default=k.EXISTING_PLATFORM_TARGET["environment"])
-    ren.add_argument("--service", default=k.EXISTING_PLATFORM_TARGET["service"])
-    ren.add_argument("--db", default=k.EXISTING_PLATFORM_TARGET["db"])
+    ren.add_argument("--approval-file", required=True)
     ren.add_argument("--python", default=PYTHON_IN_IMAGE)
-    snap = sub.add_parser("snapshot")
+    ren.add_argument("--container-root", default=k.CONTAINER_ROOT)
+    ren.add_argument("--format", choices=("command", "source"), default="command")
+    _add_target_arguments(ren)
+    snap = sub.add_parser("snapshot", add_help=False)
     snap.add_argument("--database-url", required=True)
     snap.add_argument("--out", required=True)
     snap.add_argument("--source-sha", required=True)
     snap.add_argument("--root", default=str(_REPO_ROOT))
-    chk = sub.add_parser("approval-check")
+    chk = sub.add_parser("approval-check", add_help=False)
     chk.add_argument("--root", default=str(_REPO_ROOT))
+    chk.add_argument("--approval-file", required=True)
+    chk.add_argument("--release-sha", required=True)
     chk.add_argument("--phase", required=True)
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    _add_target_arguments(chk)
+    try:
+        args = parser.parse_args(list(argv) if argv is not None else None)
+    except SystemExit as exc:
+        return int(exc.code or 0)
     try:
         if args.command == "inventory":
             print(json.dumps(inventory_report(Path(args.root)), indent=2, sort_keys=True))
-        elif args.command == "render":
-            print(render_command(Path(args.root), release_sha=args.release_sha, phase=args.phase, project=args.project,
-                                 environment=args.environment, service=args.service, db=args.db, python=args.python))
+        elif args.command in ("render", "approval-check"):
+            if not k.RELEASE_SHA_RE.match(args.release_sha):
+                raise ValueError("release_sha_malformed")
+            identity = {"project": args.project, "environment": args.environment, "service": args.service}
+            verdict = approval_verdict(Path(args.root), approval_file=Path(args.approval_file), release_sha=args.release_sha, phase=args.phase,
+                                       identity=identity, db=args.db, backup_service=args.backup_service, backup_volume=args.backup_volume)
+            if args.command == "approval-check":
+                print(json.dumps({key: value for key, value in verdict.items() if key != "approval_b64"}, indent=2, sort_keys=True))
+            else:
+                if verdict["status"] != k.PASS:
+                    raise ValueError("approval_" + str(verdict["reason"]))
+                kwargs = dict(release_sha=args.release_sha, phase=args.phase, approval_sha256=verdict["approval_sha256"], project=args.project,
+                              environment=args.environment, service=args.service, db=args.db, backup_service=args.backup_service,
+                              backup_volume=args.backup_volume, container_root=args.container_root)
+                if args.format == "source":
+                    print(render_source(Path(args.root), **kwargs))
+                else:
+                    print(render_command(Path(args.root), python=args.python, **kwargs))
         elif args.command == "snapshot":
             if not k.RELEASE_SHA_RE.match(args.source_sha):
                 raise ValueError("source_sha_malformed")
@@ -172,19 +346,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=1, sort_keys=True)
                 handle.write("\n")
-            print(json.dumps({k_: v for k_, v in payload.items() if k_ not in ("tables", "nonce", "sequences", "unique_definitions", "pk_types")}, indent=2, sort_keys=True))
-        else:
-            print(json.dumps(approval_check(Path(args.root), args.phase), indent=2, sort_keys=True))
-    except (ValueError, FileNotFoundError) as exc:
-        # The reason token or the exception type only: a DSN is never printed.
-        print(json.dumps({"error": str(exc) if isinstance(exc, ValueError) else type(exc).__name__}))
+            print(json.dumps({key: value for key, value in payload.items() if key not in ("retained", "shopify_s3")}, indent=2, sort_keys=True))
+    except ValueError as exc:
+        token = str(exc)
+        print(json.dumps({"error": token if k.TOKEN_RE.match(token) else "ValueError"}))
+        return k.EXIT_USAGE
+    except Exception as exc:  # noqa: BLE001 - the type only, never a body
+        print(json.dumps({"error": type(exc).__name__}))
         return k.EXIT_USAGE
     return k.EXIT_PASS
-
-
-def quoted_for_shell(command: str) -> str:
-    """The command as a single shell word, for operators who store it in a quoted field."""
-    return shlex.quote(command)
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

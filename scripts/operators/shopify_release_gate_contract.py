@@ -6,34 +6,35 @@ guard **for the new source only** and inherits none of that guard's mutation
 path: it never upgrades, stamps, merges or edits ``alembic_version``. Every
 state it accepts is one exact, named state, and every deviation is a refusal.
 
-Trust root
-──────────
-The guard is executed by a short rendered command (see
-``shopify_release_gate_render.py``) that the owner pastes into the service's
-pre-deploy command together with the source pin. That command carries, as
-literals, the release commit, the SHA-256 of the gate module itself, the full
-inventory digest and count, the phase, the platform identity and the database
-target. The binding is not circular: the gate module never carries its own
-digest; the command pins the module, and the module verifies an inventory
-whose digest is given to it by the command.
+Trust order
+───────────
+The owner's pre-deploy command is a **standard-library-only bootstrap**
+rendered by ``shopify_release_gate_render.py``. Before any repository module is
+imported it verifies, from literals it carries: the container root, the
+deployed commit (``RAILWAY_GIT_COMMIT_SHA``), the platform identity, the
+absence of inherited libpq target variables, the complete byte inventory
+(count and digest, computed by the bootstrap itself), the absence of package
+initializers that must not exist, the gate module's own digest and the
+SHA-256 of the external approval payload. Only then does it ``exec`` the gate,
+which re-verifies everything fail-fast and performs the database checks.
 
-Two inventories
-───────────────
-* **runtime inventory** — the legacy guard's rule (``requirements.txt``,
-  ``database/alembic.ini``, the pilot migration job and its contract, every
-  ``database/**/*.py``) plus the gate, this contract, the schema expectations,
-  the bootstrap contract and the three Shopify flag modules. The approval
-  record binds to this digest, so filling the record cannot change it.
-* **full inventory** — the runtime inventory plus the approval record. The
-  rendered command pins this digest, so the record cannot change without a
-  re-rendered command.
+Bindings (none circular)
+────────────────────────
+* The rendered command pins the inventory digest; the inventory includes the
+  gate and this contract, and neither stores its own digest.
+* The approval record is **external** to the source (an owner-held payload
+  delivered through one environment variable and pinned by SHA-256 in the
+  command). It binds to the exact deployed commit, the inventory digest and
+  count, the platform target, the backup identity and the phase, so a commit
+  never has to name itself.
 
 Phases
 ──────
-One phase per exact ``alembic_version`` state of the deployed topology. The
-gate accepts the phase named by the command and nothing else: a database one
-step ahead or behind, or with a partial Shopify footprint, is refused and the
-deploy stops. There is no blanket permission and no "any of S0..S3".
+Normal deployment is allowed in exactly two states: S0 (the deployed
+topology before any Shopify revision) and S3 (every Shopify revision
+applied). S1 and S2 are intermediate states of the separately approved manual
+migration window; they are named here so tests can prove they are refused,
+and they are never a deployment phase.
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ import datetime as _dt
 import re
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
-GATE_VERSION = 1
+GATE_VERSION = 2
 LOG_PREFIX = "[shopify-release-gate]"
 
 PASS, FAIL = "PASS", "FAIL"
@@ -60,17 +61,18 @@ RELEASE_SHA_ENV = "RAILWAY_GIT_COMMIT_SHA"
 RELEASE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
+UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
+TOKEN_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 GATE_RELATIVE_PATH = "scripts/operators/shopify_release_gate.py"
 CONTRACT_RELATIVE_PATH = "scripts/operators/shopify_release_gate_contract.py"
 EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_release_schema_expectations.json"
-APPROVAL_RELATIVE_PATH = "scripts/operators/shopify_release_approval.json"
+APPROVAL_TEMPLATE_RELATIVE_PATH = "scripts/operators/shopify_release_approval.template.json"
 
 # Legacy guard rule, reproduced exactly: these four files plus every
 # ``database/**/*.py``; sorted relative paths; ``path NUL bytes NUL`` per file.
-# Reproduces the legacy digest over exactly 132 files at the deployed commit
-# (verified in the slice's evidence), so the new rule is a superset of it.
+# It reproduces the legacy digest over exactly 132 files at the deployed
+# commit, so the gate's rule is a strict superset of the legacy one.
 LEGACY_FIXED_FILES: Tuple[str, ...] = (
     "requirements.txt",
     "database/alembic.ini",
@@ -79,16 +81,24 @@ LEGACY_FIXED_FILES: Tuple[str, ...] = (
 )
 LEGACY_GLOB_ROOT = "database"
 LEGACY_GLOB_SUFFIX = ".py"
+# Everything the gate itself imports or reads from the repository, plus the
+# modules whose flag names and defaults it relies on. Package initializers on
+# the gate's import path are pinned (``scripts/operators/__init__.py``; the
+# ``database`` ones are covered by the glob).
 RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     GATE_RELATIVE_PATH,
     CONTRACT_RELATIVE_PATH,
     EXPECTATIONS_RELATIVE_PATH,
+    "scripts/operators/__init__.py",
     "scripts/operators/bootstrap_migration_contract.py",
     "backend/services/shopify_connection/config.py",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
-FULL_EXTRA_FILES: Tuple[str, ...] = (APPROVAL_RELATIVE_PATH,)
+# Initializers that do not exist in the accepted source and must not appear:
+# ``scripts`` is a namespace package, and a planted ``scripts/__init__.py``
+# would execute on the gate's first import.
+MUST_BE_ABSENT: Tuple[str, ...] = ("scripts/__init__.py",)
 
 # ── Library pins (the legacy guard's; identical to requirements.txt) ─────────
 LIBRARY_PINS: Mapping[str, str] = {
@@ -98,9 +108,6 @@ LIBRARY_PINS: Mapping[str, str] = {
 }
 
 # ── Migration graph of the accepted source ──────────────────────────────────
-# Every edge the gate requires in the script directory it runs from. A source
-# whose graph differs (a missing revision, a re-parented one, an extra head) is
-# refused before the database is touched.
 EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0110": "0109",
     "0111": "0109",
@@ -115,11 +122,10 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0123": "0122",
 }
 EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0123"})
-# The branch point the catalog/Shopify branch leaves the address branch from.
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
-# ── Phases: one exact alembic_version state each ────────────────────────────
+# ── States ──────────────────────────────────────────────────────────────────
 FOUNDATION_TABLES: Tuple[str, ...] = (
     "shopify_connections", "shopify_shop_leases", "shopify_oauth_states",
     "shopify_webhook_events", "shopify_connection_audit",
@@ -132,35 +138,30 @@ CATALOG_TABLES: Tuple[str, ...] = (
 PRIVACY_TABLES: Tuple[str, ...] = (
     "shopify_privacy_requests", "shopify_privacy_deliveries", "shopify_privacy_request_events",
 )
-# Added to shopify_connections by 0122 (and required by 0123); absent at S0/S1.
+SHOPIFY_TABLES: Tuple[str, ...] = FOUNDATION_TABLES + CATALOG_TABLES + PRIVACY_TABLES
 CONNECTION_KEY_CONSTRAINT = "uq_shopify_connections_id_tenant"
 SHOPIFY_NAME_PREFIX = "shopify_"
+SYSTEM_SCHEMAS: Tuple[str, ...] = ("pg_catalog", "information_schema")
 
-PHASES: Mapping[str, Dict[str, Any]] = {
+# Deployment phases: exactly two. One exact ``alembic_version`` state each.
+DEPLOY_PHASES: Mapping[str, Dict[str, Any]] = {
     "S0": {"rows": frozenset({"0111", "0113", "0120"}), "shopify_row": "0120",
-           "tables": (), "connection_key": False, "branch_delta": ("0118", "0120")},
-    "S1": {"rows": frozenset({"0111", "0113", "0121"}), "shopify_row": "0121",
-           "tables": FOUNDATION_TABLES, "connection_key": False,
-           "branch_delta": ("0118", "0120", "0121")},
-    "S2": {"rows": frozenset({"0111", "0113", "0122"}), "shopify_row": "0122",
-           "tables": FOUNDATION_TABLES + CATALOG_TABLES, "connection_key": True,
-           "branch_delta": ("0118", "0120", "0121", "0122")},
+           "tables": (), "branch_delta": ("0118", "0120")},
     "S3": {"rows": frozenset({"0111", "0113", "0123"}), "shopify_row": "0123",
-           "tables": FOUNDATION_TABLES + CATALOG_TABLES + PRIVACY_TABLES, "connection_key": True,
-           "branch_delta": ("0118", "0120", "0121", "0122", "0123")},
+           "tables": SHOPIFY_TABLES, "branch_delta": ("0118", "0120", "0121", "0122", "0123")},
 }
-# Phases whose approval needs database recovery evidence beyond a backup
-# observation: these are the states reached by a schema change.
-SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S1", "S2", "S3"})
-# Documentation-only label for the deployed legacy release: it is **not** a
-# gate phase. The legacy inline guard governs that release; this gate's file
-# does not exist in that source and the command refuses it.
+# Intermediate states of the manual migration window. Never a deployment
+# phase: the gate refuses them as an argument and refuses a database in them
+# under either deployment phase.
+INTERMEDIATE_STATES: Mapping[str, FrozenSet[str]] = {
+    "S1": frozenset({"0111", "0113", "0121"}),
+    "S2": frozenset({"0111", "0113", "0122"}),
+}
+SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3"})
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
 # ── Platform identity of the existing target (non-secret metadata) ───────────
-# Injected by the platform into the service; compared with the command's
-# expectation. Nothing here is a credential.
 IDENTITY_ENVS: Mapping[str, str] = {
     "project": "RAILWAY_PROJECT_ID",
     "environment": "RAILWAY_ENVIRONMENT_ID",
@@ -171,34 +172,52 @@ EXISTING_PLATFORM_TARGET: Mapping[str, str] = {
     "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
     "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
     "db": "postgres-ancu.railway.internal:5432/railway",
+    "backup_service": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+    "backup_volume": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
 }
 EXPECTED_SCHEMA = "public"
+# The legacy guard's pinned session search path, restored deliberately and
+# verified on the connection.
+SEARCH_PATH = "public,pg_catalog"
+# libpq variables that move a connection's target; refused when present (the
+# pilot job's own list, duplicated here so the stdlib bootstrap can refuse
+# them before any import).
+LIBPQ_TARGET_ENV_VARS: Tuple[str, ...] = (
+    "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE", "PGSERVICEFILE",
+    "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGPASSFILE", "PGCONNECT_TIMEOUT",
+)
 
-# ── Bounded timeouts (seconds; the whole run is wall-clock bounded) ─────────
+# ── Bounded timeouts (seconds / milliseconds; the whole run is wall-clock bounded) ──
 CONNECT_TIMEOUT_SEC = 5
 STATEMENT_TIMEOUT_MS = 15_000
 LOCK_TIMEOUT_MS = 3_000
 IDLE_IN_TRANSACTION_TIMEOUT_MS = 20_000
 WALL_TIMEOUT_SEC = 120
 APPLICATION_NAME = "nahla-shopify-release-gate"
-# Session-level exclusive advisory lock (two int4 keys: 'NAHL', 'SRLG'). A
-# second gate, a migration operator or any holder of the same key makes this
-# run refuse rather than wait.
-ADVISORY_LOCK_KEYS: Tuple[int, int] = (0x4E41484C, 0x53524C47)
+# The legacy guard's exclusive advisory key, preserved exactly so this gate
+# contends with it and with any operator that serializes on it:
+# ``sha256(b"nahla:primary:catalog-schema:0120")[:8]`` read as a big-endian
+# signed 64-bit integer (``struct.unpack(">q", ...)``).
+ADVISORY_LOCK_KEY_SEED = b"nahla:primary:catalog-schema:0120"
+ADVISORY_LOCK_KEY = 8182734029736770447
 
 # ── Shopify flags: every one must be unset or false during the transition ───
+# The two VITE_ names are the dashboard's build-time flags. They are refused
+# here if they appear in the checked (API service) environment; the API gate
+# cannot observe another service's compiled Vite configuration, which needs
+# separate owner evidence.
 SHOPIFY_FLAG_ENVS: Tuple[str, ...] = (
     "NAHLA_SHOPIFY_CONNECTION_ENABLED",
     "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED",
+    "VITE_SHOPIFY_CONNECTION_UI",
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI",
 )
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # ── Retained schema protections (definitions, never names only) ─────────────
-# Full canonical definitions (columns, every constraint, every index) are
-# pinned for the six tables the retained 0111/0113/0118/0120 branches own.
 RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
     "commerce_runtime_handover_barrier",
     "commerce_runtime_handover_workers",
@@ -207,37 +226,42 @@ RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
     "catalog_channel_retirements",
     "meta_catalog_authorizations",
 )
-# The WhatsApp OAuth nonce relation (0103) is pinned by definition with names
-# abstracted: columns exactly, constraint definitions exactly, index shapes
-# exactly. Its index *names* may legitimately differ on a database that
-# adopted the table under the 0103 contract.
+# The WhatsApp OAuth nonce relation (0103): full definition — every column
+# with type, nullability, default, identity and generation; every constraint
+# with its definition and deferrable/deferred/validated flags; every index
+# with its shape and validity flags — with only constraint and index *names*
+# abstracted, because a database that adopted the table under the 0103
+# contract may legitimately carry different names.
 NONCE_TABLE = "whatsapp_oauth_nonces"
-# Identity-level pins for the oldest relations.
 PK_TYPE_PINS: Mapping[str, str] = {"tenants": "integer", "users": "integer"}
 UNIQUE_DEFINITION_PINS: Tuple[Tuple[str, str], ...] = (
     ("commerce_runtime_conversations", "UNIQUE (id, tenant_id, namespace)"),
 )
-EXPECTATIONS_VERSION = 1
+IDENTITY_TABLES: Tuple[str, ...] = RETAINED_FULL_DEFINITION_TABLES + (NONCE_TABLE, "tenants", "users", "commerce_runtime_conversations")
+EXPECTATIONS_VERSION = 2
 
-# ── Approval record ─────────────────────────────────────────────────────────
-APPROVAL_RECORD_VERSION = 1
-APPROVAL_PHASE_FIELDS: Tuple[str, ...] = (
-    "approved", "reviewer", "independent_review_ref", "approved_at_utc", "valid_until_utc",
-)
-ROLLBACK_SNAPSHOT_FIELDS: Tuple[str, ...] = (
-    "railway_deployment_id", "source_sha", "verified_redeployable_at_utc", "verified_by",
-)
-BACKUP_FIELDS: Tuple[str, ...] = (
-    "service_id", "volume_id", "card_timestamp_utc", "size_mb", "observed_by", "observed_at_utc",
-)
+# ── Approval record (external payload) ──────────────────────────────────────
+APPROVAL_RECORD_VERSION = 2
+APPROVAL_PAYLOAD_ENV = "NAHLA_SHOPIFY_RELEASE_APPROVAL_B64"
+# A backup observation older than this at approval time or at run time is
+# refused: the owner must take a fresh backup before a later deploy.
+BACKUP_MAX_AGE_HOURS = 72
+BACKUP_MAX_SIZE_MB = 10_000_000
+APPROVAL_FIELDS: Tuple[str, ...] = ("approved", "reviewer", "independent_review_ref", "approved_at_utc", "valid_until_utc")
+ROLLBACK_SNAPSHOT_FIELDS: Tuple[str, ...] = ("railway_deployment_id", "source_sha", "verified_redeployable_at_utc", "verified_by")
+BACKUP_FIELDS: Tuple[str, ...] = ("service_id", "volume_id", "card_timestamp_utc", "size_mb", "completed", "restore_available",
+                                  "observed_by", "observed_at_utc")
 
 # Closed result tokens (the only reasons ever printed).
 R_ROOT_MISSING = "root_missing"
+R_PHASE_NOT_DEPLOYABLE = "phase_not_deployable"
 R_RELEASE_SHA_MISSING = "release_sha_missing"
 R_RELEASE_SHA_MISMATCH = "release_sha_mismatch"
 R_INVENTORY_FILE_MISSING = "inventory_file_missing"
 R_INVENTORY_COUNT_MISMATCH = "inventory_count_mismatch"
 R_INVENTORY_DIGEST_MISMATCH = "inventory_digest_mismatch"
+R_INITIALIZER_UNEXPECTED = "initializer_unexpected"
+R_GATE_DIGEST_MISMATCH = "gate_digest_mismatch"
 R_LIBRARY_PIN_MISMATCH = "library_pin_mismatch"
 R_GRAPH_UNLOADABLE = "graph_unloadable"
 R_GRAPH_EDGE_MISMATCH = "graph_edge_mismatch"
@@ -245,16 +269,28 @@ R_GRAPH_HEADS_MISMATCH = "graph_heads_mismatch"
 R_GRAPH_BRANCH_DELTA_MISMATCH = "graph_branch_delta_mismatch"
 R_IDENTITY_MISSING = "identity_missing"
 R_IDENTITY_MISMATCH = "identity_mismatch"
+R_LIBPQ_OVERRIDE = "libpq_environment_override"
 R_DB_TARGET_MISMATCH = "database_target_mismatch"
+R_APPROVAL_PAYLOAD_MISSING = "approval_payload_missing"
+R_APPROVAL_PAYLOAD_MALFORMED = "approval_payload_malformed"
+R_APPROVAL_PAYLOAD_PIN_MISMATCH = "approval_payload_pin_mismatch"
 R_APPROVAL_UNREADABLE = "approval_record_unreadable"
 R_APPROVAL_VERSION = "approval_record_version"
+R_APPROVAL_RELEASE_MISMATCH = "approval_release_mismatch"
 R_APPROVAL_NOT_BOUND = "approval_not_bound_to_this_source"
-R_APPROVAL_MISSING = "approval_missing_for_phase"
+R_APPROVAL_TARGET_MISMATCH = "approval_target_mismatch"
+R_APPROVAL_PHASE_MISMATCH = "approval_phase_mismatch"
+R_APPROVAL_MISSING = "approval_missing"
 R_APPROVAL_EXPIRED = "approval_expired"
 R_APPROVAL_TIMESTAMP_INVALID = "approval_timestamp_invalid"
+R_APPROVAL_TIMESTAMP_ORDER = "approval_timestamp_order"
 R_ROLLBACK_SNAPSHOT_MISSING = "deployment_rollback_snapshot_missing"
 R_BACKUP_EVIDENCE_MISSING = "backup_evidence_missing"
-R_BACKUP_AFTER_APPROVAL = "backup_observed_after_approval"
+R_BACKUP_IDENTITY_MISMATCH = "backup_identity_mismatch"
+R_BACKUP_SIZE_INVALID = "backup_size_invalid"
+R_BACKUP_NOT_COMPLETED = "backup_not_completed"
+R_BACKUP_NOT_RESTORABLE = "backup_not_restorable"
+R_BACKUP_TOO_OLD = "backup_too_old"
 R_RESTORE_NOT_VERIFIED = "restore_not_verified"
 R_FLAG_ENABLED = "shopify_flag_enabled"
 R_CONNECT_FAILED = "connect_failed"
@@ -265,6 +301,7 @@ R_UNLOCK_FAILED = "unlock_failed"
 R_SERVER_IN_RECOVERY = "server_in_recovery"
 R_SERVER_READ_ONLY = "database_default_read_only"
 R_SCHEMA_NOT_PUBLIC = "current_schema_not_public"
+R_SEARCH_PATH_MISMATCH = "search_path_mismatch"
 R_DATABASE_NAME_MISMATCH = "database_name_mismatch"
 R_VERSION_TABLE_MISSING = "alembic_version_table_missing"
 R_VERSION_ROWS_DUPLICATE = "alembic_version_duplicate_rows"
@@ -272,18 +309,19 @@ R_VERSION_ROWS_UNKNOWN = "alembic_version_unknown_rows"
 R_VERSION_ROWS_MISMATCH = "alembic_version_rows_mismatch"
 R_FOOTPRINT_MISSING = "shopify_footprint_missing"
 R_FOOTPRINT_UNEXPECTED = "shopify_footprint_unexpected"
-R_FOOTPRINT_KEY = "shopify_connection_key_mismatch"
+R_SHOPIFY_DEFINITION_DRIFT = "shopify_definition_drift"
 R_RETAINED_TABLE_MISSING = "retained_table_missing"
 R_RETAINED_DEFINITION_DRIFT = "retained_definition_drift"
 R_RETAINED_IDENTITY_DRIFT = "retained_identity_drift"
+R_RELATION_REPLACED = "relation_replaced_during_run"
 R_EXPECTATIONS_UNREADABLE = "schema_expectations_unreadable"
 R_EXPECTATIONS_STALE = "schema_expectations_not_for_this_source"
 R_INTERNAL_ERROR = "internal_error"
 
 
 def phase(name: str) -> Optional[Dict[str, Any]]:
-    """The phase definition, or None for anything that is not a gate phase."""
-    return PHASES.get(str(name or ""))
+    """The deployment phase definition, or None for anything that is not one (S1/S2 included)."""
+    return DEPLOY_PHASES.get(str(name or ""))
 
 
 def truthy(value: object) -> bool:
@@ -291,9 +329,9 @@ def truthy(value: object) -> bool:
 
 
 def parse_utc(value: object) -> Optional[_dt.datetime]:
-    """``YYYY-MM-DDTHH:MM:SSZ`` (optionally with fractional seconds) -> aware UTC datetime; else None."""
+    """``YYYY-MM-DDTHH:MM:SS[.ffffff]Z`` -> aware UTC datetime; anything else -> None."""
     raw = str(value or "").strip()
-    if not _UTC_RE.match(raw):
+    if not UTC_RE.match(raw):
         return None
     try:
         parsed = _dt.datetime.fromisoformat(raw[:-1])
@@ -321,6 +359,10 @@ def parse_db_target(raw: str) -> Optional[Dict[str, Any]]:
     return {"host": host.lower(), "port": port, "database": database}
 
 
+def target_label(target: Mapping[str, Any]) -> str:
+    return f"{target['host']}:{target['port']}/{target['database']}"
+
+
 def evaluate_rows(rows: Optional[List[str]], expected: FrozenSet[str], known: FrozenSet[str]) -> Tuple[str, Optional[str], Dict[str, Any]]:
     """Exact-multiset comparison. Only known revision ids are ever reported; the rest is ``<unknown>``."""
     if rows is None:
@@ -337,38 +379,50 @@ def evaluate_rows(rows: Optional[List[str]], expected: FrozenSet[str], known: Fr
     return PASS, None, detail
 
 
-def evaluate_footprint(observed: Mapping[str, Any], phase_def: Mapping[str, Any]) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    """Exact Shopify footprint for a phase.
+def normalize(value: Any) -> Any:
+    """JSON round-trip shape: tuples become lists so file and live forms compare equal."""
+    if isinstance(value, (list, tuple)):
+        return [normalize(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): normalize(v) for k, v in value.items()}
+    return value
 
-    ``observed`` carries: ``tables`` (relations named shopify_* with kind r/p),
-    ``other_relations`` (shopify_* relations of any other kind except the
-    sequences owned by expected tables and their indexes), ``types`` (shopify_*
-    types that are not the row/array types of expected tables), ``functions``
-    (shopify_* functions), ``foreign_constraints`` (constraints named *shopify*
-    on tables outside the expected set) and ``connection_key`` (bool).
+
+def evaluate_footprint(observed: Mapping[str, Any], phase_def: Mapping[str, Any],
+                       shopify_expectations: Mapping[str, Any]) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    """Exact Shopify footprint for a deployment phase, by canonical definition.
+
+    ``observed``: ``tables`` (every ``shopify_*`` table in any user schema, as
+    ``schema.name``), ``definitions`` (canonical definition per expected
+    public table that exists), ``stray_count`` (every other ``shopify_*``
+    relation, type or function in any user schema, and every ``*shopify*``
+    constraint outside the expected tables). Only expected names are ever
+    reported; unexpected objects are counted.
     """
-    expected_tables = set(phase_def["tables"])
+    expected = [f"public.{t}" for t in phase_def["tables"]]
     tables = set(observed.get("tables") or ())
-    missing = sorted(expected_tables - tables)
-    unexpected = sorted(tables - expected_tables)
-    stray = sorted(set(observed.get("other_relations") or ()) | set(observed.get("types") or ())
-                   | set(observed.get("functions") or ()) | set(observed.get("foreign_constraints") or ()))
-    detail = {"missing": missing, "unexpected": unexpected, "stray": stray,
-              "connection_key": bool(observed.get("connection_key"))}
+    missing = sorted(t for t in expected if t not in tables)
+    unexpected_count = len(tables - set(expected))
+    stray_count = int(observed.get("stray_count") or 0)
+    drift: List[str] = []
+    for table in phase_def["tables"]:
+        definition = (observed.get("definitions") or {}).get(table)
+        pinned = (shopify_expectations.get("tables") or {}).get(table)
+        if definition is not None and (pinned is None or normalize(definition) != normalize(pinned)):
+            drift.append(table)
+    detail = {"missing": [m.split(".", 1)[1] for m in missing], "unexpected_count": unexpected_count,
+              "stray_count": stray_count, "drift": sorted(drift)}
     if missing:
         return FAIL, R_FOOTPRINT_MISSING, detail
-    if unexpected or stray:
+    if unexpected_count or stray_count:
         return FAIL, R_FOOTPRINT_UNEXPECTED, detail
-    if bool(observed.get("connection_key")) != bool(phase_def["connection_key"]):
-        return FAIL, R_FOOTPRINT_KEY, detail
+    if drift:
+        return FAIL, R_SHOPIFY_DEFINITION_DRIFT, detail
     return PASS, None, detail
 
 
 def evaluate_retained(observed: Mapping[str, Any], expectations: Mapping[str, Any]) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    """Canonical definitions of the retained relations against the pinned expectations.
-
-    Reports table names only, never definitions.
-    """
+    """Canonical definitions of the retained relations against the pinned expectations. Table names only."""
     drift: List[str] = []
     missing: List[str] = []
     expected_tables = expectations.get("tables") or {}
@@ -377,13 +431,12 @@ def evaluate_retained(observed: Mapping[str, Any], expectations: Mapping[str, An
         actual = observed_tables.get(table)
         if actual is None:
             missing.append(table)
-        elif _normalize(actual) != _normalize(definition):
+        elif normalize(actual) != normalize(definition):
             drift.append(table)
-    nonce_expected = expectations.get("nonce") or {}
     nonce_actual = observed.get("nonce")
     if nonce_actual is None:
         missing.append(NONCE_TABLE)
-    elif _normalize(nonce_actual) != _normalize(nonce_expected):
+    elif normalize(nonce_actual) != normalize(expectations.get("nonce") or {}):
         drift.append(NONCE_TABLE)
     identity: List[str] = []
     for table, pk_type in (expectations.get("pk_types") or {}).items():
@@ -393,9 +446,7 @@ def evaluate_retained(observed: Mapping[str, Any], expectations: Mapping[str, An
     observed_uniques = {tuple(x) for x in (observed.get("unique_definitions") or [])}
     for table, _definition in sorted(expected_uniques - observed_uniques):
         identity.append(table)
-    expected_sequences = {tuple(x) for x in (expectations.get("sequences") or [])}
-    observed_sequences = {tuple(x) for x in (observed.get("sequences") or [])}
-    if expected_sequences != observed_sequences:
+    if {tuple(x) for x in (expectations.get("sequences") or [])} != {tuple(x) for x in (observed.get("sequences") or [])}:
         identity.append("sequence_ownership")
     detail = {"missing": sorted(set(missing)), "drift": sorted(set(drift)), "identity": sorted(set(identity))}
     if missing:
@@ -407,13 +458,12 @@ def evaluate_retained(observed: Mapping[str, Any], expectations: Mapping[str, An
     return PASS, None, detail
 
 
-def _normalize(value: Any) -> Any:
-    """JSON round-trip shape: tuples become lists so file and live forms compare equal."""
-    if isinstance(value, (list, tuple)):
-        return [_normalize(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _normalize(v) for k, v in value.items()}
-    return value
+def evaluate_relation_identity(before: Mapping[str, Any], after: Mapping[str, Any]) -> Tuple[str, Optional[str], Dict[str, Any]]:
+    """The relations checked must be the same objects at the end of the run as at its start."""
+    changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
+    if changed:
+        return FAIL, R_RELATION_REPLACED, {"relations": [n for n in changed if n in IDENTITY_TABLES or n in SHOPIFY_TABLES]}
+    return PASS, None, {"relations": len(before)}
 
 
 def evaluate_flags(environ: Mapping[str, str]) -> Tuple[str, Optional[str], Dict[str, Any]]:
@@ -435,7 +485,7 @@ def evaluate_identity(environ: Mapping[str, str], expected: Mapping[str, str]) -
     return PASS, None, {"expected": dict(expected)}
 
 
-def _all_present(mapping: Any, fields: Tuple[str, ...]) -> bool:
+def _present(mapping: Any, fields: Tuple[str, ...]) -> bool:
     if not isinstance(mapping, dict):
         return False
     for name in fields:
@@ -445,45 +495,79 @@ def _all_present(mapping: Any, fields: Tuple[str, ...]) -> bool:
     return True
 
 
-def evaluate_approval(record: Any, phase_name: str, *, runtime_digest: str, runtime_count: int,
+def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime_digest: str, runtime_count: int,
+                      target: Mapping[str, str], backup_service: str, backup_volume: str,
                       now: _dt.datetime) -> Tuple[str, Optional[str], Dict[str, Any]]:
-    """The owner's per-phase operational approval, bound to the runtime inventory it was given for.
+    """The owner's external approval for exactly this release, source, target, phase and backup.
 
-    Fail-closed: an unfilled record, a record for another source, an expired or
-    unapproved phase, a missing deployment rollback snapshot, missing backup
-    evidence, backup evidence observed after the approval, or (for a
-    schema-changing phase) an unverified restore each refuse the deploy.
+    Fail-closed on: an unreadable or wrong-version record; a different release
+    commit, inventory, target or phase; an unapproved or incomplete approval;
+    timestamps that are not UTC or out of order (card <= observed <= approved
+    <= now <= expiry); a missing deployment rollback snapshot; backup evidence
+    for another service or volume, with a non-positive or absurd size, not
+    completed, not restorable, or older than ``BACKUP_MAX_AGE_HOURS`` at
+    approval or at run time; and, for a schema-changing phase, a restore that
+    is not verified with a reference and a timestamp between the backup and
+    the approval.
     """
     detail: Dict[str, Any] = {"phase": phase_name}
     if not isinstance(record, dict):
         return FAIL, R_APPROVAL_UNREADABLE, detail
     if record.get("record_version") != APPROVAL_RECORD_VERSION:
         return FAIL, R_APPROVAL_VERSION, detail
-    if record.get("bound_runtime_inventory_digest") != runtime_digest or record.get("bound_runtime_inventory_count") != runtime_count:
+    if record.get("release_sha") != release_sha:
+        return FAIL, R_APPROVAL_RELEASE_MISMATCH, detail
+    if record.get("runtime_inventory_digest") != runtime_digest or record.get("runtime_inventory_count") != runtime_count:
         return FAIL, R_APPROVAL_NOT_BOUND, detail
-    entry = (record.get("phase_approvals") or {}).get(phase_name)
-    if not _all_present(entry, APPROVAL_PHASE_FIELDS) or entry.get("approved") is not True:
+    bound_target = record.get("target")
+    if not isinstance(bound_target, dict) or any(bound_target.get(key) != target.get(key) for key in ("project", "environment", "service", "db")):
+        return FAIL, R_APPROVAL_TARGET_MISMATCH, detail
+    if record.get("phase") != phase_name:
+        return FAIL, R_APPROVAL_PHASE_MISMATCH, detail
+    approval = record.get("approval")
+    if not _present(approval, APPROVAL_FIELDS) or approval.get("approved") is not True:
         return FAIL, R_APPROVAL_MISSING, detail
-    approved_at = parse_utc(entry.get("approved_at_utc"))
-    valid_until = parse_utc(entry.get("valid_until_utc"))
-    if approved_at is None or valid_until is None or valid_until <= approved_at:
+    approved_at = parse_utc(approval.get("approved_at_utc"))
+    valid_until = parse_utc(approval.get("valid_until_utc"))
+    if approved_at is None or valid_until is None:
         return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
+    if valid_until <= approved_at:
+        return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
     if now < approved_at or now > valid_until:
         return FAIL, R_APPROVAL_EXPIRED, detail
-    if not _all_present(record.get("deployment_rollback_snapshot"), ROLLBACK_SNAPSHOT_FIELDS):
+    snapshot = record.get("deployment_rollback_snapshot")
+    if not _present(snapshot, ROLLBACK_SNAPSHOT_FIELDS) or parse_utc(snapshot.get("verified_redeployable_at_utc")) is None:
         return FAIL, R_ROLLBACK_SNAPSHOT_MISSING, detail
-    recovery = record.get("db_recovery_evidence") or {}
+    recovery = record.get("db_recovery_evidence")
     backup = recovery.get("backup") if isinstance(recovery, dict) else None
-    if not _all_present(backup, BACKUP_FIELDS):
+    if not _present(backup, BACKUP_FIELDS):
         return FAIL, R_BACKUP_EVIDENCE_MISSING, detail
+    if backup.get("service_id") != backup_service or backup.get("volume_id") != backup_volume:
+        return FAIL, R_BACKUP_IDENTITY_MISMATCH, detail
+    size = backup.get("size_mb")
+    if isinstance(size, bool) or not isinstance(size, (int, float)) or not (0 < size <= BACKUP_MAX_SIZE_MB):
+        return FAIL, R_BACKUP_SIZE_INVALID, detail
+    if backup.get("completed") is not True:
+        return FAIL, R_BACKUP_NOT_COMPLETED, detail
+    if backup.get("restore_available") is not True:
+        return FAIL, R_BACKUP_NOT_RESTORABLE, detail
     card_time = parse_utc(backup.get("card_timestamp_utc"))
-    if card_time is None:
+    observed_at = parse_utc(backup.get("observed_at_utc"))
+    if card_time is None or observed_at is None:
         return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
-    if card_time > approved_at:
-        return FAIL, R_BACKUP_AFTER_APPROVAL, detail
+    if not (card_time <= observed_at <= approved_at):
+        return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
+    max_age = _dt.timedelta(hours=BACKUP_MAX_AGE_HOURS)
+    if approved_at - card_time > max_age or now - card_time > max_age:
+        return FAIL, R_BACKUP_TOO_OLD, detail
     if phase_name in SCHEMA_CHANGING_PHASES:
-        if recovery.get("restore_verified") is not True or not _all_present(recovery, ("restore_verification_ref", "restore_verified_at_utc")):
+        if recovery.get("restore_verified") is not True or not _present(recovery, ("restore_verification_ref", "restore_verified_at_utc")):
             return FAIL, R_RESTORE_NOT_VERIFIED, detail
+        restored_at = parse_utc(recovery.get("restore_verified_at_utc"))
+        if restored_at is None:
+            return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
+        if not (card_time <= restored_at <= approved_at):
+            return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
     return PASS, None, detail
 
 

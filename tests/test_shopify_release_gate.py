@@ -1,10 +1,12 @@
-"""DB-free contract of the Shopify release gate: exact phases, external pins, fail-closed evaluation, secret-safe output.
+"""DB-free contract of the Shopify release gate: trust order, exact phases, external pins, fail-closed evaluation, secret-safe output.
 
 Every function the gate decides with is pure over what it reads; these cases pin
-that each refusal path exists and that nothing but closed tokens, table and
-field names, known revision ids and expected platform ids is ever reported.
-The live PostgreSQL exercise of the same gate (phase matrix, footprint, drift,
-locks, timeouts) lives in ``backend/tests/test_shopify_release_gate_pg.py``.
+that each refusal path exists, that the rendered bootstrap refuses a tampered
+source **before any repository module executes**, that only S0 and S3 are
+deployment phases, and that nothing but closed tokens, allow-listed names,
+counts, known revision ids and expected platform ids is ever reported. The live
+PostgreSQL exercise of the same gate lives in
+``backend/tests/test_shopify_release_gate_pg.py``.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +39,10 @@ SECRET_ROW = "postgresql://svc:p-not-a-real-secret@db.internal:5432/prod"
 CONTROL_ROW = "\x1b[2J\x1b[31mDROP TABLE tenants; --"
 KNOWN = frozenset({"0093", "0111", "0113", "0114", "0115", "0118", "0120", "0121", "0122", "0123"})
 EXPECTATIONS = json.loads((REPO / k.EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
+DB = "db.internal:5432/railway"
+UNROUTABLE_DB = "192.0.2.1:5432/railway"
+TARGET = harness.target_for(DB)
+RUNTIME = (143, "f" * 64)
 
 
 def _migration(name: str):
@@ -46,44 +53,50 @@ def _migration(name: str):
     return module
 
 
+def _clear_bytecode(root: Path) -> None:
+    for cache in root.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+
+
 # ── Phases and contract constants ─────────────────────────────────────────────
 
-def test_phases_are_exact_named_states_and_nothing_else():
-    assert list(k.PHASES) == ["S0", "S1", "S2", "S3"]
-    assert k.PHASES["S0"]["rows"] == {"0111", "0113", "0120"} and k.PHASES["S0"]["tables"] == ()
-    assert k.PHASES["S1"]["rows"] == {"0111", "0113", "0121"} and len(k.PHASES["S1"]["tables"]) == 5
-    assert k.PHASES["S2"]["rows"] == {"0111", "0113", "0122"} and len(k.PHASES["S2"]["tables"]) == 12
-    assert k.PHASES["S3"]["rows"] == {"0111", "0113", "0123"} and len(k.PHASES["S3"]["tables"]) == 15
-    assert [k.PHASES[p]["connection_key"] for p in k.PHASES] == [False, False, True, True]
-    for name in ("LEGACY_462_S0", "head", "heads", "", "S4", "s0", "ANY"):
+def test_only_s0_and_s3_are_deployment_phases():
+    assert list(k.DEPLOY_PHASES) == ["S0", "S3"] and list(k.INTERMEDIATE_STATES) == ["S1", "S2"]
+    assert k.DEPLOY_PHASES["S0"]["rows"] == {"0111", "0113", "0120"} and k.DEPLOY_PHASES["S0"]["tables"] == ()
+    assert k.DEPLOY_PHASES["S3"]["rows"] == {"0111", "0113", "0123"} and len(k.DEPLOY_PHASES["S3"]["tables"]) == 15
+    assert k.INTERMEDIATE_STATES["S1"] == {"0111", "0113", "0121"} and k.INTERMEDIATE_STATES["S2"] == {"0111", "0113", "0122"}
+    for name in ("S1", "S2", "LEGACY_462_S0", "head", "heads", "", "S4", "s0", "ANY"):
         assert k.phase(name) is None
-    assert k.SCHEMA_CHANGING_PHASES == {"S1", "S2", "S3"}
-    for phase in k.PHASES.values():
+    assert k.SCHEMA_CHANGING_PHASES == {"S3"}
+    for phase in k.DEPLOY_PHASES.values():
         assert k.RETAINED_ROWS <= phase["rows"] and len(phase["rows"]) == 3
 
 
 def test_contract_constants_match_the_frozen_sources():
     m121, m122, m123 = (_migration(n) for n in ("0121_shopify_connection_foundation.py", "0122_shopify_catalog_mirror.py",
                                                 "0123_shopify_privacy_requests.py"))
-    assert tuple(m121.TABLES) == k.FOUNDATION_TABLES
-    assert tuple(m122.TABLES) == k.CATALOG_TABLES and m122.CONNECTION_KEY == k.CONNECTION_KEY_CONSTRAINT
-    assert tuple(m123.TABLES) == k.PRIVACY_TABLES and m123.CONNECTION_KEY == k.CONNECTION_KEY_CONSTRAINT
-    assert (m121.revision, m121.down_revision) == ("0121", "0120")
-    assert (m122.revision, m122.down_revision) == ("0122", "0121")
-    assert (m123.revision, m123.down_revision) == ("0123", "0122")
-    assert bootstrap.REPOSITORY_ALEMBIC_HEADS == k.EXPECTED_REPOSITORY_HEADS
-    assert bootstrap.INTEGRATION_BOOTSTRAP_TARGET == "0093"
+    assert tuple(m121.TABLES) + tuple(m122.TABLES) + tuple(m123.TABLES) == k.SHOPIFY_TABLES
+    assert m122.CONNECTION_KEY == m123.CONNECTION_KEY == k.CONNECTION_KEY_CONSTRAINT
+    assert (m121.down_revision, m122.down_revision, m123.down_revision) == ("0120", "0121", "0122")
+    assert bootstrap.REPOSITORY_ALEMBIC_HEADS == k.EXPECTED_REPOSITORY_HEADS and bootstrap.INTEGRATION_BOOTSTRAP_TARGET == "0093"
     from services.shopify_catalog import config as catalog_config
     from services.shopify_connection import config as connection_config
     from services.shopify_privacy import config as privacy_config
-    assert set(k.SHOPIFY_FLAG_ENVS) == {connection_config.ENABLED_ENV, catalog_config.IMPORT_ENABLED_ENV,
-                                        privacy_config.INTAKE_ENABLED_ENV, privacy_config.WORKER_ENABLED_ENV,
-                                        privacy_config.DESTRUCTIVE_ENABLED_ENV}
+    assert set(k.SHOPIFY_FLAG_ENVS) == {connection_config.ENABLED_ENV, catalog_config.IMPORT_ENABLED_ENV, privacy_config.INTAKE_ENABLED_ENV,
+                                        privacy_config.WORKER_ENABLED_ENV, privacy_config.DESTRUCTIVE_ENABLED_ENV,
+                                        "VITE_SHOPIFY_CONNECTION_UI", "VITE_SHOPIFY_CATALOG_IMPORT_UI"}
+    flags_ts = (REPO / "dashboard" / "src" / "lib" / "platformFeatureFlags.ts").read_text()
+    assert "VITE_SHOPIFY_CONNECTION_UI" in flags_ts and "VITE_SHOPIFY_CATALOG_IMPORT_UI" in flags_ts
     pins = {line.split("==")[0]: line.split("==")[1].strip() for line in (REPO / "requirements.txt").read_text().splitlines()
             if "==" in line and line.split("==")[0] in k.LIBRARY_PINS}
     assert pins == dict(k.LIBRARY_PINS)
+    assert tuple(k.LIBPQ_TARGET_ENV_VARS) == tuple(pilot.LIBPQ_TARGET_ENV_VARS)
+    assert k.ADVISORY_LOCK_KEY == struct.unpack(">q", hashlib.sha256(k.ADVISORY_LOCK_KEY_SEED).digest()[:8])[0]
+    assert k.ADVISORY_LOCK_KEY_SEED == b"nahla:primary:catalog-schema:0120" and k.SEARCH_PATH == "public,pg_catalog"
     assert k.LEGACY_RELEASE_SHA == "462ede1aff602cad84e9569be859cca0087b190d"
     assert k.EXISTING_PLATFORM_TARGET["db"] == "postgres-ancu.railway.internal:5432/railway"
+    assert "scripts/operators/__init__.py" in k.RUNTIME_EXTRA_FILES and k.MUST_BE_ABSENT == ("scripts/__init__.py",)
+    assert not (REPO / "scripts" / "__init__.py").exists()
 
 
 # ── Inventory ────────────────────────────────────────────────────────────────
@@ -95,36 +108,28 @@ def test_inventory_digest_is_sorted_path_nul_bytes_nul(tmp_path):
     (tmp_path / "database" / "README.md").write_bytes(b"not inventory\n")
     (tmp_path / "database" / "alembic.ini").write_bytes(b"ini\n")
     (tmp_path / "requirements.txt").write_bytes(b"req\n")
-    for relative in ("scripts/operators/commerce_runtime_pilot_migration.py", "scripts/operators/commerce_runtime_pilot_migration_contract.py") + k.RUNTIME_EXTRA_FILES + k.FULL_EXTRA_FILES:
+    for relative in ("scripts/operators/commerce_runtime_pilot_migration.py", "scripts/operators/commerce_runtime_pilot_migration_contract.py") + k.RUNTIME_EXTRA_FILES:
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_bytes(relative.encode() + b"\n")
-    runtime_paths = gate.inventory_paths(tmp_path, full=False)
-    assert "database/README.md" not in runtime_paths
-    assert {"database/migrations/versions/0001_a.py", "database/migrations/env.py", "database/alembic.ini", "requirements.txt"} <= set(runtime_paths)
-    assert runtime_paths == sorted(runtime_paths)
-    full_paths = gate.inventory_paths(tmp_path, full=True)
-    assert set(full_paths) - set(runtime_paths) == set(k.FULL_EXTRA_FILES)
+    paths = gate.inventory_paths(tmp_path)
+    assert "database/README.md" not in paths and paths == sorted(paths)
+    assert {"database/migrations/versions/0001_a.py", "database/migrations/env.py", "database/alembic.ini", "requirements.txt",
+            "scripts/operators/__init__.py"} <= set(paths)
     expected = hashlib.sha256()
-    for relative in sorted(full_paths):
+    for relative in sorted(paths):
         expected.update(relative.encode() + b"\0" + (tmp_path / relative).read_bytes() + b"\0")
-    assert gate.full_inventory(tmp_path) == (len(full_paths), expected.hexdigest())
+    assert gate.inventory(tmp_path) == (len(paths), expected.hexdigest())
     (tmp_path / "database" / "migrations" / "versions" / "0001_a.py").write_bytes(b"a \n")
-    assert gate.full_inventory(tmp_path)[1] != expected.hexdigest()
-    (tmp_path / k.APPROVAL_RELATIVE_PATH).write_bytes(b"{}")
-    assert gate.runtime_inventory(tmp_path)[1] == gate.runtime_inventory(tmp_path)[1]
-    assert gate.full_inventory(tmp_path)[1] != expected.hexdigest()
+    assert gate.inventory(tmp_path)[1] != expected.hexdigest()
 
 
 def test_inventory_rule_on_the_repository_is_the_legacy_rule_plus_the_gate_files():
     legacy = set(k.LEGACY_FIXED_FILES) | {p.relative_to(REPO).as_posix() for p in (REPO / "database").rglob("*.py")}
-    runtime = gate.inventory_paths(REPO, full=False)
-    assert set(runtime) == legacy | set(k.RUNTIME_EXTRA_FILES)
-    assert set(gate.inventory_paths(REPO, full=True)) == set(runtime) | {k.APPROVAL_RELATIVE_PATH}
-    assert len(legacy) >= 132
-    count, digest = gate.full_inventory(REPO)
-    assert count == len(runtime) + 1 and k.DIGEST_RE.match(digest)
-    missing = gate.inventory_paths(REPO, full=True)
-    assert all((REPO / p).is_file() for p in missing)
+    assert set(gate.inventory_paths(REPO)) == legacy | set(k.RUNTIME_EXTRA_FILES)
+    assert len(legacy) >= 132 and all((REPO / p).is_file() for p in gate.inventory_paths(REPO))
+    assert gate.unexpected_initializers(REPO) == []
+    count, digest = gate.inventory(REPO)
+    assert count == len(legacy) + len(k.RUNTIME_EXTRA_FILES) and k.DIGEST_RE.match(digest)
 
 
 def test_legacy_guard_digest_is_reproduced_on_the_deployed_checkout_when_available():
@@ -134,171 +139,347 @@ def test_legacy_guard_digest_is_reproduced_on_the_deployed_checkout_when_availab
     root = Path(checkout)
     paths = sorted(set(k.LEGACY_FIXED_FILES) | {p.relative_to(root).as_posix() for p in (root / "database").rglob("*.py")})
     assert gate.digest_paths(root, paths) == (132, "12798863bd12348de4407263fd1a1fe86ef639a0df2bfac2fc94244bd1f714c4")
+    assert not (root / k.GATE_RELATIVE_PATH).exists()
 
 
-# ── Rendered command ─────────────────────────────────────────────────────────
-
-def test_render_pins_every_literal_and_round_trips_into_the_gate_parser():
-    report = render.inventory_report(REPO)
-    command = render.render_command(REPO, release_sha=harness.SYNTHETIC_RELEASE_SHA, phase="S2", db="db.internal:5432/railway",
-                                    **harness.SYNTHETIC_IDENTITY)
-    assert command.startswith('python -I -c "') and command.endswith('"')
-    for literal in (report["gate_sha256"], report["full_inventory_digest"], str(report["full_inventory_count"]),
-                    harness.SYNTHETIC_RELEASE_SHA, "'S2'", "db.internal:5432/railway", *harness.SYNTHETIC_IDENTITY.values()):
-        assert literal in command
-    assert "postgresql://" not in command and "password" not in command.lower() and "$" not in command
-    argv = re.search(r"\[sys\.executable,'-I',p,(.*)\]\)\"$", command).group(1)
-    tokens = [ast.literal_eval(t) for t in argv.split(",")]
-    args = gate.build_parser().parse_args(tokens)
-    assert (args.phase, args.release_sha, args.inventory_digest, args.inventory_count) == (
-        "S2", harness.SYNTHETIC_RELEASE_SHA, report["full_inventory_digest"], report["full_inventory_count"])
-    assert args.root == k.CONTAINER_ROOT and args.expect_db == "db.internal:5432/railway"
-    assert "'/app/scripts/operators/shopify_release_gate.py'" in command
-
-
-@pytest.mark.parametrize("kwargs, error", [
-    ({"phase": "LEGACY_462_S0"}, "unknown_phase"),
-    ({"phase": "head"}, "unknown_phase"),
-    ({"release_sha": "8308c16e"}, "release_sha_malformed"),
-    ({"db": "railway"}, "db_target_malformed"),
-    ({"db": "db.internal:x/railway"}, "db_target_malformed"),
-    ({"project": "not-a-uuid"}, "identity_malformed"),
-    ({"db": "db.internal:5432/rail'way"}, "token_not_renderable"),
-])
-def test_render_refuses_malformed_inputs(kwargs, error):
-    params = {"release_sha": harness.SYNTHETIC_RELEASE_SHA, "phase": "S0", "db": "db.internal:5432/railway", **harness.SYNTHETIC_IDENTITY}
-    params.update(kwargs)
-    with pytest.raises(ValueError) as excinfo:
-        render.render_command(REPO, **params)
-    assert str(excinfo.value) == error
+def test_source_tamper_and_planted_initializer_are_refused(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    count, digest = gate.inventory(root)
+    assert gate.check_inventory(root, count, digest)[0].status == k.PASS
+    migration = root / "database" / "migrations" / "versions" / "0120_meta_catalog_authorizations.py"
+    original = migration.read_bytes()
+    migration.write_bytes(original + b"\n")
+    check, runtime = gate.check_inventory(root, count, digest)
+    assert (check.reason, runtime) == (k.R_INVENTORY_DIGEST_MISMATCH, None)
+    migration.write_bytes(original)
+    (root / "database" / "migrations" / "versions" / "0124_new.py").write_text("revision = '0124'\n")
+    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INVENTORY_COUNT_MISMATCH
+    (root / "database" / "migrations" / "versions" / "0124_new.py").unlink()
+    (root / "scripts" / "__init__.py").write_text("")
+    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INITIALIZER_UNEXPECTED
+    (root / "scripts" / "__init__.py").unlink()
+    (root / k.EXPECTATIONS_RELATIVE_PATH).unlink()
+    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INVENTORY_FILE_MISSING
 
 
-def test_rendered_command_refuses_an_absent_or_tampered_gate_file(tmp_path):
+# ── Rendered bootstrap: trust order ──────────────────────────────────────────
+
+@pytest.fixture
+def rendered_root(tmp_path):
     if shutil.which("bash") is None:
         pytest.skip("bash not available")
     root = harness.build_root(tmp_path / "root")
-    command = harness.rendered(root, "S0", "db.internal:5432/railway")
-    env = harness.gate_environment("postgresql://u:p-not-a-real-secret@db.internal:5432/railway")
-    gate_file = root / k.GATE_RELATIVE_PATH
-    original = gate_file.read_bytes()
-    gate_file.write_bytes(original + b"\n# tampered\n")
+    approval = harness.approval_for(root, "S0", DB)
+    command = harness.rendered(root, "S0", DB, approval)
+    env = harness.gate_environment("postgresql://svc:p-not-a-real-secret@db.internal:5432/railway", approval=approval)
+    return root, command, env, tmp_path / "marker"
+
+
+TAMPER_TARGETS = ("scripts/operators/shopify_release_gate_contract.py", "scripts/operators/commerce_runtime_pilot_migration.py",
+                  "database/migrations/versions/0121_shopify_connection_foundation.py", "scripts/operators/__init__.py",
+                  "scripts/operators/shopify_release_gate.py", "database/migrations/env.py")
+
+
+@pytest.mark.parametrize("relative", TAMPER_TARGETS)
+def test_bootstrap_refuses_a_tampered_module_before_it_can_execute(rendered_root, relative):
+    root, command, env, marker = rendered_root
+    original = harness.plant_marker(root / relative, marker)
+    try:
+        rc, out = harness.run_command(command, env)
+    finally:
+        (root / relative).write_bytes(original)
+    assert rc == 2 and harness.bootstrap(out) == k.R_INVENTORY_DIGEST_MISMATCH, out[-800:]
+    assert not marker.exists() and f"{k.LOG_PREFIX} CHECK" not in out and "Traceback" not in out
+    assert "p-not-a-real-secret" not in out
+
+
+def test_bootstrap_refuses_a_planted_initializer_and_an_added_migration(rendered_root):
+    root, command, env, marker = rendered_root
+    (root / "scripts" / "__init__.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
     rc, out = harness.run_command(command, env)
-    assert rc == 2 and "gate_sha256_match=False" in out and "p-not-a-real-secret" not in out
-    assert f"{k.LOG_PREFIX} CHECK" not in out
-    gate_file.unlink()
+    (root / "scripts" / "__init__.py").unlink()
+    assert rc == 2 and harness.bootstrap(out) == k.R_INITIALIZER_UNEXPECTED and not marker.exists() and "CHECK" not in out
+    extra = root / "database" / "migrations" / "versions" / "0124_planted.py"
+    extra.write_text(f"open({str(marker)!r}, 'w').close()\nrevision = '0124'\ndown_revision = '0123'\n")
     rc, out = harness.run_command(command, env)
-    assert rc == 2 and f"{k.LOG_PREFIX} CHECK" not in out and "Traceback" not in out
-    gate_file.write_bytes(original)
+    extra.unlink()
+    assert rc == 2 and harness.bootstrap(out) == k.R_INVENTORY_COUNT_MISMATCH and not marker.exists() and "CHECK" not in out
+
+
+def test_bootstrap_refuses_wrong_release_identity_libpq_and_payload_before_any_import(rendered_root):
+    root, command, env, marker = rendered_root
+    # release, identity and libpq are refused before the inventory is even read: tampered modules stay unexecuted
+    originals = {relative: harness.plant_marker(root / relative, marker) for relative in TAMPER_TARGETS[:4]}
+    try:
+        cases = [
+            ({**env, k.RELEASE_SHA_ENV: "c" * 40}, k.R_RELEASE_SHA_MISMATCH),
+            ({key: value for key, value in env.items() if key != "RAILWAY_PROJECT_ID"}, k.R_IDENTITY_MISMATCH),
+            ({**env, "RAILWAY_SERVICE_ID": "99999999-9999-4999-8999-999999999999"}, k.R_IDENTITY_MISMATCH),
+            ({**env, "PGHOST": "other.internal"}, k.R_LIBPQ_OVERRIDE),
+            ({**env, "PGSERVICE": "prod"}, k.R_LIBPQ_OVERRIDE),
+        ]
+        for case_env, expected in cases:
+            rc, out = harness.run_command(command, case_env)
+            assert (rc, harness.bootstrap(out)) == (2, expected), (expected, out[-600:])
+            assert not marker.exists() and "CHECK" not in out and "p-not-a-real-secret" not in out
+    finally:
+        for relative, original in originals.items():
+            (root / relative).write_bytes(original)
+    # the payload pin is verified after the inventory and before the gate (and its imports) runs
+    cases = [
+        ({key: value for key, value in env.items() if key != k.APPROVAL_PAYLOAD_ENV}, k.R_APPROVAL_PAYLOAD_MISSING),
+        ({**env, k.APPROVAL_PAYLOAD_ENV: "not*base64"}, k.R_APPROVAL_PAYLOAD_MALFORMED),
+        ({**env, k.APPROVAL_PAYLOAD_ENV: env[k.APPROVAL_PAYLOAD_ENV][:-4] + "AAA="}, k.R_APPROVAL_PAYLOAD_PIN_MISMATCH),
+    ]
+    for case_env, expected in cases:
+        rc, out = harness.run_command(command, case_env)
+        assert (rc, harness.bootstrap(out)) == (2, expected), (expected, out[-600:])
+        assert "CHECK" not in out and "p-not-a-real-secret" not in out
+
+
+def test_bootstrap_hands_over_to_the_gate_only_when_every_pin_holds(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("bash not available")
+    root = harness.build_root(tmp_path / "root")
+    approval = harness.approval_for(root, "S0", UNROUTABLE_DB)
+    command = harness.rendered(root, "S0", UNROUTABLE_DB, approval)
+    env = harness.gate_environment("postgresql://svc:p-not-a-real-secret@192.0.2.1:5432/railway", approval=approval)
     rc, out = harness.run_command(command, env)
-    assert "gate_sha256_match=True" in out and f"{k.LOG_PREFIX} CHECK root PASS" in out
+    checks = harness.checks(out)
+    assert harness.bootstrap(out) == "PASS" and rc == 1 and harness.result(out) == k.FAIL
+    for name in ("root", "release_sha", "inventory", "libraries", "migration_preflight", "graph", "identity", "database_target", "approval",
+                 "shopify_flags", "expectations"):
+        assert checks[name][0] == k.PASS, (name, checks)
+    assert checks["connect"] == (k.FAIL, k.R_CONNECT_FAILED) and "p-not-a-real-secret" not in out and "192.0.2.1" in out
+    assert "non-default" in out and str(root) not in out.split("CHECK root")[1].split("\n")[0]
+
+
+def test_render_round_trips_and_pins_every_literal(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    approval = harness.approval_for(root, "S3", DB)
+    report = render.inventory_report(root)
+    command = harness.rendered(root, "S3", DB, approval)
+    source = render.decode_command(command)
+    assert source == render.render_source(root, release_sha=harness.SYNTHETIC_RELEASE_SHA, phase="S3", approval_sha256=harness.payload_sha(approval),
+                                          db=DB, backup_service=harness.SYNTHETIC_BACKUP["service"], backup_volume=harness.SYNTHETIC_BACKUP["volume"],
+                                          container_root=str(root), **harness.SYNTHETIC_IDENTITY)
+    for literal in (report["gate_sha256"], report["inventory_digest"], str(report["inventory_count"]), harness.SYNTHETIC_RELEASE_SHA,
+                    harness.payload_sha(approval), '"S3"', DB, *harness.SYNTHETIC_IDENTITY.values(), *harness.SYNTHETIC_BACKUP.values(),
+                    '"scripts/__init__.py"', '"scripts/operators/__init__.py"', '"PGHOST"'):
+        assert literal in source, literal
+    assert "postgresql://" not in source and "password" not in source.lower() and "import scripts" not in source
+    imports = {alias.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Import) for alias in node.names}
+    assert imports == {"base64", "hashlib", "os", "sys"} and not any(isinstance(n, ast.ImportFrom) for n in ast.walk(ast.parse(source)))
+    argv_match = re.search(r"^ARGV = (\[.*\])$", source, re.M)
+    args = gate.build_parser().parse_args(json.loads(argv_match.group(1)))
+    assert (args.phase, args.release_sha, args.inventory_digest, args.inventory_count, args.approval_sha256) == (
+        "S3", harness.SYNTHETIC_RELEASE_SHA, report["inventory_digest"], str(report["inventory_count"]), harness.payload_sha(approval))
+    assert command.startswith(f'{sys.executable} -I -c "import base64,sys;exec(') and "$" not in command
+
+
+@pytest.mark.parametrize("kwargs, error", [
+    ({"phase": "S1"}, "phase_not_deployable"),
+    ({"phase": "S2"}, "phase_not_deployable"),
+    ({"phase": "LEGACY_462_S0"}, "unknown_phase"),
+    ({"phase": "head"}, "unknown_phase"),
+    ({"release_sha": "8308c16e"}, "release_sha_malformed"),
+    ({"approval_sha256": "abc"}, "approval_sha_malformed"),
+    ({"db": "railway"}, "db_target_malformed"),
+    ({"project": "not-a-uuid"}, "identity_malformed"),
+    ({"backup_volume": "not-a-uuid"}, "identity_malformed"),
+    ({"db": "db.internal:5432/rail'way"}, "token_not_renderable"),
+])
+def test_render_refuses_malformed_inputs(kwargs, error):
+    params = {"release_sha": harness.SYNTHETIC_RELEASE_SHA, "phase": "S0", "approval_sha256": "e" * 64, "db": DB,
+              "backup_service": harness.SYNTHETIC_BACKUP["service"], "backup_volume": harness.SYNTHETIC_BACKUP["volume"], **harness.SYNTHETIC_IDENTITY}
+    params.update(kwargs)
+    with pytest.raises(ValueError) as excinfo:
+        render.render_source(REPO, **params)
+    assert str(excinfo.value) == error
+
+
+def test_render_cli_refuses_an_unapproved_or_unbound_payload_with_closed_tokens(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    common = ["--root", str(root), "--release-sha", harness.SYNTHETIC_RELEASE_SHA, "--db", DB, "--project", harness.SYNTHETIC_IDENTITY["project"],
+              "--environment", harness.SYNTHETIC_IDENTITY["environment"], "--service", harness.SYNTHETIC_IDENTITY["service"],
+              "--backup-service", harness.SYNTHETIC_BACKUP["service"], "--backup-volume", harness.SYNTHETIC_BACKUP["volume"]]
+
+    def run(*args):
+        completed = subprocess.run([sys.executable, str(REPO / "scripts" / "operators" / "shopify_release_gate_render.py"), *args],
+                                   capture_output=True, text=True, timeout=120)
+        return completed.returncode, completed.stdout + completed.stderr
+
+    template = REPO / k.APPROVAL_TEMPLATE_RELATIVE_PATH
+    rc, out = run("render", "--phase", "S0", "--approval-file", str(template), *common)
+    assert rc == 2 and json.loads(out) == {"error": "approval_" + k.R_APPROVAL_RELEASE_MISMATCH}
+    unbound = harness.approval_file(tmp_path / "a", harness.filled_approval(release_sha=harness.SYNTHETIC_RELEASE_SHA, inventory=(1, "0" * 64),
+                                                                            target=TARGET, phase="S0"))
+    rc, out = run("render", "--phase", "S0", "--approval-file", str(unbound), *common)
+    assert rc == 2 and json.loads(out) == {"error": "approval_" + k.R_APPROVAL_NOT_BOUND}
+    rc, out = run("approval-check", "--phase", "S0", "--approval-file", str(unbound), *common)
+    assert rc == 0 and json.loads(out)["reason"] == k.R_APPROVAL_NOT_BOUND and "approval_b64" not in out
+    good = harness.approval_for(root, "S0", DB)
+    rc, out = run("render", "--phase", "S3", "--approval-file", str(good), *common)
+    assert rc == 2 and json.loads(out) == {"error": "approval_" + k.R_APPROVAL_PHASE_MISMATCH}
+    rc, out = run("render", "--phase", "S1", "--approval-file", str(good), *common)
+    assert rc == 2 and json.loads(out) == {"error": "approval_" + k.R_APPROVAL_PHASE_MISMATCH}
+    rc, out = run("render", "--phase", "S0", "--approval-file", str(good), *common, "--format", "source")
+    assert rc == 0 and out.startswith("import base64, hashlib, os, sys")
+    rc, out = run("render", "--phase", "S0", "--approval-file", str(tmp_path / "missing-p-not-a-real-secret.json"), *common)
+    assert rc == 2 and json.loads(out) == {"error": "approval_file_unreadable"}
+    rc, out = run("snapshot", "--database-url", "postgresql://u:p-not-a-real-secret@h:notaport/db", "--out", str(tmp_path / "x.json"),
+                  "--source-sha", harness.SYNTHETIC_RELEASE_SHA)
+    assert rc == 2 and json.loads(out) == {"error": "database_url_malformed"} and "p-not-a-real-secret" not in out
+    rc, out = run("render", "--phase", "S0", "--approval-file", str(good), "--release-sha", "p-not-a-real-secret")
+    assert rc == 2 and "p-not-a-real-secret" not in out and json.loads(out)["error"] in ("release_sha_malformed", "invalid_arguments")
+    rc, out = run("nonsense")
+    assert rc == 2 and json.loads(out) == {"error": "invalid_arguments"}
 
 
 # ── Pure evaluations ─────────────────────────────────────────────────────────
 
 def test_rows_exact_multiset_fail_closed_and_unknown_rows_are_never_echoed():
-    assert k.evaluate_rows(["0120", "0111", "0113"], k.PHASES["S0"]["rows"], KNOWN)[0] == k.PASS
-    assert k.evaluate_rows(None, k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_TABLE_MISSING
-    assert k.evaluate_rows(["0111", "0113", "0120", "0120"], k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_DUPLICATE
-    assert k.evaluate_rows(["0111", "0113"], k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH
-    assert k.evaluate_rows(["0111", "0113", "0121"], k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH
-    assert k.evaluate_rows(["0111", "0113", "0120", "0121"], k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH
-    assert k.evaluate_rows(["0093"], k.PHASES["S0"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH
-    status, reason, detail = k.evaluate_rows(["0111", "0113", "0120", SECRET_ROW, CONTROL_ROW], k.PHASES["S0"]["rows"], KNOWN)
+    s0 = k.DEPLOY_PHASES["S0"]["rows"]
+    assert k.evaluate_rows(["0120", "0111", "0113"], s0, KNOWN)[0] == k.PASS
+    assert k.evaluate_rows(None, s0, KNOWN)[1] == k.R_VERSION_TABLE_MISSING
+    assert k.evaluate_rows(["0111", "0113", "0120", "0120"], s0, KNOWN)[1] == k.R_VERSION_ROWS_DUPLICATE
+    for rows in (["0111", "0113"], ["0111", "0113", "0121"], ["0111", "0113", "0122"], ["0111", "0113", "0120", "0121"], ["0093"], []):
+        assert k.evaluate_rows(rows, s0, KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH, rows
+    for rows in (["0111", "0113", "0121"], ["0111", "0113", "0122"], ["0111", "0113", "0120"]):
+        assert k.evaluate_rows(rows, k.DEPLOY_PHASES["S3"]["rows"], KNOWN)[1] == k.R_VERSION_ROWS_MISMATCH, rows
+    status, reason, detail = k.evaluate_rows(["0111", "0113", "0120", SECRET_ROW, CONTROL_ROW], s0, KNOWN)
     assert (status, reason) == (k.FAIL, k.R_VERSION_ROWS_UNKNOWN)
     rendered = json.dumps(detail)
     assert "p-not-a-real-secret" not in rendered and "DROP TABLE" not in rendered and "\x1b" not in rendered
     assert detail["rows"] == ["0111", "0113", "0120", k.UNKNOWN, k.UNKNOWN] and detail["unknown_row_count"] == 2
 
 
-def _observed_for(phase: str, **overrides):
-    observed = {"tables": list(k.PHASES[phase]["tables"]), "other_relations": [], "types": [], "functions": [],
-                "foreign_constraints": [], "connection_key": k.PHASES[phase]["connection_key"]}
+def _observed_s3(**overrides):
+    observed = {"tables": [f"public.{t}" for t in k.SHOPIFY_TABLES], "stray_count": 0,
+                "definitions": copy.deepcopy(EXPECTATIONS["shopify_s3"]["tables"])}
     observed.update(overrides)
     return observed
 
 
-def test_footprint_is_exact_per_phase():
-    for phase in k.PHASES:
-        assert k.evaluate_footprint(_observed_for(phase), k.PHASES[phase])[0] == k.PASS
-        for other in k.PHASES:
-            if other != phase:
-                assert k.evaluate_footprint(_observed_for(other), k.PHASES[phase])[0] == k.FAIL
-    assert k.evaluate_footprint(_observed_for("S1", tables=list(k.FOUNDATION_TABLES[:-1])), k.PHASES["S1"])[1] == k.R_FOOTPRINT_MISSING
-    assert k.evaluate_footprint(_observed_for("S1", tables=list(k.FOUNDATION_TABLES) + ["shopify_catalog_products"]), k.PHASES["S1"])[1] == k.R_FOOTPRINT_UNEXPECTED
-    assert k.evaluate_footprint(_observed_for("S0", tables=["shopify_connections"]), k.PHASES["S0"])[1] == k.R_FOOTPRINT_UNEXPECTED
-    for stray in ("other_relations", "types", "functions", "foreign_constraints"):
-        assert k.evaluate_footprint(_observed_for("S3", **{stray: ["shopify_leftover"]}), k.PHASES["S3"])[1] == k.R_FOOTPRINT_UNEXPECTED
-    assert k.evaluate_footprint(_observed_for("S1", connection_key=True), k.PHASES["S1"])[1] == k.R_FOOTPRINT_KEY
-    assert k.evaluate_footprint(_observed_for("S2", connection_key=False), k.PHASES["S2"])[1] == k.R_FOOTPRINT_KEY
+def test_footprint_is_exact_by_canonical_definition_and_reports_only_expected_names():
+    s0, s3, pinned = k.DEPLOY_PHASES["S0"], k.DEPLOY_PHASES["S3"], EXPECTATIONS["shopify_s3"]
+    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}}, s0, pinned)[0] == k.PASS
+    assert k.evaluate_footprint(_observed_s3(), s3, pinned)[0] == k.PASS
+    assert k.evaluate_footprint(_observed_s3(), s0, pinned)[1] == k.R_FOOTPRINT_UNEXPECTED
+    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}}, s3, pinned)[1] == k.R_FOOTPRINT_MISSING
+    status, reason, detail = k.evaluate_footprint({"tables": ["public.shopify_connections"], "stray_count": 0, "definitions": {}}, s0, pinned)
+    assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1)
+    status, reason, detail = k.evaluate_footprint(_observed_s3(tables=[f"public.{t}" for t in k.SHOPIFY_TABLES] + ["other.shopify_p-not-a-real-secret"]), s3, pinned)
+    assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1) and "secret" not in json.dumps(detail)
+    status, reason, detail = k.evaluate_footprint(_observed_s3(stray_count=2), s3, pinned)
+    assert (reason, detail["stray_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 2)
+    partial = _observed_s3(tables=[f"public.{t}" for t in k.SHOPIFY_TABLES[:-1]])
+    status, reason, detail = k.evaluate_footprint(partial, s3, pinned)
+    assert (reason, detail["missing"]) == (k.R_FOOTPRINT_MISSING, [k.SHOPIFY_TABLES[-1]])
+    wrong_shape = _observed_s3()
+    wrong_shape["definitions"]["shopify_privacy_request_events"] = {"columns": [], "constraints": [], "indexes": []}
+    status, reason, detail = k.evaluate_footprint(wrong_shape, s3, pinned)
+    assert (reason, detail["drift"]) == (k.R_SHOPIFY_DEFINITION_DRIFT, ["shopify_privacy_request_events"])
+    wrong_key = _observed_s3()
+    for constraint in wrong_key["definitions"]["shopify_connections"]["constraints"]:
+        if constraint[0] == k.CONNECTION_KEY_CONSTRAINT:
+            constraint[2] = "UNIQUE (id, generation)"
+    status, reason, detail = k.evaluate_footprint(wrong_key, s3, pinned)
+    assert (reason, detail["drift"]) == (k.R_SHOPIFY_DEFINITION_DRIFT, ["shopify_connections"]) and "generation" not in json.dumps(detail)
+    invalid_index = _observed_s3()
+    invalid_index["definitions"]["shopify_oauth_states"]["indexes"][0][2] = False
+    assert k.evaluate_footprint(invalid_index, s3, pinned)[2]["drift"] == ["shopify_oauth_states"]
 
 
 def test_retained_definitions_are_compared_by_definition_and_reported_by_name_only():
-    observed = copy.deepcopy({key: EXPECTATIONS[key] for key in ("tables", "nonce", "pk_types", "unique_definitions", "sequences")})
-    assert k.evaluate_retained(observed, EXPECTATIONS)[0] == k.PASS
+    retained = EXPECTATIONS["retained"]
+    observed = copy.deepcopy(retained)
+    assert k.evaluate_retained(observed, retained)[0] == k.PASS
     drifted = copy.deepcopy(observed)
     table = "commerce_runtime_handover_barrier"
     constraint = next(c for c in drifted["tables"][table]["constraints"] if c[1] == "c")
     constraint[2] = constraint[2].replace(">= 0", ">= 1")
-    status, reason, detail = k.evaluate_retained(drifted, EXPECTATIONS)
-    assert (status, reason, detail["drift"]) == (k.FAIL, k.R_RETAINED_DEFINITION_DRIFT, [table])
-    assert ">= 1" not in json.dumps(detail) and "CHECK" not in json.dumps(detail)
+    status, reason, detail = k.evaluate_retained(drifted, retained)
+    assert (status, reason, detail["drift"]) == (k.FAIL, k.R_RETAINED_DEFINITION_DRIFT, [table]) and ">= 1" not in json.dumps(detail)
     drifted = copy.deepcopy(observed)
-    index = drifted["tables"]["catalog_channel_retirements"]["indexes"][0]
-    index[1] = index[1].replace("USING btree", "USING hash")
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["drift"] == ["catalog_channel_retirements"]
+    drifted["tables"]["catalog_channel_retirements"]["indexes"][0][1] = drifted["tables"]["catalog_channel_retirements"]["indexes"][0][1].replace("USING btree", "USING hash")
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == ["catalog_channel_retirements"]
+    drifted = copy.deepcopy(observed)
+    drifted["tables"]["catalog_channel_retirements"]["indexes"][0][2] = False  # indisvalid
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == ["catalog_channel_retirements"]
     drifted = copy.deepcopy(observed)
     drifted["tables"]["meta_catalog_authorizations"]["columns"][0][1] = "bigint"
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["drift"] == ["meta_catalog_authorizations"]
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == ["meta_catalog_authorizations"]
     drifted = copy.deepcopy(observed)
     del drifted["tables"]["commerce_runtime_navigation_snapshots"]
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[1] == k.R_RETAINED_TABLE_MISSING
+    assert k.evaluate_retained(drifted, retained)[1] == k.R_RETAINED_TABLE_MISSING
     drifted = copy.deepcopy(observed)
-    drifted["nonce"]["index_shapes"] = [s for s in drifted["nonce"]["index_shapes"] if "expires_at" not in s[1]]
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["drift"] == [k.NONCE_TABLE]
+    drifted["nonce"]["indexes"] = [s for s in drifted["nonce"]["indexes"] if "expires_at" not in s[1]]
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
+    drifted = copy.deepcopy(observed)
+    drifted["nonce"]["columns"][-1][3] = None  # created_at default dropped
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
+    drifted = copy.deepcopy(observed)
+    drifted["nonce"]["constraints"][0][4] = False  # convalidated
+    assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
     drifted = copy.deepcopy(observed)
     drifted["nonce"] = None
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[1] == k.R_RETAINED_TABLE_MISSING
+    assert k.evaluate_retained(drifted, retained)[1] == k.R_RETAINED_TABLE_MISSING
     drifted = copy.deepcopy(observed)
     drifted["pk_types"]["tenants"] = "bigint"
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["identity"] == ["tenants"]
+    assert k.evaluate_retained(drifted, retained)[2]["identity"] == ["tenants"]
     drifted = copy.deepcopy(observed)
     drifted["unique_definitions"] = []
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["identity"] == ["commerce_runtime_conversations"]
+    assert k.evaluate_retained(drifted, retained)[2]["identity"] == ["commerce_runtime_conversations"]
     drifted = copy.deepcopy(observed)
     drifted["sequences"][0][2] = "other_column"
-    assert k.evaluate_retained(drifted, EXPECTATIONS)[2]["identity"] == ["sequence_ownership"]
+    assert k.evaluate_retained(drifted, retained)[2]["identity"] == ["sequence_ownership"]
 
 
-def test_expectations_file_is_bound_to_these_migrations_and_covers_the_retained_relations():
+def test_relation_identity_must_hold_across_the_run_and_names_only_from_the_allow_list():
+    before = {"tenants": 16400, "whatsapp_oauth_nonces": 16500, "shopify_connections": 16600}
+    assert k.evaluate_relation_identity(before, dict(before))[0] == k.PASS
+    status, reason, detail = k.evaluate_relation_identity(before, {**before, "whatsapp_oauth_nonces": 16999})
+    assert (status, reason, detail) == (k.FAIL, k.R_RELATION_REPLACED, {"relations": ["whatsapp_oauth_nonces"]})
+    status, reason, detail = k.evaluate_relation_identity(before, {**before, "p-not-a-real-secret": 1})
+    assert status == k.FAIL and "secret" not in json.dumps(detail)
+
+
+def test_expectations_file_is_bound_to_these_migrations_and_covers_retained_and_s3_relations():
     assert EXPECTATIONS["expectations_version"] == k.EXPECTATIONS_VERSION
     assert EXPECTATIONS["database_py_digest"] == gate.database_py_digest(REPO)
-    assert set(EXPECTATIONS["tables"]) == set(k.RETAINED_FULL_DEFINITION_TABLES)
-    totals = [sum(len(d[key]) for d in EXPECTATIONS["tables"].values()) for key in ("columns", "constraints", "indexes")]
-    assert totals == [90, 33, 18]
-    assert all(c[2].startswith(("PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY")) for d in EXPECTATIONS["tables"].values() for c in d["constraints"])
-    assert all(i[1].startswith("CREATE ") and " USING " in i[1] for d in EXPECTATIONS["tables"].values() for i in d["indexes"])
-    assert len(EXPECTATIONS["nonce"]["columns"]) == 8 and "UNIQUE (nonce_hash)" in EXPECTATIONS["nonce"]["constraint_definitions"]
-    assert EXPECTATIONS["pk_types"] == {"tenants": "integer", "users": "integer"}
-    assert EXPECTATIONS["unique_definitions"] == [["commerce_runtime_conversations", "UNIQUE (id, tenant_id, namespace)"]]
-    assert sorted(s[1] for s in EXPECTATIONS["sequences"]) == sorted(t for t in k.RETAINED_FULL_DEFINITION_TABLES if t != "commerce_runtime_handover_barrier")
+    retained, shopify = EXPECTATIONS["retained"], EXPECTATIONS["shopify_s3"]
+    assert set(retained["tables"]) == set(k.RETAINED_FULL_DEFINITION_TABLES)
+    assert [sum(len(d[key]) for d in retained["tables"].values()) for key in ("columns", "constraints", "indexes")] == [90, 33, 18]
+    assert set(shopify["tables"]) == set(k.SHOPIFY_TABLES)
+    all_tables = list(retained["tables"].values()) + list(shopify["tables"].values())
+    assert all(len(c) == 6 and c[1] in "pufc" and c[2].startswith(("PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY")) for d in all_tables for c in d["constraints"])
+    assert all(len(i) == 5 and i[1].startswith("CREATE ") and " USING " in i[1] and i[2] is True and i[3] is True and i[4] is True for d in all_tables for i in d["indexes"])
+    assert all(len(col) == 6 for d in all_tables for col in d["columns"])
+    assert any(c[0] == k.CONNECTION_KEY_CONSTRAINT and c[2] == "UNIQUE (id, tenant_id)" for c in shopify["tables"]["shopify_connections"]["constraints"])
+    nonce = retained["nonce"]
+    assert len(nonce["columns"]) == 8 and all(len(c) == 6 for c in nonce["columns"]) and nonce["columns"][-1][3] is not None
+    assert all(len(c) == 5 and c[0] in "pufc" for c in nonce["constraints"]) and any(c[1] == "UNIQUE (nonce_hash)" for c in nonce["constraints"])
+    assert all(len(i) == 5 and i[2] is True and i[3] is True for i in nonce["indexes"])
+    assert retained["pk_types"] == {"tenants": "integer", "users": "integer"}
+    assert retained["unique_definitions"] == [["commerce_runtime_conversations", "UNIQUE (id, tenant_id, namespace)"]]
+    assert sorted(s[1] for s in retained["sequences"]) == sorted(t for t in k.RETAINED_FULL_DEFINITION_TABLES if t != "commerce_runtime_handover_barrier")
     assert "nahla_password" not in json.dumps(EXPECTATIONS) and "postgresql://" not in json.dumps(EXPECTATIONS)
-    stale = dict(EXPECTATIONS, database_py_digest="0" * 64)
-    assert k.evaluate_retained(EXPECTATIONS, stale)[0] == k.PASS  # staleness is the gate's check, not the comparison's
     check, loaded = gate.check_expectations(REPO)
-    assert check.status == k.PASS and loaded["generated_from_source_sha"] == EXPECTATIONS["generated_from_source_sha"]
+    assert check.status == k.PASS and loaded is not None
 
 
 @pytest.mark.parametrize("name", k.SHOPIFY_FLAG_ENVS)
 @pytest.mark.parametrize("value", ["1", "true", "YES", " on "])
-def test_every_shopify_flag_must_be_off(name, value):
+def test_every_shopify_flag_including_the_dashboard_ones_must_be_off(name, value):
     status, reason, detail = k.evaluate_flags({name: value})
     assert (status, reason, detail["enabled"]) == (k.FAIL, k.R_FLAG_ENABLED, [name])
 
 
-def test_falsey_or_unset_flags_pass_and_dashboard_flags_are_not_consulted():
+def test_falsey_or_unset_flags_pass():
     assert k.evaluate_flags({})[0] == k.PASS
-    assert k.evaluate_flags({name: v for name in k.SHOPIFY_FLAG_ENVS for v in ("0",)})[0] == k.PASS
-    assert k.evaluate_flags({"NAHLA_SHOPIFY_CONNECTION_ENABLED": "false", "VITE_SHOPIFY_CONNECTION_UI": "1"})[0] == k.PASS
+    assert k.evaluate_flags({name: "0" for name in k.SHOPIFY_FLAG_ENVS})[0] == k.PASS
+    assert k.evaluate_flags({"NAHLA_SHOPIFY_CONNECTION_ENABLED": "false", "VITE_SHOPIFY_CONNECTION_UI": "no"})[0] == k.PASS
 
 
 def test_identity_requires_every_platform_id_and_never_prints_actual_values():
@@ -312,7 +493,7 @@ def test_identity_requires_every_platform_id_and_never_prints_actual_values():
 
 
 def test_database_target_goes_through_the_pilot_job_validators():
-    expected = k.parse_db_target("db.internal:5432/railway")
+    expected = k.parse_db_target(DB)
     base = "postgresql://svc:p-not-a-real-secret@db.internal:5432/railway"
     check, bound = gate.check_database_target({"DATABASE_URL": base}, expected)
     assert check.status == k.PASS and bound.startswith("postgresql://svc:") and "db.internal:5432/railway" in bound
@@ -333,13 +514,13 @@ def test_database_target_goes_through_the_pilot_job_validators():
         assert (check.status, check.reason, check.detail.get("refusal"), bound) == (k.FAIL, k.R_DB_TARGET_MISMATCH, refusal, None), url
     for variable in pilot.LIBPQ_TARGET_ENV_VARS:
         check, _ = gate.check_database_target({"DATABASE_URL": base, variable: "x"}, expected)
-        assert check.detail.get("refusal") == "DATABASE_URL_environment_override", variable
+        assert (check.reason, check.detail) == (k.R_LIBPQ_OVERRIDE, {"variables": [variable]}), variable
 
 
 def test_parse_helpers_fail_closed_on_malformed_input():
     assert k.parse_utc("2026-10-11T16:54:10.145Z") == _dt.datetime(2026, 10, 11, 16, 54, 10, 145000, tzinfo=_dt.timezone.utc)
     assert k.parse_utc("2026-10-11T16:54:10Z").tzinfo is _dt.timezone.utc
-    for bad in ("2026-10-11T16:54:10", "2026-10-11T16:54:10+03:00", "2026-10-11 16:54:10Z", "", None, "yesterday"):
+    for bad in ("2026-10-11T16:54:10", "2026-10-11T16:54:10+03:00", "2026-10-11 16:54:10Z", "", None, "yesterday", "2026-13-11T16:54:10Z"):
         assert k.parse_utc(bad) is None
     assert k.parse_db_target("Host.Internal:5433/Rail way") == {"host": "host.internal", "port": 5433, "database": "Rail way"}
     assert k.parse_db_target("db.internal/railway")["port"] == 5432
@@ -347,13 +528,10 @@ def test_parse_helpers_fail_closed_on_malformed_input():
         assert k.parse_db_target(bad) is None
 
 
-# ── Approval record ──────────────────────────────────────────────────────────
+# ── Approval payload ─────────────────────────────────────────────────────────
 
-RUNTIME = (142, "f" * 64)
-
-
-def _approval(**changes):
-    record = harness.filled_approval(RUNTIME)
+def _record(record_phase="S0", **changes):
+    record = harness.filled_approval(release_sha=harness.SYNTHETIC_RELEASE_SHA, inventory=RUNTIME, target=TARGET, phase=record_phase, now=NOW)
     for path, value in changes.items():
         target = record
         keys = path.split(".")
@@ -363,95 +541,202 @@ def _approval(**changes):
     return record
 
 
-def test_shipped_approval_record_is_unfilled_and_refuses_every_phase():
-    record = json.loads((REPO / k.APPROVAL_RELATIVE_PATH).read_text(encoding="utf-8"))
-    assert record["record_version"] == k.APPROVAL_RECORD_VERSION
-    assert record["bound_runtime_inventory_digest"] is None and record["bound_runtime_inventory_count"] is None
-    assert all(v is None for v in record["deployment_rollback_snapshot"].values())
-    assert all(v is None for v in record["db_recovery_evidence"]["backup"].values())
-    assert record["db_recovery_evidence"]["restore_verified"] is False
-    for phase, entry in record["phase_approvals"].items():
-        assert phase in k.PHASES and entry["approved"] is False and all(entry[f] is None for f in k.APPROVAL_PHASE_FIELDS[1:])
-    for phase in k.PHASES:
-        verdict = render.approval_check(REPO, phase, now=NOW)
-        assert (verdict["status"], verdict["reason"]) == (k.FAIL, k.R_APPROVAL_NOT_BOUND)
-    runtime = gate.runtime_inventory(REPO)
-    bound = dict(record, bound_runtime_inventory_digest=runtime[1], bound_runtime_inventory_count=runtime[0])
-    for phase in k.PHASES:
-        assert k.evaluate_approval(bound, phase, runtime_digest=runtime[1], runtime_count=runtime[0], now=NOW)[1] == k.R_APPROVAL_MISSING
+def _verdict(record, phase="S0", *, now=NOW, runtime=RUNTIME, release=harness.SYNTHETIC_RELEASE_SHA, target=TARGET,
+             backup=harness.SYNTHETIC_BACKUP):
+    return k.evaluate_approval(record, phase_name=phase, release_sha=release, runtime_digest=runtime[1], runtime_count=runtime[0],
+                               target=target, backup_service=backup["service"], backup_volume=backup["volume"], now=now)[1]
 
 
-def _verdict(record, phase="S0", now=NOW, runtime=RUNTIME):
-    return k.evaluate_approval(record, phase, runtime_digest=runtime[1], runtime_count=runtime[0], now=now)[1]
+def test_shipped_template_is_unfilled_and_is_not_part_of_the_inventory():
+    template = json.loads((REPO / k.APPROVAL_TEMPLATE_RELATIVE_PATH).read_text(encoding="utf-8"))
+    assert template["record_version"] == k.APPROVAL_RECORD_VERSION and template["release_sha"] is None and template["phase"] is None
+    assert all(v is None for v in template["target"].values())
+    assert template["approval"]["approved"] is False and all(template["approval"][f] is None for f in k.APPROVAL_FIELDS[1:])
+    assert all(v is None for v in template["deployment_rollback_snapshot"].values())
+    backup = template["db_recovery_evidence"]["backup"]
+    assert backup["completed"] is False and backup["restore_available"] is False and all(backup[f] is None for f in k.BACKUP_FIELDS if f not in ("completed", "restore_available"))
+    assert template["db_recovery_evidence"]["restore_verified"] is False
+    assert k.APPROVAL_TEMPLATE_RELATIVE_PATH not in gate.inventory_paths(REPO)
+    assert not (REPO / "scripts" / "operators" / "shopify_release_approval.json").exists()
+    assert _verdict(template) == k.R_APPROVAL_RELEASE_MISMATCH
+    filled = dict(template, release_sha=harness.SYNTHETIC_RELEASE_SHA, runtime_inventory_digest=RUNTIME[1], runtime_inventory_count=RUNTIME[0],
+                  target=dict(TARGET), phase="S0")
+    assert _verdict(filled) == k.R_APPROVAL_MISSING
 
 
-def test_filled_record_passes_only_when_bound_valid_and_evidenced():
-    assert _verdict(_approval()) is None and _verdict(_approval(), "S3") is None
-    assert _verdict(_approval(), runtime=(142, "e" * 64)) == k.R_APPROVAL_NOT_BOUND
-    assert _verdict(_approval(), runtime=(141, "f" * 64)) == k.R_APPROVAL_NOT_BOUND
-    assert _verdict(_approval(record_version=2)) == k.R_APPROVAL_VERSION
-    assert _verdict("not a record") == k.R_APPROVAL_UNREADABLE
-    assert _verdict(_approval(**{"phase_approvals.S0.approved": False})) == k.R_APPROVAL_MISSING
-    assert _verdict(_approval(**{"phase_approvals.S0.reviewer": ""})) == k.R_APPROVAL_MISSING
-    assert _verdict(_approval(**{"phase_approvals.S1.approved": True}), "S1") is None
-    assert _verdict(harness.filled_approval(RUNTIME, phases=("S0",)), "S1") == k.R_APPROVAL_MISSING
-    assert _verdict(_approval(), now=NOW + _dt.timedelta(days=3)) == k.R_APPROVAL_EXPIRED
-    assert _verdict(_approval(), now=NOW - _dt.timedelta(days=1)) == k.R_APPROVAL_EXPIRED
-    assert _verdict(_approval(**{"phase_approvals.S0.valid_until_utc": harness.iso(NOW - _dt.timedelta(hours=2))})) == k.R_APPROVAL_TIMESTAMP_INVALID
-    assert _verdict(_approval(**{"phase_approvals.S0.approved_at_utc": "2026-10-11 17:00:00"})) == k.R_APPROVAL_TIMESTAMP_INVALID
-    assert _verdict(_approval(**{"deployment_rollback_snapshot.railway_deployment_id": None})) == k.R_ROLLBACK_SNAPSHOT_MISSING
-    assert _verdict(_approval(**{"db_recovery_evidence.backup.card_timestamp_utc": None})) == k.R_BACKUP_EVIDENCE_MISSING
-    assert _verdict(_approval(**{"db_recovery_evidence.backup.size_mb": None})) == k.R_BACKUP_EVIDENCE_MISSING
-    assert _verdict(_approval(**{"db_recovery_evidence.backup.card_timestamp_utc": harness.iso(NOW - _dt.timedelta(minutes=30))})) == k.R_BACKUP_AFTER_APPROVAL
-    assert _verdict(_approval(**{"db_recovery_evidence.backup.card_timestamp_utc": "not-a-time"})) == k.R_APPROVAL_TIMESTAMP_INVALID
-    unverified = harness.filled_approval(RUNTIME, restore_verified=False)
-    assert _verdict(unverified, "S0") is None
-    for phase in sorted(k.SCHEMA_CHANGING_PHASES):
-        assert _verdict(unverified, phase) == k.R_RESTORE_NOT_VERIFIED
-    assert _verdict(_approval(**{"db_recovery_evidence.restore_verification_ref": None}), "S2") == k.R_RESTORE_NOT_VERIFIED
+def test_valid_payload_passes_for_its_phase_only():
+    assert _verdict(_record("S0")) is None and _verdict(_record("S3"), "S3") is None
+    assert _verdict(_record("S0"), "S3") == k.R_APPROVAL_PHASE_MISMATCH and _verdict(_record("S3"), "S0") == k.R_APPROVAL_PHASE_MISMATCH
 
 
-# ── Graph of the source the gate runs from ───────────────────────────────────
+@pytest.mark.parametrize("changes, expected", [
+    ({"record_version": 1}, k.R_APPROVAL_VERSION),
+    ({"release_sha": "c" * 40}, k.R_APPROVAL_RELEASE_MISMATCH),
+    ({"runtime_inventory_digest": "e" * 64}, k.R_APPROVAL_NOT_BOUND),
+    ({"runtime_inventory_count": 142}, k.R_APPROVAL_NOT_BOUND),
+    ({"target.db": "other.internal:5432/railway"}, k.R_APPROVAL_TARGET_MISMATCH),
+    ({"target.service": "99999999-9999-4999-8999-999999999999"}, k.R_APPROVAL_TARGET_MISMATCH),
+    ({"target": None}, k.R_APPROVAL_TARGET_MISMATCH),
+    ({"phase": "S1"}, k.R_APPROVAL_PHASE_MISMATCH),
+    ({"approval.approved": False}, k.R_APPROVAL_MISSING),
+    ({"approval.reviewer": " "}, k.R_APPROVAL_MISSING),
+    ({"approval.independent_review_ref": None}, k.R_APPROVAL_MISSING),
+    ({"approval.approved_at_utc": "2026-10-11 17:00:00"}, k.R_APPROVAL_TIMESTAMP_INVALID),
+    ({"approval.valid_until_utc": harness.iso(NOW - _dt.timedelta(hours=2))}, k.R_APPROVAL_TIMESTAMP_ORDER),
+    ({"deployment_rollback_snapshot.railway_deployment_id": None}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"deployment_rollback_snapshot.verified_redeployable_at_utc": "soon"}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"db_recovery_evidence.backup.card_timestamp_utc": None}, k.R_BACKUP_EVIDENCE_MISSING),
+    ({"db_recovery_evidence.backup.observed_by": ""}, k.R_BACKUP_EVIDENCE_MISSING),
+    ({"db_recovery_evidence.backup.service_id": "77777777-7777-4777-8777-777777777777"}, k.R_BACKUP_IDENTITY_MISMATCH),
+    ({"db_recovery_evidence.backup.volume_id": "77777777-7777-4777-8777-777777777777"}, k.R_BACKUP_IDENTITY_MISMATCH),
+    ({"db_recovery_evidence.backup.size_mb": 0}, k.R_BACKUP_SIZE_INVALID),
+    ({"db_recovery_evidence.backup.size_mb": -5}, k.R_BACKUP_SIZE_INVALID),
+    ({"db_recovery_evidence.backup.size_mb": "647"}, k.R_BACKUP_SIZE_INVALID),
+    ({"db_recovery_evidence.backup.size_mb": True}, k.R_BACKUP_SIZE_INVALID),
+    ({"db_recovery_evidence.backup.size_mb": 10 ** 9}, k.R_BACKUP_SIZE_INVALID),
+    ({"db_recovery_evidence.backup.completed": False}, k.R_BACKUP_NOT_COMPLETED),
+    ({"db_recovery_evidence.backup.completed": "true"}, k.R_BACKUP_NOT_COMPLETED),
+    ({"db_recovery_evidence.backup.restore_available": False}, k.R_BACKUP_NOT_RESTORABLE),
+    ({"db_recovery_evidence.backup.card_timestamp_utc": "2026-10-11T16:54:10.145"}, k.R_APPROVAL_TIMESTAMP_INVALID),
+    ({"db_recovery_evidence.backup.observed_at_utc": "later"}, k.R_APPROVAL_TIMESTAMP_INVALID),
+    ({"db_recovery_evidence.backup.card_timestamp_utc": harness.iso(NOW - _dt.timedelta(minutes=70))}, k.R_APPROVAL_TIMESTAMP_ORDER),
+    ({"db_recovery_evidence.backup.observed_at_utc": harness.iso(NOW - _dt.timedelta(minutes=30))}, k.R_APPROVAL_TIMESTAMP_ORDER),
+    ({"db_recovery_evidence.backup.observed_at_utc": harness.iso(NOW + _dt.timedelta(hours=1))}, k.R_APPROVAL_TIMESTAMP_ORDER),
+    ({"db_recovery_evidence.backup.card_timestamp_utc": harness.iso(NOW - _dt.timedelta(days=30))}, k.R_BACKUP_TOO_OLD),
+    ({"db_recovery_evidence.backup.card_timestamp_utc": harness.iso(NOW - _dt.timedelta(hours=73))}, k.R_BACKUP_TOO_OLD),
+])
+def test_payload_refusals(changes, expected):
+    assert _verdict(_record("S0", **changes)) == expected
+
+
+def test_payload_time_windows_and_freshness_at_run_time():
+    assert _verdict(_record("S0"), now=NOW + _dt.timedelta(days=3)) == k.R_APPROVAL_EXPIRED
+    assert _verdict(_record("S0"), now=NOW - _dt.timedelta(days=1)) == k.R_APPROVAL_EXPIRED
+    # fresh at approval, stale at run time: the backup window is bounded at both moments
+    record = _record("S0", **{"approval.valid_until_utc": harness.iso(NOW + _dt.timedelta(days=10))})
+    assert _verdict(record, now=NOW + _dt.timedelta(hours=71)) == k.R_BACKUP_TOO_OLD
+    assert _verdict(record, now=NOW + _dt.timedelta(hours=60)) is None
+    future = _record("S0", **{"approval.approved_at_utc": harness.iso(NOW + _dt.timedelta(hours=2)),
+                             "db_recovery_evidence.backup.observed_at_utc": harness.iso(NOW + _dt.timedelta(hours=1)),
+                             "db_recovery_evidence.restore_verified_at_utc": harness.iso(NOW + _dt.timedelta(hours=1))})
+    assert _verdict(future) == k.R_APPROVAL_EXPIRED
+    assert _verdict("not a record") == k.R_APPROVAL_UNREADABLE and _verdict([]) == k.R_APPROVAL_UNREADABLE
+
+
+def test_schema_changing_phase_requires_a_verified_restore_between_backup_and_approval():
+    unverified = harness.filled_approval(release_sha=harness.SYNTHETIC_RELEASE_SHA, inventory=RUNTIME, target=TARGET, phase="S3", now=NOW, restore_verified=False)
+    assert _verdict(unverified, "S3") == k.R_RESTORE_NOT_VERIFIED
+    unverified_s0 = harness.filled_approval(release_sha=harness.SYNTHETIC_RELEASE_SHA, inventory=RUNTIME, target=TARGET, phase="S0", now=NOW, restore_verified=False)
+    assert _verdict(unverified_s0, "S0") is None
+    assert _verdict(_record("S3", **{"db_recovery_evidence.restore_verification_ref": None}), "S3") == k.R_RESTORE_NOT_VERIFIED
+    assert _verdict(_record("S3", **{"db_recovery_evidence.restore_verified_at_utc": "yesterday"}), "S3") == k.R_APPROVAL_TIMESTAMP_INVALID
+    assert _verdict(_record("S3", **{"db_recovery_evidence.restore_verified_at_utc": harness.iso(NOW - _dt.timedelta(hours=3))}), "S3") == k.R_APPROVAL_TIMESTAMP_ORDER
+    assert _verdict(_record("S3", **{"db_recovery_evidence.restore_verified_at_utc": harness.iso(NOW - _dt.timedelta(minutes=10))}), "S3") == k.R_APPROVAL_TIMESTAMP_ORDER
+    assert _verdict(_record("S3", **{"db_recovery_evidence.restore_verified_at_utc": harness.iso(NOW + _dt.timedelta(hours=1))}), "S3") == k.R_APPROVAL_TIMESTAMP_ORDER
+
+
+def test_approval_payload_reading_is_pinned_and_closed():
+    record = _record("S0")
+    raw = json.dumps(record).encode()
+    pin = hashlib.sha256(raw).hexdigest()
+    b64 = __import__("base64").b64encode(raw).decode()
+    assert gate.read_approval_payload({k.APPROVAL_PAYLOAD_ENV: b64}, pin) == (record, None)
+    assert gate.read_approval_payload({}, pin) == (None, k.R_APPROVAL_PAYLOAD_MISSING)
+    assert gate.read_approval_payload({k.APPROVAL_PAYLOAD_ENV: "%%%"}, pin) == (None, k.R_APPROVAL_PAYLOAD_MALFORMED)
+    assert gate.read_approval_payload({k.APPROVAL_PAYLOAD_ENV: b64}, "0" * 64) == (None, k.R_APPROVAL_PAYLOAD_PIN_MISMATCH)
+    junk = __import__("base64").b64encode(b"not json").decode()
+    assert gate.read_approval_payload({k.APPROVAL_PAYLOAD_ENV: junk}, hashlib.sha256(b"not json").hexdigest()) == (None, k.R_APPROVAL_UNREADABLE)
+
+
+# ── Migration preflight and graph ────────────────────────────────────────────
+
+def test_migration_preflight_passes_on_the_repository_and_refuses_duplicates_dependencies_and_malformed_files(tmp_path):
+    check = gate.preflight_migration_files(REPO)
+    assert check.status == k.PASS and check.detail["files"] == check.detail["revisions"] >= 119
+    root = harness.build_root(tmp_path / "root")
+    versions = root / "database" / "migrations" / "versions"
+    marker = tmp_path / "marker"
+    duplicate = versions / "0121_duplicate.py"
+    duplicate.write_text(f"open({str(marker)!r}, 'w').close()\nrevision = '0121'\ndown_revision = '0120'\n")
+    check = gate.preflight_migration_files(root)
+    assert (check.status, check.reason, check.detail["duplicate_revisions"], check.detail["duplicate_count"]) == (k.FAIL, k.R_GRAPH_UNLOADABLE, ["0121"], 1)
+    assert not marker.exists()
+    duplicate.unlink()
+    cases = {
+        "depends": "revision = '0124'\ndown_revision = '0123'\ndepends_on = '0111'\n",
+        "labels": "revision = '0124'\ndown_revision = '0123'\nbranch_labels = ('x',)\n",
+        "merge": "revision = '0124'\ndown_revision = ('0123', '0111')\n",
+        "unknown_parent": "revision = '0124'\ndown_revision = '9999'\n",
+        "non_literal": "revision = str(124)\ndown_revision = '0123'\n",
+        "bad_id": "revision = 'p-not a real id'\ndown_revision = '0123'\n",
+        "syntax": "revision = '0124\n",
+        "twice": "revision = '0124'\nrevision = '0125'\ndown_revision = '0123'\n",
+    }
+    for name, body in cases.items():
+        path = versions / f"0124_{name}.py"
+        path.write_text(body)
+        check = gate.preflight_migration_files(root)
+        path.unlink()
+        assert check.status == k.FAIL and check.reason == k.R_GRAPH_UNLOADABLE, name
+        assert "p-not" not in json.dumps(check.detail), name
+        assert (check.detail["malformed_count"] + check.detail["unknown_parent_count"]) >= 1, (name, check.detail)
+    (versions / "0124_a.py").write_text("revision: str = '0124'\ndown_revision: str = '0123'\n")
+    assert gate.preflight_migration_files(root).status == k.PASS
+    (versions / "0124_a.py").unlink()
+
 
 def test_graph_edges_heads_and_branch_deltas_hold_for_every_phase():
-    for name, phase in k.PHASES.items():
+    for name, phase in k.DEPLOY_PHASES.items():
         check, known = gate.check_graph(REPO, phase)
         assert check.status == k.PASS, (name, check.reason, check.detail)
         assert check.detail["branch_delta"] == list(phase["branch_delta"]) and known >= phase["rows"]
     graph = gate.load_graph(REPO)
     assert graph["heads"] == k.EXPECTED_REPOSITORY_HEADS
     assert gate.branch_chain(graph["down"], "0123", "0112") == ("0118", "0120", "0121", "0122", "0123")
-    assert gate.branch_chain(graph["down"], "0113", "0109") == ("0110", "0112", "0113")
     assert gate.branch_chain(graph["down"], "0111", "0112") is None
-    bent = dict(graph["down"], **{"0121": ("0113",)})
-    assert gate.branch_chain(bent, "0121", "0112") != ("0118", "0120", "0121")
-
-
-def _clear_bytecode(root: Path) -> None:
-    # same-size rewrites within one second would otherwise be served from stale .pyc files
-    for cache in root.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
 
 
 def test_graph_mismatch_is_refused_before_the_database(tmp_path):
     root = harness.build_root(tmp_path / "root")
     versions = root / "database" / "migrations" / "versions"
     _clear_bytecode(root)
-    (versions / "0121_shopify_connection_foundation.py").write_text(
-        (versions / "0121_shopify_connection_foundation.py").read_text().replace('down_revision = "0120"', 'down_revision = "0113"'))
+    path = versions / "0121_shopify_connection_foundation.py"
+    path.write_text(path.read_text().replace('down_revision = "0120"', 'down_revision = "0113"'))
     _clear_bytecode(root)
-    check, known = gate.check_graph(root, k.PHASES["S1"])
+    check, known = gate.check_graph(root, k.DEPLOY_PHASES["S3"])
     assert (check.status, check.reason, known) == (k.FAIL, k.R_GRAPH_EDGE_MISMATCH, None) and check.detail == {"revisions": ["0121"]}
+    path.write_text(path.read_text().replace('down_revision = "0113"', 'down_revision = "0120"'))
     (versions / "0124_extra.py").write_text('revision = "0124"\ndown_revision = "0113"\nbranch_labels = None\ndepends_on = None\n'
                                             'def upgrade():\n    pass\ndef downgrade():\n    pass\n')
-    (versions / "0121_shopify_connection_foundation.py").write_text(
-        (versions / "0121_shopify_connection_foundation.py").read_text().replace('down_revision = "0113"', 'down_revision = "0120"'))
     _clear_bytecode(root)
-    check, _ = gate.check_graph(root, k.PHASES["S1"])
+    check, _ = gate.check_graph(root, k.DEPLOY_PHASES["S3"])
     assert (check.status, check.reason) == (k.FAIL, k.R_GRAPH_HEADS_MISMATCH)
 
 
-# ── Locked section with a fake connection (lock denial, unlock failure, errors) ──
+def test_main_stops_at_the_first_refusal_and_never_loads_migrations_after_an_inventory_failure(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    marker = tmp_path / "marker"
+    count, digest = gate.inventory(root)
+    harness.plant_marker(root / "database" / "migrations" / "versions" / "0121_shopify_connection_foundation.py", marker)
+    _clear_bytecode(root)
+    argv = ["--root", str(root), "--phase", "S0", "--release-sha", harness.SYNTHETIC_RELEASE_SHA, "--inventory-digest", digest,
+            "--inventory-count", str(count), "--approval-sha256", "e" * 64, "--expect-project", harness.SYNTHETIC_IDENTITY["project"],
+            "--expect-environment", harness.SYNTHETIC_IDENTITY["environment"], "--expect-service", harness.SYNTHETIC_IDENTITY["service"],
+            "--expect-db", DB, "--expect-backup-service", harness.SYNTHETIC_BACKUP["service"], "--expect-backup-volume", harness.SYNTHETIC_BACKUP["volume"]]
+    env = harness.gate_environment("postgresql://svc:p@db.internal:5432/railway")
+    rc = gate.main(argv, environ=env, now=NOW)
+    assert rc == 1 and not marker.exists()
+    # the same tampered tree with a digest that admits it: the AST preflight refuses a duplicate id before the graph loads
+    (root / "database" / "migrations" / "versions" / "0121_dup.py").write_text(f"open({str(marker)!r}, 'w').close()\nrevision = '0121'\ndown_revision = '0120'\n")
+    _clear_bytecode(root)
+    count2, digest2 = gate.inventory(root)
+    argv[argv.index("--inventory-digest") + 1] = digest2
+    argv[argv.index("--inventory-count") + 1] = str(count2)
+    rc = gate.main(argv, environ=env, now=NOW)
+    assert rc == 1 and not marker.exists()
+
+
+# ── Locked section with a fake connection ────────────────────────────────────
 
 class _Result:
     def __init__(self, rows):
@@ -465,8 +750,9 @@ class _Result:
 
 
 class _FakeConn:
-    def __init__(self, answers, *, unlock=True, raise_on=None, raise_exc=None):
+    def __init__(self, answers, *, unlock=True, raise_on=None, raise_exc=None, oid_sequence=None):
         self.answers, self.unlock, self.raise_on, self.raise_exc = answers, unlock, raise_on, raise_exc
+        self.oid_sequence = list(oid_sequence or [])
         self.log, self.invalidated, self.rolled_back, self.closed = [], False, 0, False
 
     def execution_options(self, **options):
@@ -475,13 +761,17 @@ class _FakeConn:
 
     def execute(self, statement, params=None):
         sql = str(statement)
-        self.log.append(sql)
+        self.log.append((sql, params))
         if self.raise_on and self.raise_on in sql:
             raise self.raise_exc
         if "pg_try_advisory_lock" in sql:
+            assert params == {"key": k.ADVISORY_LOCK_KEY}
             return _Result([(self.answers.get("lock", True),)])
         if "pg_advisory_unlock" in sql:
+            assert params == {"key": k.ADVISORY_LOCK_KEY}
             return _Result([(self.unlock,)])
+        if "AS oid" in sql and self.oid_sequence:
+            return _Result([(self.oid_sequence.pop(0),)])
         for key, rows in self.answers.items():
             if key in sql:
                 return _Result(rows)
@@ -508,25 +798,38 @@ class _FakeEngine:
         self.disposed = True
 
 
-def _run(conn):
+def _run(conn, phase="S0"):
     engine = _FakeEngine(conn)
-    checks = gate.run_database_checks("postgresql://u:p@db.internal/x", k.PHASES["S0"], KNOWN, EXPECTATIONS, "x",
+    checks = gate.run_database_checks("postgresql://u:p@db.internal/x", k.DEPLOY_PHASES[phase], KNOWN, EXPECTATIONS, "x",
                                       engine_factory=lambda url: engine)
     return {c.name: c for c in checks}, engine
 
 
-def test_lock_denied_refuses_without_reading_anything_and_without_unlocking():
+SERVER_OK = {"search_path": [("public, pg_catalog",)], "pg_is_in_recovery": [(False,)], "current_schema": [("public",)], "current_database": [("x",)]}
+
+
+def test_lock_denied_on_the_legacy_key_refuses_without_reading_anything_and_without_unlocking():
     conn = _FakeConn({"lock": False})
     checks, engine = _run(conn)
     assert checks["lock"].reason == k.R_LOCK_DENIED and "unlock" not in checks and "server" not in checks
-    assert all("pg_advisory_unlock" not in sql for sql in conn.log) and conn.closed and engine.disposed
+    assert all("pg_advisory_unlock" not in sql for sql, _ in conn.log) and conn.closed and engine.disposed
 
 
 def test_unlock_failure_fails_the_run_even_when_every_check_passed():
-    exc = RuntimeError("stop after lock")
-    conn = _FakeConn({}, unlock=False, raise_on="pg_is_in_recovery", raise_exc=exc)
+    conn = _FakeConn({}, unlock=False, raise_on="pg_is_in_recovery", raise_exc=RuntimeError("stop after lock"))
     checks, engine = _run(conn)
     assert checks["unlock"].reason == k.R_UNLOCK_FAILED and conn.invalidated and conn.rolled_back >= 1 and engine.disposed
+
+
+def test_search_path_mismatch_and_relation_replacement_are_refused():
+    conn = _FakeConn({**SERVER_OK, "search_path": [("\"$user\", public",)]})
+    checks, _ = _run(conn)
+    assert checks["server"].reason == k.R_SEARCH_PATH_MISMATCH
+    names = len(k.IDENTITY_TABLES)
+    conn = _FakeConn(dict(SERVER_OK), oid_sequence=list(range(100, 100 + names)) + list(range(100, 100 + names - 1)) + [999])
+    checks, _ = _run(conn)
+    assert checks["server"].status == k.PASS and checks["relation_identity"].reason == k.R_RELATION_REPLACED
+    assert checks["relation_identity"].detail == {"relations": [k.IDENTITY_TABLES[-1]]} and checks["unlock"].status == k.PASS
 
 
 def test_timeouts_and_errors_are_reported_by_closed_token_and_type_only():
@@ -540,7 +843,7 @@ def test_timeouts_and_errors_are_reported_by_closed_token_and_type_only():
     checks, _ = _run(conn)
     assert (checks["database"].reason, checks["database"].detail) == (k.R_TIMEOUT, {"error": "LockTimeout"})
     assert checks["unlock"].status == k.PASS and conn.rolled_back >= 1 and "server" not in checks
-    conn = _FakeConn({"pg_is_in_recovery": [(False,)]}, raise_on="current_schema", raise_exc=ValueError("p-not-a-real-secret"))
+    conn = _FakeConn({"pg_is_in_recovery": [(False,)], "search_path": [("public, pg_catalog",)]}, raise_on="current_schema", raise_exc=ValueError("p-not-a-real-secret"))
     checks, _ = _run(conn)
     assert (checks["database"].reason, checks["database"].detail) == (k.R_INTERNAL_ERROR, {"error": "ValueError"})
     assert "p-not-a-real-secret" not in json.dumps({n: c.detail for n, c in checks.items()})
@@ -550,16 +853,21 @@ def test_connect_failure_is_a_refusal_by_type_only():
     def factory(url):
         raise ConnectionRefusedError("postgresql://u:p-not-a-real-secret@db.internal/x")
 
-    checks = gate.run_database_checks("postgresql://u:p@db.internal/x", k.PHASES["S0"], KNOWN, EXPECTATIONS, "x", engine_factory=factory)
+    checks = gate.run_database_checks("postgresql://u:p@db.internal/x", k.DEPLOY_PHASES["S0"], KNOWN, EXPECTATIONS, "x", engine_factory=factory)
     assert [(c.name, c.reason, c.detail) for c in checks] == [("connect", k.R_CONNECT_FAILED, {"error": "ConnectionRefusedError"})]
 
 
 # ── Static guarantees: read-only, no executor, no subprocess ─────────────────
 
 def _sql_literals(tree: ast.Module):
-    constants = {node.targets[0].id: node.value.value for node in tree.body
-                 if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
-                 and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) and node.targets[0].id.endswith("_SQL")}
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name) and node.targets[0].id.endswith("_SQL"):
+            value = node.value
+            if isinstance(value, ast.Constant):
+                constants[node.targets[0].id] = value.value
+            else:
+                constants[node.targets[0].id] = "".join(part.value if isinstance(part, ast.Constant) else "<_USER_SCHEMA>" for part in _flatten(value))
     literals = list(constants.values())
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("_scalar", "_rows") and len(node.args) >= 2:
@@ -573,6 +881,12 @@ def _sql_literals(tree: ast.Module):
     return literals
 
 
+def _flatten(node):
+    if isinstance(node, ast.BinOp):
+        return _flatten(node.left) + _flatten(node.right)
+    return [node]
+
+
 def test_gate_module_has_no_mutation_path():
     source = (REPO / k.GATE_RELATIVE_PATH).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -583,60 +897,53 @@ def test_gate_module_has_no_mutation_path():
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module or "")
             imported |= {f"{node.module}.{alias.name}" for alias in node.names}
-    forbidden = {"subprocess", "alembic.command", "alembic.operations", "alembic.runtime", "os.system", "multiprocessing"}
-    assert not (imported & forbidden), imported & forbidden
-    assert not any(name.startswith("alembic.command") for name in imported)
+    forbidden = {"subprocess", "alembic.command", "alembic.operations", "alembic.runtime", "os.system", "multiprocessing", "shutil"}
+    assert not (imported & forbidden) and not any(name.startswith("alembic.command") for name in imported)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
-            assert node.attr not in {"system", "popen", "spawnv", "execv", "execve", "fork", "remove", "unlink"}
+            assert node.attr not in {"system", "popen", "spawnv", "execv", "execve", "fork", "remove", "unlink", "rename"}
     literals = _sql_literals(tree)
-    assert len(literals) >= 15
+    assert len(literals) >= 18
     for sql in literals:
         head = sql.strip().upper()
         assert head.startswith("SELECT ") or head.startswith("SHOW "), sql[:60]
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP|TRUNCATE|GRANT|STAMP|MERGE|UPGRADE|COPY|LOCK)\b", head.split(" USING ")[0]), sql[:60]
-    assert "postgresql_readonly=True" in source and "poolclass=NullPool" in source and "hide_parameters=True" in source and "echo=False" in source
-    assert "pg_try_advisory_lock" in source and "pg_advisory_unlock" in source
+    for needle in ("postgresql_readonly=True", "poolclass=NullPool", "hide_parameters=True", "echo=False", "logging.disable(logging.CRITICAL)",
+                   "pg_try_advisory_lock(:key)", "pg_advisory_unlock(:key)", "search_path={k.SEARCH_PATH}", "contype <> 'n'", "i.indisvalid, i.indisready, i.indislive"):
+        assert needle in source, needle
 
 
-def test_cli_fails_closed_and_never_echoes_the_dsn(tmp_path):
+def test_cli_fails_closed_and_never_echoes_arguments_or_the_dsn(tmp_path):
     root = harness.build_root(tmp_path / "root")
     report = render.inventory_report(root)
     base_argv = [sys.executable, "-I", str(root / k.GATE_RELATIVE_PATH), "--root", str(root), "--release-sha", harness.SYNTHETIC_RELEASE_SHA,
-                 "--inventory-digest", report["full_inventory_digest"], "--inventory-count", str(report["full_inventory_count"]),
+                 "--inventory-digest", report["inventory_digest"], "--inventory-count", str(report["inventory_count"]), "--approval-sha256", "e" * 64,
                  "--expect-project", harness.SYNTHETIC_IDENTITY["project"], "--expect-environment", harness.SYNTHETIC_IDENTITY["environment"],
-                 "--expect-service", harness.SYNTHETIC_IDENTITY["service"], "--expect-db", "db.internal:5432/railway"]
+                 "--expect-service", harness.SYNTHETIC_IDENTITY["service"], "--expect-db", DB,
+                 "--expect-backup-service", harness.SYNTHETIC_BACKUP["service"], "--expect-backup-volume", harness.SYNTHETIC_BACKUP["volume"]]
     env = harness.gate_environment("postgresql://svc:p-not-a-real-secret@db.internal:5432/railway", release_sha="c" * 40)
-    completed = subprocess.run(base_argv + ["--phase", "S0"], env=env, capture_output=True, text=True, timeout=120)
-    out = completed.stdout + completed.stderr
-    assert completed.returncode == 1 and "RESULT=FAIL" in out and "release_sha FAIL reason=release_sha_mismatch" in out
-    assert "database checks skipped" in out and "p-not-a-real-secret" not in out and "postgresql://" not in out
+
+    def run(argv, environment=env):
+        completed = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=120)
+        return completed.returncode, completed.stdout + completed.stderr
+
+    rc, out = run(base_argv + ["--phase", "S0"])
+    assert rc == 1 and "RESULT=FAIL" in out and "release_sha FAIL reason=release_sha_mismatch" in out
+    assert "database checks skipped" in out and "CHECK inventory" not in out and "p-not-a-real-secret" not in out and "postgresql://" not in out
+    for phase in ("S1", "S2"):
+        rc, out = run(base_argv + ["--phase", phase])
+        assert rc == 2 and f"RESULT=USAGE reason={k.R_PHASE_NOT_DEPLOYABLE}" in out
     for phase in ("LEGACY_462_S0", "head", "S9"):
-        completed = subprocess.run(base_argv + ["--phase", phase], env=env, capture_output=True, text=True, timeout=120)
-        assert completed.returncode == 2 and "RESULT=USAGE" in completed.stdout
-    completed = subprocess.run(base_argv + ["--phase", "S0", "--expect-db", "db.internal:5432"], env=env, capture_output=True, text=True, timeout=120)
-    assert completed.returncode == 2
-    completed = subprocess.run(base_argv + ["--phase", "S0"], env={**env, "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": "true", k.RELEASE_SHA_ENV: harness.SYNTHETIC_RELEASE_SHA},
-                               capture_output=True, text=True, timeout=120)
-    assert completed.returncode == 1 and "shopify_flags FAIL reason=shopify_flag_enabled" in completed.stdout
-    assert '"NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED"' in completed.stdout and "database checks skipped" in completed.stdout
-
-
-def test_source_tamper_is_refused_by_count_or_digest(tmp_path):
-    root = harness.build_root(tmp_path / "root")
-    count, digest = gate.full_inventory(root)
-    assert gate.check_inventory(root, count, digest)[0].status == k.PASS
-    migration = root / "database" / "migrations" / "versions" / "0120_meta_catalog_authorizations.py"
-    original = migration.read_bytes()
-    migration.write_bytes(original + b"\n")
-    check, runtime = gate.check_inventory(root, count, digest)
-    assert (check.reason, runtime) == (k.R_INVENTORY_DIGEST_MISMATCH, None)
-    migration.write_bytes(original)
-    approval = root / k.APPROVAL_RELATIVE_PATH
-    approval.write_text(approval.read_text() + "\n")
-    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INVENTORY_DIGEST_MISMATCH
-    (root / "database" / "migrations" / "versions" / "0124_new.py").write_text("revision = '0124'\n")
-    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INVENTORY_COUNT_MISMATCH
-    (root / "database" / "migrations" / "versions" / "0124_new.py").unlink()
-    (root / k.EXPECTATIONS_RELATIVE_PATH).unlink()
-    assert gate.check_inventory(root, count, digest)[0].reason == k.R_INVENTORY_FILE_MISSING
+        rc, out = run(base_argv + ["--phase", phase])
+        assert rc == 2 and "RESULT=USAGE reason=invalid_arguments" in out and phase not in out.replace("usage", "")
+    rc, out = run(base_argv + ["--phase", "S0", "--inventory-count", "p-not-a-real-count"])
+    assert rc == 2 and "RESULT=USAGE reason=invalid_arguments" in out and "p-not-a-real-count" not in out
+    rc, out = run(base_argv + ["--phase", "S0", "--unknown-p-not-a-real-flag"])
+    assert rc == 2 and "p-not-a-real-flag" not in out
+    marker_root = str(tmp_path / "p-not-a-real-path")
+    argv = list(base_argv)
+    argv[argv.index("--root") + 1] = marker_root
+    rc, out = run(argv + ["--phase", "S0"], {**env, k.RELEASE_SHA_ENV: harness.SYNTHETIC_RELEASE_SHA})
+    assert rc == 1 and "root FAIL reason=root_missing" in out and "p-not-a-real-path" not in out
+    rc, out = run(base_argv + ["--phase", "S0"], {**env, "VITE_SHOPIFY_CATALOG_IMPORT_UI": "true", k.RELEASE_SHA_ENV: harness.SYNTHETIC_RELEASE_SHA})
+    assert "approval FAIL" in out and "shopify_flags" not in out  # approval (unfilled pin) refuses first; flags never reached
