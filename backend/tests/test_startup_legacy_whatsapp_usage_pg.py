@@ -9,7 +9,6 @@ from __future__ import annotations
 import ast
 import copy
 import json
-import logging
 import os
 from pathlib import Path
 
@@ -86,16 +85,13 @@ def _column_shape(engine):
 def _run_source_loop(root, engine):
     _, loop = _source(root)
     records = []
-    logger = logging.getLogger("legacy-column-proof")
-    logger.handlers.clear()
-    logger.propagate = False
-    logger.setLevel(logging.INFO)
 
-    class Capture(logging.Handler):
-        def emit(self, record):
-            records.append(record.getMessage())
-    logger.addHandler(Capture())
-    namespace = {"engine": engine, "text": text, "logger": logger, "safe_alters": ALTERS}
+    class Capture:
+        # The imported release gate deliberately disables process-wide logging.
+        # Collect the source warning calls directly without changing that guard.
+        def warning(self, message, *arguments):
+            records.append(message % arguments)
+    namespace = {"engine": engine, "text": text, "logger": Capture(), "safe_alters": ALTERS}
     exec(compile(ast.Module(body=[copy.deepcopy(loop)], type_ignores=[]),
                  str(root / "backend/main.py"), "exec"), namespace)
     return records
