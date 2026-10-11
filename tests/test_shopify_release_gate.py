@@ -191,8 +191,6 @@ def test_rendered_command_refuses_an_absent_or_tampered_gate_file(tmp_path):
     gate_file.write_bytes(original)
     rc, out = harness.run_command(command, env)
     assert "gate_sha256_match=True" in out and f"{k.LOG_PREFIX} CHECK root PASS" in out
-    # the legacy release carries no gate file at all: the trusted command refuses before anything runs
-    assert not (REPO / "docs").joinpath("nonexistent").exists()
 
 
 # ── Pure evaluations ─────────────────────────────────────────────────────────

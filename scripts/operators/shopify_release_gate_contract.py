@@ -487,4 +487,5 @@ def evaluate_approval(record: Any, phase_name: str, *, runtime_digest: str, runt
     return PASS, None, detail
 
 
-__all__ = [name for name in globals() if not name.startswith("_")]
+__all__ = [name for name, value in list(globals().items())
+           if not name.startswith("_") and name not in {"re", "Any", "Dict", "FrozenSet", "List", "Mapping", "Optional", "Tuple"}]

@@ -12,6 +12,7 @@ given the disposable database explicitly.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import subprocess
@@ -158,11 +159,10 @@ def test_phase_matrix_accepts_exactly_the_current_state_and_bootstrap_is_a_noop(
         assert harness.checks(out)["shopify_footprint"] == (k.FAIL, k.R_FOOTPRINT_UNEXPECTED)
         _assert_fail(gate_root, "S2", db, "S2 against S1", check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
         # the normal bootstrap target of the new source is an ancestor of the retained 0111 row: a no-op on every phase
-        for state, expected_rows in (("S1", topo.S1),):
-            proc = subprocess.run(build_normal_bootstrap_upgrade_argv(python_executable=sys.executable), cwd=str(_REPO / "database"),
-                                  env={**os.environ, "DATABASE_URL": url}, capture_output=True, text=True, timeout=600)
-            assert proc.returncode == 0, proc.stderr[-2000:]
-            topo.assert_step(url, expected_rows, baseline, planted, counts, f"{state} after bootstrap upgrade 0093")
+        proc = subprocess.run(build_normal_bootstrap_upgrade_argv(python_executable=sys.executable), cwd=str(_REPO / "database"),
+                              env={**os.environ, "DATABASE_URL": url}, capture_output=True, text=True, timeout=600)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        topo.assert_step(url, topo.S1, baseline, planted, counts, "S1 after bootstrap upgrade 0093")
 
         assert _alembic(db, "upgrade", "0122").returncode == 0
         topo.assert_step(url, topo.S2, baseline, planted, counts, "S2")
@@ -342,7 +342,7 @@ def test_wrong_identity_target_override_flags_and_stale_approval_never_reach_the
             out = _assert_fail(gate_root, "S0", db, f"{flag} on", check="shopify_flags", reason=k.R_FLAG_ENABLED, extra_env={flag: "1"})
             assert "database checks skipped" in out
         stale = harness.build_root(tmp_path / "stale", approval=None)
-        record = harness.filled_approval(gate.runtime_inventory(stale), now=harness.NOW - __import__("datetime").timedelta(days=30))
+        record = harness.filled_approval(gate.runtime_inventory(stale), now=harness.NOW - _dt.timedelta(days=30))
         harness.write_approval(stale, record)
         out = _assert_fail(stale, "S0", db, "expired approval", check="approval", reason=k.R_APPROVAL_EXPIRED)
         assert "database checks skipped" in out
