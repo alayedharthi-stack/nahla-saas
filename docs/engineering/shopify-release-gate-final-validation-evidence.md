@@ -9,8 +9,10 @@ does not replace this tested source identity. Stacked base remains
 Google 0124 was not absorbed.
 
 Status on 2026-10-11: independent source review has closed the three residual
-findings at this source/tree without weakening guards. **Overall acceptance
-remains pending full supported Unix and PostgreSQL 16/18 validation.** The
+findings at this source/tree without weakening guards. **Essential supported
+Unix/PostgreSQL validation is complete: 154 + 10 + 10 cases passed, zero skips,
+failures or errors, in run 38171916514.** Parent review of the completed logs
+and final acceptance remain separate; no merge or rollout approval is claimed. The
 earlier 7f89dcbe evidence and Claude 2ab3042d PostgreSQL reports are historical
 results, not passes for the current guard.
 
@@ -177,21 +179,78 @@ retained. No guard was bypassed and no current Unix/PG suite pass is claimed.
 
 The proposed YAML now has a **single-line correction** to that expected
 canonical digest. All other YAML bytes remain those reviewed at f103ea88.
-The active workflow is still the original d06cbf2b version; the correction
-has not been activated or rerun pending parent review under the instruction
-to activate only independently reviewed YAML. Gate SHA, tree pin, count,
+At that checkpoint the active workflow was still the original d06cbf2b version;
+the correction was held for parent review under the instruction to activate
+only independently reviewed YAML. The parent subsequently approved the exact
+one-line correction at 7494646d, and it was activated in c9909973 as recorded
+below. Gate SHA, tree pin, count,
 library binding, all tests, zero-skip checks and permissions remain intact.
 
 Existing [GOV-002](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171281902)
 and [merge-freeze](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171281925)
 checks completed successfully at d06cbf2b. They do not replace the unrun suites.
 
+## Completed supported Unix and PostgreSQL validation
+
+The independently reviewed one-line correction was published in test-only
+commit `c990997361a81369c3c6e1c27769793013d01d2f` under the owner's existing
+explicit workflow publication/execution approval. Functional source, test
+assertions, guards, permissions and all other workflow bytes remain unchanged.
+[Run 38171916514](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171916514)
+started at 20:22:13 UTC and completed **successfully** at 20:25:41 UTC on
+2026-10-11. Both jobs reached terminal success and stopped their disposable
+containers. The previous failed run above remains part of the evidence.
+
+Actual counts below are taken from the downloaded completed job logs. Every
+JUnit summary reports `ok=True`, `reason=clean`, `skipped=0`, `failures=0`,
+`errors=0`; the workflow also asserts the exact 154/10 counts.
+
+| Suite / job log | Actual result | UTC window |
+|---|---|---|
+| [Full DB-free module, Unix / job 114566111983](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171916514/job/114566111983) | **154 passed** in 12.18 s; JUnit tests=154, zero skips/failures/errors | 20:22:54–20:23:07 |
+| [Strict PostgreSQL 16 / job 114566111983](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171916514/job/114566111983) | **10 passed** in 149.68 s; JUnit tests=10, zero skips/failures/errors; server_version_num=160015 (**16.15**) | 20:23:08–20:25:38 |
+| [Strict PostgreSQL 18 / job 114566112156](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171916514/job/114566112156) | **10 passed** in 148.85 s; JUnit tests=10, zero skips/failures/errors; server_version_num=180006 (**18.6**) | 20:23:06–20:25:36 |
+
+The DB-free module ran once, in the PG16 job. Its intentionally omitted
+duplicate step in the PG18 job is not a skipped test case. No `-k` selection
+or deselection was used. The exact legacy checkout enabled both the DB-free
+legacy digest case and the genuine legacy bootstrap refusal/rollback proof.
+Both PostgreSQL runs used strict required-PG mode, the explicit disposable
+admin URL and the ephemeral host alias, with genuine upgrades and rollbacks.
+
+Both jobs verify and record:
+
+- Functional source SHA `1257e4c10bad28ab189c6d1ff7d4e3c2add15781` and tree
+  `c40f954a3a9218b6148230cd5778e8eacb14bedd`, before and after testing, and
+  a clean tracked source diff.
+- Legacy SHA `462ede1aff602cad84e9569be859cca0087b190d`, tree
+  `f2866da7abec02e55592360b0360279205b6c08c`.
+- Count 143, canonical inventory
+  `1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4`, gate SHA
+  `206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157`.
+- Isolated Python **3.12.10**, twelve pinned installed packages and clean
+  `pip check`. The actual library-binding gate reports PASS; Alembic 1.13.1,
+  SQLAlchemy 2.0.30 and psycopg2-binary 2.9.9 originate from the isolated
+  interpreter's `lib/python3.12/site-packages`, outside the checkout.
+
+The Unix positive import and rendered-handover controls pass without weakening
+the Windows-observed namespace refusal or executable checks. The real PG cases
+exercise the valid wrong-owner target and restoration, current footprint
+snapshots, drift, locks/timeouts, S0/S3 acceptance, intermediate-state refusal
+and legacy compatibility. This closes the essential runner gap for the frozen
+guard; it does not assert full startup or live deployment compatibility.
+
+[GOV-002](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171917813)
+and [merge-freeze](https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38171917790)
+also completed successfully at workflow commit c9909973. These focused proofs
+do not replace other required repository checks or independent parent review.
+
 ## Acceptance versus rollout
 
-Essential guard acceptance is: supported Unix full module with zero skipped
-cases, then 10/10 strict PostgreSQL proofs on each of 16 and 18, with exact
-source provenance and independent review of actual logs. No current PG16/18
-pass is claimed for this modified guard.
+Essential test coverage is now complete: supported Unix full module with zero
+skipped cases and 10/10 strict PostgreSQL proofs on each of 16 and 18, with exact
+source provenance. Final guard acceptance still requires the parent's independent
+review of the completed logs and consolidated evidence. The PR remains Draft.
 
 Full startup compatibility (Salla cleanup, `create_all`, safe alters) remains
 a separate rollout gate. The operator plan's enforced deployment exclusion,
