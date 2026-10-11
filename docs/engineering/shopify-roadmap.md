@@ -37,7 +37,7 @@ merge or release.
 | Slice | Draft | What exists | Evidence class |
 |---|---|---|---|
 | Secure connection foundation | [#1202](https://github.com/alayedharthi-stack/nahla-saas/pull/1202) | standalone authorization code, expiring offline tokens, `read_products` only, uninstall quarantine and reconciliation | implemented; Shopify mocked |
-| Merchant connection UI | [#1203](https://github.com/alayedharthi-stack/nahla-saas/pull/1203) | connection card and completion page behind a UI flag | implemented; browser harness against a local backend |
+| Merchant connection UI | [#1203](https://github.com/alayedharthi-stack/nahla-saas/pull/1203) | connection card and completion page behind a UI flag | implemented; local dashboard browser harness with mocked API, Shopify and Sentry routes (no backend, no real Shopify) |
 | Read-only catalog import | [#1204](https://github.com/alayedharthi-stack/nahla-saas/pull/1204) | provider-scoped mirror, Admin API 2026-10, no shared-hub projection | implemented; Shopify mocked |
 | Privacy compliance webhooks | [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | durable intake of `customers/data_request`, `customers/redact`, `shop/redact`; bounded assessments; blocked-policy proposals; fixture-only cleanup | implemented; Shopify mocked; no subscription registered |
 

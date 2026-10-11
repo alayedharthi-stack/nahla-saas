@@ -28,7 +28,7 @@ its node id.
 | Level | Meaning |
 |---|---|
 | **U** | unit test, no database, mocks / fakes |
-| **D** | integration on disposable PostgreSQL, or a local browser harness |
+| **D** | integration on disposable PostgreSQL, or a local browser harness (a local dashboard with mocked routes is still D, never R) |
 | **R** | observed on a real Shopify development store |
 
 | Status | Meaning |
@@ -252,7 +252,9 @@ Node ids are pinned: #1202–#1204 at
 [`08428cb`](https://github.com/alayedharthi-stack/nahla-saas/tree/08428cb7edf9666a0b31874e8f0256764fd11c90)
 (the #1204 head, which contains #1202 and #1203), #1205 at
 [`3681ebd`](https://github.com/alayedharthi-stack/nahla-saas/tree/3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c)
-(its tested source).
+— the **pinned proof source**; its final execution evidence is **pending**
+until full terminal logs of the final-head runs exist (pre-commit focused
+runs are not final evidence).
 
 * **[P1] two tenants / shops isolated** —
   `backend/tests/test_shopify_connection_pg.py::test_connect_two_tenants_isolated`;
