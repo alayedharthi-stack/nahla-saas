@@ -1523,3 +1523,70 @@ def test_a_valid_json_partial_payload_cannot_clear_values_or_publish(pg):
     assert outcome == "failed" and run_row(pg, handle.run_id)["failure_reason"] == E.R_INVALID_RESPONSE
     assert _mirror(pg) == before
     assert _sql(pg, "SELECT count(*) AS n FROM shopify_catalog_staged_records")[0]["n"] == 0
+
+
+def test_one_file_shared_by_two_products_and_their_variants_commits(pg, monkeypatch):
+    monkeypatch.setattr(C, "PRODUCTS_PAGE", 1)
+    merchant = Merchant(pg, "files")
+    fake = FakeCatalogShop(*SHOES)
+    shoe = fake.add_product("حذاء رياضي أبيض", variants=[{"price": "199.00"}])
+    shared = fake.products[shoe].media[0]
+    perfume = fake.add_product("عطر ورد 100ml", images=0, variants=[{"price": "250.00"}, {"price": "260.00", "title": "x"}])
+    fake.products[perfume].media = [shared]
+    fake.products[perfume].featured = shared
+    for v in fake.variants.values():
+        v.media = [shared]
+    connect(pg, merchant, fake)
+    handle, outcome = import_once(pg, merchant, fake)
+    assert outcome == "committed"
+    url = fake.media[shared].url
+    assert {r["image_url"] for r in _dump(pg, "shopify_catalog_products")} == {url}
+    assert {(r["image_url"], r["image_source"]) for r in _dump(pg, "shopify_catalog_variants")} == {(url, "variant")}
+
+
+# ── Read-only collision audit ─────────────────────────────────────────────────
+
+def test_the_collision_audit_is_read_only_and_reports_counts_only(pg):
+    import psycopg2
+
+    sys.path.insert(0, str(_REPO / "scripts"))
+    import audit_shopify_catalog_collisions_readonly as audit_module
+
+    merchant = Merchant(pg, "audit")
+    fake = shoe_store()
+    connect(pg, merchant, fake)
+    assert import_once(pg, merchant, fake)[1] == "committed"
+    raw_product = sorted(fake.products)[0]
+    _sql(pg, "INSERT INTO products (tenant_id, external_id, title, source, in_stock) VALUES (:t, :e, 'x', 'salla', true)",
+         t=merchant.tenant_id, e=str(raw_product))
+    _sql(pg, "INSERT INTO products (tenant_id, external_id, title, source, in_stock) VALUES (:t, 'legacy-1', 'y',"
+             " 'shopify', true)", t=merchant.tenant_id)
+    dsn = make_url(_url(pg.name)).set(drivername="postgresql").render_as_string(hide_password=False)
+    before = _mirror(pg)
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.set_session(readonly=True, autocommit=False)
+        with conn.cursor() as cur:
+            cur.execute("SET TRANSACTION READ ONLY")
+            report = audit_module.audit(cur)
+            with pytest.raises(psycopg2.Error):
+                cur.execute("UPDATE products SET title = 'z'")   # the audit's transaction cannot write
+        conn.rollback()
+    finally:
+        conn.close()
+    checks = {c["check"]: c for c in report["checks"]}
+    assert report["schema"] == {"foundation_0121": True, "catalog_0122": True, "connection_key": True,
+                                "partial_catalog": False}
+    assert report["verdict"] == "WARN"
+    assert checks["legacy_hub.products_source_shopify_not_adopted"]["count"] == 1
+    assert checks["raw_id_overlap.products_external_id"]["count"] == 1
+    assert all(c["count"] == 0 for k, c in checks.items() if k.startswith("mirror_integrity."))
+    assert _mirror(pg) == before
+    assert _sql(pg, "SELECT count(*) AS n FROM products WHERE source = 'shopify'")[0]["n"] == 1   # never adopted
+    # A Shopify GID in a Salla/generic identity column is a FAIL; the CLI never prints the DSN.
+    _sql(pg, "UPDATE products SET external_id = 'gid://shopify/Product/1' WHERE external_id = 'legacy-1'")
+    proc = subprocess.run([sys.executable, str(_REPO / "scripts" / "audit_shopify_catalog_collisions_readonly.py")],
+                          env={**os.environ, "DATABASE_URL": dsn}, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 1, proc.stderr[-2000:]
+    out = json.loads(proc.stdout)
+    assert out["verdict"] == "FAIL" and pg.name not in proc.stdout and "postgresql://" not in proc.stdout

@@ -229,10 +229,15 @@ def media(node: Any) -> Dict[str, Any]:
         image = n.get("image")
         if image is not None:
             image = obj(image)
-            url = safe_image_url(image.get("url"))
+            # Presence and type of both selected fields first, then usability.
+            raw_url = image.get("url")
+            alt = optional_text(image.get("altText"), limit=512)
+            if raw_url is not None and not isinstance(raw_url, str):
+                raise _invalid()
+            url = safe_image_url(raw_url)
             if url is not None:
                 record["url"] = url
-                record["alt"] = optional_text(image.get("altText"), limit=512)
+                record["alt"] = alt
     return record
 
 

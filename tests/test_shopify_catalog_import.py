@@ -617,6 +617,14 @@ def test_omitted_queried_fields_are_refused_while_explicit_null_is_kept():
             parse.media(broken)
     with pytest.raises(E.ImportFailure):
         parse.page_info({"hasNextPage": False})
+    # altText must be present whether or not the URL turns out usable.
+    for url in ("https://cdn.shopify.com/s/files/a.jpg", "https://evil.example/a.jpg", None):
+        with pytest.raises(E.ImportFailure):
+            parse.media(dict(image, image={"url": url}))
+        kept = parse.media(dict(image, image={"url": url, "altText": None}))
+        assert kept["url"] == (url if url and url.startswith("https://cdn.shopify.com/") else None)
+    with pytest.raises(E.ImportFailure):
+        parse.media(dict(image, image={"url": 7, "altText": None}))
 
 
 def test_an_option_and_variant_added_mid_read_restart_the_whole_product_unit(monkeypatch):
