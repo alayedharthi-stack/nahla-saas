@@ -20,6 +20,8 @@
  *   6. UI flag off → the original static step; the import route is never called.
  *   7. evidence renders the API version; a products-only import says
  *      inventory was not read.
+ *   8. a failed connection attempt (invalid shop, server refusal) leaves the
+ *      already connected shop's import start available and working.
  *
  * Run (from dashboard/): node scripts/verify-shopify-catalog-import-ui.mjs
  */
@@ -41,6 +43,7 @@ const STATUS = 'GET /merchant/integrations/shopify/status'
 const DISCONNECT = 'POST /merchant/integrations/shopify/disconnect'
 const IMPORT_STATUS = 'GET /merchant/integrations/shopify/catalog-import/status'
 const IMPORT_START = 'POST /merchant/integrations/shopify/catalog-import/start'
+const CONNECT_START = 'POST /merchant/integrations/shopify/start'
 
 let passed = 0
 let failed = 0
@@ -291,6 +294,47 @@ async function main() {
       await waitFor(async () => (await s.page.textContent('[data-testid="shopify-onboarding-steps"]') || '')
         .includes('not available at this stage'), 10_000, 'static step')
       check('5: 404 → the original static step', (await stepState(s.page)).join(',') === 'not_started' && !(await s.page.$(START)))
+      await s.ctx.close()
+    })
+
+    await run('failed connect keeps the connected shop importable', async () => {
+      const state = { imports: [importEntry('active', { can_start: true })] }
+      const s = await scenario(browser, ON, {
+        [STATUS]: async () => ({ status: 200, body: connectionStatus([ACTIVE]) }),
+        [CONNECT_START]: async () => ({ status: 409, body: { detail: { error: 'shop_unavailable' } } }),
+        [IMPORT_STATUS]: async () => ({ status: 200, body: importStatus(state.imports) }),
+        [IMPORT_START]: async () => {
+          state.imports = [importEntry('active', { state: 'importing', started_at: '2026-10-11T06:00:00+00:00', can_start: false })]
+          return { status: 202, body: { status: 'importing', shop_domain: SHOP } }
+        },
+      })
+      await s.page.goto(`${ON}/integrations`)
+      await s.page.waitForSelector(`${STEP}[data-step="not_started"]`)
+      await s.page.waitForSelector(START)
+      // (a) an invalid shop: refused locally, no request.
+      await s.page.fill('#shopify-shop-input', 'not a shop!')
+      await s.page.click('[data-testid="shopify-connect-button"]')
+      await s.page.waitForSelector('[data-testid="shopify-start-error"]')
+      check('8a: invalid connect attempt shows its error', count(s, CONNECT_START) === 0)
+      check('8a: the connected shop can still start its import',
+        await s.page.isVisible(START) && await s.page.isEnabled(START))
+      // (b) a server refusal for another shop.
+      await s.page.fill('#shopify-shop-input', 'another-generic-store.myshopify.com')
+      await s.page.click('[data-testid="shopify-connect-button"]')
+      await waitFor(async () => count(s, CONNECT_START) === 1, 10_000, 'connect refused')
+      await s.page.waitForSelector('[data-testid="shopify-start-error"]')
+      // The refusal makes the card re-read status; the step fails closed for
+      // that re-read, then must offer the connected shop's start again.
+      const reoffered = await waitFor(async () => {
+        const el = await s.page.$(START)
+        return !!el && await el.isEnabled()
+      }, 10_000, 'import start re-offered').catch(() => false)
+      check('8b: refused connect attempt leaves the import start enabled (after the re-read)',
+        reoffered && await s.page.isVisible('[data-testid="shopify-start-error"]'))
+      await s.page.click(START)
+      await waitFor(async () => count(s, IMPORT_START) === 1, 10_000, 'import start request')
+      await s.page.waitForSelector(`${STEP}[data-step="importing"]`)
+      check('8b: the import start was sent and the step shows importing', !(await s.page.$(START)))
       await s.ctx.close()
     })
 

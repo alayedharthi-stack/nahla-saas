@@ -126,6 +126,9 @@ const view = (connections: unknown[]) => parseImportStatus({ available: true, ap
     && code.includes("setLoad({ phase: 'loading' })"))
   assert('step: renders the evidence API version', code.includes('evidence.apiVersion'))
   assert('card binds the step to the parent status', card.includes('parentStatus={state.status}'))
+  assert('card: only an in-flight connect or disconnect is busy (a failed connect is not)',
+    card.includes("state.start.phase === 'starting' || state.start.phase === 'redirecting'")
+    && !card.includes("state.start.phase !== 'idle'"))
   assert('step: no browser storage', !/localStorage|sessionStorage|indexedDB|document\.cookie/.test(code))
   assert('step: no console logging', !/console\./.test(code))
   assert('step: never renders an error message', !/\b(err|error|e|exc)\.message\b/.test(code))
