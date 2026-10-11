@@ -272,6 +272,11 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/webhook")
             or path.startswith("/auth")
             or path.startswith("/api/salla/diag/")  # public diagnostic
+            # Shopify authenticates this browser redirect with HMAC and single-use state.
+            or (
+                request.method == "GET"
+                and path == "/merchant/integrations/shopify/callback"
+            )
         ):
             auth_header = request.headers.get("Authorization", "")
             has_bearer_token = auth_header.startswith("Bearer ")
