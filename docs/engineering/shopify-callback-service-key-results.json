@@ -303,7 +303,32 @@
     "status": "passed",
     "synthetic_db_connects": 2
   },
-  "decoded_log_lf_sha256": "5b630b50f5231d1f2e633b1fe96ae7bbd5fcd305efce5bd0d615683b0c5eed37",
+  "decoded_log_lf_sha256": "eec4624c6057ad29860429446f14a9bcc951a151d493ccc4c39d4372a3d64293",
+  "log_representation": {
+    "canonical_algorithm": "Encode the tool-returned decoded text as UTF-8; remove one leading UTF-8 BOM if present; replace CRLF with LF; preserve all remaining bytes, including the original terminal newline; do not strip or append newlines.",
+    "canonical_utf8_bytes": 323646,
+    "canonical_lf_count": 2871,
+    "canonical_terminal_lf_count": 1,
+    "fresh_download_with_bom": {
+      "utf8_bytes": 323649,
+      "sha256": "2292949304e988b75c567b634976ca599f9c61a77d0476516648c14c42614e17",
+      "bom_present": true,
+      "crlf_count": 0,
+      "lf_count": 2871,
+      "terminal_lf_count": 1
+    },
+    "original_saved_capture_preserved": {
+      "file": "callback-final-114588288125.log",
+      "utf8_bytes": 323650,
+      "sha256": "5b630b50f5231d1f2e633b1fe96ae7bbd5fcd305efce5bd0d615683b0c5eed37",
+      "bom_present": true,
+      "crlf_count": 0,
+      "lf_count": 2872,
+      "terminal_lf_count": 2,
+      "verified_byte_relation": "original_saved_capture == fresh_download_with_bom + one byte 0x0A",
+      "cause": "The apply_patch log capture appended one additional terminal LF. The previously published digest accurately hashed that saved copy, but its representation label was incomplete."
+    }
+  },
   "security_source_git_blob_sha256": {
     "backend/core/middleware.py": "5b346c833e3d97a54b4752e0151dab7e80b4aacaa367c40a0abea6064f04c7d8",
     "backend/routers/shopify_connection.py": "87cb4860c19575c5d016c3de4b98ad071f358c2b35f4d4f6b53fe20550f10262",
@@ -329,6 +354,6 @@
     "shop_binding_created": false,
     "existing_salla_meta_ai_runtime_unchanged": true,
     "prior_guard_and_startup_tests_rerun": false,
-    "independent_review": "pending; required before activation"
+    "independent_review": "completed with no functional/security blocker; evidence-only log representation clarified; no activation or live-change authorization"
   }
 }

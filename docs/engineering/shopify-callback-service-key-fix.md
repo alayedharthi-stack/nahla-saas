@@ -123,8 +123,20 @@ dependency overrides, replacement routes or provider mocks.
 [Structured results](shopify-callback-service-key-results.json) contain the
 three actual reports, complete job steps, source/image identities, shared
 dependency layers and security-source hashes. Full decoded job log is retained
-locally as `callback-final-114588288125.log`; LF-normalized UTF-8 SHA-256 is
+locally as `callback-final-114588288125.log`. The original saved file is preserved:
+its UTF-8 bytes retain the leading BOM and include one additional terminal LF
+introduced by the apply_patch capture. Its 323,650 bytes hash to
 `5b630b50f5231d1f2e633b1fe96ae7bbd5fcd305efce5bd0d615683b0c5eed37`.
+An exact fresh decoded download is 323,649 bytes, has the same BOM and one terminal
+LF, and hashes to `2292949304e988b75c567b634976ca599f9c61a77d0476516648c14c42614e17`.
+The saved file was verified byte-for-byte equal to that download plus one `0x0A`.
+
+The canonical published digest now removes one leading UTF-8 BOM, normalizes
+CRLF to LF, and preserves the download's remaining bytes and original terminal
+newline without trimming or appending anything. These 323,646 bytes hash to
+`eec4624c6057ad29860429446f14a9bcc951a151d493ccc4c39d4372a3d64293`.
+The earlier label omitted the capture's extra LF/BOM; this is an evidence-only
+representation correction, with no difference in log content, reports or source.
 Local Python/YAML syntax, entire-module AST scope, diff check and trusted-base
 GOV-002 passed. This workflow passed on its first run; no assertion was waived.
 
@@ -135,7 +147,9 @@ is not run, and accepted startup/essential guard suites are carried without
 reruns. No provider token exchange, shop binding, live migration, deployment,
 source pin, app permission/credential/settings change, merge or purchase occurred.
 
-Independent review of this exact source/evidence is pending. The earlier
+Independent review found no functional or security blocker and verified the
+actual reports/source hashes; the log representation discrepancy is clarified
+above. The earlier
 [remaining rollout checklist](shopify-production-asgi-evidence.md) continues
 to apply: after acceptance of this fix the demonstrated service-key callback
 blocker is resolved in source; live source/build/backup/restore/deployment-window
