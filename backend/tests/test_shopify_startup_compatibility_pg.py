@@ -250,7 +250,18 @@ def test_adopted_nonce_survives_s0_to_s3_without_fixture_reset(tmp_path, monkeyp
             report = _startup(root, pg._loopback_url(db), tmp_path / label)
             assert report["db_tasks"] == ["_bootstrap_db_schema_bg", "_migrate_background"]
             assert report["bootstrap_ready"] and report["safe_alters_ready"]
-            assert report["sql_or_bootstrap_errors"] == []
+            if root.resolve() == LEGACY.resolve():
+                # The immutable deployed source predates the accepted 1216 repair.
+                # Classify its two known missing-column warnings; any other error fails.
+                errors = report["sql_or_bootstrap_errors"]
+                assert len(errors) == 2
+                assert all("psycopg2.errors.UndefinedColumn" in error for error in errors)
+                assert {error.split(" | error=", 1)[0] for error in errors} == {
+                    "Startup migration skipped statement: ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used SET DEFAULT 0",
+                    "Startup migration skipped statement: ALTER TABLE whatsapp_usage ALTER COLUMN conversations_used DROP NOT NULL",
+                }
+            else:
+                assert report["sql_or_bootstrap_errors"] == []
             verify_retained(topo.S0 if phase == "S0" else topo.S3, label)
 
         exercise_nonce("S0")
@@ -272,7 +283,8 @@ def test_adopted_nonce_survives_s0_to_s3_without_fixture_reset(tmp_path, monkeyp
         print("ADOPTED_NONCE_PROOF", json.dumps({"baseline_creations": 1, "fixture_resets": 0,
             "server_default": None, "nonce_oid_preserved": True, "retained_definitions_and_oids_preserved": True,
             "migration_steps": ["0121", "0122", "0123"], "legacy_s0_boots": 1,
-            "candidate_s0_boots": 1, "candidate_s3_boots": 2, "nonce_operations": nonce_reports}, sort_keys=True))
+            "candidate_s0_boots": 1, "candidate_s3_boots": 2, "candidate_startup_errors": 0,
+            "legacy_known_missing_column_warnings": 2, "nonce_operations": nonce_reports}, sort_keys=True))
     finally:
         engine.dispose()
         pg._drop(db)
