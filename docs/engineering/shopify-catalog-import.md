@@ -132,7 +132,9 @@ stored Shopify `updatedAt` is newer than the staged one is **not**
 overwritten (`stale_skipped`) and keeps its previous `last_seen_run_id`
 (seen is not refreshed). Its relationships survive with it: an inventory
 item is detached only when no present variant references it, and absent
-levels are detached only for items this run actually traversed. A failed,
+levels are detached only for items this run actually traversed — except that a
+level at a location Shopify confirmed gone is always detached with it (no
+present level ever sits at a deleted location). A failed,
 cancelled, interrupted, partial or inconsistent run publishes nothing; the
 last committed mirror stays exactly as it was and staged rows are deleted.
 
@@ -225,7 +227,19 @@ not read: it totals locations that cannot fulfil online orders.
 counts, removals, inventory mode and counts — null when not read) with
 `current_installation` true/false. The dashboard shows "complete" only for
 server-committed evidence of the current installation; reasons map to fixed
-copy; support impersonation sees the state but cannot start.
+copy; support impersonation sees the state but cannot start. The step is bound
+to the card's authoritative connection reads: every new parent status
+(refresh, pageshow / back-forward restore, a disconnect, a session change)
+invalidates it and it fails closed — no badge, no start — until its own
+re-read answers; a shop the parent no longer reports as active is never shown
+"complete" and never offered start, nor is any shop while the server reports
+the import unavailable. The evidence line shows the Shopify API version used.
+
+Real-browser proofs (local, like the connection UI's harness):
+`cd dashboard && node scripts/verify-shopify-catalog-import-ui.mjs` — completed
+import → same-session disconnect (badge and start removed while the re-read is
+held), pageshow restore, `available=false`, support impersonation, backend
+route off, UI flag off.
 
 ## Not supported in this slice (explicit boundaries)
 

@@ -38,7 +38,9 @@ Concurrency model
   with them: an inventory item is detached only when no present variant
   references it any more, and absent levels are detached only for items
   this run actually traversed — so skipping a stale variant never orphans
-  the (newer) item and levels it still points to. Absent products, variants and
+  the (newer) item and levels it still points to. The one exception is a
+  level at a location Shopify confirmed gone: it is detached with that
+  location, so no present level ever sits at a deleted location. Absent products, variants and
   locations become ``deleted`` only if Shopify confirmed each of them gone;
   inventory items and levels no longer referenced become ``detached``.
   Nothing is ever hard-deleted from the mirror.
@@ -573,6 +575,13 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
                 "  AND s.gid = m.location_gid) RETURNING m.location_gid"), params)
             if not removed_locations <= confirmed_absent.get(KIND_LOCATION, set()):
                 raise E.ImportFailure(E.R_TRAVERSAL_INCONSISTENT)
+            # A level cannot outlive a location Shopify confirmed gone — even
+            # one kept with a retained (newer, unstaged) item.
+            _tombstone(db, (
+                "UPDATE shopify_catalog_inventory_levels m SET lifecycle = 'detached', removed_at = :now,"
+                " updated_at = :now FROM shopify_catalog_locations c WHERE c.id = m.location_id"
+                " AND m.connection_id = :c AND m.lifecycle = 'present' AND c.lifecycle = 'deleted'"
+                " RETURNING m.inventory_level_gid"), params)
             _tombstone(db, (
                 "UPDATE shopify_catalog_inventory_levels m SET lifecycle = 'detached', removed_at = :now,"
                 " updated_at = :now WHERE m.connection_id = :c AND m.lifecycle = 'present' AND NOT EXISTS ("

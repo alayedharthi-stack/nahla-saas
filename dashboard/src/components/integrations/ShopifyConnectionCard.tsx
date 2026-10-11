@@ -224,6 +224,8 @@ export default function ShopifyConnectionCard() {
                       lang={lang}
                       readOnly={state.readOnly}
                       sessionKey={getSessionBindingKey}
+                      parentStatus={state.status}
+                      parentBusy={state.disconnect.phase === 'working' || state.start.phase !== 'idle'}
                       fallback={staticImportStep}
                     />
                   )

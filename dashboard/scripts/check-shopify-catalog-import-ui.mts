@@ -12,10 +12,12 @@
 import { readFileSync } from 'node:fs'
 import {
   IMPORT_REASON_CODES,
+  displayState,
   importStepValue,
   parseImportStatus,
   projectImportFailure,
   reasonKey,
+  startAllowed,
 } from '../src/lib/shopifyConnection/catalogImport'
 import { shopifyConnectionAr, shopifyConnectionEn } from '../src/i18n/shopifyConnectionLabels'
 
@@ -74,6 +76,16 @@ const view = (connections: unknown[]) => parseImportStatus({ available: true, ap
   assert('no start without an active connection', inactive?.entries[0].canStart === false)
   assert('malformed status is null', parseImportStatus({ connections: 'x' }) === null && parseImportStatus(null) === null)
   assert('step value defaults to not_started', importStepValue(null) === 'not_started')
+  const done = view([entry({ state: 'imported', last_success: evidence(), can_start: true })])!.entries[0]
+  const ok = { available: true, parentActive: true, readOnly: false, busy: false }
+  assert('start allowed only when every authority agrees', startAllowed(done, ok)
+    && !startAllowed(done, { ...ok, available: false }) && !startAllowed(done, { ...ok, parentActive: false })
+    && !startAllowed(done, { ...ok, readOnly: true }) && !startAllowed(done, { ...ok, busy: true }))
+  const unavailable = parseImportStatus({ available: false, connections: [entry({ can_start: true })] })!
+  assert('available=false never offers start even if an entry says can_start',
+    !startAllowed(unavailable.entries[0], { ...ok, available: unavailable.available }))
+  assert('a shop the parent no longer reports active is never shown complete',
+    displayState(done, false) === 'unknown' && displayState(done, true) === 'imported')
   assert('every backend reason code maps to a key', [...IMPORT_REASON_CODES].every((c) => reasonKey(c) !== null))
   assert('failure projection never reads messages',
     projectImportFailure({ status: 409, code: 'import_in_progress', message: 'x' }).kind === 'refused'
@@ -108,8 +120,12 @@ const view = (connections: unknown[]) => parseImportStatus({ available: true, ap
   assert('card renders the import step only behind the flag', card.includes('isShopifyCatalogImportUiEnabled() && state.load === \'ready\''))
   const step = src('../src/components/integrations/ShopifyCatalogImportStep.tsx')
   const code = step.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
-  assert('step: start refused for read-only sessions', code.includes('if (readOnly || starting) return')
-    && code.includes('entry.canStart && !readOnly'))
+  assert('step: start refused for read-only sessions', code.includes('if (readOnly || starting || parentBusy) return')
+    && code.includes('startAllowed(entry, { available, parentActive, readOnly, busy: parentBusy })'))
+  assert('step: re-reads and fails closed on every parent read', code.includes('}, [refresh, parentStatus])')
+    && code.includes("setLoad({ phase: 'loading' })"))
+  assert('step: renders the evidence API version', code.includes('evidence.apiVersion'))
+  assert('card binds the step to the parent status', card.includes('parentStatus={state.status}'))
   assert('step: no browser storage', !/localStorage|sessionStorage|indexedDB|document\.cookie/.test(code))
   assert('step: no console logging', !/console\./.test(code))
   assert('step: never renders an error message', !/\b(err|error|e|exc)\.message\b/.test(code))

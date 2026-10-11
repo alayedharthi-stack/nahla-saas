@@ -1590,3 +1590,50 @@ def test_the_collision_audit_is_read_only_and_reports_counts_only(pg):
     assert proc.returncode == 1, proc.stderr[-2000:]
     out = json.loads(proc.stdout)
     assert out["verdict"] == "FAIL" and pg.name not in proc.stdout and "postgresql://" not in proc.stdout
+
+
+def test_a_retained_stale_graph_never_keeps_a_level_at_a_confirmed_deleted_location(pg):
+    """The newer stored variant keeps item B (not staged this run); B's level
+    sits at a location Shopify confirms gone. That level is detached with the
+    location (no present level at a deleted location), while the rest of the
+    retained B graph stays, availability stays unknown, and a failing run
+    changes nothing."""
+    merchant = Merchant(pg, "graphloc")
+    fake = FakeCatalogShop(*SHIRTS, scopes=("read_products", "read_inventory"))
+    old_loc = fake.add_location("مستودع قديم")
+    kept_loc = fake.add_location("مستودع الرياض")
+    fake.add_product("قميص قطني أزرق", variants=[{"price": "89.90", "levels": {old_loc: 5, kept_loc: 2}}])
+    cid = connect(pg, merchant, fake, scopes="read_products,read_inventory")
+    import_once(pg, merchant, fake)
+    [variant_number] = list(fake.variants)
+    item_b = fake.variants[variant_number].item
+    _sql(pg, "UPDATE shopify_catalog_variants SET source_updated_at = now() + interval '1 year'")
+    new_loc = fake.add_location("مستودع جدة")
+    item_a = 990002
+    fake.items[item_a] = {"tracked": True, "updatedAt": "2026-10-01T07:00:00Z"}
+    fake.set_level(item_a, new_loc, 9)
+    fake.variants[variant_number].item = item_a
+    fake.items.pop(item_b)
+    for key in [k for k in fake.levels if k[0] == item_b]:
+        fake.levels.pop(key)
+    fake.locations.pop(old_loc)                                      # confirmed gone by nodes(ids:)
+    handle, outcome = import_once(pg, merchant, fake)
+    assert outcome == "committed", run_row(pg, handle.run_id)["failure_reason"]
+    locations = {r["location_gid"]: r for r in _dump(pg, "shopify_catalog_locations")}
+    assert locations[gid("Location", old_loc)]["lifecycle"] == "deleted"
+    items = {r["inventory_item_gid"]: r for r in _dump(pg, "shopify_catalog_inventory_items")}
+    b = items[gid("InventoryItem", item_b)]
+    assert b["lifecycle"] == "present"                              # the newer variant's item survives
+    levels = {(r["inventory_item_id"], r["location_id"]): r for r in _dump(pg, "shopify_catalog_inventory_levels")}
+    at_old = levels[(b["id"], locations[gid("Location", old_loc)]["id"])]
+    at_kept = levels[(b["id"], locations[gid("Location", kept_loc)]["id"])]
+    assert at_old["lifecycle"] == "detached"                        # never present at a deleted location
+    assert at_kept["lifecycle"] == "present" and at_kept["available"] == 2   # unconfirmed, retained
+    assert not _sql(pg, "SELECT 1 FROM shopify_catalog_inventory_levels l JOIN shopify_catalog_locations c"
+                        " ON c.id = l.location_id WHERE l.lifecycle = 'present' AND c.lifecycle <> 'present'")
+    assert _availability(pg, merchant, cid, fake)["basis"] == "stale_observation"
+    # A failing run afterwards still changes nothing.
+    before = _mirror(pg)
+    fake.tokens.clear()
+    handle, outcome = import_once(pg, merchant, fake)
+    assert outcome == "failed" and _mirror(pg) == before

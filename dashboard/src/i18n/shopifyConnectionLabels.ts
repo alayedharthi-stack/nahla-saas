@@ -97,6 +97,7 @@ export interface ShopifyConnectionLabels {
     starting: string
     refresh: string
     lastSuccess: string
+    apiVersion: string
     previousInstallation: string
     inventoryNotRead: string
     inventoryRead: string
@@ -207,6 +208,7 @@ export const shopifyConnectionAr: ShopifyConnectionLabels = {
     starting: 'جارٍ البدء…',
     refresh: 'تحديث الحالة',
     lastSuccess: 'آخر استيراد مكتمل: {time} — {products} منتج، {variants} خيار.',
+    apiVersion: 'إصدار واجهة Shopify المستخدم: {version}',
     previousInstallation: 'هذا الاستيراد من ربط سابق للمتجر.',
     inventoryNotRead: 'لم يُستورد المخزون: صلاحية قراءة المخزون غير ممنوحة.',
     inventoryRead: 'المخزون حسب الموقع: {locations} موقع، {levels} سجل.',
@@ -327,6 +329,7 @@ export const shopifyConnectionEn: ShopifyConnectionLabels = {
     starting: 'Starting…',
     refresh: 'Refresh status',
     lastSuccess: 'Last complete import: {time} — {products} products, {variants} variants.',
+    apiVersion: 'Shopify API version used: {version}',
     previousInstallation: 'This import is from an earlier connection of the store.',
     inventoryNotRead: 'Inventory was not read: inventory read permission is not granted.',
     inventoryRead: 'Inventory by location: {locations} locations, {levels} records.',

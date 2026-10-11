@@ -160,3 +160,21 @@ export function projectImportFailure(err: unknown): ImportFailure {
 export function importStepValue(entry: ImportEntry | null): ImportState {
   return entry ? entry.state : 'not_started'
 }
+
+/**
+ * What the step may show for one shop, given the parent card's latest
+ * authoritative connection read: "imported" / "importing" only while the
+ * parent still reports that shop's connection as active.
+ */
+export function displayState(entry: ImportEntry, parentActive: boolean): ImportState {
+  if (!parentActive && (entry.state === 'imported' || entry.state === 'importing')) return 'unknown'
+  return entry.state
+}
+
+/** Start is offered only when every authority agrees. */
+export function startAllowed(entry: ImportEntry, ctx: {
+  available: boolean; parentActive: boolean; readOnly: boolean; busy: boolean
+}): boolean {
+  return ctx.available && ctx.parentActive && !ctx.readOnly && !ctx.busy && entry.canStart
+    && entry.connectionStatus === 'active' && entry.state !== 'importing'
+}
