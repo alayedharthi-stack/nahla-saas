@@ -194,8 +194,16 @@ are the sorted-case and case-outcome digests of the five JUnit files and the
 | `fix_gate` vs `compat_gate` | 1119 → 1119 | same set | none | identical |
 
 The 37 cases that skipped as PostgreSQL-unavailable in the post-reboot
-diagnostic runs: 37 passed in `base_gate`, 37 in `fix_gate`, 37 in
-`compat_gate`.
+diagnostic runs are listed individually in the JSON
+(`comparisons.formerly_pg_skipped_37`: the JUnit `(classname, name)` pairs
+skipped in the probe readback of `08428cb` and passed in `base_gate`, with
+each one's outcome in the original baseline JUnit, `base_gate`, `fix_gate`
+and `compat_gate`, a derived pytest node id, and the probe skip reason).
+They span `test_salla_customer_address_candidates_pg`,
+`test_salla_embedded_identity_binding::TestMigration0100SallaEmbeddedIdentityBindings`
+and `test_salla_shipment_tracking_pg`; all 37 passed in the original
+baseline run and in each of the three restored-PostgreSQL gates (37 / 37 /
+37, asserted when the JSON was built).
 
 ## Focused coverage
 
