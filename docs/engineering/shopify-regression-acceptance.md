@@ -253,10 +253,10 @@ Node ids are pinned: #1202–#1204 at
 (the #1204 head, which contains #1202 and #1203), #1205 at
 [`3681ebd`](https://github.com/alayedharthi-stack/nahla-saas/tree/3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c)
 — the **pinned proof source**; its final-head execution evidence is
-recorded in [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/3d802df44054db8e85b377ebc2805752fbe6c94d/docs/engineering/shopify-privacy-webhooks-validation.md)
-(docs-only commit `3d802df`; tested source `3681ebd`, baseline `08428cb`),
+recorded in [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/50d097cc45a9d86a33f9f7af2c3b866ed40ca5ec/docs/engineering/shopify-privacy-webhooks-validation.md)
+(docs-only commit `50d097c`; tested source `3681ebd`, baseline `08428cb`),
 with its sanitized machine-readable subset
-[`shopify-privacy-webhooks-validation-evidence.json`](https://github.com/alayedharthi-stack/nahla-saas/blob/3d802df44054db8e85b377ebc2805752fbe6c94d/docs/engineering/shopify-privacy-webhooks-validation-evidence.json).
+[`shopify-privacy-webhooks-validation-evidence.json`](https://github.com/alayedharthi-stack/nahla-saas/blob/50d097cc45a9d86a33f9f7af2c3b866ed40ca5ec/docs/engineering/shopify-privacy-webhooks-validation-evidence.json).
 
 * **[P1] two tenants / shops isolated** —
   `backend/tests/test_shopify_connection_pg.py::test_connect_two_tenants_isolated`;
@@ -342,7 +342,7 @@ with its sanitized machine-readable subset
 |---|---|
 | [#1202](https://github.com/alayedharthi-stack/nahla-saas/pull/1202) | design and runbook `docs/engineering/shopify-connection-foundation.md`; validation recorded on the Draft |
 | [#1204](https://github.com/alayedharthi-stack/nahla-saas/pull/1204) | `docs/engineering/shopify-catalog-import-validation.md` |
-| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/3d802df44054db8e85b377ebc2805752fbe6c94d/docs/engineering/shopify-privacy-webhooks-validation.md) at `3d802df` (tested source `3681ebd`, baseline `08428cb`): strict PG16.15 and PG18.6 SCRAM **PROVEN 815/815**; 17 `lint-and-test` steps RC 0 at both SHAs; owner 65-file regression gate **FAILED** at candidate and baseline alike (RC 1 — 2 failed, 1075 passed, 41 skipped; identical JUnit identities: reproduced baseline debt, not a pass) |
+| [#1205](https://github.com/alayedharthi-stack/nahla-saas/pull/1205) | [`shopify-privacy-webhooks-validation.md`](https://github.com/alayedharthi-stack/nahla-saas/blob/50d097cc45a9d86a33f9f7af2c3b866ed40ca5ec/docs/engineering/shopify-privacy-webhooks-validation.md) at `50d097c` (tested source `3681ebd`, baseline `08428cb`): strict PG16.15 and PG18.6 SCRAM **PROVEN 815/815**; 17 `lint-and-test` steps RC 0 at both SHAs; owner 65-file regression gate **FAILED** at candidate and baseline alike (RC 1 — 2 failed, 1075 passed, 41 skipped; identical JUnit identities: reproduced baseline debt, not a pass) |
 
 Final test links for later slices are added here only when those runs exist.
 
