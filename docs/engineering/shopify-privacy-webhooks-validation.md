@@ -7,6 +7,24 @@ its SHA is not the tested source. Nothing here was deployed, activated,
 registered with Shopify or run against a live database, a live Shopify store
 or real customer data. All three flags remain off.
 
+**Machine-readable evidence:**
+[`shopify-privacy-webhooks-validation-evidence.json`](shopify-privacy-webhooks-validation-evidence.json)
+is a compact, sanitized subset derived from the retained raw artifacts (raw
+logs and JUnit XML stayed in the session scratchpad and are not committed).
+It holds the ordered 65-file list and its digest, the gate command and
+environment switches, candidate and baseline counts / exits / timings, the
+two failures (pytest node ids, JUnit identities, source lines, assertions and
+reported values), all 41 skipped identities (5 collection-time), JUnit case
+counts with reproducible sorted-case and case-outcome digests (format defined
+in the file), D1a–D4 commands and outcomes, the root inventory and collection
+skip, strict proof suites, CI steps and governance results. Sanitization:
+absolute checkout and scratch paths made repository-relative or removed,
+Python object addresses replaced by `<addr>`, host name and credentials
+omitted; nothing else rewritten, and candidate and baseline values are kept
+separate. It was built and then cross-checked by a second, independent
+script against the retained files (164 checks, 0 failures), without
+re-running any test.
+
 ## Verdict summary
 
 | Gate | Candidate `3681ebd` | Baseline `08428cb` |
@@ -210,10 +228,13 @@ python -m pytest -q -p no:cacheprovider --junitxml=$OUT/junit.xml $(cat owner_re
 Failures, identical at both SHAs:
 
 1. `backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log`
-   — `assert any("[SallaEmbeddedAppId] rejected code=invalid_salla_app_id" in r.message for r in caplog.records)`
-   → `assert False` (file blob `1571e59f` at both SHAs).
+   (line 93) — source assertion
+   `assert any("[SallaEmbeddedAppId] rejected code=invalid_salla_app_id" in r.message for r in caplog.records)`;
+   pytest reports `assert False` (file blob `1571e59f` at both SHAs).
 2. `backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql`
-   (line 250) — `assert isinstance(JSON(), JSONB)` → `False`, where
+   (line 250) — source assertion
+   `assert isinstance(Coupon.__table__.c["metadata"].type, JSONB)`; pytest
+   reports `assert False` where `isinstance(JSON(), JSONB)` and
    `JSON() = Column('metadata', JSON(), table=<coupons>).type` (file blob
    `f8c8a8a2` at both SHAs).
 
