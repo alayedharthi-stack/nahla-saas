@@ -329,13 +329,23 @@ re-rendered command (its SHA-256 is pinned there).
 
 ## 8. Old-deployment startup, redeploy and rollback compatibility
 
-The disposable tests exercise only Alembic Step C (`upgrade 0093`). They do
+The essential guard tests exercise only Alembic Step C (`upgrade 0093`). They do
 not run the full startup path: Salla cleanup, `create_all`, and safe alters
 remain unverified at each Shopify state. Reports of unchanged rows/schema
 below apply to Step C only. Full startup compatibility is not established by
 the gate or those tests. Its experiment is separate from the essential guard
 suite and optional for guard review; a later rollout decision must explicitly
 assess the unverified startup steps rather than infer compatibility from Step C.
+
+Subsequent targeted startup proof at unchanged accepted source 7188ddbd is
+documented in [startup compatibility evidence](shopify-startup-compatibility-evidence.md).
+It executes real Salla cleanup, concurrent `create_all`/64 SQL statements and
+Step C at S0/S3, with provider tasks withheld. Schema/OID/row preservation and
+the post-startup gate pass on PG16/18, but the suite retains two failures per
+server for stale `whatsapp_usage.conversations_used` alters present in both
+deployed and candidate startup. This does not establish complete ASGI/image
+startup or production provider-task suppression; see the concrete boundaries
+and action-time sequence in that evidence.
 
 * **New-source Step C**: the application's background bootstrap
   (`alembic upgrade 0093`, pinned by `bootstrap_migration_contract`) is a

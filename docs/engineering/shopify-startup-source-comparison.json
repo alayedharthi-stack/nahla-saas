@@ -1,0 +1,38 @@
+{
+  "candidate": {
+    "sha": "1257e4c10bad28ab189c6d1ff7d4e3c2add15781",
+    "file_hashes": {
+      "backend/main.py": "d5f5675a6594a64ef35766964d322fdd4fed5b43df10957546f00a3850196400",
+      "database/models.py": "1ca00283f3bf208d80f3f8ffb14ad9c58613331e991e39d828e9da10f3d3bdde",
+      "database/session.py": "31e3c609b7da957d0128f6b3b149ba9a150a02f032b4234dc24bb62cb26c0842",
+      "scripts/cleanup_salla_duplicates.py": "8746ec07b55c58f481567903e25a4e31ca781e90a970e968d3954b29d95bc36e",
+      "start.sh": "3dc9dc8ce38cd2ff61ba77f30e617a6cc0a066d9b327643397d7adafb4312647",
+      "scripts/preflight_check.py": "8bfe7a5a306dd3f2fd4736ab31aad7213c410a5bf5cce213c45f0e3c5c946e5b"
+    },
+    "schema_function_ast_hashes": {
+      "_run_migrations": "36ff8d6fd2bccbec48b0fabac03855bdd7b8b1e24c9d397dd1eea14058a9dcaa",
+      "_migrate_background": "c10b221f7b81b52beb80b7404e8aba9bc51c23d1150ec7b3140e5b71cc97b3f3",
+      "_bootstrap_db_schema": "1bcbe1d9b0decdc736c267186308db17c6d409a477832ff642d78921b6e7c6fb",
+      "_bootstrap_db_schema_bg": "9c1c5ecbce4131aaa7e1c31b1b432681027dcb44cb49c19ef7e73e2ed4ec9127"
+    },
+    "safe_alter_count": 64
+  },
+  "deployed": {
+    "sha": "462ede1aff602cad84e9569be859cca0087b190d",
+    "file_hashes": {
+      "backend/main.py": "1dd3aacb6a16bbcb3105407a2ff1b2faab9c76cd025eac48488f33590a839ea3",
+      "database/models.py": "1ca00283f3bf208d80f3f8ffb14ad9c58613331e991e39d828e9da10f3d3bdde",
+      "database/session.py": "31e3c609b7da957d0128f6b3b149ba9a150a02f032b4234dc24bb62cb26c0842",
+      "scripts/cleanup_salla_duplicates.py": "8746ec07b55c58f481567903e25a4e31ca781e90a970e968d3954b29d95bc36e",
+      "start.sh": "3dc9dc8ce38cd2ff61ba77f30e617a6cc0a066d9b327643397d7adafb4312647",
+      "scripts/preflight_check.py": "8bfe7a5a306dd3f2fd4736ab31aad7213c410a5bf5cce213c45f0e3c5c946e5b"
+    },
+    "schema_function_ast_hashes": {
+      "_run_migrations": "36ff8d6fd2bccbec48b0fabac03855bdd7b8b1e24c9d397dd1eea14058a9dcaa",
+      "_migrate_background": "c10b221f7b81b52beb80b7404e8aba9bc51c23d1150ec7b3140e5b71cc97b3f3",
+      "_bootstrap_db_schema": "1bcbe1d9b0decdc736c267186308db17c6d409a477832ff642d78921b6e7c6fb",
+      "_bootstrap_db_schema_bg": "9c1c5ecbce4131aaa7e1c31b1b432681027dcb44cb49c19ef7e73e2ed4ec9127"
+    },
+    "safe_alter_count": 64
+  }
+}
