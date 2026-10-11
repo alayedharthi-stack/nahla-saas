@@ -147,6 +147,8 @@ def proof():
                 assert (await client.get(callback + '/extra')).status_code == 401
 
         check('configured_service_key_browser_callback', lambda: asyncio.run(callback_probe()))
+        assert not any(ATTEMPTS.values()), ATTEMPTS
+        REPORT['refused_attempt_counts'] = {k: len(v) for k, v in ATTEMPTS.items()}
         return
 
     logs = io.StringIO()
@@ -182,13 +184,15 @@ def proof():
                     r = await client.request(method, path, json=body,
                                              headers={'Authorization': 'Bearer ' + token,
                                                       'X-Tenant-ID': str(1403 - tenant)})
-                    assert r.status_code == 404
+                    # Legacy has no Shopify routes. Its existing catch-all
+                    # OPTIONS route produces 405 for these authenticated paths.
+                    assert r.status_code == (404 if MODE != 'legacy' else 405)
                     assert r.headers.get('location') is None
                 for path in webhooks:
                     r = await client.post(path, content=b'{}',
                                           headers={'Content-Type': 'application/json',
                                                    'X-Shopify-Hmac-Sha256': hmac})
-                    assert r.status_code == 404
+                    assert r.status_code == (404 if MODE != 'legacy' else 405)
             check('two_signed_tenants_all_disabled_routes', lambda: None)
 
     asyncio.run(requests())
