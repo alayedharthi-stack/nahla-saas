@@ -130,8 +130,9 @@ decision for separate review.
   cases reach the database through the test fixtures' default service URL
   on `127.0.0.1:5433` (`legacy_migration_drift_postgres_fixtures.DEFAULT_SERVICE_URL`).
 - **Reboot.** The machine rebooted at 2026-10-11 09:49:30Z, which stopped
-  the disposable clusters. The original #1205 gate (08:55–09:10Z) ran with
-  the disposable PG16 up; 37 of its passing cases are PostgreSQL-backed.
+  the disposable clusters. The original #1205 gate runs (candidate `3681ebd`
+  08:55:00 → 09:02:41Z, baseline `08428cb` 09:02:41 → 09:10:39Z) ran with
+  the disposable PG16 up; 37 of their passing cases are PostgreSQL-backed.
 - **Disposable PG16 restored** at 10:36Z with the originally recorded
   command: Ubuntu `postgresql-16 16.15-0ubuntu0.24.04.1` binaries, the
   existing data directory, stale `postmaster.pid` (PID 2350) confirmed not
@@ -146,7 +147,10 @@ decision for separate review.
 
 ## Gates (final chain, `7ae59f4`, started 10:41:50Z, finished 11:08:55Z)
 
-Command for each gate, from the repository root:
+Every stage's exact argv, working tree, stage order and the six unset
+PostgreSQL / database variables are recorded in the JSON (`argv`, `cwd`,
+`env_unset`, `stage_order`). Command for each gate, from the repository
+root:
 
 ```bash
 python -m pytest -q -p no:cacheprovider --junitxml=<out>/<label>_junit.xml $(cat owner_regression_files.txt)
@@ -175,15 +179,18 @@ cherry-picked in order (`c4ecda0`, `3affff6`, `7ae59f4`). `git diff
 their blob ids equals the blob at `7ae59f4`
 (`158cfa71…`, `e19fbba0…`, `2318fb2d…`, `42a1dbf5…`, `62465548…`); the rest of
 the tree is identical to `3681ebd` (`git ls-tree -r` comparison with those
-five paths removed).
+five paths removed). The full blob ids, the tree digests and the
+cherry-pick ancestry are in the JSON (`temporary_head_verification`), as
+are the sorted-case and case-outcome digests of the five JUnit files and the
+41 skipped identities with reasons (`junit_digests`, `skipped_41`).
 
 ### JUnit comparisons (case = JUnit `classname` + `name`)
 
 | Comparison | Cases | Identities | Outcome changes | Skipped |
 |---|---|---|---|---|
-| original baseline JUnit (08:55Z) vs `base_gate` | 1118 → 1118 | same set | none | identical identities and reasons |
+| original baseline JUnit (`08428cb`, 09:02:41 → 09:10:39Z) vs `base_gate` | 1118 → 1118 | same set | none | identical identities and reasons |
 | `base_gate` vs `fix_gate` | 1118 → 1119 | +1: `test_salla_embedded_reconcile_telemetry::test_requests_here_run_under_the_app_log_redaction` | the two isolation failures → passed | identical identities and reasons |
-| original #1205 candidate JUnit (`3681ebd`, 09:02Z) vs `compat_gate` | 1118 → 1119 | +1, the same canary | the two isolation failures → passed | identical identities and reasons |
+| original #1205 candidate JUnit (`3681ebd`, 08:55:00 → 09:02:41Z) vs `compat_gate` | 1118 → 1119 | +1, the same canary | the two isolation failures → passed | identical identities and reasons |
 | `fix_gate` vs `compat_gate` | 1119 → 1119 | same set | none | identical |
 
 The 37 cases that skipped as PostgreSQL-unavailable in the post-reboot
@@ -201,9 +208,13 @@ embedded-identity and shipment-tracking files; at the head also
 | `7ae59f4` | 1 | 3 failed, 253 passed |
 | `08428cb` | 1 | 5 failed, 247 passed (the 3 below plus the two isolation targets) |
 
-The three remaining failures are **retained as FAILED**. Each fails alone at
-both SHAs, so none is leakage; each import resolves to the real module file
-and the referenced name is absent from it:
+The three remaining failures are **retained as FAILED**. Each fails alone:
+controls at `08428cb` and at `3affff6` (≈10:38Z, before `7ae59f4` existed,
+each `1 failed`), and a bounded verification at a detached checkout of
+exactly `7ae59f4` (11:15:32 → 11:15:38Z, `python -m pytest -q -p no:cacheprovider <node>`
+per node, each RC 1, `1 failed`, the same error lines as in the table). So
+none is leakage; each import resolves to the real module file and the
+referenced name is absent from it:
 
 | Node id | Error | Where the name is actually defined |
 |---|---|---|
