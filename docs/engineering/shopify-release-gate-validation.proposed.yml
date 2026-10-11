@@ -1,0 +1,170 @@
+name: Frozen Shopify release gate validation
+
+# Proposed test-only addition to Draft #1214. Not yet published or triggered.
+# Standard public-repository runner; no cache/artifact storage or live secrets.
+on:
+  push:
+    branches: [claude/shopify-release-gate-transition-20261011]
+    paths: [.github/workflows/shopify-release-gate-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  frozen-gate:
+    name: Shopify gate / PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: '16'
+            image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          - pg: '18'
+            image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    services:
+      postgres:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FROZEN_SOURCE_SHA: 1257e4c10bad28ab189c6d1ff7d4e3c2add15781
+      FROZEN_SOURCE_TREE: c40f954a3a9218b6148230cd5778e8eacb14bedd
+      LEGACY_SOURCE_SHA: 462ede1aff602cad84e9569be859cca0087b190d
+      NAHLA_LEGACY_462_CHECKOUT: ${{ github.workspace }}/legacy
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      # Public fetch avoids persisting a checkout token and avoids this repo's
+      # dangling gitlink checkout-cleanup issue. Submodules are never populated.
+      - name: Fetch exact public source and legacy checkout
+        id: sources
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source config core.autocrlf false
+          git -C source remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C source fetch --no-tags --depth=1 origin "$FROZEN_SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          git init legacy
+          git -C legacy config core.autocrlf false
+          git -C legacy remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C legacy fetch --no-tags --depth=1 origin "$LEGACY_SOURCE_SHA"
+          git -C legacy checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$FROZEN_SOURCE_SHA"
+          test "$(git -C source rev-parse 'HEAD^{tree}')" = "$FROZEN_SOURCE_TREE"
+          test "$(git -C legacy rev-parse HEAD)" = "$LEGACY_SOURCE_SHA"
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+          git -C source show -s --format='source=%H tree=%T'
+          git -C legacy show -s --format='legacy=%H tree=%T'
+
+      - name: Setup Unix Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Isolate interpreter
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/shopify-gate-venv"
+          echo "$RUNNER_TEMP/shopify-gate-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned focused-suite dependencies
+        id: dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps \
+            alembic==1.13.1 SQLAlchemy==2.0.30 psycopg2-binary==2.9.9 pytest==9.1.1 \
+            Mako==1.4.3 MarkupSafe==3.0.4 greenlet==3.5.6 typing-extensions==4.16.0 \
+            iniconfig==2.3.1 packaging==26.3 pluggy==1.6.0 Pygments==2.21.0
+          python -m pip check
+          python --version
+          python -m pip freeze
+
+      - name: Verify frozen runtime bytes and installed library origins
+        id: provenance
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          from scripts.operators import shopify_release_gate as gate
+          root = Path.cwd()
+          actual = gate.inventory(root)
+          assert actual == (143, '83c92152e2dd7a8c04420902e5dc9fa38087eec849cec03657fe705986fbde92'), actual
+          assert not gate.unexpected_initializers(root)
+          digest = hashlib.sha256((root / 'scripts/operators/shopify_release_gate.py').read_bytes()).hexdigest()
+          assert digest == '206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157'
+          check = gate.check_libraries(root)
+          print('library_gate=', check.status, check.reason)
+          assert check.status == 'PASS', check.reason
+          import alembic, sqlalchemy, psycopg2
+          for module in (alembic, sqlalchemy, psycopg2):
+              print('library_origin=', module.__name__, module.__version__, module.__file__)
+          print('inventory=', json.dumps({'count': actual[0], 'digest': actual[1], 'gate_sha256': digest}))
+          PY
+
+      - name: Full DB-free suite (once, Unix; zero skips)
+        if: matrix.pg == '16'
+        run: |
+          set -euo pipefail
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+          python -B -m pytest tests/test_shopify_release_gate.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-db-free.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-db-free.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-db-free.xml"); print(result); assert result["ok"] and result["tests"] == 154'
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Strict disposable PostgreSQL suite (zero skips)
+        # Still collect the independent PG evidence if the DB-free suite fails.
+        if: ${{ !cancelled() && steps.sources.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.provenance.outcome == 'success' }}
+        env:
+          NAHLA_RELIABILITY_REQUIRE_PG: '1'
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
+          EXPECTED_PG_MAJOR: ${{ matrix.pg }}
+        run: |
+          set -euo pipefail
+          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts > /dev/null
+          python - <<'PY'
+          import os
+          import sqlalchemy as sa
+          from sqlalchemy.pool import NullPool
+          engine = sa.create_engine(os.environ['NAHLA_RELIABILITY_PG_ADMIN_DSN'], poolclass=NullPool)
+          try:
+              with engine.connect() as connection:
+                  version = int(connection.exec_driver_sql('SHOW server_version_num').scalar())
+                  print('PostgreSQL server_version_num=', version)
+                  assert version // 10000 == int(os.environ['EXPECTED_PG_MAJOR'])
+          finally:
+              engine.dispose()
+          PY
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+          python -B -m pytest backend/tests/test_shopify_release_gate_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-pg.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-pg.xml"); print(result); assert result["ok"] and result["tests"] == 10'
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Record final source identity
+        if: ${{ always() && steps.sources.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git show -s --format='source=%H tree=%T'
+          date -u +'%Y-%m-%dT%H:%M:%SZ'

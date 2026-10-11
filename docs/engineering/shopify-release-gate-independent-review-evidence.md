@@ -1,5 +1,11 @@
 # Shopify release gate: independent local validation (Draft #1214)
 
+Historical source/run: 7f89dcbe. Current frozen source and corrected failure
+classification are in [consolidated validation](shopify-release-gate-final-validation-evidence.md).
+The blanket environment explanation below was incomplete: a stale stdlib import
+allowlist was a concrete test defect and was corrected in 1257e4c. Full startup
+is a separate rollout gate, not an additional essential guard-suite proof.
+
 Status: **Draft; modified guard not accepted for merge or rollout.**
 The source under review is `7f89dcbe174a1b639509cd6b68d421a3a8e939c7`,
 tree `b5ca2faedb1447d4b7cd6df63c47d0866543d422`. It preserves Claude's
