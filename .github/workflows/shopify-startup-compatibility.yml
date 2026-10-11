@@ -1,0 +1,134 @@
+name: Shopify startup compatibility
+
+on:
+  push:
+    branches: [claude/shopify-release-gate-transition-20261011]
+    paths:
+      - .github/workflows/shopify-startup-compatibility.yml
+      - backend/tests/_shopify_startup_probe.py
+      - backend/tests/test_shopify_startup_compatibility_pg.py
+
+permissions:
+  contents: read
+
+jobs:
+  startup-proof:
+    name: Startup / PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: '16'
+            image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          - pg: '18'
+            image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    services:
+      postgres:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CANDIDATE_SOURCE_SHA: 7188ddbdcc6c1b0aa0688244c0f3103d7671d52f
+      LEGACY_SOURCE_SHA: 462ede1aff602cad84e9569be859cca0087b190d
+      NAHLA_STARTUP_SOURCE_ROOT: ${{ github.workspace }}/candidate
+      NAHLA_LEGACY_462_CHECKOUT: ${{ github.workspace }}/legacy
+      NAHLA_RELIABILITY_REQUIRE_PG: '1'
+      NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+      NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
+      EXPECTED_PG_MAJOR: ${{ matrix.pg }}
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: driver
+    steps:
+      - name: Fetch exact accepted and deployed sources plus test driver
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          for checkout_name in candidate legacy driver; do
+            git init "$checkout_name"
+            git -C "$checkout_name" config core.autocrlf false
+            git -C "$checkout_name" remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          done
+          git -C candidate fetch --no-tags --depth=1 origin "$CANDIDATE_SOURCE_SHA"
+          git -C candidate checkout --detach FETCH_HEAD
+          git -C legacy fetch --no-tags --depth=1 origin "$LEGACY_SOURCE_SHA"
+          git -C legacy checkout --detach FETCH_HEAD
+          git -C driver fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git -C driver checkout --detach FETCH_HEAD
+          git -C driver fetch --no-tags --depth=1 origin "$CANDIDATE_SOURCE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SOURCE_SHA"
+          test "$(git -C legacy rev-parse HEAD)" = "$LEGACY_SOURCE_SHA"
+          test "$(git -C driver rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C driver diff --exit-code "$CANDIDATE_SOURCE_SHA" HEAD -- \
+            backend/main.py backend/core database integrations requirements.txt start.sh scripts/operators scripts/cleanup_salla_duplicates.py scripts/preflight_check.py
+          git -C candidate show -s --format='candidate=%H tree=%T'
+          git -C legacy show -s --format='legacy=%H tree=%T'
+          git -C driver show -s --format='driver=%H tree=%T'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Isolate interpreter
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/shopify-startup-venv"
+          echo "$RUNNER_TEMP/shopify-startup-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned focused dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps \
+            alembic==1.13.1 SQLAlchemy==2.0.30 psycopg2-binary==2.9.9 pytest==9.1.1 \
+            Mako==1.4.3 MarkupSafe==3.0.4 greenlet==3.5.6 typing-extensions==4.16.0 \
+            iniconfig==2.3.1 packaging==26.3 pluggy==1.6.0 Pygments==2.21.0 \
+            cryptography==45.0.7 cffi==2.1.1 pycparser==3.11
+          python -m pip check
+          python --version
+          python -m pip freeze
+
+      - name: Assert disposable server and run only startup proof
+        run: |
+          set -euo pipefail
+          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts > /dev/null
+          python - <<'PY'
+          import os
+          import sqlalchemy as sa
+          from sqlalchemy.pool import NullPool
+          engine = sa.create_engine(os.environ['NAHLA_RELIABILITY_PG_ADMIN_DSN'], poolclass=NullPool)
+          try:
+              with engine.connect() as connection:
+                  version = int(connection.exec_driver_sql('SHOW server_version_num').scalar())
+                  print('PostgreSQL server_version_num=', version)
+                  assert version // 10000 == int(os.environ['EXPECTED_PG_MAJOR'])
+          finally:
+              engine.dispose()
+          PY
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+          python -B -m pytest backend/tests/test_shopify_startup_compatibility_pg.py -q -s -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-startup.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-startup.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-startup.xml"); print(result); assert result["ok"] and result["tests"] == 6'
+          date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Record final source identity
+        if: always()
+        run: |
+          set -euo pipefail
+          git -C ../candidate diff --exit-code
+          git -C ../legacy diff --exit-code
+          git -C ../candidate show -s --format='candidate=%H tree=%T'
+          git -C ../legacy show -s --format='legacy=%H tree=%T'
