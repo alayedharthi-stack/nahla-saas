@@ -52,7 +52,15 @@ def audit_guard(event, args):
         ATTEMPTS['network'].append(event)  # never record destinations/payloads
         raise RuntimeError('proof_network_refused')
     if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'):
-        ATTEMPTS['subprocess'].append(event)
+        frames = traceback.extract_stack(limit=16)
+        ATTEMPTS['subprocess'].append({
+            'event': event, 'executable_basename': Path(str(args[0])).name,
+            'stdlib_processor_lookup': event == 'subprocess.Popen'
+                and args[1] == ['uname', '-p']
+                and any(f.filename == '/usr/local/lib/python3.11/platform.py'
+                        and f.name == 'from_subprocess' for f in frames),
+            'stack_functions': [Path(f.filename).name + ':' + f.name for f in frames],
+        })
         raise RuntimeError('proof_subprocess_refused')
 
 
@@ -69,7 +77,8 @@ sa.event.listen(sa.engine.interfaces.Dialect, 'do_connect', deny_database)
 THREADS_BEFORE = {t.ident for t in threading.enumerate()}
 RESULTS = []
 REPORT = {'mode': MODE, 'source_sha': os.environ['PROOF_SOURCE_SHA'],
-          'python': sys.version, 'lifespan_executed': False, 'cases': RESULTS}
+          'python': sys.version, 'lifespan_executed': False, 'cases': RESULTS,
+          'api_key_configured': bool(os.environ.get('API_SECRET_KEY'))}
 
 
 def check(name, fn):
@@ -122,6 +131,22 @@ def proof():
         REPORT['shopify_route_count'] = len(expected & paths)
 
     check('full_module_and_router_graph', import_graph)
+
+    if os.environ.get('PROOF_CALLBACK_PROBE') == '1':
+        assert os.environ.get('API_SECRET_KEY') == 'synthetic-service-key-for-asgi-proof'
+
+        async def callback_probe():
+            transport = httpx.ASGITransport(app=main.app, raise_app_exceptions=True)
+            async with httpx.AsyncClient(transport=transport, base_url='https://proof.invalid') as client:
+                response = await client.get(callback)
+                REPORT['callback_status'] = response.status_code
+                REPORT['callback_expected_status'] = 404 if MODE != 'legacy' else 401
+                assert response.status_code == REPORT['callback_expected_status'], (
+                    'browser_callback_api_key_gate', response.status_code, REPORT['callback_expected_status'])
+                assert (await client.get(callback + '/extra')).status_code == 401
+
+        check('configured_service_key_browser_callback', lambda: asyncio.run(callback_probe()))
+        return
 
     logs = io.StringIO()
     handler = logging.StreamHandler(logs)
@@ -216,11 +241,16 @@ def proof():
     check('production_resolved_encryption_library', resolved_crypto)
 
     def no_side_effects():
-        assert not any(ATTEMPTS.values()), ATTEMPTS
+        assert not ATTEMPTS['network'] and not ATTEMPTS['database'], ATTEMPTS
+        # Python's platform.processor() probes `uname -p` on Linux. The guard
+        # still refuses it. Classify only that exact stdlib read-only lookup;
+        # every other subprocess attempt fails, even if caught by app code.
+        assert all(p['stdlib_processor_lookup'] for p in ATTEMPTS['subprocess']), ATTEMPTS
         extra = [t.name for t in threading.enumerate() if t.ident not in THREADS_BEFORE]
         assert not any('shopify' in name.lower() for name in extra), extra
         REPORT['additional_threads'] = extra
         REPORT['refused_attempt_counts'] = {k: len(v) for k, v in ATTEMPTS.items()}
+        REPORT['refused_subprocess_details'] = ATTEMPTS['subprocess']
         REPORT['dependency_versions'] = {n: importlib.metadata.version(n) for n in (
             'fastapi', 'starlette', 'httpx', 'sqlalchemy', 'psycopg2-binary',
             'pydantic', 'cryptography', 'python-jose', 'sentry-sdk', 'openai-agents')}
@@ -234,6 +264,7 @@ except BaseException as exc:
     REPORT['status'] = 'failed'
     REPORT['error_type'] = type(exc).__name__
     REPORT['refused_attempt_counts'] = {k: len(v) for k, v in ATTEMPTS.items()}
+    REPORT['refused_subprocess_details'] = ATTEMPTS['subprocess']
     print('ASGI_REPORT', json.dumps(REPORT, sort_keys=True), flush=True)
     traceback.print_exc()
     raise SystemExit(1)

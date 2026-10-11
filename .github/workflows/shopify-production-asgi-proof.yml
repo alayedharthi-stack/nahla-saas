@@ -94,6 +94,7 @@ jobs:
         if: success() && steps.build.outcome == 'success'
         run: |
           set -uo pipefail
+          set +e
           failed=0
           # Requirements and Dockerfile were byte-compared above. Reuse the
           # cached production dependency layers, with each source baked by
@@ -139,6 +140,27 @@ jobs:
           print('ASGI_TOTAL 24 passed / 0 skipped / 0 failed')
           PY
           if [ "$?" -ne 0 ]; then failed=1; fi
+          exit "$failed"
+
+      - name: Compare browser callback with synthetic service API key configured
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          set -uo pipefail
+          set +e
+          failed=0
+          for kind in candidate accepted legacy; do
+            case "$kind" in
+              candidate) revision="$CANDIDATE_SHA" ;;
+              accepted) revision="$ACCEPTED_SHA" ;;
+              legacy) revision="$LEGACY_SHA" ;;
+            esac
+            docker run --rm --network none --env-file proof.env \
+              --env "PROOF_MODE=$kind" --env "PROOF_SOURCE_SHA=$revision" \
+              --env PROOF_CALLBACK_PROBE=1 --env API_SECRET_KEY=synthetic-service-key-for-asgi-proof \
+              --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_production_asgi.py,target=/proof.py,readonly" \
+              "nahla-asgi-proof:$kind" python -B /proof.py 2>&1 | tee "$kind-service-key-callback.log"
+            if [ "${PIPESTATUS[0]}" -ne 0 ]; then failed=1; fi
+          done
           exit "$failed"
 
       - name: Record final immutable source identities
