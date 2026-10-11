@@ -43,6 +43,14 @@ CATALOG_CONSENT_ALEMBIC_HEAD = "0120"
 # and replaces 0120 as its head. Additive, never applied by normal bootstrap;
 # 0120 itself remains a valid explicit upgrade target.
 SHOPIFY_CONNECTION_ALEMBIC_HEAD = "0121"
+# The dormant Shopify catalog mirror extends the Shopify connection branch and
+# replaces 0121 as its head. Additive, never applied by normal bootstrap; 0121
+# itself remains a valid explicit upgrade target.
+SHOPIFY_CATALOG_ALEMBIC_HEAD = "0122"
+# The dormant Shopify privacy compliance requests extend the catalog mirror
+# branch and replace 0122 as its head. Additive, never applied by normal
+# bootstrap; 0122 itself remains a valid explicit upgrade target.
+SHOPIFY_PRIVACY_ALEMBIC_HEAD = "0123"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -58,7 +66,9 @@ AI_USAGE_REPOSITORY_ALEMBIC_HEADS = frozenset(
 PAYMENTS_REPOSITORY_ALEMBIC_HEADS = AI_USAGE_REPOSITORY_ALEMBIC_HEADS | {PAYMENTS_ALEMBIC_HEAD}
 CATALOG_RETIREMENTS_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {CATALOG_RETIREMENTS_ALEMBIC_HEAD}
 CATALOG_CONSENT_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {CATALOG_CONSENT_ALEMBIC_HEAD}
-REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CONNECTION_ALEMBIC_HEAD}
+SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CONNECTION_ALEMBIC_HEAD}
+SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CATALOG_ALEMBIC_HEAD}
+REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_PRIVACY_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -70,6 +80,8 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     PAYMENTS_REPOSITORY_ALEMBIC_HEADS,
     CATALOG_RETIREMENTS_REPOSITORY_ALEMBIC_HEADS,
     CATALOG_CONSENT_REPOSITORY_ALEMBIC_HEADS,
+    SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS,
+    SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -83,8 +95,10 @@ def repository_heads_expected(heads) -> bool:
     AI usage ``{0092, 0111, 0114}``, and payments
     ``{0092, 0111, 0114, 0115}``, catalog retirements
     ``{0092, 0111, 0114, 0115, 0118}``, catalog consent
-    ``{0092, 0111, 0114, 0115, 0120}`` and the Shopify connection foundation
-    ``{0092, 0111, 0114, 0115, 0121}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115, 0120}``, the Shopify connection foundation
+    ``{0092, 0111, 0114, 0115, 0121}``, the Shopify catalog mirror
+    ``{0092, 0111, 0114, 0115, 0122}`` and the Shopify privacy requests
+    ``{0092, 0111, 0114, 0115, 0123}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS
