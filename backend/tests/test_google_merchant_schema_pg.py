@@ -1200,12 +1200,14 @@ def test_attempt_outcomes_are_cleared_and_bound_to_the_current_attempt(pg):
     for assignment in ("last_outcome = 'timeout'", "last_error_code = 'invalid'",
                        "next_attempt_at = next_attempt_at + interval '1 hour'"):
         _fails(pg, f"UPDATE {LEDGER} SET {assignment}, version = version + 1 WHERE id = :rid", {RESTRICT}, rid=rid)
-    # A fresh dispatch clears it in the database; the caller writes nothing about it.
-    assert _sql(pg, _DISPATCH.format(extra=""), rid=rid, a="a2", s=300) == 1
+    # A fresh dispatch clears it in the database; the caller writes nothing about it,
+    # and the attempt's start is the database clock even when the caller claims an older one.
+    stale_start = _DISPATCH.replace("dispatched_at = clock_timestamp()", "dispatched_at = :claimed")
+    assert _sql(pg, stale_start.format(extra=""), rid=rid, a="a2", s=300, claimed=first["dispatched_at"]) == 1
     second = _row(pg, rid)
     assert (second["attempt_id"], second["last_outcome"], second["last_error_code"], second["next_attempt_at"]) == (
         "a2", None, None, None)
-    assert second["dispatched_at"] > first["next_attempt_at"]
+    assert second["dispatched_at"] > first["next_attempt_at"] > first["dispatched_at"]
     # Nothing is recorded early while the attempt is in flight.
     for assignment in ("last_outcome = 'rate_limited'", "last_error_code = 'invalid'", "next_attempt_at = :old"):
         _fails(pg, f"UPDATE {LEDGER} SET {assignment}, version = version + 1 WHERE id = :rid", {CHECK},

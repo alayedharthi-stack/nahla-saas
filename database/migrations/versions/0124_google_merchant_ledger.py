@@ -444,7 +444,9 @@ BEGIN
           RAISE EXCEPTION 'google_merchant_offer_ledger dispatches only under a bound connection'
             USING ERRCODE = 'restrict_violation';
         END IF;
-        -- A fresh attempt never inherits the previous attempt's outcome or retry time.
+        -- The attempt's start is the database clock, not a caller's claim; a
+        -- fresh attempt never inherits the previous attempt's outcome or retry time.
+        NEW.dispatched_at := clock_timestamp();
         NEW.last_outcome := NULL;
         NEW.last_error_code := NULL;
         NEW.next_attempt_at := NULL;

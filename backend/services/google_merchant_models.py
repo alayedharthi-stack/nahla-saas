@@ -34,7 +34,8 @@ evidence, outbox and idempotency in one row.
     idempotency key, generation) is frozen until it resolves; ``lease_fence``
     only grows and changes only when a new dispatch lease is taken, with a
     fresh ``attempt_id``, under a still-bound connection; the fresh attempt
-    starts with no outcome or retry time, and a live attempt keeps its owner.
+    is stamped with the database clock and starts with no outcome or retry
+    time, and a live attempt keeps its owner.
     A completion from a superseded attempt cannot match.
   * an attempt's outcome (a 429 with its retry time, or a rejection code) is
     written only by the transition that ends that live attempt, names it
@@ -484,7 +485,9 @@ BEGIN
           RAISE EXCEPTION 'google_merchant_offer_ledger dispatches only under a bound connection'
             USING ERRCODE = 'restrict_violation';
         END IF;
-        -- A fresh attempt never inherits the previous attempt's outcome or retry time.
+        -- The attempt's start is the database clock, not a caller's claim; a
+        -- fresh attempt never inherits the previous attempt's outcome or retry time.
+        NEW.dispatched_at := clock_timestamp();
         NEW.last_outcome := NULL;
         NEW.last_error_code := NULL;
         NEW.next_attempt_at := NULL;
