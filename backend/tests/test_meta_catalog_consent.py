@@ -31,6 +31,7 @@ for _p in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from backend.tests._log_redaction_isolation import restoring_log_filters  # noqa: E402
 import core.config as core_config  # noqa: E402
 import core.review_environment as review_env_mod  # noqa: E402
 import core.whatsapp_oauth_nonce as nonce_mod  # noqa: E402
@@ -151,6 +152,11 @@ def world(monkeypatch, caplog):
     )
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool, future=True)
+    # ``_remap_jsonb`` rewrites the shared JSONB column objects of every table
+    # on ``models.Base.metadata``; give them back their types once SQLite has
+    # its DDL, so no later test inherits ``JSON()`` columns.
+    jsonb_columns = [(col, col.type) for table in Base.metadata.tables.values()
+                     for col in table.columns if isinstance(col.type, JSONB)]
     event.listen(Base.metadata, "before_create", _remap_jsonb)
     try:
         Base.metadata.create_all(engine, tables=[
@@ -159,6 +165,8 @@ def world(monkeypatch, caplog):
         ])
     finally:
         event.remove(Base.metadata, "before_create", _remap_jsonb)
+        for col, original in jsonb_columns:
+            col.type = original
     factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     with factory() as s:
         s.add(Tenant(id=TENANT, name="متجر تجريبي عام"))
@@ -199,18 +207,21 @@ def world(monkeypatch, caplog):
 
     app.dependency_overrides[router_mod.get_db] = _db
     client = TestClient(app)
-    # The production log path: main.py installs this at import.
+    # The production log path: main.py installs this at import. It attaches to
+    # pytest's own root handlers here, so take off exactly what it added when
+    # the test is done, or if the rest of this setup fails.
     from core.log_redaction import install_log_redaction
 
-    install_log_redaction()
-    caplog.set_level(logging.DEBUG)
+    with restoring_log_filters():
+        install_log_redaction()
+        caplog.set_level(logging.DEBUG)
 
-    class W:
-        pass
+        class W:
+            pass
 
-    w = W()
-    w.client, w.factory, w.graph, w.secrets, w.engine = client, factory, graph, seen, engine
-    return w
+        w = W()
+        w.client, w.factory, w.graph, w.secrets, w.engine = client, factory, graph, seen, engine
+        yield w
 
 
 def _jwt(tenant_id: int = TENANT, **extra) -> Dict[str, str]:
