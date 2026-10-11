@@ -120,15 +120,14 @@ def _guardrail_code(item: Any) -> str:
     return "blocked"
 
 
-def _is_retryable_evidence_free_output(item: Any) -> bool:
-    """Retry outputs that assert a factual value without a verified claim."""
-    info = item.output.output_info
-    if not isinstance(info, dict):
-        return False
-    errors = info.get("errors")
-    if not isinstance(errors, list):
-        return False
-    factual_errors = {
+# Rejections that earn the single re-grounding retry.  Factual codes: the
+# reply asserted a commercial value without a verified claim.  Knowledge-span
+# codes: the reply cited the right section (ref, value and span presence all
+# verified) but paraphrased it beyond ``_knowledge_span_supported``; Run 2's
+# K16 ended there with no retry at all.  Nothing else is retried, and the
+# retry itself stays fail-closed.
+_FACTUAL_RETRY_ERRORS = frozenset(
+    {
         "evidence_free_commercial_or_factual_claim",
         "availability_in_text_without_verified_claim",
         "order_evidence_without_verified_claim",
@@ -136,7 +135,40 @@ def _is_retryable_evidence_free_output(item: Any) -> bool:
         "stock_quantity_in_text_without_verified_claim",
         "url_in_text_without_verified_claim",
     }
-    return bool(factual_errors.intersection(str(error) for error in errors))
+)
+_KNOWLEDGE_SPAN_RETRY_ERRORS = frozenset(
+    {
+        "claim_span_not_equivalent:product_knowledge",
+        "claim_span_not_equivalent:merchant_knowledge",
+    }
+)
+GROUNDING_RETRY_FACTUAL = "evidence_free_commercial_or_factual_claim"
+GROUNDING_RETRY_KNOWLEDGE_SPAN = "knowledge_span_not_equivalent"
+
+
+def _guardrail_error_codes(item: Any) -> list[str]:
+    info = item.output.output_info
+    if not isinstance(info, dict):
+        return []
+    errors = info.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [str(error) for error in errors]
+
+
+def _is_retryable_evidence_free_output(item: Any) -> bool:
+    """Retry outputs that assert a factual value without a verified claim."""
+    return bool(_FACTUAL_RETRY_ERRORS.intersection(_guardrail_error_codes(item)))
+
+
+def _grounding_retry_reason(item: Any) -> str:
+    """Which re-grounding retry, if any, a rejected output earns; "" for none."""
+    errors = set(_guardrail_error_codes(item))
+    if errors & _FACTUAL_RETRY_ERRORS:
+        return GROUNDING_RETRY_FACTUAL
+    if errors & _KNOWLEDGE_SPAN_RETRY_ERRORS:
+        return GROUNDING_RETRY_KNOWLEDGE_SPAN
+    return ""
 
 
 def _grounding_retry_input(user_input: str) -> str:
@@ -152,6 +184,28 @@ def _grounding_retry_input(user_input: str) -> str:
         "أو الشحنة المناسبة، واربط كل evidence_ref مذكور بـ FactClaim موثق لنفس "
         "subject_order_id. لا تذكر evidence_ref استُخدم للتفويض فقط ولا يدعم حقيقة "
         "أو إجراءً ظاهرًا في الرد."
+    )
+
+
+def _knowledge_regrounding_input(user_input: str) -> str:
+    """Attach trusted, run-local remediation after a paraphrased knowledge span.
+
+    PROMPT_CHANGED=YES — limited to this grounding-retry instruction.  The
+    retry must quote or faithfully reproduce the supported merchant knowledge,
+    preserve its meaning and scope, bind the claim to the registered evidence
+    ref, and otherwise drop the claim and disclose that the detail is
+    unavailable.  The system instructions, persona, model and routing are
+    untouched; the span check itself is not relaxed.
+    """
+    return (
+        f"{str(user_input or '').strip()}\n\n"
+        "تعليمة تصحيح داخلية: المحاولة السابقة نقلت معلومة من معرفة التاجر بصياغة "
+        "لا تطابق النص المعتمد. أعد استخدام أداة القراءة المناسبة في التشغيل الحالي، "
+        "ثم انقل معلومة التاجر المدعومة بالاقتباس الحرفي أو بإعادة إنتاج أمينة تحفظ "
+        "معناها ونطاقها دون إضافة أو تعميم أو حذف قيد، واربط الادعاء بـ evidence_ref "
+        "المسجل لنفس القسم مع text_span مطابق لما ورد في الرد. إذا تعذّر نقلها بأمانة "
+        "فاحذف هذا الادعاء واذكر صراحةً أن هذه التفصيلة غير متوفرة لديك، ولا تذكر أي "
+        "حقيقة تجارية بلا دليل."
     )
 
 
@@ -200,6 +254,7 @@ async def run_commerce_agent(
         )
         async with asyncio.timeout(deadline):
             grounding_retry_used = False
+            retry_reason = ""
             while True:
                 agent = build_commerce_agent(
                     model=configured_model,
@@ -218,14 +273,16 @@ async def run_commerce_agent(
                     service_tier=requested_service_tier,
                     require_tool_call=grounding_retry_used,
                 )
+                if not grounding_retry_used:
+                    run_input = str(user_input or "")
+                elif retry_reason == GROUNDING_RETRY_KNOWLEDGE_SPAN:
+                    run_input = _knowledge_regrounding_input(user_input)
+                else:
+                    run_input = _grounding_retry_input(user_input)
                 try:
                     run = await Runner.run(
                         agent,
-                        (
-                            _grounding_retry_input(user_input)
-                            if grounding_retry_used
-                            else str(user_input or "")
-                        ),
+                        run_input,
                         context=context,
                         session=session,
                         hooks=hooks,
@@ -252,18 +309,24 @@ async def run_commerce_agent(
                     )
                     break
                 except OutputGuardrailTripwireTriggered as exc:
-                    if (
-                        not grounding_retry_used
-                        and _is_retryable_evidence_free_output(exc.guardrail_result)
-                    ):
+                    reason = _grounding_retry_reason(exc.guardrail_result)
+                    if not grounding_retry_used and reason:
                         grounding_retry_used = True
+                        retry_reason = reason
                         context.activate_grounding_retry()
                         session = ConversationMessageSession(context)
                         hooks.events.append(
                             {
                                 "kind": "grounding_retry",
-                                "reason": "evidence_free_commercial_or_factual_claim",
+                                "reason": reason,
                                 "tool_choice": "required",
+                                # The first pass's rejection, kept on the
+                                # trace so a retried turn still shows what it
+                                # recovered from — never merged into
+                                # ``guardrail_results``, which describe the
+                                # delivered reply only.
+                                "guardrail": exc.guardrail_result.guardrail.get_name(),
+                                "errors": _guardrail_error_codes(exc.guardrail_result),
                             }
                         )
                         continue

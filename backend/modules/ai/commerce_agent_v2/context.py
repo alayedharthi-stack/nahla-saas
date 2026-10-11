@@ -337,8 +337,19 @@ class CommerceAgentContext(BaseModel):
         return self._grounding_retry_active
 
     def activate_grounding_retry(self) -> None:
-        """Mark the single fail-closed re-grounding attempt for read tools."""
+        """Mark the single fail-closed re-grounding attempt for read tools.
+
+        The retry runs in a fresh model session that never saw the first
+        pass's tool outputs, so the per-pass exposure record is reset: a
+        section the first pass emitted must reach the retry's model again.
+        Run 2's K15 retry proved the opposite — the ledger recorded hits while
+        the retry's tool results carried no sections at all.  The lookup
+        ledger, its signatures, the cached rows and the product authorization
+        are run-scoped and stay, so a repeat lookup still resolves to the
+        recorded attempt without a second database query.
+        """
         self._grounding_retry_active = True
+        self._knowledge_sections_emitted = set()
 
     @property
     def run_user_input(self) -> str:
