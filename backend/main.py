@@ -559,6 +559,11 @@ app.include_router(_shopify_webhook_router)
 # NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED are both set; writes no shared catalog.
 from routers.shopify_catalog_import import router as _shopify_catalog_import_router  # noqa: E402
 app.include_router(_shopify_catalog_import_router)
+# Dormant Shopify privacy compliance webhooks (customers/data_request,
+# customers/redact, shop/redact): 404 unless NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED;
+# durable receipt only — no subscription, erasure or response happens here.
+from routers.shopify_privacy_webhooks import router as _shopify_privacy_router  # noqa: E402
+app.include_router(_shopify_privacy_router)
 app.include_router(_merchant_catalog_router)
 app.include_router(_admin_catalog_router)
 app.include_router(_support_access_router)
@@ -1558,6 +1563,20 @@ async def on_startup() -> None:
             logger.info("[Scheduler] shopify_uninstall_recovery not queued — reason=%s", _shopify_gate.reason)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Scheduler] shopify_uninstall_recovery gate check failed: %s", type(exc).__name__)
+
+    # Dormant Shopify privacy request evaluation: queued only when its own flag
+    # is on. It evaluates evidence and proposes; it never erases anything.
+    def _f_shopify_privacy_worker():
+        from services.shopify_privacy.worker import run_worker_scheduler  # noqa: PLC0415
+        return run_worker_scheduler()
+    try:
+        from services.shopify_privacy.config import worker_enabled as _shopify_privacy_worker_enabled  # noqa: PLC0415
+        if _shopify_privacy_worker_enabled():
+            _start("shopify_privacy_worker", _f_shopify_privacy_worker, 26)
+        else:
+            logger.info("[Scheduler] shopify_privacy_worker not queued — flag off")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Scheduler] shopify_privacy_worker gate check failed: %s", type(exc).__name__)
 
     def _f_emitters():
         from core.scheduler import run_automation_emitters_scheduler  # noqa: PLC0415

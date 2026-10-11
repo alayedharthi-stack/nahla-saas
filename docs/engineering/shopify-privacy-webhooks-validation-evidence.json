@@ -1,0 +1,1030 @@
+{
+  "schema": "nahla.shopify-privacy-webhooks.validation-evidence/v1",
+  "status": "evidence only: a compact, sanitized subset derived from retained raw artifacts; it is not itself a test run",
+  "pull_request": 1205,
+  "tested_source_sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+  "baseline_sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+  "validation_document": "docs/engineering/shopify-privacy-webhooks-validation.md",
+  "derivation": {
+    "derived_from": [
+      "pytest console logs",
+      "JUnit XML of the owner 65-file runs",
+      "strict runner report.json",
+      "collect-only logs",
+      "acceptance / diagnostics run logs",
+      "git trees of both SHAs"
+    ],
+    "not_included": [
+      "raw full logs",
+      "raw JUnit XML",
+      "warnings",
+      "credentials or DSNs",
+      "real customer or shop data",
+      "absolute private paths",
+      "process memory addresses",
+      "host names",
+      "unrelated session context"
+    ],
+    "sanitization": [
+      "absolute checkout prefixes (candidate checkout, baseline worktree) removed: paths are repository-relative",
+      "session scratch paths replaced by <scratch>/ (none remain in this file)",
+      "Python object addresses ' at 0x...' replaced by ' at <addr>' in pytest messages",
+      "JUnit hostname omitted",
+      "nothing else rewritten; candidate and baseline values are recorded separately and compared, never merged"
+    ],
+    "tests_rerun_to_build_this_file": false
+  },
+  "environment": {
+    "python": "3.12.3",
+    "pytest": "9.1.1",
+    "postgresql": [
+      {
+        "version": "16.15",
+        "server_version_num": 160015,
+        "source": "Ubuntu package 16.15-0ubuntu0.24.04.1",
+        "listen": "127.0.0.1:5433"
+      },
+      {
+        "version": "18.6",
+        "server_version_num": 180006,
+        "source": "Maven Central io.zonky.test.postgres:embedded-postgres-binaries-linux-amd64:18.6.0",
+        "artifact_sha1": "0a36625fa44dc0d65cb1cee6041e468d96bdbb8d",
+        "listen": "127.0.0.1:5434"
+      }
+    ],
+    "postgresql_auth": "TCP host scram-sha-256; synthetic CI role (credentials omitted); disposable local clusters",
+    "shopify_dev_fetch": "unreachable from this environment (WebFetch ENOTFOUND; proxy CONNECT 403); not bypassed"
+  },
+  "owner_regression_gate": {
+    "status": "FAILED",
+    "waiver": "none",
+    "reproduced_on_baseline": true,
+    "classification": "pre-existing baseline debt reproduced identically at both SHAs; not a pass",
+    "file_list": {
+      "count": 65,
+      "ordered": [
+        "backend/tests/test_admin_tenant_list_billing_badge.py",
+        "backend/tests/test_billing_partner_override.py",
+        "backend/tests/test_billing_scenarios.py",
+        "backend/tests/test_constitution_compliance.py",
+        "backend/tests/test_fixed_tenant_policy.py",
+        "backend/tests/test_intelligence_non_interference_guard.py",
+        "backend/tests/test_intelligence_non_interference_source_locations.py",
+        "backend/tests/test_manual_billing_grant.py",
+        "backend/tests/test_meta_catalog_auto_sync.py",
+        "backend/tests/test_meta_catalog_claim_guard_pg.py",
+        "backend/tests/test_meta_catalog_consent.py",
+        "backend/tests/test_meta_catalog_consent_pg.py",
+        "backend/tests/test_meta_catalog_identity.py",
+        "backend/tests/test_meta_catalog_identity_postgres.py",
+        "backend/tests/test_meta_catalog_import_guards.py",
+        "backend/tests/test_meta_catalog_linking.py",
+        "backend/tests/test_meta_catalog_localized_price_verification.py",
+        "backend/tests/test_meta_catalog_onboarding.py",
+        "backend/tests/test_meta_catalog_onboarding_postgres.py",
+        "backend/tests/test_meta_catalog_push_one.py",
+        "backend/tests/test_meta_catalog_reconcile.py",
+        "backend/tests/test_meta_catalog_stale_repair_lock_pg.py",
+        "backend/tests/test_meta_catalog_variant_eligibility.py",
+        "backend/tests/test_meta_catalog_variant_payload_preview.py",
+        "backend/tests/test_p0b_tenant_commerce_permissions.py",
+        "backend/tests/test_salla_adapter_sale_price_normalize.py",
+        "backend/tests/test_salla_broad_browse_global_fallback_guard.py",
+        "backend/tests/test_salla_broad_browse_ownership.py",
+        "backend/tests/test_salla_cart_recovery_postgres.py",
+        "backend/tests/test_salla_check_session.py",
+        "backend/tests/test_salla_cod_in_progress_gate.py",
+        "backend/tests/test_salla_commerce_reconciler_postgres.py",
+        "backend/tests/test_salla_compose_trusted_singleton_handoff.py",
+        "backend/tests/test_salla_coupons_poller_race_postgres.py",
+        "backend/tests/test_salla_customer_address_candidates_pg.py",
+        "backend/tests/test_salla_delete_401_branch_closure_postgres.py",
+        "backend/tests/test_salla_delete_401_refresh_postgres.py",
+        "backend/tests/test_salla_embedded_app_identity.py",
+        "backend/tests/test_salla_embedded_diag.py",
+        "backend/tests/test_salla_embedded_identity_binding.py",
+        "backend/tests/test_salla_embedded_reconcile_completion_handoff.py",
+        "backend/tests/test_salla_embedded_reconcile_telemetry.py",
+        "backend/tests/test_salla_integration_resolver_ambiguity.py",
+        "backend/tests/test_salla_merchant_ai_e2e_acceptance.py",
+        "backend/tests/test_salla_merchant_ai_layer2_e2e.py",
+        "backend/tests/test_salla_merchant_ai_layer3_dialogue.py",
+        "backend/tests/test_salla_oauth_callback_reconcile.py",
+        "backend/tests/test_salla_pr888_remaining_remediation.py",
+        "backend/tests/test_salla_pr888_remediation.py",
+        "backend/tests/test_salla_presented_identity_product_card.py",
+        "backend/tests/test_salla_product_discovery_direct_presentation.py",
+        "backend/tests/test_salla_realtime_commerce.py",
+        "backend/tests/test_salla_sale_price_display.py",
+        "backend/tests/test_salla_shipment_tracking.py",
+        "backend/tests/test_salla_shipment_tracking_migration_preflight.py",
+        "backend/tests/test_salla_shipment_tracking_pg.py",
+        "backend/tests/test_salla_tenant_guard.py",
+        "backend/tests/test_salla_tenant_reconcile.py",
+        "backend/tests/test_salla_variant_catalog_identity.py",
+        "backend/tests/test_salla_variant_catalog_identity_postgres.py",
+        "backend/tests/test_salla_variant_option_summary_fallback.py",
+        "backend/tests/test_salla_variant_sync.py",
+        "backend/tests/test_salla_webhook_identity.py",
+        "backend/tests/test_tenant_config_hygiene.py",
+        "backend/tests/test_tenant_merchant_clone_operator.py"
+      ],
+      "digest": {
+        "algorithm": "sha256",
+        "value": "ff606274c0bb84b57bee3310306ff00f80057c12b1cbaa05bde959b8a06460e1",
+        "format": "UTF-8 bytes of the repository-relative paths in the listed order, each followed by one LF (0x0A)"
+      },
+      "changed_between_shas": 0
+    },
+    "command": {
+      "cwd": "repository root (pytest.ini: testpaths=tests; pythonpath=. backend database)",
+      "argv": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "--junitxml=<out>/junit.xml", "<the 65 paths of file_list.ordered, in order>"],
+      "env_unset": ["NAHLA_RELIABILITY_REQUIRE_PG", "NAHLA_RELIABILITY_PG_ADMIN_DSN", "CUSTOMER_NAME_PROVENANCE_PG_REQUIRED", "LEGACY_MIG_PG_TEST_DATABASE_URL"],
+      "env_not_set_per_recorded_skips": ["A1_PG_INTEGRATION_REQUIRED"]
+    },
+    "runs": {
+      "candidate": {
+        "sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+        "tree_clean_before": true,
+        "exit_code": 1,
+        "pytest_summary": "2 failed, 1075 passed, 41 skipped, 2088 warnings in 452.06s (0:07:32)",
+        "counts": {
+          "failed": 2,
+          "passed": 1075,
+          "skipped": 41,
+          "warnings": 2088
+        },
+        "pytest_duration_seconds": 452.06,
+        "junit_testsuite": {
+          "tests": "1118",
+          "failures": "2",
+          "errors": "0",
+          "skipped": "41",
+          "time": "452.027",
+          "timestamp": "2026-10-11T08:55:00.301520+00:00"
+        },
+        "finished_utc": "2026-10-11T09:02:41Z"
+      },
+      "baseline": {
+        "sha": "08428cb7edf9666a0b31874e8f0256764fd11c90",
+        "tree_clean_before": true,
+        "exit_code": 1,
+        "pytest_summary": "2 failed, 1075 passed, 41 skipped, 2088 warnings in 469.29s (0:07:49)",
+        "counts": {
+          "failed": 2,
+          "passed": 1075,
+          "skipped": 41,
+          "warnings": 2088
+        },
+        "pytest_duration_seconds": 469.29,
+        "junit_testsuite": {
+          "tests": "1118",
+          "failures": "2",
+          "errors": "0",
+          "skipped": "41",
+          "time": "469.253",
+          "timestamp": "2026-10-11T09:02:41.532672+00:00"
+        },
+        "finished_utc": "2026-10-11T09:10:39Z"
+      }
+    },
+    "failed_tests": {
+      "candidate": [
+        {
+          "pytest_node_id": "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log",
+          "junit": {
+            "classname": "backend.tests.test_salla_embedded_app_identity",
+            "name": "test_rejection_emits_structured_log"
+          },
+          "source": {
+            "path": "backend/tests/test_salla_embedded_app_identity.py",
+            "line": 93,
+            "exception": "AssertionError"
+          },
+          "source_assertion": "assert any(\"[SallaEmbeddedAppId] rejected code=invalid_salla_app_id\" in r.message for r in caplog.records)",
+          "pytest_message": ["assert False", " +  where False = any(<generator object test_rejection_emits_structured_log.<locals>.<genexpr> at <addr>>)"]
+        },
+        {
+          "pytest_node_id": "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+          "junit": {
+            "classname": "backend.tests.test_salla_shipment_tracking",
+            "name": "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+          },
+          "source": {
+            "path": "backend/tests/test_salla_shipment_tracking.py",
+            "line": 250,
+            "exception": "AssertionError"
+          },
+          "source_assertion": "assert isinstance(Coupon.__table__.c[\"metadata\"].type, JSONB)",
+          "pytest_message": ["AssertionError: assert False", " +  where False = isinstance(JSON(), JSONB)", " +    where JSON() = Column('metadata', JSON(), table=<coupons>).type"]
+        }
+      ],
+      "baseline": [
+        {
+          "pytest_node_id": "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log",
+          "junit": {
+            "classname": "backend.tests.test_salla_embedded_app_identity",
+            "name": "test_rejection_emits_structured_log"
+          },
+          "source": {
+            "path": "backend/tests/test_salla_embedded_app_identity.py",
+            "line": 93,
+            "exception": "AssertionError"
+          },
+          "source_assertion": "assert any(\"[SallaEmbeddedAppId] rejected code=invalid_salla_app_id\" in r.message for r in caplog.records)",
+          "pytest_message": ["assert False", " +  where False = any(<generator object test_rejection_emits_structured_log.<locals>.<genexpr> at <addr>>)"]
+        },
+        {
+          "pytest_node_id": "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql",
+          "junit": {
+            "classname": "backend.tests.test_salla_shipment_tracking",
+            "name": "test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+          },
+          "source": {
+            "path": "backend/tests/test_salla_shipment_tracking.py",
+            "line": 250,
+            "exception": "AssertionError"
+          },
+          "source_assertion": "assert isinstance(Coupon.__table__.c[\"metadata\"].type, JSONB)",
+          "pytest_message": ["AssertionError: assert False", " +  where False = isinstance(JSON(), JSONB)", " +    where JSON() = Column('metadata', JSON(), table=<coupons>).type"]
+        }
+      ],
+      "identical_after_sanitization": true
+    },
+    "skipped": {
+      "count": {
+        "candidate": 41,
+        "baseline": 41
+      },
+      "collection_time_module_skips": {
+        "candidate": 5,
+        "baseline": 5
+      },
+      "test_level_skips": {
+        "candidate": 36,
+        "baseline": 36
+      },
+      "identical_between_shas": true,
+      "identity_columns": ["kind", "junit_classname", "junit_name", "pytest_node_id_or_module", "skip_location_path", "skip_location_line", "reason"],
+      "identities": [
+        ["collection_time_module_skip", "", "backend.tests.test_salla_cart_recovery_postgres", "backend/tests/test_salla_cart_recovery_postgres.py", "backend/tests/test_salla_cart_recovery_postgres.py", 33, "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"],
+        ["collection_time_module_skip", "", "backend.tests.test_salla_commerce_reconciler_postgres", "backend/tests/test_salla_commerce_reconciler_postgres.py", "backend/tests/test_salla_commerce_reconciler_postgres.py", 31, "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"],
+        ["collection_time_module_skip", "", "backend.tests.test_salla_coupons_poller_race_postgres", "backend/tests/test_salla_coupons_poller_race_postgres.py", "backend/tests/test_salla_coupons_poller_race_postgres.py", 31, "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"],
+        ["collection_time_module_skip", "", "backend.tests.test_salla_delete_401_branch_closure_postgres", "backend/tests/test_salla_delete_401_branch_closure_postgres.py", "backend/tests/test_salla_delete_401_branch_closure_postgres.py", 113, "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"],
+        ["collection_time_module_skip", "", "backend.tests.test_salla_delete_401_refresh_postgres", "backend/tests/test_salla_delete_401_refresh_postgres.py", "backend/tests/test_salla_delete_401_refresh_postgres.py", 103, "PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_claim_guard_pg", "test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently", "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_two_tenants_cannot_adopt_the_same_catalog_concurrently", "backend/tests/test_meta_catalog_claim_guard_pg.py", 103, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_claim_guard_pg", "test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids", "backend/tests/test_meta_catalog_claim_guard_pg.py::test_postgres_guard_is_a_no_op_for_an_empty_id_and_allows_distinct_ids", "backend/tests/test_meta_catalog_claim_guard_pg.py", 150, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_fresh_database_gets_the_table_and_downgrade_removes_only_it", "backend/tests/test_meta_catalog_consent_pg.py::test_fresh_database_gets_the_table_and_downgrade_removes_only_it", "backend/tests/test_meta_catalog_consent_pg.py", 171, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_create_all_table_is_adopted_unchanged", "backend/tests/test_meta_catalog_consent_pg.py::test_create_all_table_is_adopted_unchanged", "backend/tests/test_meta_catalog_consent_pg.py", 185, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_drifted_table_fails_closed_and_changes_nothing[extra_column]", "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[extra_column]", "backend/tests/test_meta_catalog_consent_pg.py", 193, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]", "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[catalog_not_unique]", "backend/tests/test_meta_catalog_consent_pg.py", 193, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_drifted_table_fails_closed_and_changes_nothing[token_nullable]", "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[token_nullable]", "backend/tests/test_meta_catalog_consent_pg.py", 193, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_drifted_table_fails_closed_and_changes_nothing[extra_check]", "backend/tests/test_meta_catalog_consent_pg.py::test_drifted_table_fails_closed_and_changes_nothing[extra_check]", "backend/tests/test_meta_catalog_consent_pg.py", 193, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled", "backend/tests/test_meta_catalog_consent_pg.py::test_pre_0120_database_keeps_existing_catalog_paths_with_feature_disabled", "backend/tests/test_meta_catalog_consent_pg.py", 261, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_consent_enabled_on_pre_0120_database_fails_closed", "backend/tests/test_meta_catalog_consent_pg.py::test_consent_enabled_on_pre_0120_database_fails_closed", "backend/tests/test_meta_catalog_consent_pg.py", 285, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_catalog_nonce_is_consumed_exactly_once_under_concurrency", "backend/tests/test_meta_catalog_consent_pg.py::test_catalog_nonce_is_consumed_exactly_once_under_concurrency", "backend/tests/test_meta_catalog_consent_pg.py", 293, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_two_tenants_persisting_one_catalog_concurrently_one_wins", "backend/tests/test_meta_catalog_consent_pg.py::test_two_tenants_persisting_one_catalog_concurrently_one_wins", "backend/tests/test_meta_catalog_consent_pg.py", 326, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_consent_pg", "test_full_callback_on_postgres_and_concurrent_replay", "backend/tests/test_meta_catalog_consent_pg.py::test_full_callback_on_postgres_and_concurrent_replay", "backend/tests/test_meta_catalog_consent_pg.py", 387, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_identity_postgres", "test_legacy_identity_keys_from_persisted_variants", "backend/tests/test_meta_catalog_identity_postgres.py::test_legacy_identity_keys_from_persisted_variants", "backend/tests/test_meta_catalog_identity_postgres.py", 74, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_identity_postgres", "test_canonical_sibling_bind_gates_postgres", "backend/tests/test_meta_catalog_identity_postgres.py::test_canonical_sibling_bind_gates_postgres", "backend/tests/test_meta_catalog_identity_postgres.py", 229, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated identity tests. DATABASE_URL is ignored and is never used."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_onboarding_postgres", "test_lock_failure_raises_and_does_not_create", "backend/tests/test_meta_catalog_onboarding_postgres.py::test_lock_failure_raises_and_does_not_create", "backend/tests/test_meta_catalog_onboarding_postgres.py", 60, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_onboarding_postgres", "test_advisory_lock_serializes_two_sessions", "backend/tests/test_meta_catalog_onboarding_postgres.py::test_advisory_lock_serializes_two_sessions", "backend/tests/test_meta_catalog_onboarding_postgres.py", 86, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_onboarding_postgres", "test_concurrent_ensure_creates_exactly_one_catalog", "backend/tests/test_meta_catalog_onboarding_postgres.py::test_concurrent_ensure_creates_exactly_one_catalog", "backend/tests/test_meta_catalog_onboarding_postgres.py", 126, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_onboarding_postgres", "test_waiter_observes_catalog_id_committed_while_waiting", "backend/tests/test_meta_catalog_onboarding_postgres.py::test_waiter_observes_catalog_id_committed_while_waiting", "backend/tests/test_meta_catalog_onboarding_postgres.py", 236, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_onboarding_postgres", "test_two_tenants_cannot_claim_the_same_catalog", "backend/tests/test_meta_catalog_onboarding_postgres.py::test_two_tenants_cannot_claim_the_same_catalog", "backend/tests/test_meta_catalog_onboarding_postgres.py", 341, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated onboarding concurrency tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_meta_catalog_stale_repair_lock_pg", "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[newer_publication]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py", 204, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_stale_repair_lock_pg", "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[remap_to_another_product]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py", 204, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_stale_repair_lock_pg", "test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_repair_waits_for_a_concurrent_change_and_refuses_it[delete]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py", 204, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_stale_repair_lock_pg", "test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-SECOND]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py", 245, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_meta_catalog_stale_repair_lock_pg", "test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py::test_postgres_two_repairs_of_the_same_key_serialize[META-FIRST]", "backend/tests/test_meta_catalog_stale_repair_lock_pg.py", 245, "NAHLA_RELIABILITY_PG_ADMIN_DSN not set (no real PostgreSQL)"],
+        ["test_level_skip", "backend.tests.test_salla_embedded_identity_binding.TestBindingUpsertIdempotentAndRebind", "test_rebind_revokes_previous_active_binding", "backend/tests/test_salla_embedded_identity_binding.py::TestBindingUpsertIdempotentAndRebind::test_rebind_revokes_previous_active_binding", "backend/tests/test_salla_embedded_identity_binding.py", 557, "rebind upsert requires PostgreSQL partial unique active index"],
+        ["test_level_skip", "backend.tests.test_salla_merchant_ai_layer3_dialogue", "test_layer3_live_compose_one_turn", "backend/tests/test_salla_merchant_ai_layer3_dialogue.py::test_layer3_live_compose_one_turn", "backend/tests/test_salla_merchant_ai_layer3_dialogue.py", 90, "OPENAI_API_KEY not set — Layer3 live Luna compose blocked"],
+        ["test_level_skip", "backend.tests.test_salla_merchant_ai_layer3_dialogue", "test_layer3_full_dialogue_suite", "backend/tests/test_salla_merchant_ai_layer3_dialogue.py::test_layer3_full_dialogue_suite", "backend/tests/test_salla_merchant_ai_layer3_dialogue.py", 109, "OPENAI_API_KEY not set — skip full Layer3 suite"],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_duplicate_salla_variant_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_duplicate_salla_variant_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 134, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_duplicate_meta_item_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_duplicate_meta_item_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 168, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_cross_tenant_and_cross_catalog_same_meta_item_allowed", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_cross_tenant_and_cross_catalog_same_meta_item_allowed", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 202, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_audit_fails_closed_without_delete", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_audit_fails_closed_without_delete", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 243, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_duplicate_retailer_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_duplicate_retailer_id_in_same_catalog_is_rejected", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 282, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_catalog_id_switch_allows_same_variant_key", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_catalog_id_switch_allows_same_variant_key", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 316, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_salla_variant_catalog_identity_postgres", "test_two_workers_cannot_bind_same_variant_twice", "backend/tests/test_salla_variant_catalog_identity_postgres.py::test_two_workers_cannot_bind_same_variant_twice", "backend/tests/test_salla_variant_catalog_identity_postgres.py", 347, "WA_CATALOG_SYNC_PG_TEST_DATABASE_URL is required for isolated catalog identity tests. DATABASE_URL is ignored."],
+        ["test_level_skip", "backend.tests.test_tenant_merchant_clone_operator", "test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards", "backend/tests/test_tenant_merchant_clone_operator.py::test_pg_preserve_tenant_33_bootstrap_cleanup_and_shell_guards", "backend/tests/test_tenant_merchant_clone_operator.py", 1983, "tenant clone PostgreSQL source/target databases unavailable"]
+      ]
+    },
+    "junit_cases": {
+      "candidate": {
+        "raw_testcase_elements": 1118,
+        "unique_classname_name_pairs": 1118,
+        "outcomes": {
+          "skipped": 41,
+          "passed": 1075,
+          "failure": 2
+        },
+        "sorted_case_digest": "1eb928f8f3d7fb48be430487109a55475c293150792e79b8361d8591ec160dec",
+        "sorted_case_outcome_digest": "0d18187ca382b7b35d8fbddf94728459ea8313ba370e6bbcf79a704bf997615a"
+      },
+      "baseline": {
+        "raw_testcase_elements": 1118,
+        "unique_classname_name_pairs": 1118,
+        "outcomes": {
+          "skipped": 41,
+          "passed": 1075,
+          "failure": 2
+        },
+        "sorted_case_digest": "1eb928f8f3d7fb48be430487109a55475c293150792e79b8361d8591ec160dec",
+        "sorted_case_outcome_digest": "0d18187ca382b7b35d8fbddf94728459ea8313ba370e6bbcf79a704bf997615a"
+      },
+      "same_case_set": true,
+      "outcome_differences": 0,
+      "digest_format": {
+        "algorithm": "sha256 over UTF-8",
+        "case_line": "<classname>\\t<name>  (JUnit testcase attributes; collection-time module skips have an empty classname)",
+        "case_outcome_line": "<classname>\\t<name>\\t<outcome>, outcome = failure | error | skipped | passed (first such child element, else passed)",
+        "ordering": "lines sorted by Unicode code point (Python sorted), each followed by one LF, concatenated"
+      }
+    }
+  },
+  "diagnostics": [
+    {
+      "id": "D1a",
+      "label": "diagnostic (does not replace the FAILED gate)",
+      "description": "failure 1 alone",
+      "argv": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"],
+      "results": {
+        "candidate": {
+          "exit_code": 0,
+          "pytest_summary": "1 passed in 0.58s",
+          "counts": {
+            "passed": 1
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        },
+        "baseline": {
+          "exit_code": 0,
+          "pytest_summary": "1 passed in 0.62s",
+          "counts": {
+            "passed": 1
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        }
+      }
+    },
+    {
+      "id": "D1b",
+      "label": "diagnostic (does not replace the FAILED gate)",
+      "description": "failure 2 alone",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+      ],
+      "results": {
+        "candidate": {
+          "exit_code": 0,
+          "pytest_summary": "1 passed, 2 warnings in 1.30s",
+          "counts": {
+            "passed": 1,
+            "warnings": 2
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        },
+        "baseline": {
+          "exit_code": 0,
+          "pytest_summary": "1 passed, 2 warnings in 1.41s",
+          "counts": {
+            "passed": 1,
+            "warnings": 2
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        }
+      }
+    },
+    {
+      "id": "D2",
+      "label": "diagnostic (does not replace the FAILED gate)",
+      "description": "billing-badge file, then failure 2",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "backend/tests/test_admin_tenant_list_billing_badge.py",
+        "backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+      ],
+      "results": {
+        "candidate": {
+          "exit_code": 0,
+          "pytest_summary": "6 passed, 22 warnings in 5.68s",
+          "counts": {
+            "passed": 6,
+            "warnings": 22
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        },
+        "baseline": {
+          "exit_code": 0,
+          "pytest_summary": "6 passed, 22 warnings in 5.35s",
+          "counts": {
+            "passed": 6,
+            "warnings": 22
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true
+        }
+      }
+    },
+    {
+      "id": "D3",
+      "label": "diagnostic (does not replace the FAILED gate)",
+      "description": "files 1-38 of the ordered list",
+      "argv": ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", "<files 1-38 of owner_regression_gate.file_list.ordered, in order>"],
+      "results": {
+        "candidate": {
+          "exit_code": 1,
+          "pytest_summary": "1 failed, 640 passed, 30 skipped, 916 warnings in 339.22s (0:05:39)",
+          "counts": {
+            "failed": 1,
+            "passed": 640,
+            "skipped": 30,
+            "warnings": 916
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true,
+          "failed_node_ids": ["backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"],
+          "skip_identities": "not recorded (run without -rs / JUnit)"
+        },
+        "baseline": {
+          "exit_code": 1,
+          "pytest_summary": "1 failed, 640 passed, 30 skipped, 916 warnings in 363.30s (0:06:03)",
+          "counts": {
+            "failed": 1,
+            "passed": 640,
+            "skipped": 30,
+            "warnings": 916
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true,
+          "failed_node_ids": ["backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"],
+          "skip_identities": "not recorded (run without -rs / JUnit)"
+        }
+      }
+    },
+    {
+      "id": "D4",
+      "label": "diagnostic (does not replace the FAILED gate)",
+      "description": "full ordered 65-file list, two names selected with -k",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        "-rA",
+        "<the 65 files of owner_regression_gate.file_list.ordered, in order>",
+        "-k",
+        "test_rejection_emits_structured_log or test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"
+      ],
+      "results": {
+        "candidate": {
+          "exit_code": 1,
+          "pytest_summary": "1 failed, 1 passed, 5 skipped, 1111 deselected, 11 warnings in 22.00s",
+          "counts": {
+            "failed": 1,
+            "passed": 1,
+            "skipped": 5,
+            "deselected": 1111,
+            "warnings": 11
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true,
+          "failed_node_ids": ["backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"],
+          "passed_node_ids": ["backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"],
+          "skipped_reports": [
+            "backend/tests/test_salla_cart_recovery_postgres.py:33: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_commerce_reconciler_postgres.py:31: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_coupons_poller_race_postgres.py:31: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_delete_401_branch_closure_postgres.py:113: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_delete_401_refresh_postgres.py:103: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"
+          ],
+          "selected_test_nodes": 2,
+          "executed_test_nodes": 2,
+          "collection_time_skip_reports": 5,
+          "selected_reports": 7,
+          "deselected": 1111,
+          "reports_total": 1118,
+          "note": "module-level skips are reported at collection, before -k deselection; only the two selected test nodes executed, together with their fixtures and the session's conftest / plugin hooks, after collecting (importing) the full list; no unrelated test case ran"
+        },
+        "baseline": {
+          "exit_code": 1,
+          "pytest_summary": "1 failed, 1 passed, 5 skipped, 1111 deselected, 11 warnings in 23.11s",
+          "counts": {
+            "failed": 1,
+            "passed": 1,
+            "skipped": 5,
+            "deselected": 1111,
+            "warnings": 11
+          },
+          "tree_clean_before": true,
+          "tree_clean_after": true,
+          "failed_node_ids": ["backend/tests/test_salla_embedded_app_identity.py::test_rejection_emits_structured_log"],
+          "passed_node_ids": ["backend/tests/test_salla_shipment_tracking.py::test_building_the_sqlite_schema_leaves_jsonb_intact_for_postgresql"],
+          "skipped_reports": [
+            "backend/tests/test_salla_cart_recovery_postgres.py:33: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_commerce_reconciler_postgres.py:31: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_coupons_poller_race_postgres.py:31: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_delete_401_branch_closure_postgres.py:113: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1",
+            "backend/tests/test_salla_delete_401_refresh_postgres.py:103: PostgreSQL integration tests require A1_PG_INTEGRATION_REQUIRED=1"
+          ],
+          "selected_test_nodes": 2,
+          "executed_test_nodes": 2,
+          "collection_time_skip_reports": 5,
+          "selected_reports": 7,
+          "deselected": 1111,
+          "reports_total": 1118,
+          "note": "module-level skips are reported at collection, before -k deselection; only the two selected test nodes executed, together with their fixtures and the session's conftest / plugin hooks, after collecting (importing) the full list; no unrelated test case ran"
+        }
+      }
+    }
+  ],
+  "diagnostic_interpretation": {
+    "failure_1_caplog": "passes alone (D1a); fails in D4, where only the two selected test nodes executed (no unrelated test case ran) with their fixtures and hooks inside the full list's collection context: collection-context sensitivity, not an isolated import/collection cause; the responsible logger/module is NOT identified",
+    "failure_2_jsonb": "passes alone (D1b), in the two-file D2 run and in D4; fails only when earlier tests execute in the full list. D2 did not rule out the billing-badge file: backend/tests/test_admin_tenant_list_billing_badge.py registers a module-level, never-removed Base.metadata before_create listener that rewrites JSONB column types to JSON (verified in source, identical at both SHAs), so it remains a verified suspect including module-alias and ordering interactions; the two-file D2 run was insufficient to reproduce the failure. The polluting fixture/test is NOT identified",
+    "gate_effect": "diagnostics do not replace or waive the FAILED gate"
+  },
+  "root_suite": {
+    "execution_reports": {
+      "candidate": {
+        "pytest_summary": "9669 passed, 790 skipped, 7 xfailed, 45504 warnings in 1035.14s (0:17:15)",
+        "counts": {
+          "passed": 9669,
+          "skipped": 790,
+          "xfailed": 7,
+          "warnings": 45504
+        },
+        "total_reports": 10466
+      },
+      "baseline": {
+        "pytest_summary": "9529 passed, 790 skipped, 7 xfailed, 45504 warnings in 1012.07s (0:16:52)",
+        "counts": {
+          "passed": 9529,
+          "skipped": 790,
+          "xfailed": 7,
+          "warnings": 45504
+        },
+        "total_reports": 10326
+      }
+    },
+    "collected_node_ids": {
+      "candidate": {
+        "count": 10465,
+        "unique": 10465,
+        "sorted_node_id_digest": "f9dcc2b1b11aaf51ea7c94ec3550cc1185c69936eae4cee2a81989c080b3fe6f",
+        "collect_exit_code": 0
+      },
+      "baseline": {
+        "count": 10325,
+        "unique": 10325,
+        "sorted_node_id_digest": "9d90284331dd44102bc5cd984b148f64425d291c4d543a0b5f4f151742f33004",
+        "collect_exit_code": 0
+      }
+    },
+    "collection_time_skips": {
+      "candidate": {
+        "exit_code": 0,
+        "tree_clean_before": true,
+        "tree_clean_after": true,
+        "node_ids": 10465,
+        "skip_reports": ["tests/tenant_isolation_test.py:26: Live E2E tenant-isolation script — set NAHLA_LIVE_E2E=1 (and run `uvicorn backend.main:app` separately) to enable."]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "tree_clean_before": true,
+        "tree_clean_after": true,
+        "node_ids": 10325,
+        "skip_reports": ["tests/tenant_isolation_test.py:26: Live E2E tenant-isolation script — set NAHLA_LIVE_E2E=1 (and run `uvicorn backend.main:app` separately) to enable."]
+      }
+    },
+    "inventory_diff": {
+      "added": 140,
+      "removed": 0,
+      "added_privacy_db_free_cases": {
+        "file": "tests/test_shopify_privacy_webhooks.py",
+        "count": 130,
+        "sorted_node_id_digest": "04150abb20c79e68ec8fa7a111860de3cb8ae993799cac54f98444eb490a04cc"
+      },
+      "added_existing_guard_cases": {
+        "node_ids": [
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1151]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1152]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1153]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1154]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1155]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1156]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1157]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1158]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1159]",
+          "tests/test_single_automation_engine.py::test_no_log_autopilot_event_callers[py_file1160]"
+        ],
+        "explanation": "existing test parametrized over every backend .py file (rglob); #1205 adds 10 non-test backend files; the py_fileN ids are positional and do not name a fixed file; not agent runtime edits"
+      },
+      "removed_node_ids": []
+    }
+  },
+  "strict_postgres_proofs": {
+    "final_pg16_3681ebd": {
+      "sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+      "tree_clean": true,
+      "port": 5433,
+      "server_version_num": 160015,
+      "exit_code": 0,
+      "verdict": "PROVEN",
+      "required": 815,
+      "passed": 815,
+      "by_kind": {
+        "proof": {
+          "required": 813,
+          "passed": 813
+        },
+        "runner_regression": {
+          "required": 2,
+          "passed": 2
+        }
+      },
+      "suite_columns": ["id", "kind", "required", "collected", "passed", "skipped", "failed", "errors", "pytest_exit_code", "proven"],
+      "suites": [
+        ["commerce_runtime_foundation", "proof", 27, 27, 27, 0, 0, 0, 0, true],
+        ["commerce_runtime_migration", "proof", 13, 13, 13, 0, 0, 0, 0, true],
+        ["global_customer_identity", "proof", 5, 5, 5, 0, 0, 0, 0, true],
+        ["commerce_runtime_ledgers", "proof", 30, 30, 30, 0, 0, 0, 0, true],
+        ["commerce_runtime_ledgers_migration", "proof", 15, 15, 15, 0, 0, 0, 0, true],
+        ["commerce_runtime_agent_loop", "proof", 44, 44, 44, 0, 0, 0, 0, true],
+        ["commerce_runtime_pilot", "proof", 112, 112, 112, 0, 0, 0, 0, true],
+        ["commerce_runtime_handover_migration", "proof", 25, 25, 25, 0, 0, 0, 0, true],
+        ["commerce_runtime_pilot_handover_controls", "proof", 83, 83, 83, 0, 0, 0, 0, true],
+        ["commerce_runtime_trial_evidence", "proof", 13, 13, 13, 0, 0, 0, 0, true],
+        ["commerce_runtime_synthetic_probe", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["runner_connection_regressions", "runner_regression", 2, 2, 2, 0, 0, 0, 0, true],
+        ["salla_customer_address_candidates", "proof", 31, 31, 31, 0, 0, 0, 0, true],
+        ["salla_shipment_tracking", "proof", 4, 4, 4, 0, 0, 0, 0, true],
+        ["commerce_runtime_navigation", "proof", 38, 38, 38, 0, 0, 0, 0, true],
+        ["commerce_runtime_pagination", "proof", 53, 53, 53, 0, 0, 0, 0, true],
+        ["catalog_search_order", "proof", 16, 16, 16, 0, 0, 0, 0, true],
+        ["campaign_marketing_continuation", "proof", 41, 41, 41, 0, 0, 0, 0, true],
+        ["promotion_scoped_read", "proof", 12, 12, 12, 0, 0, 0, 0, true],
+        ["customer_order_history", "proof", 8, 8, 8, 0, 0, 0, 0, true],
+        ["catalog_claim_guard_concurrency", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["catalog_q5_membership_readout", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["catalog_stale_repair_row_lock", "proof", 5, 5, 5, 0, 0, 0, 0, true],
+        ["catalog_channel_retirements_migration", "proof", 17, 17, 17, 0, 0, 0, 0, true],
+        ["catalog_review_environment_guard", "proof", 16, 16, 16, 0, 0, 0, 0, true],
+        ["catalog_meta_consent", "proof", 11, 11, 11, 0, 0, 0, 0, true],
+        ["shopify_connection_foundation", "proof", 73, 73, 73, 0, 0, 0, 0, true],
+        ["shopify_catalog_import", "proof", 55, 55, 55, 0, 0, 0, 0, true],
+        ["shopify_privacy_webhooks", "proof", 60, 60, 60, 0, 0, 0, 0, true]
+      ],
+      "final_line": "REQUIRED POSTGRES PROOFS: PROVEN (815/815 required tests passed: 813/813 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)",
+      "started_utc": "2026-10-11T07:37:11Z"
+    },
+    "final_pg18_3681ebd": {
+      "sha": "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+      "tree_clean": true,
+      "port": 5434,
+      "server_version_num": 180006,
+      "exit_code": 0,
+      "verdict": "PROVEN",
+      "required": 815,
+      "passed": 815,
+      "by_kind": {
+        "proof": {
+          "required": 813,
+          "passed": 813
+        },
+        "runner_regression": {
+          "required": 2,
+          "passed": 2
+        }
+      },
+      "suite_columns": ["id", "kind", "required", "collected", "passed", "skipped", "failed", "errors", "pytest_exit_code", "proven"],
+      "suites": [
+        ["commerce_runtime_foundation", "proof", 27, 27, 27, 0, 0, 0, 0, true],
+        ["commerce_runtime_migration", "proof", 13, 13, 13, 0, 0, 0, 0, true],
+        ["global_customer_identity", "proof", 5, 5, 5, 0, 0, 0, 0, true],
+        ["commerce_runtime_ledgers", "proof", 30, 30, 30, 0, 0, 0, 0, true],
+        ["commerce_runtime_ledgers_migration", "proof", 15, 15, 15, 0, 0, 0, 0, true],
+        ["commerce_runtime_agent_loop", "proof", 44, 44, 44, 0, 0, 0, 0, true],
+        ["commerce_runtime_pilot", "proof", 112, 112, 112, 0, 0, 0, 0, true],
+        ["commerce_runtime_handover_migration", "proof", 25, 25, 25, 0, 0, 0, 0, true],
+        ["commerce_runtime_pilot_handover_controls", "proof", 83, 83, 83, 0, 0, 0, 0, true],
+        ["commerce_runtime_trial_evidence", "proof", 13, 13, 13, 0, 0, 0, 0, true],
+        ["commerce_runtime_synthetic_probe", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["runner_connection_regressions", "runner_regression", 2, 2, 2, 0, 0, 0, 0, true],
+        ["salla_customer_address_candidates", "proof", 31, 31, 31, 0, 0, 0, 0, true],
+        ["salla_shipment_tracking", "proof", 4, 4, 4, 0, 0, 0, 0, true],
+        ["commerce_runtime_navigation", "proof", 38, 38, 38, 0, 0, 0, 0, true],
+        ["commerce_runtime_pagination", "proof", 53, 53, 53, 0, 0, 0, 0, true],
+        ["catalog_search_order", "proof", 16, 16, 16, 0, 0, 0, 0, true],
+        ["campaign_marketing_continuation", "proof", 41, 41, 41, 0, 0, 0, 0, true],
+        ["promotion_scoped_read", "proof", 12, 12, 12, 0, 0, 0, 0, true],
+        ["customer_order_history", "proof", 8, 8, 8, 0, 0, 0, 0, true],
+        ["catalog_claim_guard_concurrency", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["catalog_q5_membership_readout", "proof", 2, 2, 2, 0, 0, 0, 0, true],
+        ["catalog_stale_repair_row_lock", "proof", 5, 5, 5, 0, 0, 0, 0, true],
+        ["catalog_channel_retirements_migration", "proof", 17, 17, 17, 0, 0, 0, 0, true],
+        ["catalog_review_environment_guard", "proof", 16, 16, 16, 0, 0, 0, 0, true],
+        ["catalog_meta_consent", "proof", 11, 11, 11, 0, 0, 0, 0, true],
+        ["shopify_connection_foundation", "proof", 73, 73, 73, 0, 0, 0, 0, true],
+        ["shopify_catalog_import", "proof", 55, 55, 55, 0, 0, 0, 0, true],
+        ["shopify_privacy_webhooks", "proof", 60, 60, 60, 0, 0, 0, 0, true]
+      ],
+      "final_line": "REQUIRED POSTGRES PROOFS: PROVEN (815/815 required tests passed: 813/813 proofs + 2/2 runner/fixture regressions, 0 skips tolerated)",
+      "started_utc": "2026-10-11T07:57:00Z"
+    }
+  },
+  "lint_and_test_steps": [
+    {
+      "index": 0,
+      "name": "Lint — no new silent excepts",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["no-silent-except: OK (624 pre-existing, all baselined)"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["no-silent-except: OK (624 pre-existing, all baselined)"]
+      }
+    },
+    {
+      "index": 1,
+      "name": "Run unit tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["9669 passed, 790 skipped, 7 xfailed, 45504 warnings in 1035.14s (0:17:15)"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["9529 passed, 790 skipped, 7 xfailed, 45504 warnings in 1012.07s (0:16:52)"]
+      }
+    },
+    {
+      "index": 2,
+      "name": "WhatsApp OAuth callback auth boundary",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["16 passed in 2.10s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["16 passed in 2.19s"]
+      }
+    },
+    {
+      "index": 3,
+      "name": "Canonical sibling identity unit tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["94 passed in 4.14s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["94 passed in 4.80s"]
+      }
+    },
+    {
+      "index": 4,
+      "name": "Manual gift grant permanence tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["36 passed, 151 warnings in 9.88s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["36 passed, 151 warnings in 10.54s"]
+      }
+    },
+    {
+      "index": 5,
+      "name": "Orders list newest-first tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["15 passed, 16 warnings in 4.77s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["15 passed, 16 warnings in 4.55s"]
+      }
+    },
+    {
+      "index": 6,
+      "name": "Salla broad browse ownership tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["41 passed in 4.97s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["41 passed in 5.29s"]
+      }
+    },
+    {
+      "index": 7,
+      "name": "Salla presented identity product card tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["75 passed in 5.25s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["75 passed in 5.00s"]
+      }
+    },
+    {
+      "index": 8,
+      "name": "Salla compose trusted singleton handoff tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["85 passed in 4.87s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["85 passed in 5.07s"]
+      }
+    },
+    {
+      "index": 9,
+      "name": "Salla PR 888 remediation unit tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["69 passed, 135 warnings in 18.62s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["69 passed, 135 warnings in 18.18s"]
+      }
+    },
+    {
+      "index": 10,
+      "name": "Customer conditional coupon Layer 0 consumer tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["156 passed, 31 warnings in 15.64s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["156 passed, 31 warnings in 16.23s"]
+      }
+    },
+    {
+      "index": 11,
+      "name": "Coupon shadow observation probe tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["10 passed in 3.28s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["10 passed in 3.29s"]
+      }
+    },
+    {
+      "index": 12,
+      "name": "Conditional coupon consumer verify operator tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["29 passed in 6.12s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["29 passed in 6.48s"]
+      }
+    },
+    {
+      "index": 13,
+      "name": "Real-channel conversational acceptance probe tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["59 passed in 2.35s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["59 passed in 2.38s"]
+      }
+    },
+    {
+      "index": 14,
+      "name": "Guarded staging migration operator tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["39 passed in 0.75s", "37 passed in 0.83s", "49 passed in 0.78s", "16 passed in 0.63s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["39 passed in 0.73s", "37 passed in 0.76s", "49 passed in 0.80s", "16 passed in 0.62s"]
+      }
+    },
+    {
+      "index": 15,
+      "name": "Tenant merchant clone operator tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["112 passed, 1 skipped in 0.97s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["112 passed, 1 skipped in 1.05s"]
+      }
+    },
+    {
+      "index": 16,
+      "name": "Staging DR canonical parity unit tests",
+      "candidate": {
+        "exit_code": 0,
+        "result_lines": ["17 passed in 0.52s", "7 passed in 0.29s"]
+      },
+      "baseline": {
+        "exit_code": 0,
+        "result_lines": ["17 passed in 0.64s", "7 passed in 0.31s"]
+      }
+    }
+  ],
+  "governance": {
+    "gov002": {
+      "exit_code": 0,
+      "scanner_source": "08428cb7edf9666a0b31874e8f0256764fd11c90:scripts/lint_intelligence_non_interference.py",
+      "argv": [
+        "python",
+        "<scanner>",
+        "--repo",
+        ".",
+        "--base",
+        "08428cb7edf9666a0b31874e8f0256764fd11c90",
+        "--head",
+        "3681ebdb4f6f922e4f2f4bd415d8963c45ef3f6c",
+        "--trusted-base-scanner"
+      ],
+      "output_flags": {
+        "INTELLIGENCE_NON_INTERFERENCE_POLICY": "ACTIVE",
+        "TRUSTED_BASE_SCANNER_REQUIRED": "yes",
+        "BOOTSTRAP_HEAD_TRUST_EXCEPTION": "no",
+        "GOV002_BOOTSTRAP": "no",
+        "SINGLE_USE_SCOPE": "PER_SCAN",
+        "PERSISTENT_CONSUMPTION": "NO",
+        "MODEL_CHANGED": "NO",
+        "PROMPT_CHANGED": "NO",
+        "PERSONA_CHANGED": "NO",
+        "PHRASE_MAP_CHANGED": "NO",
+        "KEYWORD_ROUTER_CHANGED": "NO",
+        "CUSTOMER_REGEX_CHANGED": "NO",
+        "FINDINGS": "none"
+      }
+    },
+    "constitution": {
+      "exit_code": 0,
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "backend/tests/test_constitution_compliance.py",
+        "backend/tests/test_intelligence_non_interference_guard.py",
+        "-q",
+        "-p",
+        "no:cacheprovider"
+      ],
+      "pytest_summary": "98 passed in 145.22s (0:02:25)"
+    }
+  },
+  "test_generated_artifacts": {
+    "files": [
+      "backend/tests/salla_acceptance/ACCEPTANCE_RESULTS.json",
+      "backend/tests/salla_acceptance/LAYER2_ACCEPTANCE_RESULTS.json",
+      "backend/tests/salla_acceptance/LAYER3_ACCEPTANCE_RESULTS.json"
+    ],
+    "handling": "rewritten by the full regression run at both SHAs; diffs and copies preserved outside the repository; files restored to each HEAD; not committed",
+    "post_restore_checks": "git status clean; worktree hash equals HEAD blob; preserved diff applies to HEAD (git apply --check); HEAD + diff reproduces each preserved copy byte for byte",
+    "diff_differences_between_shas": "recorded base_sha and random dedup_msg_id values only"
+  },
+  "evidence_limits": [
+    "the 3 s receipt limit is a handler wait bound: the database thread and any COMMIT may continue beyond it and keep their slot until they finish",
+    "statement / lock / connect timeouts do not guarantee termination of a network-stalled client receive or an in-flight COMMIT",
+    "a redelivery joins a still-open request; a completed request is never reused",
+    "manifest comparison is parsed-object equality, not a byte comparison",
+    "no real Shopify store, subscription, live delivery or erasure was exercised"
+  ],
+  "unresolved": [
+    "owner 65-file gate FAILED (no waiver)",
+    "logger/module behind failure 1 (caplog) not identified; D4 shows collection-context sensitivity only",
+    "fixture/test polluting failure 2 (JSONB) not identified; the billing-badge before_create JSONB->JSON listener is a verified, not excluded, suspect",
+    "root skip / xfail identities not compared (root run had no -rs / JUnit); only counts match",
+    "D3 skip identities not recorded"
+  ]
+}
