@@ -217,9 +217,14 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         _assert_fail(gate_root, "S3", db, "stray public table", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
         _sql(db, "DROP TABLE public.shopify_leftover")
         _assert_pass(gate_root, "S3", db, "S3 restored")
-        _sql(db, "DROP TABLE shopify_privacy_request_events", "CREATE TABLE shopify_privacy_request_events (id bigint primary key)")
+        # same name, same serial key sequence (so the pinned sequence set still holds), wrong shape: definition drift
+        _sql(db, "DROP TABLE shopify_privacy_request_events", "CREATE TABLE shopify_privacy_request_events (id bigserial primary key)")
         out = _assert_fail(gate_root, "S3", db, "same-name wrong-shaped table", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
         assert '"drift":["shopify_privacy_request_events"]' in out
+        # the same table keyed without its serial: the pinned sequence is missing, which outranks the drift
+        _sql(db, "DROP TABLE shopify_privacy_request_events", "CREATE TABLE shopify_privacy_request_events (id bigint primary key)")
+        out = _assert_fail(gate_root, "S3", db, "same-name table without its sequence", check="shopify_footprint", reason=k.R_FOOTPRINT_MISSING)
+        assert '"public.shopify_privacy_request_events_id_seq"' in out.split("CHECK shopify_footprint")[1].split("\n")[0]
         _sql(db, "DROP TABLE shopify_privacy_request_events")
         out = _assert_fail(gate_root, "S3", db, "partial footprint", check="shopify_footprint", reason=k.R_FOOTPRINT_MISSING)
         assert '"missing":["shopify_privacy_request_events"]' in out
