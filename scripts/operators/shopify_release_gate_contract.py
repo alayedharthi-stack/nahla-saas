@@ -238,7 +238,7 @@ UNIQUE_DEFINITION_PINS: Tuple[Tuple[str, str], ...] = (
     ("commerce_runtime_conversations", "UNIQUE (id, tenant_id, namespace)"),
 )
 IDENTITY_TABLES: Tuple[str, ...] = RETAINED_FULL_DEFINITION_TABLES + (NONCE_TABLE, "tenants", "users", "commerce_runtime_conversations")
-EXPECTATIONS_VERSION = 2
+EXPECTATIONS_VERSION = 3
 
 # ── Approval record (external payload) ──────────────────────────────────────
 APPROVAL_RECORD_VERSION = 2
@@ -394,29 +394,39 @@ def evaluate_footprint(observed: Mapping[str, Any], phase_def: Mapping[str, Any]
 
     ``observed``: ``tables`` (every ``shopify_*`` table in any user schema, as
     ``schema.name``), ``definitions`` (canonical definition per expected
-    public table that exists), ``stray_count`` (every other ``shopify_*``
-    relation, type or function in any user schema, and every ``*shopify*``
-    constraint outside the expected tables). Only expected names are ever
-    reported; unexpected objects are counted.
+    public table that exists), ``sequences`` (every sequence in any user
+    schema that is Shopify-named **or** owned by an expected table, as
+    ``[schema.sequence, owner_table_or_null, owner_column_or_null]``) and
+    ``stray_count`` (every other ``shopify_*`` relation, type or function in
+    any user schema, and every ``*shopify*`` constraint outside the expected
+    tables). At S0 no sequence may exist; at S3 the sequence set must equal
+    the pinned one exactly (name, owner table, owner column). Only expected
+    names are ever reported; unexpected objects are counted.
     """
     expected = [f"public.{t}" for t in phase_def["tables"]]
     tables = set(observed.get("tables") or ())
     missing = sorted(t for t in expected if t not in tables)
     unexpected_count = len(tables - set(expected))
     stray_count = int(observed.get("stray_count") or 0)
+    pinned_sequences = {tuple(s) for s in (shopify_expectations.get("sequences") or [])} if phase_def["tables"] else set()
+    observed_sequences = {tuple(s) for s in (observed.get("sequences") or [])}
+    pinned_names = {s[0] for s in pinned_sequences}
+    extra_sequences = sum(1 for s in observed_sequences - pinned_sequences if s[0] not in pinned_names)
+    sequence_drift = sorted(s[0] for s in (pinned_sequences ^ observed_sequences) if s[0] in pinned_names)
+    missing_sequences = sorted(name for name in pinned_names if name not in {s[0] for s in observed_sequences})
     drift: List[str] = []
     for table in phase_def["tables"]:
         definition = (observed.get("definitions") or {}).get(table)
         pinned = (shopify_expectations.get("tables") or {}).get(table)
         if definition is not None and (pinned is None or normalize(definition) != normalize(pinned)):
             drift.append(table)
-    detail = {"missing": [m.split(".", 1)[1] for m in missing], "unexpected_count": unexpected_count,
-              "stray_count": stray_count, "drift": sorted(drift)}
-    if missing:
+    detail = {"missing": [m.split(".", 1)[1] for m in missing] + missing_sequences, "unexpected_count": unexpected_count + extra_sequences,
+              "stray_count": stray_count, "drift": sorted(set(drift) | set(sequence_drift))}
+    if missing or missing_sequences:
         return FAIL, R_FOOTPRINT_MISSING, detail
-    if unexpected_count or stray_count:
+    if unexpected_count or stray_count or extra_sequences:
         return FAIL, R_FOOTPRINT_UNEXPECTED, detail
-    if drift:
+    if drift or sequence_drift:
         return FAIL, R_SHOPIFY_DEFINITION_DRIFT, detail
     return PASS, None, detail
 
@@ -503,7 +513,9 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
     Fail-closed on: an unreadable or wrong-version record; a different release
     commit, inventory, target or phase; an unapproved or incomplete approval;
     timestamps that are not UTC or out of order (card <= observed <= approved
-    <= now <= expiry); a missing deployment rollback snapshot; backup evidence
+    <= now <= expiry); a deployment rollback snapshot without a UUID
+    deployment id, a full source sha, a verifier and a verification time
+    ``<= approved <= now``; backup evidence
     for another service or volume, with a non-positive or absurd size, not
     completed, not restorable, or older than ``BACKUP_MAX_AGE_HOURS`` at
     approval or at run time; and, for a schema-changing phase, a restore that
@@ -536,8 +548,15 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
     if now < approved_at or now > valid_until:
         return FAIL, R_APPROVAL_EXPIRED, detail
     snapshot = record.get("deployment_rollback_snapshot")
-    if not _present(snapshot, ROLLBACK_SNAPSHOT_FIELDS) or parse_utc(snapshot.get("verified_redeployable_at_utc")) is None:
+    if not _present(snapshot, ROLLBACK_SNAPSHOT_FIELDS):
         return FAIL, R_ROLLBACK_SNAPSHOT_MISSING, detail
+    if not UUID_RE.match(str(snapshot.get("railway_deployment_id"))) or not RELEASE_SHA_RE.match(str(snapshot.get("source_sha"))):
+        return FAIL, R_ROLLBACK_SNAPSHOT_MISSING, detail
+    verified_at = parse_utc(snapshot.get("verified_redeployable_at_utc"))
+    if verified_at is None:
+        return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
+    if not (verified_at <= approved_at <= now):
+        return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
     recovery = record.get("db_recovery_evidence")
     backup = recovery.get("backup") if isinstance(recovery, dict) else None
     if not _present(backup, BACKUP_FIELDS):

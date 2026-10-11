@@ -30,8 +30,10 @@ and never against the existing platform database. Subcommands:
 ``approval-check --approval-file <payload> --root <checkout> --release-sha <40 hex> --phase S0|S3``
     Evaluates the payload offline and prints the gate's verdict for it.
 
-Every failure is reported as a closed token or an exception type; a DSN,
-a path argument or an exception body is never printed.
+Every failure is reported as a closed token (an internal ``RenderRefusal``)
+or, for any other exception including a third-party ``ValueError``, the
+exception type only; a DSN, a path argument or an exception body is never
+printed.
 """
 from __future__ import annotations
 
@@ -52,6 +54,14 @@ from scripts.operators import shopify_release_gate as gate  # noqa: E402
 from scripts.operators import shopify_release_gate_contract as k  # noqa: E402
 
 PYTHON_IN_IMAGE = "python"
+
+
+class RenderRefusal(Exception):
+    """An internal refusal carrying a closed token; the only exception whose text is ever printed."""
+
+    def __init__(self, token: str):
+        super().__init__(token)
+        self.token = token if k.TOKEN_RE.match(token or "") else "refusal"
 
 # The bootstrap. Standard library only; every ``{name}`` is a JSON literal
 # substituted by ``render_command``. It imports nothing from the repository
@@ -147,11 +157,11 @@ def load_approval(path: Path) -> Dict[str, Any]:
     try:
         raw = path.read_bytes()
     except OSError:
-        raise ValueError("approval_file_unreadable")
+        raise RenderRefusal("approval_file_unreadable")
     try:
         record = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        raise ValueError("approval_file_malformed")
+        raise RenderRefusal("approval_file_malformed")
     return {"raw": raw, "record": record, "sha256": __import__("hashlib").sha256(raw).hexdigest(),
             "b64": base64.b64encode(raw).decode("ascii")}
 
@@ -162,7 +172,7 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
     loaded = load_approval(approval_file)
     target = dict(k.parse_db_target(db) or {})
     if not target:
-        raise ValueError("db_target_malformed")
+        raise RenderRefusal("db_target_malformed")
     bound_target = {"project": identity["project"], "environment": identity["environment"], "service": identity["service"],
                     "db": k.target_label(target)}
     status, reason, detail = k.evaluate_approval(
@@ -176,27 +186,27 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
 def _check_tokens(*values: str) -> None:
     for value in values:
         if not isinstance(value, str) or not value or any(c in value for c in "'\"$`\\") or any(c.isspace() for c in value):
-            raise ValueError("token_not_renderable")
+            raise RenderRefusal("token_not_renderable")
 
 
 def render_source(root: Path, *, release_sha: str, phase: str, approval_sha256: str, project: str, environment: str, service: str,
                   db: str, backup_service: str, backup_volume: str, container_root: str = k.CONTAINER_ROOT) -> str:
     """The bootstrap program with every literal substituted (readable form)."""
     if k.phase(phase) is None:
-        raise ValueError("phase_not_deployable" if phase in k.INTERMEDIATE_STATES else "unknown_phase")
+        raise RenderRefusal("phase_not_deployable" if phase in k.INTERMEDIATE_STATES else "unknown_phase")
     if not k.RELEASE_SHA_RE.match(release_sha):
-        raise ValueError("release_sha_malformed")
+        raise RenderRefusal("release_sha_malformed")
     if not k.DIGEST_RE.match(approval_sha256):
-        raise ValueError("approval_sha_malformed")
+        raise RenderRefusal("approval_sha_malformed")
     if k.parse_db_target(db) is None:
-        raise ValueError("db_target_malformed")
+        raise RenderRefusal("db_target_malformed")
     for value in (project, environment, service, backup_service, backup_volume):
         if not k.UUID_RE.match(value):
-            raise ValueError("identity_malformed")
+            raise RenderRefusal("identity_malformed")
     _check_tokens(container_root, db)
     report = inventory_report(root)
     if report["unexpected_initializers"]:
-        raise ValueError("initializer_unexpected")
+        raise RenderRefusal("initializer_unexpected")
     argv = [
         "--root", container_root, "--phase", phase, "--release-sha", release_sha,
         "--inventory-digest", report["inventory_digest"], "--inventory-count", str(report["inventory_count"]),
@@ -240,9 +250,9 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         parsed = make_url(database_url)
         host = str(parsed.host or "").lower()
     except Exception as exc:  # noqa: BLE001 - the type only; the URL is never printed
-        raise ValueError("database_url_malformed") from exc
+        raise RenderRefusal("database_url_malformed") from exc
     if host == k.EXISTING_PLATFORM_TARGET["db"].split(":", 1)[0]:
-        raise ValueError("refusing_existing_platform_database")
+        raise RenderRefusal("refusing_existing_platform_database")
     try:
         engine = gate._engine(database_url)
         try:
@@ -253,15 +263,19 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
                 conn.rollback()
         finally:
             engine.dispose()
-    except ValueError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - the type only
-        raise ValueError("snapshot_" + type(exc).__name__.lower()) from exc
+    except Exception as exc:  # noqa: BLE001 - the exception type only, never its body
+        raise RenderRefusal("snapshot_" + "".join(c for c in type(exc).__name__.lower() if c.isalnum() or c == "_")) from exc
     missing_retained = sorted(set(k.RETAINED_FULL_DEFINITION_TABLES) - set(retained["tables"]))
     missing_shopify = sorted(set(k.SHOPIFY_TABLES) - set(footprint["definitions"]))
+    # every sequence observed must be a public sequence owned by an expected public table (the tables that
+    # carry a serial key; a table keyed otherwise owns none)
+    sequences_ok = bool(footprint["sequences"]) and all(
+        name.startswith("public.") and owner and owner.startswith("public.") and owner.split(".", 1)[1] in k.SHOPIFY_TABLES and column
+        for name, owner, column in footprint["sequences"])
     if (missing_retained or retained["nonce"] is None or set(retained["pk_types"]) != set(k.PK_TYPE_PINS)
-            or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]):
-        raise ValueError("database_is_not_a_complete_s3_build")
+            or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]
+            or not sequences_ok):
+        raise RenderRefusal("database_is_not_a_complete_s3_build")
     return k.normalize({
         "expectations_version": k.EXPECTATIONS_VERSION,
         "generated_from_source_sha": source_sha,
@@ -270,7 +284,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
         "server_version": server_version,
         "retained": retained,
-        "shopify_s3": {"tables": footprint["definitions"]},
+        "shopify_s3": {"tables": footprint["definitions"], "sequences": footprint["sequences"]},
     })
 
 
@@ -323,7 +337,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(inventory_report(Path(args.root)), indent=2, sort_keys=True))
         elif args.command in ("render", "approval-check"):
             if not k.RELEASE_SHA_RE.match(args.release_sha):
-                raise ValueError("release_sha_malformed")
+                raise RenderRefusal("release_sha_malformed")
             identity = {"project": args.project, "environment": args.environment, "service": args.service}
             verdict = approval_verdict(Path(args.root), approval_file=Path(args.approval_file), release_sha=args.release_sha, phase=args.phase,
                                        identity=identity, db=args.db, backup_service=args.backup_service, backup_volume=args.backup_volume)
@@ -331,7 +345,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print(json.dumps({key: value for key, value in verdict.items() if key != "approval_b64"}, indent=2, sort_keys=True))
             else:
                 if verdict["status"] != k.PASS:
-                    raise ValueError("approval_" + str(verdict["reason"]))
+                    raise RenderRefusal("approval_" + str(verdict["reason"]))
                 kwargs = dict(release_sha=args.release_sha, phase=args.phase, approval_sha256=verdict["approval_sha256"], project=args.project,
                               environment=args.environment, service=args.service, db=args.db, backup_service=args.backup_service,
                               backup_volume=args.backup_volume, container_root=args.container_root)
@@ -341,17 +355,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     print(render_command(Path(args.root), python=args.python, **kwargs))
         elif args.command == "snapshot":
             if not k.RELEASE_SHA_RE.match(args.source_sha):
-                raise ValueError("source_sha_malformed")
+                raise RenderRefusal("source_sha_malformed")
             payload = snapshot(args.database_url, source_sha=args.source_sha, root=Path(args.root))
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=1, sort_keys=True)
                 handle.write("\n")
             print(json.dumps({key: value for key, value in payload.items() if key not in ("retained", "shopify_s3")}, indent=2, sort_keys=True))
-    except ValueError as exc:
-        token = str(exc)
-        print(json.dumps({"error": token if k.TOKEN_RE.match(token) else "ValueError"}))
+    except RenderRefusal as refusal:
+        print(json.dumps({"error": refusal.token}))
         return k.EXIT_USAGE
-    except Exception as exc:  # noqa: BLE001 - the type only, never a body
+    except Exception as exc:  # noqa: BLE001 - any other exception, third-party ValueError included: the type only, never a body
         print(json.dumps({"error": type(exc).__name__}))
         return k.EXIT_USAGE
     return k.EXIT_PASS

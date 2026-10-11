@@ -32,8 +32,9 @@ expectations bound to the migration files present. Only then: one read-only
 connection with bounded timeouts and the legacy fixed search path, the legacy
 exclusive advisory key (refused when held by anyone), a writable primary on
 ``public``, exactly the phase's ``alembic_version`` rows, exactly the phase's
-Shopify footprint by canonical definition across every user schema, the
-retained relations by canonical definition, the same relation identities at
+Shopify footprint by canonical definition across every user schema (tables,
+the exact pinned sequence set with ownership, no other Shopify-named or
+Shopify-owned object), the retained relations by canonical definition, the same relation identities at
 the end of the run as at its start, and a verified unlock. It executes nothing
 that writes: no Alembic command, no subprocess, no DDL, no DML.
 
@@ -384,7 +385,8 @@ def read_json(path: Path) -> Optional[Any]:
 def check_expectations(root: Path) -> Tuple[Check, Optional[Dict[str, Any]]]:
     expectations = read_json(root / k.EXPECTATIONS_RELATIVE_PATH)
     if (not isinstance(expectations, dict) or expectations.get("expectations_version") != k.EXPECTATIONS_VERSION
-            or not isinstance(expectations.get("retained"), dict) or not isinstance(expectations.get("shopify_s3"), dict)):
+            or not isinstance(expectations.get("retained"), dict) or not isinstance(expectations.get("shopify_s3"), dict)
+            or not isinstance(expectations["shopify_s3"].get("sequences"), list) or not isinstance(expectations["shopify_s3"].get("tables"), dict)):
         return Check("expectations", k.FAIL, k.R_EXPECTATIONS_UNREADABLE), None
     try:
         current = database_py_digest(root)
@@ -431,10 +433,18 @@ _SHOPIFY_RELATIONS_SQL = (
     "SELECT n.nspname, c.relname, c.relkind,"
     " CASE WHEN c.relkind = 'i' THEN (SELECT t.relname FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid"
     " JOIN pg_namespace tn ON tn.oid = t.relnamespace WHERE i.indexrelid = c.oid AND tn.nspname = 'public')"
-    " WHEN c.relkind = 'S' THEN (SELECT t.relname FROM pg_depend d JOIN pg_class t ON t.oid = d.refobjid"
-    " JOIN pg_namespace tn ON tn.oid = t.relnamespace WHERE d.objid = c.oid AND d.deptype IN ('a', 'i') AND tn.nspname = 'public' LIMIT 1)"
     " ELSE NULL END FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-    " WHERE" + _USER_SCHEMA + " AND c.relname LIKE :pattern ESCAPE '\\' ORDER BY n.nspname, c.relname")
+    " WHERE" + _USER_SCHEMA + " AND c.relkind <> 'S' AND c.relname LIKE :pattern ESCAPE '\\' ORDER BY n.nspname, c.relname")
+# Every sequence that is Shopify-named or owned by an expected public table, in
+# any user schema, with its owning table and column (null when unowned).
+_SHOPIFY_SEQUENCES_SQL = (
+    "SELECT n.nspname || '.' || s.relname, tn.nspname || '.' || t.relname, a.attname"
+    " FROM pg_class s JOIN pg_namespace n ON n.oid = s.relnamespace"
+    " LEFT JOIN pg_depend d ON d.objid = s.oid AND d.classid = 'pg_class'::regclass AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')"
+    " LEFT JOIN pg_class t ON t.oid = d.refobjid LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace"
+    " LEFT JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid"
+    " WHERE s.relkind = 'S' AND" + _USER_SCHEMA +
+    " AND (s.relname LIKE :pattern ESCAPE '\\' OR (tn.nspname = 'public' AND t.relname = ANY(:tables))) ORDER BY 1, 2, 3")
 _SHOPIFY_TYPES_SQL = (
     "SELECT t.typname, COALESCE(r.relname, (SELECT r2.relname FROM pg_type e JOIN pg_class r2 ON r2.oid = e.typrelid WHERE e.oid = t.typelem)),"
     " n.nspname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace LEFT JOIN pg_class r ON r.oid = t.typrelid"
@@ -525,17 +535,18 @@ def observe_footprint(conn, phase_def: Mapping[str, Any]) -> Dict[str, Any]:
     for schema, name, kind, owner in _rows(conn, _SHOPIFY_RELATIONS_SQL, pattern=pattern):
         if kind in ("r", "p"):
             tables.append(f"{schema}.{name}")
-        elif kind in ("S", "i") and owner in expected:
+        elif kind == "i" and owner in expected and schema == "public":
             continue
         else:
             stray += 1
+    sequences = [list(row) for row in _rows(conn, _SHOPIFY_SEQUENCES_SQL, pattern=pattern, tables=list(expected))]
     stray += sum(1 for _name, owner, _schema in _rows(conn, _SHOPIFY_TYPES_SQL, pattern=pattern, array_pattern="\\_" + pattern)
                  if owner not in expected)
     stray += len(_rows(conn, _SHOPIFY_FUNCTIONS_SQL, pattern=pattern))
     stray += sum(1 for _name, table, schema in _rows(conn, _SHOPIFY_CONSTRAINTS_SQL, contains="%shopify%")
                  if not (schema == "public" and table in expected))
     definitions = {table: table_definition(conn, table) for table in phase_def["tables"] if f"public.{table}" in tables}
-    return {"tables": sorted(tables), "stray_count": stray, "definitions": definitions}
+    return {"tables": sorted(tables), "stray_count": stray, "definitions": definitions, "sequences": sequences}
 
 
 def relation_oids(conn, names: Sequence[str]) -> Dict[str, Any]:

@@ -1,7 +1,7 @@
 {
  "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
- "expectations_version": 2,
- "generated_at_utc": "2026-10-11T17:49:49Z",
+ "expectations_version": 3,
+ "generated_at_utc": "2026-10-11T18:14:35Z",
  "generated_from_source_sha": "8308c16e39a18745239e869e6996c7aeaf680fd4",
  "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
  "retained": {
@@ -1326,6 +1326,78 @@
  },
  "server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
  "shopify_s3": {
+  "sequences": [
+   [
+    "public.shopify_catalog_import_runs_id_seq",
+    "public.shopify_catalog_import_runs",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_inventory_items_id_seq",
+    "public.shopify_catalog_inventory_items",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_inventory_levels_id_seq",
+    "public.shopify_catalog_inventory_levels",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_locations_id_seq",
+    "public.shopify_catalog_locations",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_products_id_seq",
+    "public.shopify_catalog_products",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_staged_records_id_seq",
+    "public.shopify_catalog_staged_records",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_variants_id_seq",
+    "public.shopify_catalog_variants",
+    "id"
+   ],
+   [
+    "public.shopify_connection_audit_id_seq",
+    "public.shopify_connection_audit",
+    "id"
+   ],
+   [
+    "public.shopify_connections_id_seq",
+    "public.shopify_connections",
+    "id"
+   ],
+   [
+    "public.shopify_oauth_states_id_seq",
+    "public.shopify_oauth_states",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_deliveries_id_seq",
+    "public.shopify_privacy_deliveries",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_request_events_id_seq",
+    "public.shopify_privacy_request_events",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_requests_id_seq",
+    "public.shopify_privacy_requests",
+    "id"
+   ],
+   [
+    "public.shopify_webhook_events_id_seq",
+    "public.shopify_webhook_events",
+    "id"
+   ]
+  ],
   "tables": {
    "shopify_catalog_import_runs": {
     "columns": [

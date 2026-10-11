@@ -293,9 +293,9 @@ def test_render_refuses_malformed_inputs(kwargs, error):
     params = {"release_sha": harness.SYNTHETIC_RELEASE_SHA, "phase": "S0", "approval_sha256": "e" * 64, "db": DB,
               "backup_service": harness.SYNTHETIC_BACKUP["service"], "backup_volume": harness.SYNTHETIC_BACKUP["volume"], **harness.SYNTHETIC_IDENTITY}
     params.update(kwargs)
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(render.RenderRefusal) as excinfo:
         render.render_source(REPO, **params)
-    assert str(excinfo.value) == error
+    assert excinfo.value.token == error
 
 
 def test_render_cli_refuses_an_unapproved_or_unbound_payload_with_closed_tokens(tmp_path):
@@ -326,7 +326,7 @@ def test_render_cli_refuses_an_unapproved_or_unbound_payload_with_closed_tokens(
     rc, out = run("render", "--phase", "S0", "--approval-file", str(good), *common, "--format", "source")
     assert rc == 0 and out.startswith("import base64, hashlib, os, sys")
     rc, out = run("render", "--phase", "S0", "--approval-file", str(tmp_path / "missing-p-not-a-real-secret.json"), *common)
-    assert rc == 2 and json.loads(out) == {"error": "approval_file_unreadable"}
+    assert rc == 2 and json.loads(out) == {"error": "approval_file_unreadable"} and "p-not-a-real-secret" not in out
     rc, out = run("snapshot", "--database-url", "postgresql://u:p-not-a-real-secret@h:notaport/db", "--out", str(tmp_path / "x.json"),
                   "--source-sha", harness.SYNTHETIC_RELEASE_SHA)
     assert rc == 2 and json.loads(out) == {"error": "database_url_malformed"} and "p-not-a-real-secret" not in out
@@ -334,6 +334,42 @@ def test_render_cli_refuses_an_unapproved_or_unbound_payload_with_closed_tokens(
     assert rc == 2 and "p-not-a-real-secret" not in out and json.loads(out)["error"] in ("release_sha_malformed", "invalid_arguments")
     rc, out = run("nonsense")
     assert rc == 2 and json.loads(out) == {"error": "invalid_arguments"}
+
+
+def test_renderer_never_prints_a_third_party_exception_body(monkeypatch, capsys, tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    good = harness.approval_for(root, "S0", DB)
+    common = ["--root", str(root), "--release-sha", harness.SYNTHETIC_RELEASE_SHA, "--db", DB, "--project", harness.SYNTHETIC_IDENTITY["project"],
+              "--environment", harness.SYNTHETIC_IDENTITY["environment"], "--service", harness.SYNTHETIC_IDENTITY["service"],
+              "--backup-service", harness.SYNTHETIC_BACKUP["service"], "--backup-volume", harness.SYNTHETIC_BACKUP["volume"]]
+
+    def raiser(*_args, **_kwargs):
+        raise ValueError("sentinelcredentiallowercase")
+
+    monkeypatch.setattr(render, "inventory_report", raiser)
+    rc = render.main(["render", "--phase", "S0", "--approval-file", str(good), *common])
+    out = capsys.readouterr().out
+    assert rc == 2 and json.loads(out) == {"error": "ValueError"} and "sentinelcredential" not in out and "Traceback" not in out
+    rc = render.main(["inventory", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert rc == 2 and json.loads(out) == {"error": "ValueError"} and "sentinelcredential" not in out
+    monkeypatch.setattr(render, "load_approval", raiser)
+    rc = render.main(["approval-check", "--phase", "S0", "--approval-file", str(good), *common])
+    out = capsys.readouterr().out
+    assert rc == 2 and json.loads(out) == {"error": "ValueError"} and "sentinelcredential" not in out
+
+    class Weird(Exception):
+        def __str__(self):
+            return "sentinelcredentiallowercase"
+
+    monkeypatch.setattr(render, "load_approval", lambda *_a, **_k: (_ for _ in ()).throw(Weird()))
+    rc = render.main(["approval-check", "--phase", "S0", "--approval-file", str(good), *common])
+    out = capsys.readouterr().out
+    assert rc == 2 and json.loads(out) == {"error": "Weird"} and "sentinelcredential" not in out
+    assert render.RenderRefusal("not a token!").token == "refusal"
+    with pytest.raises(render.RenderRefusal) as excinfo:
+        render.snapshot("postgresql://u:sentinelcredentiallowercase@h:notaport/db", source_sha=harness.SYNTHETIC_RELEASE_SHA)
+    assert excinfo.value.token == "database_url_malformed"
 
 
 # ── Pure evaluations ─────────────────────────────────────────────────────────
@@ -356,18 +392,45 @@ def test_rows_exact_multiset_fail_closed_and_unknown_rows_are_never_echoed():
 
 def _observed_s3(**overrides):
     observed = {"tables": [f"public.{t}" for t in k.SHOPIFY_TABLES], "stray_count": 0,
-                "definitions": copy.deepcopy(EXPECTATIONS["shopify_s3"]["tables"])}
+                "definitions": copy.deepcopy(EXPECTATIONS["shopify_s3"]["tables"]),
+                "sequences": copy.deepcopy(EXPECTATIONS["shopify_s3"]["sequences"])}
     observed.update(overrides)
     return observed
 
 
+def test_footprint_pins_the_exact_shopify_sequence_set_with_ownership():
+    s0, s3, pinned = k.DEPLOY_PHASES["S0"], k.DEPLOY_PHASES["S3"], EXPECTATIONS["shopify_s3"]
+    # fourteen serial keys: every Shopify table except shopify_shop_leases, which is keyed without a sequence
+    owners = {row[1].split(".", 1)[1] for row in pinned["sequences"]}
+    assert len(pinned["sequences"]) == 14 and owners == set(k.SHOPIFY_TABLES) - {"shopify_shop_leases"}
+    assert {tuple(s) for s in pinned["sequences"]} == {(f"public.{t}_id_seq", f"public.{t}", "id") for t in owners}
+    assert k.evaluate_footprint(_observed_s3(), s3, pinned)[0] == k.PASS
+    status, reason, detail = k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}, "sequences": [["public.shopify_planted_seq", None, None]]}, s0, pinned)
+    assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1) and "planted" not in json.dumps(detail)
+    extra_owned = _observed_s3(sequences=pinned["sequences"] + [["public.shopify_planted", "public.shopify_connections", "id"]])
+    status, reason, detail = k.evaluate_footprint(extra_owned, s3, pinned)
+    assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1) and "planted" not in json.dumps(detail)
+    extra_unnamed = _observed_s3(sequences=pinned["sequences"] + [["public.planted_seq", "public.shopify_connections", "generation"]])
+    assert k.evaluate_footprint(extra_unnamed, s3, pinned)[1] == k.R_FOOTPRINT_UNEXPECTED
+    other_schema = _observed_s3(sequences=pinned["sequences"] + [["other.shopify_connections_id_seq", None, None]])
+    assert k.evaluate_footprint(other_schema, s3, pinned)[1] == k.R_FOOTPRINT_UNEXPECTED
+    re_owned = _observed_s3(sequences=[[n, "public.shopify_shop_leases" if n == "public.shopify_connections_id_seq" else t, c] for n, t, c in pinned["sequences"]])
+    status, reason, detail = k.evaluate_footprint(re_owned, s3, pinned)
+    assert (reason, detail["drift"]) == (k.R_SHOPIFY_DEFINITION_DRIFT, ["public.shopify_connections_id_seq"])
+    unowned = _observed_s3(sequences=[[n, None, None] if n == "public.shopify_connections_id_seq" else [n, t, c] for n, t, c in pinned["sequences"]])
+    assert k.evaluate_footprint(unowned, s3, pinned)[2]["drift"] == ["public.shopify_connections_id_seq"]
+    missing = _observed_s3(sequences=pinned["sequences"][1:])
+    status, reason, detail = k.evaluate_footprint(missing, s3, pinned)
+    assert reason == k.R_FOOTPRINT_MISSING and detail["missing"] == [pinned["sequences"][0][0]]
+
+
 def test_footprint_is_exact_by_canonical_definition_and_reports_only_expected_names():
     s0, s3, pinned = k.DEPLOY_PHASES["S0"], k.DEPLOY_PHASES["S3"], EXPECTATIONS["shopify_s3"]
-    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}}, s0, pinned)[0] == k.PASS
+    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}, "sequences": []}, s0, pinned)[0] == k.PASS
     assert k.evaluate_footprint(_observed_s3(), s3, pinned)[0] == k.PASS
     assert k.evaluate_footprint(_observed_s3(), s0, pinned)[1] == k.R_FOOTPRINT_UNEXPECTED
-    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}}, s3, pinned)[1] == k.R_FOOTPRINT_MISSING
-    status, reason, detail = k.evaluate_footprint({"tables": ["public.shopify_connections"], "stray_count": 0, "definitions": {}}, s0, pinned)
+    assert k.evaluate_footprint({"tables": [], "stray_count": 0, "definitions": {}, "sequences": []}, s3, pinned)[1] == k.R_FOOTPRINT_MISSING
+    status, reason, detail = k.evaluate_footprint({"tables": ["public.shopify_connections"], "stray_count": 0, "definitions": {}, "sequences": []}, s0, pinned)
     assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1)
     status, reason, detail = k.evaluate_footprint(_observed_s3(tables=[f"public.{t}" for t in k.SHOPIFY_TABLES] + ["other.shopify_p-not-a-real-secret"]), s3, pinned)
     assert (reason, detail["unexpected_count"]) == (k.R_FOOTPRINT_UNEXPECTED, 1) and "secret" not in json.dumps(detail)
@@ -451,7 +514,8 @@ def test_expectations_file_is_bound_to_these_migrations_and_covers_retained_and_
     retained, shopify = EXPECTATIONS["retained"], EXPECTATIONS["shopify_s3"]
     assert set(retained["tables"]) == set(k.RETAINED_FULL_DEFINITION_TABLES)
     assert [sum(len(d[key]) for d in retained["tables"].values()) for key in ("columns", "constraints", "indexes")] == [90, 33, 18]
-    assert set(shopify["tables"]) == set(k.SHOPIFY_TABLES)
+    assert set(shopify["tables"]) == set(k.SHOPIFY_TABLES) and len(shopify["sequences"]) == 14
+    assert all(len(row) == 3 and row[0].startswith("public.shopify_") and row[1].startswith("public.shopify_") and row[2] == "id" for row in shopify["sequences"])
     all_tables = list(retained["tables"].values()) + list(shopify["tables"].values())
     assert all(len(c) == 6 and c[1] in "pufc" and c[2].startswith(("PRIMARY KEY", "UNIQUE", "CHECK", "FOREIGN KEY")) for d in all_tables for c in d["constraints"])
     assert all(len(i) == 5 and i[1].startswith("CREATE ") and " USING " in i[1] and i[2] is True and i[3] is True and i[4] is True for d in all_tables for i in d["indexes"])
@@ -584,7 +648,12 @@ def test_valid_payload_passes_for_its_phase_only():
     ({"approval.approved_at_utc": "2026-10-11 17:00:00"}, k.R_APPROVAL_TIMESTAMP_INVALID),
     ({"approval.valid_until_utc": harness.iso(NOW - _dt.timedelta(hours=2))}, k.R_APPROVAL_TIMESTAMP_ORDER),
     ({"deployment_rollback_snapshot.railway_deployment_id": None}, k.R_ROLLBACK_SNAPSHOT_MISSING),
-    ({"deployment_rollback_snapshot.verified_redeployable_at_utc": "soon"}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"deployment_rollback_snapshot.railway_deployment_id": "deployment-12"}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"deployment_rollback_snapshot.source_sha": "462ede1a"}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"deployment_rollback_snapshot.verified_by": " "}, k.R_ROLLBACK_SNAPSHOT_MISSING),
+    ({"deployment_rollback_snapshot.verified_redeployable_at_utc": "soon"}, k.R_APPROVAL_TIMESTAMP_INVALID),
+    ({"deployment_rollback_snapshot.verified_redeployable_at_utc": harness.iso(NOW - _dt.timedelta(minutes=30))}, k.R_APPROVAL_TIMESTAMP_ORDER),
+    ({"deployment_rollback_snapshot.verified_redeployable_at_utc": harness.iso(NOW + _dt.timedelta(hours=5))}, k.R_APPROVAL_TIMESTAMP_ORDER),
     ({"db_recovery_evidence.backup.card_timestamp_utc": None}, k.R_BACKUP_EVIDENCE_MISSING),
     ({"db_recovery_evidence.backup.observed_by": ""}, k.R_BACKUP_EVIDENCE_MISSING),
     ({"db_recovery_evidence.backup.service_id": "77777777-7777-4777-8777-777777777777"}, k.R_BACKUP_IDENTITY_MISMATCH),

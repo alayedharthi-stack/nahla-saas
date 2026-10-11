@@ -225,13 +225,32 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         assert '"missing":["shopify_privacy_request_events"]' in out
         assert _alembic(db, "downgrade", "0123@-1").returncode == 0 and _alembic(db, "upgrade", "0123").returncode == 0
         _assert_pass(gate_root, "S3", db, "S3 rebuilt")
-        _sql(db, f"ALTER TABLE shopify_connections DROP CONSTRAINT {k.CONNECTION_KEY_CONSTRAINT}",
-             f"ALTER TABLE shopify_connections ADD CONSTRAINT {k.CONNECTION_KEY_CONSTRAINT} UNIQUE (id, generation)")
+        # a same-name UNIQUE on the wrong columns (the connection key itself carries dependent composite
+        # foreign keys and cannot be swapped in place; the state-hash key has none)
+        _sql(db, "ALTER TABLE shopify_oauth_states DROP CONSTRAINT uq_shopify_oauth_states_state_hash",
+             "ALTER TABLE shopify_oauth_states ADD CONSTRAINT uq_shopify_oauth_states_state_hash UNIQUE (state_hash, tenant_id)")
         out = _assert_fail(gate_root, "S3", db, "same-name key on the wrong columns", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
-        assert '"drift":["shopify_connections"]' in out and "generation" not in out.split("CHECK shopify_footprint")[1].split("\n")[0]
-        _sql(db, f"ALTER TABLE shopify_connections DROP CONSTRAINT {k.CONNECTION_KEY_CONSTRAINT}",
-             f"ALTER TABLE shopify_connections ADD CONSTRAINT {k.CONNECTION_KEY_CONSTRAINT} UNIQUE (id, tenant_id)")
+        assert '"drift":["shopify_oauth_states"]' in out and "tenant_id" not in out.split("CHECK shopify_footprint")[1].split("\n")[0]
+        _sql(db, "ALTER TABLE shopify_oauth_states DROP CONSTRAINT uq_shopify_oauth_states_state_hash",
+             "ALTER TABLE shopify_oauth_states ADD CONSTRAINT uq_shopify_oauth_states_state_hash UNIQUE (state_hash)")
         _assert_pass(gate_root, "S3", db, "key restored")
+        assert any(c[0] == k.CONNECTION_KEY_CONSTRAINT and c[2] == "UNIQUE (id, tenant_id)"
+                   for c in EXPECTATIONS["shopify_s3"]["tables"]["shopify_connections"]["constraints"])
+        # sequences: an extra sequence owned by an expected table, an extra Shopify-named sequence in another
+        # schema, a non-Shopify-named sequence owned by an expected column, and a pinned sequence re-owned
+        _sql(db, "CREATE SEQUENCE shopify_planted OWNED BY shopify_connections.id")
+        out = _assert_fail(gate_root, "S3", db, "extra sequence owned by an expected table", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
+        assert '"unexpected_count":1' in out and "planted" not in out
+        _sql(db, "DROP SEQUENCE shopify_planted", "CREATE SCHEMA other", f'CREATE SEQUENCE other."{SECRET_NAME}_seq"')
+        out = _assert_fail(gate_root, "S3", db, "Shopify-named sequence in another schema", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
+        assert SECRET_NAME not in out
+        _sql(db, f'DROP SEQUENCE other."{SECRET_NAME}_seq"', "DROP SCHEMA other", "CREATE SEQUENCE planted_seq OWNED BY shopify_connections.generation")
+        _assert_fail(gate_root, "S3", db, "non-Shopify-named sequence owned by an expected column", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
+        _sql(db, "DROP SEQUENCE planted_seq", "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_shop_leases.id")
+        out = _assert_fail(gate_root, "S3", db, "pinned sequence re-owned", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
+        assert '"drift":["public.shopify_connections_id_seq"]' in out
+        _sql(db, "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_connections.id")
+        _assert_pass(gate_root, "S3", db, "sequence ownership restored")
         index = next(i[0] for i in EXPECTATIONS["shopify_s3"]["tables"]["shopify_oauth_states"]["indexes"])
         _sql(db, f"UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{index}'::regclass")
         _assert_fail(gate_root, "S3", db, "invalid index flag", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
@@ -251,7 +270,10 @@ def test_s0_refuses_any_shopify_object(gate_root):
         _sql(db, "DROP TABLE shopify_connections", f'CREATE FUNCTION public."{SECRET_NAME}"() RETURNS int LANGUAGE sql AS \'SELECT 1\'')
         out = _assert_fail(gate_root, "S0", db, "planted function", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
         assert SECRET_NAME not in out
-        _sql(db, f'DROP FUNCTION public."{SECRET_NAME}"()')
+        _sql(db, f'DROP FUNCTION public."{SECRET_NAME}"()', "CREATE SEQUENCE shopify_connections_id_seq")
+        out = _assert_fail(gate_root, "S0", db, "planted sequence", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
+        assert '"unexpected_count":1' in out
+        _sql(db, "DROP SEQUENCE shopify_connections_id_seq")
         _assert_pass(gate_root, "S0", db, "S0 clean")
     finally:
         _drop(db)
@@ -430,16 +452,16 @@ def test_expectations_file_equals_fresh_snapshots_on_this_server():
         try:
             with engine.connect() as conn:
                 assert k.normalize(gate.observe_retained(conn)) == EXPECTATIONS["retained"]
-                assert gate.observe_footprint(conn, k.DEPLOY_PHASES["S0"]) == {"tables": [], "stray_count": 0, "definitions": {}}
+                assert gate.observe_footprint(conn, k.DEPLOY_PHASES["S0"]) == {"tables": [], "stray_count": 0, "definitions": {}, "sequences": []}
         finally:
             engine.dispose()
-        with pytest.raises(ValueError, match="database_is_not_a_complete_s3_build"):
+        with pytest.raises(render.RenderRefusal, match="database_is_not_a_complete_s3_build"):
             render.snapshot(_loopback_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
         _build(db, "0121", "0122", "0123")
         fresh = render.snapshot(_loopback_url(db), source_sha=EXPECTATIONS["generated_from_source_sha"], root=_REPO)
         for key in ("retained", "shopify_s3", "database_py_digest", "expectations_version"):
             assert fresh[key] == EXPECTATIONS[key], key
-        with pytest.raises(ValueError, match="refusing_existing_platform_database"):
+        with pytest.raises(render.RenderRefusal, match="refusing_existing_platform_database"):
             render.snapshot(make_url(ADMIN_URL).set(host=k.EXISTING_PLATFORM_TARGET["db"].split(":")[0], database=db).render_as_string(hide_password=False),
                             source_sha=EXPECTATIONS["generated_from_source_sha"])
     finally:

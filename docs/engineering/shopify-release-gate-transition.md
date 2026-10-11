@@ -56,7 +56,7 @@ not an attestation for a later deploy.
 | `scripts/operators/shopify_release_gate.py` | The gate. Read-only, fail-fast, fail-closed. Executed only by the rendered bootstrap. |
 | `scripts/operators/shopify_release_gate_contract.py` | Closed constants: deployment phases S0/S3, intermediate states S1/S2, graph edges and heads, inventory rule and forbidden initializers, library pins, identity variables, legacy advisory key and search path, timeouts, flag names, retained-definition pins, approval rules, reason tokens. |
 | `scripts/operators/shopify_release_gate_render.py` | Operator tool (never in the container): `inventory`, `render` (the standard-library bootstrap command, readable with `--format source`), `snapshot` (schema expectations from a disposable S3 build), `approval-check`. |
-| `scripts/operators/shopify_release_schema_expectations.json` | Canonical definitions — columns with type, nullability, default, identity and generation; every constraint with definition and deferrable/deferred/validated flags (PostgreSQL 18 `contype='n'` rows excluded as redundant with nullability); every index with definition and `indisvalid`/`indisready`/`indislive` — of the six retained tables, the WhatsApp nonce relation (names abstracted), `tenants`/`users` primary-key types, the conversation scope key, sequence ownership, **and** the fifteen S3 Shopify tables. Generated from a disposable S3 build; bound to the migration files by digest. |
+| `scripts/operators/shopify_release_schema_expectations.json` | Canonical definitions — columns with type, nullability, default, identity and generation; every constraint with definition and deferrable/deferred/validated flags (PostgreSQL 18 `contype='n'` rows excluded as redundant with nullability); every index with definition and `indisvalid`/`indisready`/`indislive` — of the six retained tables, the WhatsApp nonce relation (names abstracted), `tenants`/`users` primary-key types, the conversation scope key, retained sequence ownership, **and** the fifteen S3 Shopify tables with their exact sequence set (name, owning table, owning column). Generated from a disposable S3 build; bound to the migration files by digest. |
 | `scripts/operators/shopify_release_approval.template.json` | **Unfilled** template of the external approval payload. Not read by the gate, not in the inventory. |
 | `tests/test_shopify_release_gate.py` | DB-free contract: trust order (tampered contract, pilot module, migration, initializer and gate are refused by the bootstrap before they can execute — proven with import-time markers), phases, inventory rule, bootstrap round trip, every evaluation, payload rules, AST preflight, static read-only guarantees, CLI and renderer secret safety. |
 | `backend/tests/test_shopify_release_gate_pg.py` | Disposable PostgreSQL through the rendered bootstrap: S0/S3 matrix with S1/S2 refused under both, footprint by definition across user schemas, same-name wrong-shaped tables and keys, invalid index flags, malformed rows, retained drift and exact restoration, legacy-key contention and release on failure, lock timeout bound, read-only database, source-side refusals, restore requirement, expectations freshness on PG16 and PG18, legacy-462 bootstrap refusal. |
@@ -149,7 +149,11 @@ are counted as `<unknown>`, never echoed); `shopify_footprint` (every
 **every user schema**: exactly the phase's public tables — none at S0, the
 fifteen at S3 — with each S3 table compared by canonical definition against
 the pinned expectations, which include `uq_shopify_connections_id_tenant` as
-`UNIQUE (id, tenant_id)`; unexpected objects are counted, never named);
+`UNIQUE (id, tenant_id)`; every sequence that is Shopify-named **or** owned
+by an expected table, in any user schema, must equal the pinned S3 sequence
+set exactly by name, owning table and owning column — an extra sequence,
+even one `OWNED BY` an expected table, or a pinned sequence with another
+owner is a refusal; unexpected objects are counted, never named);
 `retained_schema` (the six retained tables, the nonce relation, the integer
 primary keys, the conversation scope key, sequence ownership — drift reported
 by allow-listed table name only); `relation_identity` (the OIDs of every
@@ -183,7 +187,7 @@ read-only audit script (#1211 plan), never by a deploy.
 | accepted source, phase `S1` / `S2` | any | — | exit 2 `phase_not_deployable` (render refuses too) | not a deployment phase |
 | accepted source, phase `S3` | S3 `{0111,0113,0123}`, fifteen tables by definition, key present | — | PASS | the only deploy after the window |
 | accepted source, phase `S0` | S3 | — | FAIL rows + footprint | the 462 state is never whitelisted against S3 |
-| any phase | partial footprint, same-name wrong-shaped table or key, stray `shopify_*` object in any user schema, duplicate/unknown/missing row, retained drift, invalid index, flag on, legacy key held, read-only DB, wrong identity/target, stale or foreign approval | — | FAIL (named token) / bootstrap refusal | deploy refused |
+| any phase | partial footprint, same-name wrong-shaped table or key, extra or re-owned sequence, stray `shopify_*` object in any user schema, duplicate/unknown/missing row, retained drift, invalid index, flag on, legacy key held, read-only DB, wrong identity/target, stale or foreign approval | — | FAIL (named token) / bootstrap refusal | deploy refused |
 
 Never used: `head`, `heads`, `stamp`, `merge`, version-row edits. The only
 future rollback spellings remain `0123@-1`, `0122@-1`, `0121@-1`, each with
@@ -198,8 +202,9 @@ inventory digest and count, the platform target (`project`, `environment`,
 `approval` that is approved with reviewer, independent review reference,
 `approved_at_utc` and `valid_until_utc` with the run time inside that window;
 a filled **deployment rollback snapshot** (the deployment to redeploy to
-withdraw the release — *not* database recovery) with a valid verification
-time; **backup evidence** for exactly the expected database service and
+withdraw the release — *not* database recovery) with a UUID deployment id, a
+full 40-hex source sha, a verifier and a UTC verification time ordered
+`verified ≤ approved ≤ now`; **backup evidence** for exactly the expected database service and
 volume, with a positive sane size (0 < MB ≤ 10 000 000), `completed: true`,
 `restore_available: true`, an observer, and UTC timestamps ordered `card ≤
 observed ≤ approved ≤ now ≤ expiry`, the card no older than **72 hours** at
@@ -308,10 +313,15 @@ Current shell (app `434031788033`, org `240110284`): `embedded = false`,
 redirects, webhook API version `2026-10`. Nothing below is configured by code;
 each item is an owner action after this slice's independent review.
 
-* **Routes (from the actual routers, dormant until flagged on)**: OAuth
-  callback `https://api.nahlah.ai/merchant/integrations/shopify/callback`
-  (`CALLBACK_PATH`); dashboard completion
-  `https://app.nahlah.ai/integrations/shopify/complete`; `app/uninstalled`
+* **URLs (proposed, from the actual routers; dormant until flagged on)**:
+  proposed App URL `https://app.nahlah.ai/integrations` (Nahlah's own
+  authenticated integrations page; the shell currently carries the default
+  app-home URL); the **only** OAuth allowlist redirect
+  `https://api.nahlah.ai/merchant/integrations/shopify/callback`
+  (`CALLBACK_PATH`, registered byte-exactly); the dashboard completion URL
+  `https://app.nahlah.ai/integrations/shopify/complete` is where the callback
+  sends the merchant's browser afterwards and is explicitly **not** another
+  OAuth redirect — it must not be added to the allowlist; `app/uninstalled`
   webhook `https://api.nahlah.ai/webhooks/shopify/app-uninstalled`
   (`WEBHOOK_UNINSTALL_PATH`); compliance webhooks under the plural prefix
   `/webhooks/shopify/privacy/`: `customers-data-request`, `customers-redact`,
@@ -326,31 +336,35 @@ each item is an owner action after this slice's independent review.
   Token exchange / managed `authenticate.admin` designs are therefore **not**
   used and not silently adopted; `embedded = false` is consistent with this but
   is not the reason for it.
-* **Installation / scope source — reviewed choice**: the app configuration
-  reference states `use_legacy_install_flow = false` (or omitted) means
-  Shopify-managed scope installation, and `true` sends URL scopes through the
-  legacy OAuth flow (still supported, not recommended)
-  (`shopify.dev/docs/apps/build/cli-for-apps/app-configuration`). The reviewed
-  choice is to **keep `use_legacy_install_flow = false`** and declare
-  `read_products` as the app's only access scope in the app configuration:
-  the frozen code's authorize URL already sends `scope=read_products` (the
-  identical set, so whichever source Shopify applies the grant is the same),
-  the enforcement point is the exchange-time validation (granted ⊆ read-only)
-  and it is unchanged, and the not-recommended legacy setting is not needed by
-  the code. This choice must be **confirmed by the supervised journey** (grant
-  screen shown, `read_products`-only expiring offline token returned) before
-  activation; if that journey shows the managed path does not present the
-  grant for a standalone authorization-code app, the fallback is an explicit
-  owner decision to set `use_legacy_install_flow = true` — a shell setting, no
-  code change. Nothing is flipped by this slice.
+* **Installation / scope source — conditional proposal, not yet proven**:
+  the app configuration reference states `use_legacy_install_flow = false`
+  (or omitted) means Shopify-managed scope installation, and `true` sends URL
+  scopes through the legacy OAuth flow (still supported, not recommended)
+  (`shopify.dev/docs/apps/build/cli-for-apps/app-configuration`). The
+  proposal is to **keep `use_legacy_install_flow = false`** and declare
+  `read_products` as the app's only access scope in the app configuration,
+  because the frozen code's authorize URL already sends `scope=read_products`
+  (the identical set) and the enforcement point — exchange-time validation
+  that the granted scopes are a subset of the read-only set — is unchanged
+  either way. Whether a standalone authorization-code app receives its grant
+  correctly under managed installation with this shell has **not** been
+  exercised by any journey in this program, and the frozen code was written
+  against the legacy-style flow; so this is genuinely uncertain. The
+  supervised journey must prove it (grant screen shown, `read_products`-only
+  expiring offline token returned, `scope` on the token response exactly
+  `read_products`). If it does not, the fallback is an explicit owner decision
+  to set `use_legacy_install_flow = true` — a shell setting, no code change —
+  and that fallback is as acceptable as the proposal. Nothing is flipped by
+  this slice.
 * **API version — reviewed choice**: the connection runtime defaults to
   `2026-07` (`SHOPIFY_ADMIN_API_VERSION` unset; still supported per the
   versioning page, with `2026-10` the latest stable), the catalog import pins
   `2026-10` by code, and the shell's webhook version is `2026-10`. For the S0
-  deploy nothing changes. At activation, set `SHOPIFY_ADMIN_API_VERSION=2026-10`
-  so the identity query, the catalog import and webhook payloads share one
-  version; that is an environment change with its own approval, not part of
-  this slice.
+  deploy nothing changes. At activation, setting
+  `SHOPIFY_ADMIN_API_VERSION=2026-10` so the identity query, the catalog
+  import and webhook payloads share one version is the proposal; the
+  `2026-10` activation configuration is **untested** in this program and is
+  an environment change with its own approval, not part of this slice.
 * **Secrets**: `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET`, a dedicated
   `SHOPIFY_TOKEN_ENC_KEY` (distinct from every other key; the code refuses a
   reused one) are entered out of band, later, never through a repository or a
