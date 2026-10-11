@@ -1,6 +1,7 @@
 """Shopify release gate on real PostgreSQL: S0/S3 phase matrix, intermediate-state refusal, footprint by definition, drift, locks, timeouts.
 
 Every case builds the deployed topology {0111, 0113, 0120} by genuine upgrades
+after 0103 adopts a synthetic pre-existing nonce table without a server default,
 on a disposable server and runs the gate **through its rendered trusted
 bootstrap** (``bash -c``) with an explicit synthetic environment and a
 synthetic external approval payload. The gate's target validator refuses
@@ -90,10 +91,32 @@ def _alembic(db: str, *args: str, database_dir: Path = _REPO / "database") -> su
     return subprocess.run([sys.executable, "-m", "alembic", *args], cwd=str(database_dir), env=env, capture_output=True, text=True, timeout=600)
 
 
-def _build(db: str, *targets: str) -> None:
-    for target in ("0093", "0111", "0113", "0120") + targets:
-        proc = _alembic(db, "upgrade", target)
+def _build(db: str, *targets: str, database_dir: Path = _REPO / "database") -> dict:
+    """Adopt the legacy nonce definition once; never reset an existing fixture."""
+    for target in ("0093", "0102"):
+        proc = _alembic(db, "upgrade", target, database_dir=database_dir)
         assert proc.returncode == 0, proc.stderr[-3000:]
+    created = _sql(db, "SELECT to_regclass('public.whatsapp_oauth_nonces')") == [(None,)]
+    if created:
+        _sql(db, """CREATE TABLE whatsapp_oauth_nonces (
+            id SERIAL PRIMARY KEY,
+            nonce_hash VARCHAR(64) NOT NULL,
+            tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            connection_mode VARCHAR(32) NOT NULL,
+            redirect_uri_fingerprint VARCHAR(64) NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            consumed_at TIMESTAMPTZ NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            CONSTRAINT uq_whatsapp_oauth_nonces_hash UNIQUE (nonce_hash))""",
+             "CREATE INDEX ix_whatsapp_oauth_nonces_expires_at ON whatsapp_oauth_nonces (expires_at)",
+             "CREATE INDEX ix_whatsapp_oauth_nonces_tenant_id ON whatsapp_oauth_nonces (tenant_id)")
+    before = _sql(db, "SELECT 'public.whatsapp_oauth_nonces'::regclass::oid")
+    for target in ("0103", "0111", "0113", "0120") + targets:
+        proc = _alembic(db, "upgrade", target, database_dir=database_dir)
+        assert proc.returncode == 0, proc.stderr[-3000:]
+    after = _sql(db, "SELECT 'public.whatsapp_oauth_nonces'::regclass::oid")
+    assert before == after
+    return {"adopted_nonce_created": created, "pre_0103_oid": before[0][0], "post_build_oid": after[0][0]}
 
 
 def _sql(db: str, *statements: str):
@@ -349,9 +372,11 @@ def test_retained_definition_drift_is_refused_and_exact_restoration_passes(gate_
         assert f'"drift":["{k.NONCE_TABLE}"]' in out
         _sql(db, "ALTER TABLE whatsapp_oauth_nonces DROP CONSTRAINT whatsapp_oauth_nonces_tenant_id_fkey",
              "ALTER TABLE whatsapp_oauth_nonces ADD CONSTRAINT whatsapp_oauth_nonces_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE")
-        _sql(db, "ALTER TABLE whatsapp_oauth_nonces ALTER COLUMN created_at DROP DEFAULT")
-        _assert_fail(gate_root, "S0", db, "nonce default dropped", check="retained_schema", reason=k.R_RETAINED_DEFINITION_DRIFT)
-        _sql(db, "ALTER TABLE whatsapp_oauth_nonces ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP")
+        for added_default in ("CURRENT_TIMESTAMP", "now()", "'2000-01-01'::timestamptz"):
+            _sql(db, "ALTER TABLE whatsapp_oauth_nonces ALTER COLUMN created_at SET DEFAULT " + added_default)
+            _assert_fail(gate_root, "S0", db, "nonce server default added", check="retained_schema", reason=k.R_RETAINED_DEFINITION_DRIFT)
+            _sql(db, "ALTER TABLE whatsapp_oauth_nonces ALTER COLUMN created_at DROP DEFAULT")
+            _assert_pass(gate_root, "S0", db, "exact no-default nonce restored")
         _sql(db, "ALTER INDEX ix_whatsapp_oauth_nonces_expires_at RENAME TO ix_nonce_expires_renamed",
              "ALTER TABLE whatsapp_oauth_nonces RENAME CONSTRAINT uq_whatsapp_oauth_nonces_hash TO uq_nonce_renamed")
         _assert_pass(gate_root, "S0", db, "nonce names abstracted, definition intact")

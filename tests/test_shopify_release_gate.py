@@ -692,9 +692,13 @@ def test_retained_definitions_are_compared_by_definition_and_reported_by_name_on
     drifted = copy.deepcopy(observed)
     drifted["nonce"]["indexes"] = [s for s in drifted["nonce"]["indexes"] if "expires_at" not in s[1]]
     assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
-    drifted = copy.deepcopy(observed)
-    drifted["nonce"]["columns"][-1][3] = None  # created_at default dropped
-    assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
+    assert observed["nonce"]["columns"][-1][0] == "created_at"
+    assert observed["nonce"]["columns"][-1][3] is None
+    for added_default in ("CURRENT_TIMESTAMP", "now()", "'2000-01-01'::timestamp with time zone"):
+        drifted = copy.deepcopy(observed)
+        drifted["nonce"]["columns"][-1][3] = added_default
+        status, reason, detail = k.evaluate_retained(drifted, retained)
+        assert (status, reason, detail["drift"]) == (k.FAIL, k.R_RETAINED_DEFINITION_DRIFT, [k.NONCE_TABLE])
     drifted = copy.deepcopy(observed)
     drifted["nonce"]["constraints"][0][4] = False  # convalidated
     assert k.evaluate_retained(drifted, retained)[2]["drift"] == [k.NONCE_TABLE]
@@ -735,7 +739,8 @@ def test_expectations_file_is_bound_to_these_migrations_and_covers_retained_and_
     assert all(len(col) == 6 for d in all_tables for col in d["columns"])
     assert any(c[0] == k.CONNECTION_KEY_CONSTRAINT and c[2] == "UNIQUE (id, tenant_id)" for c in shopify["tables"]["shopify_connections"]["constraints"])
     nonce = retained["nonce"]
-    assert len(nonce["columns"]) == 8 and all(len(c) == 6 for c in nonce["columns"]) and nonce["columns"][-1][3] is not None
+    assert len(nonce["columns"]) == 8 and all(len(c) == 6 for c in nonce["columns"])
+    assert nonce["columns"][-1] == ["created_at", "timestamp with time zone", True, None, "", ""]
     assert all(len(c) == 5 and c[0] in "pufc" for c in nonce["constraints"]) and any(c[1] == "UNIQUE (nonce_hash)" for c in nonce["constraints"])
     assert all(len(i) == 5 and i[2] is True and i[3] is True for i in nonce["indexes"])
     assert retained["pk_types"] == {"tenants": "integer", "users": "integer"}

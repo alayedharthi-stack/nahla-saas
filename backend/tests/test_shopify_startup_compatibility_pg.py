@@ -6,6 +6,8 @@ DB executors; provider coroutines are withheld. Not an HTTP/router import proof.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.pool import NullPool
+from sqlalchemy.orm import sessionmaker
 
 from backend.tests import _alembic_topology_probe as topo
 from backend.tests import _shopify_release_gate_harness as gate_harness
@@ -119,9 +122,7 @@ def started_state(request, tmp_path_factory):
     url = pg._loopback_url(db)
     work = tmp_path_factory.mktemp("startup_" + phase)
     try:
-        for revision in ("0093", "0111", "0113", "0120"):
-            result = pg._alembic(db, "upgrade", revision, database_dir=CANDIDATE / "database")
-            assert result.returncode == 0, result.stderr[-2000:]
+        pg._build(db, database_dir=CANDIDATE / "database")
         deployed = _startup(LEGACY, url, work / "legacy_hook")
         if phase == "S3":
             for revision in ("0121", "0122", "0123"):
@@ -179,6 +180,102 @@ def test_release_gate_accepts_the_schema_after_actual_startup(started_state):
     rc, out = gate_harness.run_gate(root, state["phase"], pg._alias_url(state["db"]), target)
     print("STARTUP_GATE", state["phase"], rc, json.dumps(gate_harness.checks(out), sort_keys=True))
     assert rc == 0 and gate_harness.result(out) == contract.PASS, out[-3000:]
+
+
+def test_adopted_nonce_survives_s0_to_s3_without_fixture_reset(tmp_path, monkeypatch):
+    """One adopted database, genuine migrations, real nonce writer/consumer and startup DB tasks."""
+    if not pg.ADMIN_URL or not pg.HOST_ALIAS:
+        pytest.fail("focused adopted-baseline proof requires disposable PostgreSQL")
+    admin = make_url(pg.ADMIN_URL)
+    assert (admin.host, admin.port, admin.username, admin.password, admin.database) == (
+        "127.0.0.1", 5433, "nahla", "nahla_password", "postgres")
+    assert LEGACY.is_dir() and CANDIDATE.is_dir()
+    spec = importlib.util.spec_from_file_location("focused_inherited_nonce", CANDIDATE / "backend/core/whatsapp_oauth_nonce.py")
+    nonce_api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nonce_api)
+    # Supply only a synthetic HMAC key, without importing service config/provider clients.
+    monkeypatch.setattr(nonce_api, "_hmac_key", lambda: b"synthetic-adopted-nonce-hmac-key")
+    db = pg._fresh_db("adopted_nonce")
+    engine = create_engine(pg._loopback_url(db), poolclass=NullPool)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(nonce_api, "_independent_session", factory)
+    try:
+        adoption = pg._build(db, database_dir=CANDIDATE / "database")
+        assert adoption["adopted_nonce_created"] is True
+        assert adoption["pre_0103_oid"] == adoption["post_build_oid"]
+        gate_root = gate_harness.build_root(tmp_path / "gate", source=CANDIDATE)
+        with engine.connect() as conn:
+            retained = pg.gate.observe_retained(conn)
+            identities = pg.gate.relation_oids(conn, contract.IDENTITY_TABLES)
+        assert contract.normalize(retained) == pg.EXPECTATIONS["retained"]
+        assert retained["nonce"]["columns"][-1] == ("created_at", "timestamp with time zone", True, None, "", "")
+        tenant_ids = [int(_sql(pg._loopback_url(db), "INSERT INTO tenants(name) VALUES (:name) RETURNING id",
+                               {"name": name})[0][0]) for name in ("synthetic apparel merchant", "synthetic accessories merchant")]
+        nonce_reports = []
+
+        def verify_retained(rows, step):
+            topo.assert_rows(pg._loopback_url(db), rows, step)
+            with engine.connect() as conn:
+                assert contract.normalize(pg.gate.observe_retained(conn)) == contract.normalize(retained), step
+                assert pg.gate.relation_oids(conn, contract.IDENTITY_TABLES) == identities, step
+
+        def exercise_nonce(phase):
+            raw = nonce_api.generate_oauth_nonce()
+            expired = nonce_api.generate_oauth_nonce()
+            uri = "https://synthetic.example.invalid/oauth/callback"
+            with factory() as session:
+                for value, expires in ((raw, datetime.now(timezone.utc) + timedelta(minutes=10)),
+                                       (expired, datetime.now(timezone.utc) - timedelta(seconds=5))):
+                    nonce_api.persist_oauth_nonce(session, nonce=value, tenant_id=tenant_ids[0],
+                        connection_mode="embedded", redirect_uri=uri, expires_at=expires)
+                session.commit()
+                row = session.execute(text("SELECT nonce_hash,created_at,consumed_at FROM whatsapp_oauth_nonces "
+                                           "WHERE nonce_hash=:hash"), {"hash": nonce_api.hash_oauth_nonce(raw)}).one()
+                assert row[0] != raw and row[1] is not None and row[2] is None
+            valid = {"nonce": raw, "tenant_id": tenant_ids[0], "connection_mode": "embedded", "redirect_uri": uri}
+            for change in ({"tenant_id": tenant_ids[1]}, {"connection_mode": "coexistence"},
+                           {"connection_mode": "invalid"}, {"redirect_uri": uri + "/wrong"}, {"nonce": expired}):
+                with pytest.raises(nonce_api.NonceRejected):
+                    nonce_api.consume_oauth_nonce(**{**valid, **change})
+            assert nonce_api.consume_oauth_nonce(**valid) > 0
+            with pytest.raises(nonce_api.NonceRejected):
+                nonce_api.consume_oauth_nonce(**valid)
+            with factory() as session:
+                assert nonce_api.nonce_is_consumed(nonce_hash=nonce_api.hash_oauth_nonce(raw), db=session)
+                assert not nonce_api.nonce_is_consumed(nonce_hash=nonce_api.hash_oauth_nonce(expired), db=session)
+            nonce_reports.append({"phase": phase, "insert_created_at": True, "tenant_mode_redirect_expiry_rejections": 5,
+                                  "consume_successes": 1, "replay_rejections": 1})
+
+        def boot(root, phase, label):
+            report = _startup(root, pg._loopback_url(db), tmp_path / label)
+            assert report["db_tasks"] == ["_bootstrap_db_schema_bg", "_migrate_background"]
+            assert report["bootstrap_ready"] and report["safe_alters_ready"]
+            assert report["sql_or_bootstrap_errors"] == []
+            verify_retained(topo.S0 if phase == "S0" else topo.S3, label)
+
+        exercise_nonce("S0")
+        nonce_rows = _sql(pg._loopback_url(db), "SELECT * FROM whatsapp_oauth_nonces ORDER BY id")
+        pg._assert_pass(gate_root, "S0", db, "adopted S0")
+        boot(LEGACY, "S0", "legacy_s0")
+        boot(CANDIDATE, "S0", "candidate_s0")
+        assert _sql(pg._loopback_url(db), "SELECT * FROM whatsapp_oauth_nonces ORDER BY id") == nonce_rows
+        for revision, rows in (("0121", topo.S1), ("0122", topo.S2), ("0123", topo.S3)):
+            result = pg._alembic(db, "upgrade", revision, database_dir=CANDIDATE / "database")
+            assert result.returncode == 0, result.stderr[-2000:]
+            verify_retained(rows, revision)
+            assert _sql(pg._loopback_url(db), "SELECT * FROM whatsapp_oauth_nonces ORDER BY id") == nonce_rows
+        boot(CANDIDATE, "S3", "candidate_s3_first")
+        boot(CANDIDATE, "S3", "candidate_s3_second")
+        assert _sql(pg._loopback_url(db), "SELECT * FROM whatsapp_oauth_nonces ORDER BY id") == nonce_rows
+        exercise_nonce("S3")
+        pg._assert_pass(gate_root, "S3", db, "same adopted S3 after startup and nonce operations")
+        print("ADOPTED_NONCE_PROOF", json.dumps({"baseline_creations": 1, "fixture_resets": 0,
+            "server_default": None, "nonce_oid_preserved": True, "retained_definitions_and_oids_preserved": True,
+            "migration_steps": ["0121", "0122", "0123"], "legacy_s0_boots": 1,
+            "candidate_s0_boots": 1, "candidate_s3_boots": 2, "nonce_operations": nonce_reports}, sort_keys=True))
+    finally:
+        engine.dispose()
+        pg._drop(db)
 
 
 def test_disabled_scheduler_and_provider_boundaries_are_exercised(tmp_path):
