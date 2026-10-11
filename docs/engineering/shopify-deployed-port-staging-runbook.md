@@ -6,9 +6,13 @@ owner or an operator. The port itself ships dormant: all Shopify capability,
 UI, worker and destructive flags default OFF, and no secret, grant, webhook,
 redirect or subscription is configured by the code.
 
-The known `main` versus deployed-catalog divergence remains a release
-blocker for the Shopify stack as a whole; this runbook does not propose a
-merge or a deployment.
+The original `main`-based stack cannot be applied to the deployed base
+unchanged; the port on exact `462ede1aff60` (source head `a246580519f9`,
+parent-accepted) resolves that divergence at source level. The gates that
+remain are separate from the source: the staging and live schema state
+verified below, a durable import worker and any activation, and the owner's
+approval. This runbook proposes neither a merge nor a deployment and executes
+nothing.
 
 ## 0. Preconditions (owner decisions, out of band)
 
@@ -33,23 +37,42 @@ merge or a deployment.
   reused key). `SHOPIFY_ADMIN_API_VERSION` may be left at the code default;
   the catalog import pins Admin API `2026-10` independently.
 
-## 1. Staging schema preflight (read-only first)
+## 1. Staging schema preflight (read-only, on an approved staging clone)
 
-Live Alembic / schema state is **unverified** by this port. Before any
-migration:
+Live and staging Alembic / schema state is **unverified** by this port, and
+the repository's bootstrap pin (`0093`) is a code contract, **not** an
+observation of any live database. `alembic upgrade 0121` upgrades from
+whatever revision the database is at, so a database below `0120` would have
+every intermediate migration executed silently. The preflight therefore
+requires, on an approved staging clone (never the live database):
 
-1. Record the staging `alembic_version` rows and confirm the deployed bootstrap
-   target is still `0093` (normal bootstrap never applies 0121–0123).
-2. Run the read-only audits with `DATABASE_URL` set for staging only, in a
-   session that cannot write:
+1. **Exactly one starting revision, and it is `0120`.** Record the
+   `alembic_version` rows. The run may continue only if there is exactly one
+   row and it is `0120`. If the row is `0093`, any other revision, more than
+   one row, no row, or unreadable: **STOP**; the migrations that would bring
+   the database to `0120` are a separate prior-migration plan with its own
+   approval, outside this runbook.
+2. **The `0120` schema is actually present.** Verify the objects that
+   `0120` and its predecessors create (at minimum the catalog authorization
+   tables of `0120`) exist with the expected columns; any drift between the
+   recorded revision and the observed schema is a **STOP** for the same
+   separate plan.
+3. **Read-only Shopify footprint audits**, with `DATABASE_URL` set for the
+   clone only, in a session that cannot write:
    * `python scripts/audit_shopify_catalog_collisions_readonly.py`
    * `python scripts/audit_shopify_privacy_readonly.py`
    Both run one `READ ONLY` transaction and print counts only. Any
    pre-existing `shopify_*` table, partial schema or legacy Shopify footprint
    is a stop: migrations 0121–0123 refuse pre-existing objects and change
    nothing in that case.
-3. Confirm `database/migrations/versions/0120_*` on staging equals the
+4. **Backup with restore proven.** Take a full backup of the clone and prove
+   its restore on a disposable copy before any change; keep the restored copy
+   until the rollback path (§2) has been exercised.
+5. Confirm `database/migrations/versions/0120_*` in the checkout equals the
    repository blob (it is identical on the deployed base and `main`).
+
+Every Shopify flag stays OFF throughout the migration and any rollback. None
+of this is an action on the live database.
 
 ## 2. Migrations 0121 → 0122 → 0123 (explicit, owner-approved, in order)
 

@@ -1,11 +1,20 @@
 # Shopify deployed-compatible port — validation evidence (Draft PR #1209)
 
-Status: **dormant port, source frozen, validation terminal.** This document
-records what was run against the port of the reviewed Shopify stack onto the
-exact deployed ops base, with the results as observed. It is not a merge or
-deployment proposal: the known `main` versus deployed-catalog divergence remains
-a release blocker for the Shopify stack, no live schema, preflight or activation
-step was performed, and every Shopify flag defaults OFF.
+Status: **dormant port, source frozen, validation terminal; evidence revision 2.**
+This document records what was run against the port of the reviewed Shopify
+stack onto the exact deployed ops base, with the results as observed. The
+original `main`-based stack cannot be applied to the deployed base unchanged;
+this port onto exact `462ede1aff60` resolves that integration divergence at
+source level, and its source head `a246580519f9` is parent-accepted. What
+remains are separate gates, not source blockers: the staging and live schema
+state (unverified; see the runbook), a durable import worker and any
+activation, and the owner's approval. No live schema, preflight or activation
+step was performed, every Shopify flag defaults OFF, and this document is not a
+merge or deployment proposal.
+
+Evidence revision 2 is a docs-only correction bundle rebuilt from the retained
+artifacts (no test re-run, no source change); it supersedes the first evidence
+commit `301b2cf743ba`. The JSON's `evidence_revision` lists the changes.
 
 Machine-readable companion (sanitized subset of the retained artifacts):
 [`shopify-deployed-port-validation-evidence.json`](shopify-deployed-port-validation-evidence.json).
@@ -19,7 +28,8 @@ Staging runbook (not executed):
 | Target base (`ops/tenant1-haiku-20260921-f9021b59`, unchanged during the slice) | [`462ede1aff60`](https://github.com/alayedharthi-stack/nahla-saas/commit/462ede1aff60) |
 | `main` at port time (the reviewed stack's base) | [`b7d2d6811911`](https://github.com/alayedharthi-stack/nahla-saas/commit/b7d2d6811911) |
 | **Tested source** (the acceptance chain's checkout) | [`d199035ca163`](https://github.com/alayedharthi-stack/nahla-saas/commit/d199035ca163) |
-| **Final published source** (PR head; parent accepted the dormant source here) | [`a246580519f9`](https://github.com/alayedharthi-stack/nahla-saas/commit/a246580519f9) |
+| **Source head** (parent-accepted; every later commit on the PR is docs-only evidence) | [`a246580519f9`](https://github.com/alayedharthi-stack/nahla-saas/commit/a246580519f9) |
+| Evidence commits (docs-only, no source change) | first [`301b2cf743ba`](https://github.com/alayedharthi-stack/nahla-saas/commit/301b2cf743ba); this revision is the commit that carries this file |
 
 Commit chain on the PR branch (three logical commits, 68 files added, 29
 modified, 0 deleted against the base):
@@ -47,7 +57,7 @@ evidence JSON (`source_mapping`):
 * Commit 1 is byte-identical in both histories.
 
 Runs made on the tested source are reported as such below and are **not**
-relabelled as runs of the published head. The published head was separately
+relabelled as runs of the source head. The source head was separately
 re-checked (§6, §7, §8, §9). The tested SHAs stay recoverable from this
 document and the PR body.
 
@@ -112,10 +122,10 @@ document and the PR body.
 | owner 65-file regression gate (JUnit) | `462ede1aff60` | 2026-10-11T12:14:44Z | 2026-10-11T12:23:27Z | **rc 1**: 2 failed, 1080 passed, 41 skipped, 2096 warnings in 512.53s (0:08:32) |
 | strict required-PostgreSQL proofs | `d199035ca163` | 2026-10-11T12:23:27Z | 2026-10-11T12:44:01Z | rc 0: REQUIRED POSTGRES PROOFS: PROVEN (799/799 required tests passed: 797/797 proofs + 2/2 runner/fixture regressions, 0 skips tolerated) |
 | strict required-PostgreSQL proofs | `462ede1aff60` | 2026-10-11T12:44:01Z | 2026-10-11T13:00:49Z | rc 0: REQUIRED POSTGRES PROOFS: PROVEN (611/611 required tests passed: 609/609 proofs + 2/2 runner/fixture regressions, 0 skips tolerated) |
-| deployed CI non-PostgreSQL steps (17) | `d199035ca163` | 2026-10-11T13:00:49Z | — | rc 0: 17/17 steps rc 0 |
-| deployed CI non-PostgreSQL steps (17) | `462ede1aff60` | 2026-10-11T13:01:04Z | — | rc 0: 17/17 steps rc 0 |
+| deployed CI non-PostgreSQL steps (17), corrected attempt | `d199035ca163` | 2026-10-11T13:02:26Z | 2026-10-11T13:24:38Z | rc 0: 17/17 steps rc 0 |
+| deployed CI non-PostgreSQL steps (17), corrected attempt | `462ede1aff60` | 2026-10-11T13:24:38Z | 2026-10-11T13:45:49Z | rc 0: 17/17 steps rc 0 |
 
-PostgreSQL postmaster unchanged across every PostgreSQL stage: **yes**. Every stage ended with `HEAD` unchanged and a clean tree (`porcelain=0`).
+PostgreSQL postmaster unchanged across every PostgreSQL stage: **yes**. Every stage ended with `HEAD` unchanged and a clean tree (`porcelain=0`). Final chain completion line: **2026-10-11T13:45:49Z**, after both corrected CI-step stage ends; the earlier completion line at 2026-10-11T13:01:19Z belongs to the invalid first CI-step attempt described in §4.3.
 
 ### 4.1 Owner 65-file regression gate (JUnit, candidate versus base)
 
@@ -174,9 +184,9 @@ PostgreSQL postmaster unchanged across every PostgreSQL stage: **yes**. Every st
 | 15 | Tenant merchant clone operator tests | rc 0 | rc 0 |
 | 16 | Staging DR canonical parity unit tests | rc 0 | rc 0 |
 
-Last output line of each step is in the JSON. Overall: base rc 0, candidate rc 0. Run with the virtual environment first on PATH (the deployed job uses setup-python 3.12 with the requirements installed), strict-PostgreSQL and Shopify variables unset; candidate started 2026-10-11T13:02:26Z, base started 2026-10-11T13:24:38Z.
+Last output line of each step is in the JSON, together with the 17 verbatim `run:` blocks (`ci_steps.run_block_verification.run_blocks`), verified byte-equal and in order against the deployed workflow at the base. Overall: base rc 0, candidate rc 0. Run with the virtual environment first on PATH (the deployed job uses setup-python 3.12 with the requirements installed), strict-PostgreSQL and Shopify variables unset. Corrected attempt: candidate 2026-10-11T13:02:26Z → 2026-10-11T13:24:38Z, base 2026-10-11T13:24:38Z → 2026-10-11T13:45:49Z.
 
-**Invalid first attempt (kept, not counted):** both stages first ran at 2026-10-11T13:01:04Z / 2026-10-11T13:01:18Z with a scratch-harness defect: the step harness ran the deployed run: blocks without the virtual environment on PATH, so python resolved to the system interpreter (3.13) without pytest; no test executed. 16 of 17 steps per side exited immediately with `/usr/bin/python: No module named pytest`; only `Lint — no new silent excepts` ran. These are unexecuted commands, not test failures. The attempt is kept under `invalid_first_attempt` in the JSON; both stages were re-run with the virtual environment on PATH and no other change, and the chain's final completion line (13:45:49Z) follows both corrected stage ends.
+**Invalid first attempt (kept, not counted):** candidate 2026-10-11T13:00:49Z → 2026-10-11T13:01:04Z, base 2026-10-11T13:01:04Z → 2026-10-11T13:01:18Z, with a scratch-harness defect: the step harness ran the deployed run: blocks without the virtual environment on PATH, so python resolved to the system interpreter (3.13) without pytest; no test executed. 16 of 17 steps per side exited immediately with `/usr/bin/python: No module named pytest`; only `Lint — no new silent excepts` ran. These are unexecuted commands, not test failures. The attempt is kept under `invalid_first_attempt` in the JSON; both stages were re-run with the virtual environment on PATH and no other change, and the chain's final completion line (13:45:49Z) follows both corrected stage ends.
 
 Root-suite step 1 output: base `9583 passed, 790 skipped, 7 xfailed, 45657 warnings in 1100.71s (0:18:20)`; candidate `9890 passed, 790 skipped, 7 xfailed, 45657 warnings in 1165.52s (0:19:25)` (the candidate collects the DB-free Shopify suites and the repair's added tests; skipped and xfailed counts are identical).
 
@@ -196,31 +206,33 @@ On the deployed base and on the port alike, `services.meta_catalog_sync_confirm`
 defines no `_sanitize_sync_error` (a function of that name lives in
 `native_meta_sync_orchestrator.py`) and `token_manager` has no `wa_provider`
 attribute. The port does not add, fix, skip or rename these tests; a runtime
-API change is outside this slice. Neither file is in the owner gate list,
-which is why the gate itself shows no failure.
+API change is outside this slice. Neither file is in the owner 65-file gate
+list, so these three nodes are outside that gate; the gate's own two
+baseline-only failures remain those of §4.1.
 
 ## 6. Leakage reproductions bound to exact SHAs
 
-Two-node reproductions of the baseline test-pollution defects that #1207
-repaired, re-run on the exact final head and the exact deployed base at
-12:12–12:13Z (DB-free):
+Bounded reproductions of the baseline test-pollution defects that #1207
+repaired, re-run on the exact source head and the exact deployed base at
+12:12–12:13Z (DB-free). The nodes actually executed are stated per row; the
+JSON carries `executed_nodes` and `deselected_nodes` for each run:
 
-| Reproduction (order as run) | Final `a246580519f9` | Base `462ede1aff60` |
+| Reproduction (order as run; nodes executed) | Source head `a246580519f9` | Base `462ede1aff60` |
 |---|---|---|
-| R1 telemetry file, then identity file `-k test_rejection_emits_structured_log` | 1 passed | **1 failed** (`test_rejection_emits_structured_log`) |
-| R1d consent `test_unmarked_database_is_refused`, then `test_rejection_emits_structured_log` | 2 passed | 1 failed (target) |
-| R2 consent `test_unmarked_database_is_refused`, then JSONB `…leaves_jsonb_intact_for_postgresql` | 2 passed | 1 failed (JSONB node) |
-| R3a `test_exact_token_refresh_path_logs_no_credential`, then target | 1 failed (the §5 node), target passed | 2 failed (both) |
-| R3b `test_uvicorn_access_log_redacts_inbound_query_secrets`, then target | 2 passed | 1 failed (target) |
-| R3c `test_install_covers_root_handlers_and_named_loggers`, then target | 2 passed | 1 failed (target) |
+| R1 telemetry file, then identity file, `-k test_rejection_emits_structured_log` (two files collected, **one selected case executed**, the rest deselected) | 1 passed, 10 deselected | **1 failed** (`test_rejection_emits_structured_log`), 9 deselected |
+| R1d consent `test_unmarked_database_is_refused`, then `test_rejection_emits_structured_log` (2 nodes executed) | 2 passed | 1 failed (target), 1 passed |
+| R2 consent `test_unmarked_database_is_refused`, then JSONB `…leaves_jsonb_intact_for_postgresql` (2 nodes executed) | 2 passed | 1 failed (JSONB node), 1 passed |
+| R3a `test_exact_token_refresh_path_logs_no_credential`, then target (2 nodes executed) | 1 failed (the §5 node), 1 passed (target) | 2 failed (both) |
+| R3b `test_uvicorn_access_log_redacts_inbound_query_secrets`, then target (2 nodes executed) | 2 passed | 1 failed (target), 1 passed |
+| R3c `test_install_covers_root_handlers_and_named_loggers`, then target (2 nodes executed) | 2 passed | 1 failed (target), 1 passed |
 
 The same reproductions were first run at 11:41Z on the uncommitted port
 working tree before the commits were created (diagnostic only; recorded in the
 JSON under `leakage_reproductions.pre_commit_smoke`, not bound to a SHA).
 
-## 7. Final-head checks at `a246580519f9`
+## 7. Source-head checks at `a246580519f9`
 
-Re-run on a clean checkout of the published head on 2026-10-11:
+Re-run on a clean checkout of the source head on 2026-10-11:
 
 | Check | Result |
 |---|---|
@@ -230,7 +242,7 @@ Re-run on a clean checkout of the published head on 2026-10-11:
 | Constitution + non-interference guard | 98 passed (12:06:50Z) |
 | Shopify audit scripts against the disposable PostgreSQL | 8 passed, 52 deselected |
 
-## 8. GitHub checks on the published head
+## 8. GitHub checks on the source head
 
 Check runs for `a246580519f9` as read from GitHub at 2026-10-11T12:35:30Z:
 
@@ -285,8 +297,11 @@ CUSTOMER_REGEX_CHANGED=NO
   (force-with-lease once, §1.1); `ops` and `main` were never pushed.
 * Synthetic credentials only; no password, DSN or session-scratch path appears
   in the published evidence (asserted by the JSON builder).
-* No test was weakened, skipped, renamed or excluded; the three §5 failures
-  stay explicit.
+* No test was weakened, renamed or excluded and no new skip or xfail guard
+  was added; the existing skips are recorded as observed (41 gate skip rows
+  with identical identities and raw message attributes on both sides; 790
+  skipped and 7 xfailed in the root suite on both sides); the three §5
+  failures stay explicit.
 * Known limits carried from the reviewed stack: the catalog import runs as an
   in-process FastAPI `BackgroundTask`; `inventory_mode=scope_missing` with
   null counts; privacy worker and destructive executor OFF with no approved
