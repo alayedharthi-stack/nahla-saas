@@ -253,7 +253,7 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         assert SECRET_NAME not in out
         _sql(db, f'DROP SEQUENCE other."{SECRET_NAME}_seq"', "DROP SCHEMA other", "CREATE SEQUENCE planted_seq OWNED BY shopify_connections.generation")
         _assert_fail(gate_root, "S3", db, "non-Shopify-named sequence owned by an expected column", check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
-        _sql(db, "DROP SEQUENCE planted_seq", "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_shop_leases.id")
+        _sql(db, "DROP SEQUENCE planted_seq", "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_webhook_events.id")
         out = _assert_fail(gate_root, "S3", db, "pinned sequence re-owned", check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
         assert '"drift":["public.shopify_connections_id_seq"]' in out
         _sql(db, "ALTER SEQUENCE shopify_connections_id_seq OWNED BY shopify_connections.id")
