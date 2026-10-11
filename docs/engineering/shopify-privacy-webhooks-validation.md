@@ -77,16 +77,38 @@ Per-suite: every one of the 29 suites `verdict=PROVEN` with
 `required=60 collected=60 passed=60`; `shopify_connection_foundation`
 73/73 and `shopify_catalog_import` 55/55 unchanged and passing.
 
-Manifest: `scripts/required_postgres_proofs.json` at `3681ebd` keeps the
-baseline's 28 suites (755 required ids) and every non-suite key
-**byte-for-byte equal** to `08428cb` (checked by comparing the parsed
-manifests of both commits) and appends one suite of 60 ids — 815 in 29
-suites.
+Manifest: `scripts/required_postgres_proofs.json` was compared as **parsed
+JSON objects**, not byte for byte. At `3681ebd` the first 28 suite objects
+are equal, in order, to the baseline's 28 suite objects at `08428cb` (every
+field: `id`, `kind`, `module`, `origin`, `required_env` and the 755 node
+ids); the non-suite values `manifest_version`, `title` and `rules` are
+equal; one suite object with 60 node ids is appended — 815 in 29 suites.
 
-**Superseded attempt (not evidence).** An earlier PG16 run at `6c3aba0`
-(`hist_6c3aba0_pg16_STOPPED_mixed_source`) was **STOPPED**: the working tree
-was edited while it ran, so it is mixed-source. It has no exit code and is
-not counted.
+**Superseded attempt (not evidence).** An earlier strict PG16 run started
+at `6c3aba0` with a clean tree (`hist_6c3aba0_pg16_STOPPED_mixed_source`)
+was **STOPPED** manually after 7 of 29 suites (each of those 7 reported
+pytest exit code 0). The working tree was edited while it ran, so it is
+mixed-source. The runner never completed: it wrote **no final runner
+verdict** (its `report.json` is still the runner's `NOT RUN` /
+`validation_not_started` placeholder) and no runner exit status was
+recorded. It is not counted.
+
+**Historical pre-freeze failures (superseded; not acceptance evidence).**
+Development runs before the source was frozen, recovered from the retained
+session transcript (their output was not kept as separate log files). Each
+ran on an **uncommitted working tree**; the branch HEAD at the time is
+inferred from commit timestamps, and no commit SHA identifies the tested
+tree.
+
+| Time (UTC) | Branch HEAD then | Command | Result | Resolution before freeze |
+|---|---|---|---|---|
+| 06:56:17 | `2f6a351` (+ uncommitted edits) | `python -m pytest -q tests/test_shopify_privacy_webhooks.py` | 1 failed, 128 passed (14.19s): `test_delayed_inspection_is_bounded_and_never_blocks_the_event_loop` | router re-checks the deadline before the receipt SQL; committed in `5a963d8` |
+| 07:05:57 | `5a963d8` (+ uncommitted edits) | PG16, `python -m pytest -q -x backend/tests/test_shopify_privacy_webhooks_pg.py -p no:cacheprovider` | 1 failed, 8 passed (42.92s; `-x` stopped at the first failure): `test_composite_key_isolates_tenants_and_checks_refuse_fabricated_states` | malformed test insert replaced by a bounded-counter (`attempts = -1`) check; present in `6c3aba0` |
+| 07:08:17 | `5a963d8` (+ uncommitted edits) | PG16, same without `-x` | 5 failed, 54 passed (128.28s): `test_any_legacy_shopify_footprint_blocks_the_no_data_outcome[external_customer_profiles]`, `test_connect_committing_between_unknown_evaluation_and_write_is_fenced`, `test_confirmed_uninstall_yields_a_counts_only_blocked_proposal`, `test_reinstall_racing_the_executor_waits_and_builds_a_new_generation`, `test_audit_script_never_prints_stored_strings_of_malformed_tables` | fixed before the freeze at `3681ebd` (the commit in which each fix landed is not separately recorded); all pass in the final runs above |
+
+The transcript also shows two earlier transient DB-free failures
+(06:48:18, 1 failed / 75 passed; 06:55:54, 1 failed / 113 passed), fixed
+before `5a963d8`. None of these runs is acceptance evidence.
 
 ## 2. `lint-and-test` non-PostgreSQL steps (candidate vs baseline)
 
@@ -228,9 +250,10 @@ run's report count.
 
 Interpretation, bounded by this evidence:
 
-* Failure 1 needs only collection / import of the full list (D4: no other
-  test executed) — a collection or import side effect on logging capture.
-  The responsible module is not identified.
+* Failure 1 needs only collection / import of the full list (D4: only the
+  two selected nodes executed; no unrelated test cases ran) — a collection
+  or import side effect on logging capture. The responsible logger / module
+  is not identified.
 * Failure 2 passes alone (D1b), after the billing-badge file (D2 —
   counterevidence for that suspect) and in D4; it fails only when earlier
   tests execute. **The exact leaking fixture or test remains unidentified**;
@@ -296,10 +319,16 @@ their only evidence and are not GitHub check results.
 * The owner 65-file gate is **FAILED** (reproduced baseline debt above).
 * The JSONB failure's leaking fixture is unidentified.
 * Root skip / xfail identities are not compared (counts only).
-* An HTTP receipt timeout answers 503 but does not terminate a database
-  thread stalled on the network; the dedicated pool, `statement_timeout`,
-  `lock_timeout` and `connect_timeout` bound it, and the redelivery is
-  idempotent (design document).
+* An HTTP receipt timeout answers 503 but does not terminate the receipt
+  thread. The dedicated executor (4 threads), its admission semaphore and
+  its dedicated pool (`pool_size` 4, `max_overflow` 0) cap concurrent
+  receipts at 4 per application process. `statement_timeout`,
+  `lock_timeout` and `connect_timeout` limit server-side work and connection
+  attempts; they do **not** guarantee termination of a client receive
+  stalled on the network or of a COMMIT already in flight. If such a COMMIT
+  lands after the 503, Shopify's redelivery joins that request while it is
+  still open; a completed request is never reused (a later identical
+  delivery opens a new request).
 * Bodies are bounded at 64 KiB (the foundation's limit, reused unchanged).
 * Owner decisions listed in `shopify-privacy-webhooks.md` are unresolved;
   `APPROVED_POLICY` is `None` and destructive processing is disabled.
