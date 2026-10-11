@@ -1,0 +1,1218 @@
+{
+ "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+ "expectations_version": 1,
+ "generated_at_utc": "2026-10-11T17:16:46Z",
+ "generated_from_source_sha": "8308c16e39a18745239e869e6996c7aeaf680fd4",
+ "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
+ "nonce": {
+  "columns": [
+   [
+    "id",
+    "integer",
+    true
+   ],
+   [
+    "nonce_hash",
+    "character varying(64)",
+    true
+   ],
+   [
+    "tenant_id",
+    "integer",
+    true
+   ],
+   [
+    "connection_mode",
+    "character varying(32)",
+    true
+   ],
+   [
+    "redirect_uri_fingerprint",
+    "character varying(64)",
+    true
+   ],
+   [
+    "expires_at",
+    "timestamp with time zone",
+    true
+   ],
+   [
+    "consumed_at",
+    "timestamp with time zone",
+    false
+   ],
+   [
+    "created_at",
+    "timestamp with time zone",
+    true
+   ]
+  ],
+  "constraint_definitions": [
+   "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+   "PRIMARY KEY (id)",
+   "UNIQUE (nonce_hash)"
+  ],
+  "index_shapes": [
+   [
+    false,
+    "USING btree (expires_at)"
+   ],
+   [
+    false,
+    "USING btree (tenant_id)"
+   ],
+   [
+    true,
+    "USING btree (id)"
+   ],
+   [
+    true,
+    "USING btree (nonce_hash)"
+   ]
+  ]
+ },
+ "pk_types": {
+  "tenants": "integer",
+  "users": "integer"
+ },
+ "sequences": [
+  [
+   "catalog_channel_retirements_id_seq",
+   "catalog_channel_retirements",
+   "id"
+  ],
+  [
+   "commerce_runtime_deferred_inbound_id_seq",
+   "commerce_runtime_deferred_inbound",
+   "id"
+  ],
+  [
+   "commerce_runtime_handover_workers_id_seq",
+   "commerce_runtime_handover_workers",
+   "id"
+  ],
+  [
+   "commerce_runtime_navigation_snapshots_id_seq",
+   "commerce_runtime_navigation_snapshots",
+   "id"
+  ],
+  [
+   "meta_catalog_authorizations_id_seq",
+   "meta_catalog_authorizations",
+   "id"
+  ]
+ ],
+ "server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+ "tables": {
+  "catalog_channel_retirements": {
+   "columns": [
+    [
+     "id",
+     "integer",
+     true,
+     "nextval('catalog_channel_retirements_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "catalog_id",
+     "character varying(64)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "retailer_id",
+     "character varying(255)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "meta_item_id",
+     "character varying(128)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "product_id",
+     "integer",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "reason",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "status",
+     "character varying(32)",
+     true,
+     "'pending'::character varying",
+     "",
+     ""
+    ],
+    [
+     "attempts",
+     "integer",
+     true,
+     "0",
+     "",
+     ""
+    ],
+    [
+     "next_attempt_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "last_error",
+     "character varying(255)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "updated_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "done_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "catalog_channel_retirements_pkey",
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "catalog_channel_retirements_tenant_id_fkey",
+     "f",
+     "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_catalog_channel_retirements_tenant_catalog_retailer",
+     "u",
+     "UNIQUE (tenant_id, catalog_id, retailer_id)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "catalog_channel_retirements_pkey",
+     "CREATE UNIQUE INDEX catalog_channel_retirements_pkey ON public.catalog_channel_retirements USING btree (id)"
+    ],
+    [
+     "ix_catalog_channel_retirements_tenant_status",
+     "CREATE INDEX ix_catalog_channel_retirements_tenant_status ON public.catalog_channel_retirements USING btree (tenant_id, status)"
+    ],
+    [
+     "uq_catalog_channel_retirements_tenant_catalog_retailer",
+     "CREATE UNIQUE INDEX uq_catalog_channel_retirements_tenant_catalog_retailer ON public.catalog_channel_retirements USING btree (tenant_id, catalog_id, retailer_id)"
+    ]
+   ]
+  },
+  "commerce_runtime_deferred_inbound": {
+   "columns": [
+    [
+     "id",
+     "bigint",
+     true,
+     "nextval('commerce_runtime_deferred_inbound_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "namespace",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "channel_connection_ref",
+     "character varying(128)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "phone_number_id",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "recipient",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "provider_message_id",
+     "character varying(200)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "payload",
+     "jsonb",
+     true,
+     "'{}'::jsonb",
+     "",
+     ""
+    ],
+    [
+     "reason",
+     "character varying(32)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "state",
+     "character varying(16)",
+     true,
+     "'pending'::character varying",
+     "",
+     ""
+    ],
+    [
+     "barrier_generation",
+     "bigint",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "disposition",
+     "character varying(32)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "disposition_evidence",
+     "jsonb",
+     true,
+     "'{}'::jsonb",
+     "",
+     ""
+    ],
+    [
+     "disposed_by",
+     "character varying(200)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "disposed_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "resolved_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "updated_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "ck_commerce_runtime_deferred_inbound_disposition",
+     "c",
+     "CHECK (((((state)::text = 'disposed'::text) = (disposition IS NOT NULL)) AND ((disposition IS NULL) OR ((disposition)::text = ANY ((ARRAY['replayed'::character varying, 'answered'::character varying, 'superseded'::character varying, 'not_required'::character varying, 'unanswered'::character varying])::text[])))))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_deferred_inbound_namespace",
+     "c",
+     "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_deferred_inbound_reason",
+     "c",
+     "CHECK (((reason)::text = ANY ((ARRAY['accepted'::character varying, 'drain_buffered'::character varying, 'process_draining'::character varying, 'admission_refused'::character varying, 'settled_window'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_deferred_inbound_state",
+     "c",
+     "CHECK (((state)::text = ANY ((ARRAY['pending'::character varying, 'resolved'::character varying, 'disposed'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "commerce_runtime_deferred_inbound_pkey",
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_commerce_runtime_deferred_inbound_identity",
+     "u",
+     "UNIQUE (tenant_id, namespace, channel_connection_ref, provider_message_id)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "commerce_runtime_deferred_inbound_pkey",
+     "CREATE UNIQUE INDEX commerce_runtime_deferred_inbound_pkey ON public.commerce_runtime_deferred_inbound USING btree (id)"
+    ],
+    [
+     "ix_commerce_runtime_deferred_inbound_created",
+     "CREATE INDEX ix_commerce_runtime_deferred_inbound_created ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, created_at)"
+    ],
+    [
+     "ix_commerce_runtime_deferred_inbound_pending",
+     "CREATE INDEX ix_commerce_runtime_deferred_inbound_pending ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, namespace) WHERE ((state)::text = 'pending'::text)"
+    ],
+    [
+     "uq_commerce_runtime_deferred_inbound_identity",
+     "CREATE UNIQUE INDEX uq_commerce_runtime_deferred_inbound_identity ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, namespace, channel_connection_ref, provider_message_id)"
+    ]
+   ]
+  },
+  "commerce_runtime_handover_barrier": {
+   "columns": [
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "namespace",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "state",
+     "character varying(16)",
+     true,
+     "'open'::character varying",
+     "",
+     ""
+    ],
+    [
+     "generation",
+     "bigint",
+     true,
+     "0",
+     "",
+     ""
+    ],
+    [
+     "opened_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "settled_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "released_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "evidence",
+     "jsonb",
+     true,
+     "'{}'::jsonb",
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "updated_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "ck_commerce_runtime_handover_barrier_generation",
+     "c",
+     "CHECK ((generation >= 0))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_handover_barrier_namespace",
+     "c",
+     "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_handover_barrier_state",
+     "c",
+     "CHECK (((state)::text = ANY ((ARRAY['open'::character varying, 'draining'::character varying, 'settled'::character varying, 'released'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "commerce_runtime_handover_barrier_pkey",
+     "p",
+     "PRIMARY KEY (tenant_id, namespace)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "commerce_runtime_handover_barrier_pkey",
+     "CREATE UNIQUE INDEX commerce_runtime_handover_barrier_pkey ON public.commerce_runtime_handover_barrier USING btree (tenant_id, namespace)"
+    ]
+   ]
+  },
+  "commerce_runtime_handover_workers": {
+   "columns": [
+    [
+     "id",
+     "bigint",
+     true,
+     "nextval('commerce_runtime_handover_workers_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "namespace",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "worker_id",
+     "character varying(200)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "observed_generation",
+     "bigint",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "observed_state",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "seen_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "retired_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "retired_by",
+     "character varying(200)",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "retired_reason",
+     "text",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "retirement_evidence",
+     "jsonb",
+     true,
+     "'{}'::jsonb",
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "updated_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "ck_commerce_runtime_handover_workers_generation",
+     "c",
+     "CHECK ((observed_generation >= 0))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_handover_workers_namespace",
+     "c",
+     "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_handover_workers_retirement",
+     "c",
+     "CHECK (((retired_at IS NOT NULL) = (retired_by IS NOT NULL)))",
+     false,
+     false,
+     true
+    ],
+    [
+     "commerce_runtime_handover_workers_pkey",
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_commerce_runtime_handover_workers_identity",
+     "u",
+     "UNIQUE (tenant_id, namespace, worker_id)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "commerce_runtime_handover_workers_pkey",
+     "CREATE UNIQUE INDEX commerce_runtime_handover_workers_pkey ON public.commerce_runtime_handover_workers USING btree (id)"
+    ],
+    [
+     "ix_commerce_runtime_handover_workers_active",
+     "CREATE INDEX ix_commerce_runtime_handover_workers_active ON public.commerce_runtime_handover_workers USING btree (tenant_id, namespace) WHERE (retired_at IS NULL)"
+    ],
+    [
+     "uq_commerce_runtime_handover_workers_identity",
+     "CREATE UNIQUE INDEX uq_commerce_runtime_handover_workers_identity ON public.commerce_runtime_handover_workers USING btree (tenant_id, namespace, worker_id)"
+    ]
+   ]
+  },
+  "commerce_runtime_navigation_snapshots": {
+   "columns": [
+    [
+     "id",
+     "bigint",
+     true,
+     "nextval('commerce_runtime_navigation_snapshots_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "token",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "series",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "namespace",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "conversation_id",
+     "bigint",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "minted_by_turn_id",
+     "bigint",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "origin_turn_id",
+     "bigint",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "origin_call_id",
+     "character varying(128)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "search_method",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "query_digest",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "product_ids",
+     "jsonb",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "complete",
+     "boolean",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "page_offset",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "page_size",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "more_label",
+     "character varying(24)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "button_label",
+     "character varying(20)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "expires_at",
+     "timestamp with time zone",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "consumed_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "consumed_by_turn_id",
+     "bigint",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "ck_commerce_runtime_navigation_consumed",
+     "c",
+     "CHECK (((consumed_at IS NULL) = (consumed_by_turn_id IS NULL)))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_navigation_namespace",
+     "c",
+     "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_navigation_offset",
+     "c",
+     "CHECK (((page_offset >= 1) AND (page_offset < jsonb_array_length(product_ids))))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_navigation_page_size",
+     "c",
+     "CHECK (((page_size >= 1) AND (page_size < 10)))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_navigation_products",
+     "c",
+     "CHECK (((jsonb_typeof(product_ids) = 'array'::text) AND (jsonb_array_length(product_ids) >= 1) AND (jsonb_array_length(product_ids) <= 50)))",
+     false,
+     false,
+     true
+    ],
+    [
+     "ck_commerce_runtime_navigation_words",
+     "c",
+     "CHECK (((char_length((more_label)::text) >= 1) AND (char_length((button_label)::text) >= 1)))",
+     false,
+     false,
+     true
+    ],
+    [
+     "commerce_runtime_navigation_snapshots_pkey",
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "fk_commerce_runtime_navigation_conversation_scope",
+     "f",
+     "FOREIGN KEY (conversation_id, tenant_id, namespace) REFERENCES commerce_runtime_conversations(id, tenant_id, namespace)",
+     false,
+     false,
+     true
+    ],
+    [
+     "fk_commerce_runtime_navigation_tenant",
+     "f",
+     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_commerce_runtime_navigation_page",
+     "u",
+     "UNIQUE (series, page_offset)",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_commerce_runtime_navigation_token",
+     "u",
+     "UNIQUE (token)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "commerce_runtime_navigation_snapshots_pkey",
+     "CREATE UNIQUE INDEX commerce_runtime_navigation_snapshots_pkey ON public.commerce_runtime_navigation_snapshots USING btree (id)"
+    ],
+    [
+     "ix_commerce_runtime_navigation_expiry",
+     "CREATE INDEX ix_commerce_runtime_navigation_expiry ON public.commerce_runtime_navigation_snapshots USING btree (expires_at)"
+    ],
+    [
+     "uq_commerce_runtime_navigation_page",
+     "CREATE UNIQUE INDEX uq_commerce_runtime_navigation_page ON public.commerce_runtime_navigation_snapshots USING btree (series, page_offset)"
+    ],
+    [
+     "uq_commerce_runtime_navigation_token",
+     "CREATE UNIQUE INDEX uq_commerce_runtime_navigation_token ON public.commerce_runtime_navigation_snapshots USING btree (token)"
+    ]
+   ]
+  },
+  "meta_catalog_authorizations": {
+   "columns": [
+    [
+     "id",
+     "integer",
+     true,
+     "nextval('meta_catalog_authorizations_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "catalog_id",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "business_id",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "meta_app_id",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "meta_user_id",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "access_token_enc",
+     "text",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "granted_scopes",
+     "json",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "token_expires_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "data_access_expires_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "status",
+     "character varying(16)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "verified_at",
+     "timestamp with time zone",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ],
+    [
+     "updated_at",
+     "timestamp with time zone",
+     true,
+     "now()",
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "meta_catalog_authorizations_pkey",
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "meta_catalog_authorizations_tenant_id_fkey",
+     "f",
+     "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_meta_catalog_authorizations_catalog",
+     "u",
+     "UNIQUE (catalog_id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "uq_meta_catalog_authorizations_tenant",
+     "u",
+     "UNIQUE (tenant_id)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "meta_catalog_authorizations_pkey",
+     "CREATE UNIQUE INDEX meta_catalog_authorizations_pkey ON public.meta_catalog_authorizations USING btree (id)"
+    ],
+    [
+     "uq_meta_catalog_authorizations_catalog",
+     "CREATE UNIQUE INDEX uq_meta_catalog_authorizations_catalog ON public.meta_catalog_authorizations USING btree (catalog_id)"
+    ],
+    [
+     "uq_meta_catalog_authorizations_tenant",
+     "CREATE UNIQUE INDEX uq_meta_catalog_authorizations_tenant ON public.meta_catalog_authorizations USING btree (tenant_id)"
+    ]
+   ]
+  }
+ },
+ "unique_definitions": [
+  [
+   "commerce_runtime_conversations",
+   "UNIQUE (id, tenant_id, namespace)"
+  ]
+ ]
+}
