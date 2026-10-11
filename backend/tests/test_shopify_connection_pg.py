@@ -548,6 +548,12 @@ def test_alembic_chain_upgrades_0120_to_0121_and_back():
         assert "meta_catalog_authorizations" in inspect(eng).get_table_names()
         assert audit("0111,0113,0120").returncode == 0
         eng.dispose()
+        # negative control, last: same-name CHECK / foreign-key / index-predicate definition changes must be
+        # detected by the definition snapshot (and vanish again once restored); the database is dropped after
+        topo.assert_definition_changes_are_detected(url, baseline)
+        # negative control: a seeded column the projection never listed (query_digest, granted_scopes,
+        # source_observed_at) must fail the whole-row digest check and pass again once restored exactly
+        topo.assert_sentinel_mutations_are_detected(url, planted)
     finally:
         _drop(name)
 

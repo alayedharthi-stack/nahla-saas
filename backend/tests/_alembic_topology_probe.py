@@ -6,11 +6,16 @@ by genuine ``alembic upgrade`` calls and then step through 0121, 0122 and
 after every step:
 
 * the **exact** ``alembic_version`` rows (count and ids, duplicates included);
-* that the non-Shopify schema is unchanged — tables, columns, primary keys,
-  unique, check and foreign-key constraints and indexes, compared by
-  definition;
+* that the non-Shopify schema is unchanged, compared by **canonical PostgreSQL
+  definition**: columns (name, type, nullability, default), every constraint
+  through ``pg_get_constraintdef`` (primary key, unique, check, foreign key
+  including referenced table, ON DELETE / ON UPDATE, MATCH, deferrability)
+  and every index through ``pg_get_indexdef`` (method, columns, expressions,
+  ordering and operator classes, INCLUDE, partial predicate);
 * that synthetic sentinel rows planted in generic, catalog and retained
-  0111 / 0113 branch tables survive untouched.
+  0111 / 0113 branch tables survive untouched;
+* and, as a negative control, that a same-name constraint or index whose
+  definition changes **is** detected.
 
 Nothing here stamps, merges, fabricates or deletes version rows, and nothing
 prints a token column, a DSN or a row: failures name tables only.
@@ -21,7 +26,7 @@ import hashlib
 import secrets
 from typing import Any, Dict, List, Tuple
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
 
 S0 = frozenset({"0111", "0113", "0120"})
@@ -31,6 +36,20 @@ S3 = frozenset({"0111", "0113", "0123"})
 RETAINED = frozenset({"0111", "0113"})
 
 _SYNTHETIC_TOKEN = "synthetic-ciphertext-placeholder-not-a-token"
+
+_TABLES_SQL = text(
+    "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') ORDER BY c.relname")
+_COLUMNS_SQL = text(
+    "SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,"
+    " pg_get_expr(d.adbin, d.adrelid), a.attidentity, a.attgenerated"
+    " FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+    " WHERE a.attrelid = CAST(:tbl AS regclass) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum")
+_CONSTRAINTS_SQL = text(
+    "SELECT conname, contype, pg_get_constraintdef(oid), condeferrable, condeferred, convalidated"
+    " FROM pg_constraint WHERE conrelid = CAST(:tbl AS regclass) ORDER BY conname")
+_INDEXES_SQL = text(
+    "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = :tbl ORDER BY indexname")
 
 
 def _engine(url: str):
@@ -54,34 +73,33 @@ def assert_rows(url: str, expected: frozenset, step: str) -> None:
 
 
 def schema_snapshot(url: str, *, exclude_prefixes: Tuple[str, ...] = ("shopify_",), exclude: Tuple[str, ...] = ("alembic_version",)) -> Dict[str, Any]:
-    """Definition-level snapshot of every table outside the excluded set."""
+    """Canonical-definition snapshot of every table outside the excluded set (current schema)."""
     eng = _engine(url)
     try:
-        insp = inspect(eng)
-        snap: Dict[str, Any] = {}
-        for table in sorted(insp.get_table_names()):
-            if table in exclude or table.startswith(exclude_prefixes):
-                continue
-            pk = insp.get_pk_constraint(table)
-            snap[table] = {
-                "columns": [(c["name"], str(c["type"]), bool(c["nullable"]), str(c.get("default"))) for c in insp.get_columns(table)],
-                "primary_key": (pk.get("name"), list(pk.get("constrained_columns") or [])),
-                "unique": sorted((u.get("name"), list(u["column_names"])) for u in insp.get_unique_constraints(table)),
-                "check": sorted((c.get("name"), c.get("sqltext")) for c in insp.get_check_constraints(table)),
-                "foreign_keys": sorted((f.get("name"), list(f["constrained_columns"]), f["referred_table"], list(f["referred_columns"]),
-                                        (f.get("options") or {}).get("ondelete")) for f in insp.get_foreign_keys(table)),
-                "indexes": sorted((i.get("name"), list(i["column_names"]), bool(i.get("unique"))) for i in insp.get_indexes(table)),
-            }
-        return snap
+        with eng.connect() as conn:
+            snap: Dict[str, Any] = {}
+            for (table,) in conn.execute(_TABLES_SQL):
+                if table in exclude or table.startswith(exclude_prefixes):
+                    continue
+                qualified = f'"{table}"'
+                snap[table] = {
+                    "columns": [tuple(r) for r in conn.execute(_COLUMNS_SQL, {"tbl": qualified})],
+                    "constraints": [tuple(r) for r in conn.execute(_CONSTRAINTS_SQL, {"tbl": qualified})],
+                    "indexes": [tuple(r) for r in conn.execute(_INDEXES_SQL, {"tbl": table})],
+                }
+            return snap
     finally:
         eng.dispose()
 
 
+def schema_diff(a: Dict[str, Any], b: Dict[str, Any]) -> List[str]:
+    """Names of tables whose definition differs (never the definitions themselves)."""
+    return sorted(t for t in set(a) | set(b) if a.get(t) != b.get(t))
+
+
 def assert_schema_unchanged(url: str, baseline: Dict[str, Any], step: str) -> None:
-    now = schema_snapshot(url)
-    if now != baseline:
-        changed = sorted(t for t in set(now) | set(baseline) if now.get(t) != baseline.get(t))
-        raise AssertionError(f"{step}: non-Shopify schema changed for tables {changed}")
+    changed = schema_diff(schema_snapshot(url), baseline)
+    assert not changed, f"{step}: non-Shopify schema definition changed for tables {changed}"
 
 
 def plant_sentinels(url: str) -> Dict[str, Any]:
@@ -128,7 +146,15 @@ def plant_sentinels(url: str) -> Dict[str, Any]:
                 " granted_scopes, status, verified_at) VALUES (:tid, :cat, :biz, :app, :usr, :tok, CAST(:scopes AS json), 'active', now()) RETURNING id"),
                 {"tid": tenant, "cat": f"catalog-{tag}", "biz": f"biz-{tag}", "app": f"app-{tag}", "usr": f"user-{tag}",
                  "tok": _SYNTHETIC_TOKEN, "scopes": "[]"}).scalar_one()
+            ids = {"tenants": tenant, "products": product, "customers": customer, "customer_addresses": address,
+                   "customer_address_provenance": provenance, "commerce_runtime_conversations": conversation,
+                   "commerce_runtime_navigation_snapshots": snapshot, "commerce_runtime_handover_workers": worker,
+                   "meta_catalog_memberships": membership, "catalog_channel_retirements": retirement,
+                   "meta_catalog_authorizations": authorization}
+            # canonical whole-row digests (every column, token columns included), taken in the inserting transaction
+            digests = {t: _row_digest(conn, t, i) for t, i in ids.items()}
         return {
+            "row_digests": digests,
             "tag": tag,
             "tenants": (tenant, {"name": f"mh-sentinel-tenant-{tag}"}),
             "products": (product, {"title": f"sentinel white sneakers {tag}", "tenant_id": tenant}),
@@ -152,14 +178,22 @@ def plant_sentinels(url: str) -> Dict[str, Any]:
         eng.dispose()
 
 
+def _row_digest(conn, table: str, row_id: int) -> str:
+    """sha256 of the canonical text form of the whole row (every column, values never returned to Python)."""
+    return conn.execute(text(f"SELECT encode(sha256(convert_to(CAST(t AS text), 'UTF8')), 'hex') FROM {table} t WHERE id = :id"),
+                        {"id": row_id}).scalar_one()
+
+
 def assert_sentinels(url: str, planted: Dict[str, Any], step: str) -> None:
-    """Every planted row still exists with the planted values; the token column is compared by digest only."""
+    """Every planted row still exists with the planted values and its whole-row digest equals the one taken at
+    insertion (every column, token columns included); failures name the table only."""
     eng = _engine(url)
     try:
         with eng.connect() as conn:
             for table, spec in planted.items():
-                if table in ("tag", "token_sha256"):
+                if table in ("tag", "token_sha256", "row_digests"):
                     continue
+                assert _row_digest(conn, table, spec[0]) == planted["row_digests"][table], f"{step}: sentinel row digest changed in {table}"
                 row_id, values = spec
                 cols = ", ".join(values)
                 row = conn.execute(text(f"SELECT {cols} FROM {table} WHERE id = :id"), {"id": row_id}).mappings().first()
@@ -193,3 +227,94 @@ def assert_step(url: str, expected_rows: frozenset, baseline_schema: Dict[str, A
     assert_schema_unchanged(url, baseline_schema, step)
     assert_sentinels(url, planted, step)
     assert row_counts(url, SENTINEL_TABLES) == counts, f"{step}: row counts of non-Shopify tables changed"
+
+
+def assert_sentinel_mutations_are_detected(url: str, planted: Dict[str, Any]) -> None:
+    """Negative control: mutating a seeded column that the projection does not list (navigation
+    query_digest, authorization granted_scopes, provenance source_observed_at) must fail the sentinel check,
+    and restoring the exact original value must make it pass again. Values are never printed."""
+    nav_id = planted["commerce_runtime_navigation_snapshots"][0]
+    auth_id = planted["meta_catalog_authorizations"][0]
+    prov_id = planted["customer_address_provenance"][0]
+    eng = _engine(url)
+    try:
+        with eng.connect() as conn:
+            original_observed_at = conn.execute(text("SELECT source_observed_at FROM customer_address_provenance WHERE id = :id"),
+                                                {"id": prov_id}).scalar_one()
+        cases = [
+            ("commerce_runtime_navigation_snapshots", "UPDATE commerce_runtime_navigation_snapshots SET query_digest = query_digest || '-mutated' WHERE id = :id",
+             "UPDATE commerce_runtime_navigation_snapshots SET query_digest = :q WHERE id = :id", {"id": nav_id, "q": f"q-{planted['tag']}"}),
+            ("meta_catalog_authorizations", "UPDATE meta_catalog_authorizations SET granted_scopes = CAST('[\"mutated\"]' AS json) WHERE id = :id",
+             "UPDATE meta_catalog_authorizations SET granted_scopes = CAST('[]' AS json) WHERE id = :id", {"id": auth_id}),
+            ("customer_address_provenance", "UPDATE customer_address_provenance SET source_observed_at = source_observed_at + interval '1 second' WHERE id = :id",
+             "UPDATE customer_address_provenance SET source_observed_at = :ts WHERE id = :id", {"id": prov_id, "ts": original_observed_at}),
+        ]
+        for table, mutate, restore, params in cases:
+            with eng.begin() as conn:
+                conn.execute(text(mutate), {"id": params["id"]})
+            try:
+                assert_sentinels(url, planted, f"negative control on {table}")
+            except AssertionError as exc:
+                assert table in str(exc), f"sentinel failure did not name {table}"
+            else:
+                raise AssertionError(f"mutation of a seeded column in {table} was not detected")
+            with eng.begin() as conn:
+                conn.execute(text(restore), params)
+            assert_sentinels(url, planted, f"after restoring {table}")
+    finally:
+        eng.dispose()
+
+
+def assert_definition_changes_are_detected(url: str, baseline: Dict[str, Any]) -> None:
+    """Negative control, run last on the disposable database: three same-name definition changes on
+    retained-branch tables (a CHECK predicate, a foreign key's ON DELETE / deferrability, an index gaining a
+    partial predicate) must each be detected by the snapshot and must disappear again once restored."""
+    eng = _engine(url)
+    try:
+        with eng.connect() as conn:
+            check_def = conn.execute(text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'commerce_runtime_handover_workers'::regclass"
+                " AND conname = 'ck_commerce_runtime_handover_workers_generation'")).scalar_one()
+            fk_def = conn.execute(text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'customer_address_provenance'::regclass"
+                " AND conname = 'customer_address_provenance_tenant_id_fkey'")).scalar_one()
+            index_row = None
+            for candidate in ("customer_address_provenance", "commerce_runtime_handover_workers", "commerce_runtime_navigation_snapshots",
+                              "commerce_runtime_conversations", "catalog_channel_retirements", "meta_catalog_authorizations"):
+                found = conn.execute(text(
+                    "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = :t"
+                    " AND indexdef NOT LIKE 'CREATE UNIQUE%' AND indexdef NOT LIKE '% WHERE %' ORDER BY indexname LIMIT 1"), {"t": candidate}).first()
+                if found is not None:
+                    index_row = found
+                    break
+        assert "observed_generation >= 0" in check_def and check_def.startswith("CHECK"), "unexpected baseline CHECK definition"
+        assert fk_def.startswith("FOREIGN KEY (tenant_id) REFERENCES tenants(id)"), "unexpected baseline FK definition"
+
+        mutations = [
+            ("commerce_runtime_handover_workers",
+             "ALTER TABLE commerce_runtime_handover_workers DROP CONSTRAINT ck_commerce_runtime_handover_workers_generation;"
+             " ALTER TABLE commerce_runtime_handover_workers ADD CONSTRAINT ck_commerce_runtime_handover_workers_generation CHECK (observed_generation >= 0 AND observed_generation <= 2147483647)",
+             "ALTER TABLE commerce_runtime_handover_workers DROP CONSTRAINT ck_commerce_runtime_handover_workers_generation;"
+             f" ALTER TABLE commerce_runtime_handover_workers ADD CONSTRAINT ck_commerce_runtime_handover_workers_generation {check_def}"),
+            ("customer_address_provenance",
+             "ALTER TABLE customer_address_provenance DROP CONSTRAINT customer_address_provenance_tenant_id_fkey;"
+             " ALTER TABLE customer_address_provenance ADD CONSTRAINT customer_address_provenance_tenant_id_fkey"
+             " FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED",
+             "ALTER TABLE customer_address_provenance DROP CONSTRAINT customer_address_provenance_tenant_id_fkey;"
+             f" ALTER TABLE customer_address_provenance ADD CONSTRAINT customer_address_provenance_tenant_id_fkey {fk_def}"),
+        ]
+        if index_row is not None:
+            table, name, indexdef = index_row
+            mutations.append((table, f"DROP INDEX {name}; {indexdef} WHERE (id > 0)", f"DROP INDEX {name}; {indexdef}"))
+        assert len(mutations) == 3, "negative control needs a plain btree index on a retained-branch or catalog table"
+        for table, mutate, restore in mutations:
+            with eng.begin() as conn:
+                for stmt in mutate.split(";"):
+                    conn.execute(text(stmt))
+            assert schema_diff(schema_snapshot(url), baseline) == [table], f"definition change on {table} was not detected"
+            with eng.begin() as conn:
+                for stmt in restore.split(";"):
+                    conn.execute(text(stmt))
+            assert schema_diff(schema_snapshot(url), baseline) == [], f"restored definition on {table} still differs"
+    finally:
+        eng.dispose()

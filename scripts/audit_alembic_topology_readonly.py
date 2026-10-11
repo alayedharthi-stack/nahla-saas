@@ -6,8 +6,11 @@ Read-only preflight for a multi-head Alembic topology.
 
 Reads every row of ``alembic_version`` in one ``READ ONLY`` transaction and
 compares the exact row multiset with the expected set given on the command
-line. It prints revision ids only — never a DSN, a token, a config value or
-any other row — and it creates, stamps, merges, deletes or migrates nothing.
+line. It prints **known repository revision ids only** — a row whose value
+is not a revision the repository knows is reported as ``<unknown>`` and
+counted, never echoed, so a corrupted field cannot leak a credential or
+control text into logs. It never prints a DSN, a token, a config value or any
+other row, and it creates, stamps, merges, deletes or migrates nothing.
 
 Why exact rows: a malformed ``alembic_version`` table can carry a duplicate
 or an unknown id while the *set* of ids still looks right. The check therefore
@@ -17,12 +20,11 @@ unexpected id. It never coerces, repairs or relabels.
 
 Repository heads versus database rows: the repository graph has its own heads
 (``alembic heads``), which are not what a database must record. A database
-legitimately records one row per *applied* branch, which may be an interior
-revision of the repository (for example ``0113`` while ``0114`` exists) and
+records one row per *applied* branch, which may be an interior revision of
+the repository (for example ``0113`` recorded while ``0114`` exists) and
 need not include every repository head (``0092`` is not recorded in the
-observed topology). The
-report prints both and marks, per database row, whether the repository knows
-it and whether it is a repository head.
+observed topology). The report prints both and marks, per database row,
+whether the repository knows it and whether it is a repository head.
 
 Exit codes: 0 rows equal the expectation exactly, 1 any mismatch (including a
 missing table), 2 invocation / connection error.
@@ -37,20 +39,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 PASS, FAIL = "PASS", "FAIL"
+UNKNOWN = "<unknown>"
 _DATABASE_DIR = Path(__file__).resolve().parents[1] / "database"
+_REVISION_ID = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
 
 def parse_expect(raw: str) -> List[str]:
-    """Comma-separated revision ids -> sorted list; duplicates in the expectation are an error."""
+    """Comma-separated revision ids -> sorted list; malformed ids or duplicates in the expectation are an error."""
     items = [x.strip() for x in raw.split(",") if x.strip()]
     if not items:
         raise ValueError("--expect needs at least one revision id")
+    bad = [x for x in items if not _REVISION_ID.match(x)]
+    if bad:
+        raise ValueError(f"--expect carries {len(bad)} malformed revision id(s)")
     if len(set(items)) != len(items):
         raise ValueError("--expect repeats a revision id")
     return sorted(items)
@@ -72,7 +80,8 @@ def repository_graph() -> Dict[str, Any]:
 
 
 def evaluate(rows: Sequence[str] | None, expected: Sequence[str], known: set, heads: set) -> Dict[str, Any]:
-    """Pure comparison: the exact row multiset against the expected set. ``rows`` is None when the table is absent."""
+    """Pure comparison of the exact row multiset against the expected set. ``rows`` is None when the table
+    is absent. Only ids the repository knows appear in the report; anything else is ``<unknown>`` and counted."""
     expected_sorted = sorted(expected)
     report: Dict[str, Any] = {"expected": expected_sorted, "repository_heads": sorted(heads), "checks": []}
     if rows is None:
@@ -80,26 +89,26 @@ def evaluate(rows: Sequence[str] | None, expected: Sequence[str], known: set, he
         report["checks"].append((FAIL, "alembic_version.table_missing"))
         report["verdict"] = FAIL
         return report
-    observed = sorted(rows)
-    counts = Counter(observed)
-    report["rows"] = observed
-    report["row_count"] = len(observed)
-    report["row_detail"] = [
-        {"revision": r, "known_to_repository": r in known, "is_repository_head": r in heads} for r in observed
-    ]
+    known_rows = sorted(r for r in rows if r in known)
+    unknown_count = len(rows) - len(known_rows)
+    counts = Counter(known_rows)
+    report["rows"] = known_rows + [UNKNOWN] * unknown_count
+    report["row_count"] = len(rows)
+    report["unknown_row_count"] = unknown_count
+    report["row_detail"] = [{"revision": r, "known_to_repository": True, "is_repository_head": r in heads} for r in known_rows] + [
+        {"revision": UNKNOWN, "known_to_repository": False, "is_repository_head": False}] * unknown_count
     dup = sorted(r for r, n in counts.items() if n > 1)
-    unknown = sorted(r for r in counts if r not in known)
-    missing = sorted(set(expected_sorted) - set(observed))
-    unexpected = sorted(set(observed) - set(expected_sorted))
+    missing = sorted(set(expected_sorted) - set(known_rows))
+    unexpected = sorted(set(known_rows) - set(expected_sorted))
     if dup:
         report["checks"].append((FAIL, "alembic_version.duplicate_rows:" + ",".join(dup)))
-    if unknown:
-        report["checks"].append((FAIL, "alembic_version.unknown_revision:" + ",".join(unknown)))
+    if unknown_count:
+        report["checks"].append((FAIL, f"alembic_version.unknown_revision_count:{unknown_count}"))
     if missing:
         report["checks"].append((FAIL, "alembic_version.missing_expected:" + ",".join(missing)))
     if unexpected:
         report["checks"].append((FAIL, "alembic_version.unexpected_row:" + ",".join(unexpected)))
-    if observed != expected_sorted:
+    if sorted(rows) != expected_sorted:
         report["checks"].append((FAIL, "alembic_version.rows_differ_from_expectation"))
     if not report["checks"]:
         report["checks"].append((PASS, "alembic_version.rows_exactly_expected"))

@@ -75,14 +75,28 @@ database only. Each is a single explicit revision; nothing here uses `head`,
 
 | Never | Why |
 |---|---|
-| `alembic upgrade head` / `heads` | with several repository heads it is ambiguous, and it would apply `0092`, `0114` and `0115`, which the observed topology does not record and this plan must not add |
+| `alembic upgrade head` | with several repository heads Alembic refuses it as ambiguous ("multiple head revisions are present"); there is no single head to mean |
+| `alembic upgrade heads` | means *every* branch to its own head: it would add `0092`, `0114` and `0115`, which the observed topology does not record and this plan must not add, on top of the catalog branch |
 | `alembic downgrade -1` (bare) | ambiguous with several database rows; Alembic refuses or picks a branch you did not choose |
 | `alembic downgrade 0120` / `0122` etc. (parent id, unqualified) | resolves across branches to a common ancestor and can remove `0110`–`0113` work along the way; the repository's pilot runbook proved this for `0109`/`0111-1` |
 | `alembic stamp …` | rewrites rows without running migrations: it fabricates state and hides drift |
 | `alembic merge …` | a new merge revision changes the repository graph; out of scope and unnecessary |
 | deleting or editing `alembic_version` rows, "purge", "reset" | manual fabrication; the preflight below fails closed on anything but the exact rows |
 
-## 3. Closed gates (every one must pass on the approved clone before the next)
+## 3. Closed gates (every one must pass before the next; nothing proceeds on a failure)
+
+Gates A and B are human gates and come first; gates 1–6 are checks on the
+approved clone. No gate is automated away by this plan: there is no script
+that sequences the steps.
+
+* **Gate A — independent review.** This plan and its evidence report
+  (§7) are reviewed by someone other than the author, and the review is
+  recorded, before any clone is touched.
+* **Gate B — owner approval, per environment.** A recorded owner approval
+  is required before any work on the approved staging clone; a *separate*
+  recorded owner approval is required before any staging action; any live
+  action is outside this plan and needs its own, later approval. None of
+  these approvals is implied by this document or by #1211.
 
 1. **Exact topology, fail closed.** The read-only preflight compares the exact
    row multiset (count and ids; duplicates and unknown ids fail):
@@ -123,25 +137,93 @@ database only. Each is a single explicit revision; nothing here uses `head`,
    `catalog_channel_retirements`, `meta_catalog_authorizations`) are recorded
    before and compared after every step on the clone.
 
-## 4. Procedure on the approved clone (then, separately approved, on the target)
+## 4. Procedure on the approved clone (one operator-approved step at a time)
 
-```text
-# gate 1 (exact S0), gates 2–6
-DATABASE_URL=<clone> python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120
-# forward, one explicit revision at a time, re-running the preflight between steps
-(cd database && alembic upgrade 0121) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
-(cd database && alembic upgrade 0122) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
-(cd database && alembic upgrade 0123) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0123
-# rollback rehearsal on the clone (branch-qualified only), back to the exact observation
-(cd database && alembic downgrade 0123@-1) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
-(cd database && alembic downgrade 0122@-1) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
-(cd database && alembic downgrade 0121@-1) ; python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120
+Every block below is run **by an operator, separately, after the previous
+block ended with exit 0 and after the gates of §3 are satisfied**. Nothing
+sequences the blocks; a failing block stops the procedure at that state.
+Each block binds the clone DSN explicitly to every command and runs with
+shell fail-fast enabled.
+
+**Step 0 — clone-only environment (once per operator shell).** The clone
+DSN is entered out of band and never written into a file, a document, a
+ticket or a chat:
+
+```bash
+set -euo pipefail
+export CLONE_DSN='<approved staging CLONE dsn, entered out of band>'
 ```
 
-Record the preflight output (revision ids only; it prints no DSN, token or
-row data) and the row counts before and after each command. A non-zero exit
-anywhere is a STOP at that state; the recorded branch-qualified rollback of
-the last applied revision is the only way back, never a stamp or a row edit.
+`CLONE_DSN` must point at the clone only. The procedure never reads
+`DATABASE_URL` from the environment: every command below sets it explicitly
+from `CLONE_DSN`, so an inherited DSN from a shell, an `.env` file or a
+service cannot be used by accident.
+
+**Step 1 — exact-topology preflight (gate 1) plus gates 2–6.**
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120
+```
+
+**Step 2 — forward to S1** (only after step 1 exit 0; re-check before and after).
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120
+( cd database && DATABASE_URL="$CLONE_DSN" alembic upgrade 0121 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
+```
+
+**Step 3 — forward to S2.**
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
+( cd database && DATABASE_URL="$CLONE_DSN" alembic upgrade 0122 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
+```
+
+**Step 4 — forward to S3.**
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
+( cd database && DATABASE_URL="$CLONE_DSN" alembic upgrade 0123 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0123
+```
+
+**Steps 5–7 — rollback rehearsal on the clone, branch-qualified only, back to
+the exact observation** (each its own block, same pattern):
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0123
+( cd database && DATABASE_URL="$CLONE_DSN" alembic downgrade 0123@-1 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
+```
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122
+( cd database && DATABASE_URL="$CLONE_DSN" alembic downgrade 0122@-1 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
+```
+
+```bash
+set -euo pipefail
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121
+( cd database && DATABASE_URL="$CLONE_DSN" alembic downgrade 0121@-1 )
+DATABASE_URL="$CLONE_DSN" python scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120
+```
+
+Record the preflight output of every block (it prints known revision ids
+only; an unknown row is counted, never echoed, and no DSN, token or row data
+is printed) and the row counts of the protected tables (gate 6) before and
+after each command. A non-zero exit anywhere is a STOP at that state: the
+recorded branch-qualified rollback of the last applied revision, run as its
+own approved block, is the only way back — never a stamp, a merge or a row
+edit.
 
 ## 5. Forward compatibility: a later `0124` on the same branch
 
@@ -162,7 +244,8 @@ compatible.
 
 * It performs no live or staging action, verifies no live state and grants no
   credential; the production observation is the owner's and is not
-  re-inspected here.
+  re-inspected here. It contains no DSN and no credential; the clone DSN is
+  entered out of band at step 0.
 * It changes no migration revision, `env.py`, runtime, bootstrap or CI file.
 * It does not recommend a merge revision, a stamp, a purge, `head`/`heads`
   or a bare `-1`.
@@ -172,8 +255,12 @@ compatible.
 The disposable-PostgreSQL proof of every row in §2 (exact rows after each
 forward and rollback step, retained `0111`/`0113`, non-Shopify schema by
 definition, synthetic sentinel rows in generic, catalog and retained-branch
-tables) is the three strengthened chain cases of the Shopify proof suites,
-and the preflight's fail-closed behaviour is pinned by
+tables compared by whole-row digest of every column taken at insertion, and
+negative controls proving that a same-name CHECK, foreign-key or
+index-predicate definition change and a mutation of a seeded column *are*
+detected) is the three
+strengthened chain cases of the Shopify proof suites, and the preflight's
+fail-closed, secret-safe behaviour is pinned by
 `tests/test_alembic_topology_audit_script.py` and exercised on real
 PostgreSQL inside the connection chain case. The run bound to this
 document's source is recorded in
