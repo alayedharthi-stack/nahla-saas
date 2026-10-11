@@ -14,6 +14,17 @@ Planning never calls a transport. :func:`simulate_plan` runs only with an
 explicit :class:`SimulationOptIn` AND an exact :class:`FakeMerchantTransport`;
 there is no real publishing interface in this module.
 
+Identity rules
+──────────────
+* A desired offer must carry mapper tenant provenance equal to the
+  binding's tenant, and its envelope ``offer_id`` must equal the payload
+  ``offerId`` exactly.
+* Offer ids are case-sensitive. Case-folding is used only to DETECT
+  collisions: any offer or record whose id differs from the decided id
+  (even by case) blocks; it never authorizes a write.
+* Before a simulated send, the request must still target exactly the
+  decided identity, data source and payload, or it is refused unsent.
+
 Decision rules (per offer identity)
 ───────────────────────────────────
 * INSERT: no ownership evidence, offer passes offline checks, and a fresh
@@ -40,11 +51,15 @@ from services.google_merchant_products_v1 import (
 )
 from services.google_merchant_protocol_v1 import (
     READBACK_FOREIGN_SOURCE,
+    OP_DELETE,
+    OP_INSERT,
+    OP_PATCH,
     READBACK_IDENTITY_MATCHES,
     RESP_ACCEPTED,
     RESP_NOT_FOUND,
     RESP_UNCERTAIN_WRITE,
     SUPPORTED_PRODUCT_ATTRIBUTES,
+    UPDATE_MASK_ATTRIBUTE_PREFIX,
     MerchantApiBinding,
     MerchantRequest,
     ProductReadback,
@@ -65,6 +80,7 @@ from services.google_merchant_protocol_v1 import (
     payload_fingerprint,
     readback_identity_state,
     validate_binding,
+    write_target,
 )
 
 ACTION_INSERT = "INSERT"
@@ -87,6 +103,7 @@ OUTCOME_CONFIRMED = "content_confirmed"  # write applied; publication is separat
 OUTCOME_UNRESOLVED = "unresolved_requires_later_readback"
 OUTCOME_PERMANENT_FAILURE = "permanent_failure"
 OUTCOME_GAVE_UP = "gave_up"
+OUTCOME_REFUSED = "refused_request_integrity"
 
 
 class SimulationNotPermitted(RuntimeError):
@@ -288,8 +305,13 @@ def _decide(
     offer_id = offer.offer_id if offer is not None else evidence[0].scope.offer_id
     reasons: List[str] = []
 
-    if any(not r.scope.matches(binding) for r in [*evidence, *observations, *pending]):
+    records = [*evidence, *observations, *pending]
+    if any(not r.scope.matches(binding) for r in records):
         reasons.append("evidence_scope_mismatch")
+    # Case-folding only DETECTS collisions. Every offer and record must carry
+    # the decided identity exactly; a case-only variant never authorizes.
+    if len({o.offer_id for o in offers} | {r.scope.offer_id for r in records}) > 1:
+        reasons.append("offer_id_case_conflict")
     if len(offers) > 1:
         reasons.append("duplicate_offer_identity")
     if len(evidence) > 1:
@@ -301,15 +323,23 @@ def _decide(
     desired: Dict[str, Any] = {}
     if offer is not None:
         body = offer.product_input
+        if offer.tenant_id is None:
+            reasons.append("offer_tenant_provenance_missing")
+        elif type(offer.tenant_id) is not int or offer.tenant_id != binding.tenant_id:
+            reasons.append("offer_tenant_mismatch")
+        if body.get("offerId") != offer.offer_id:
+            reasons.append("offer_identity_envelope_mismatch")
         if offer.status != OFFER_STATUS_PASSES_OFFLINE_CHECKS:
             reasons.append("offer_blocked_offline")
         if (body.get("contentLanguage"), body.get("feedLabel")) != (binding.content_language, binding.feed_label):
             reasons.append("offer_target_mismatch")
-        desired = copy.deepcopy(dict(body.get("productAttributes") or {}))
+        attrs = body.get("productAttributes")
+        if isinstance(attrs, Mapping):
+            desired = copy.deepcopy(dict(attrs))
+        else:
+            reasons.append("product_attributes_missing")
         if set(desired) - SUPPORTED_PRODUCT_ATTRIBUTES:
             reasons.append("attribute_not_in_supported_schema")
-        if owned is not None and owned.scope.offer_id != offer.offer_id:
-            reasons.append("offer_id_case_conflict")
     if owned is not None:
         stale = freshness_issue(owned.observed_at, now, freshness.ownership_max_age_s)
         if stale:
@@ -335,7 +365,7 @@ def _decide(
                 return _blocked(offer_id, ["ownership_evidence_missing"])
             return PlannedAction(
                 offer_id, ACTION_INSERT, ("absence_verified",),
-                insert_request(binding, offer.product_input), desired,
+                insert_request(binding, offer.product_input, offer_id=offer_id), desired,
             )
         if offer is not None:
             if remote == OBS_ABSENT:
@@ -369,6 +399,13 @@ def plan_lifecycle(
     """Deterministic plan. Performs no I/O and never calls a transport."""
     binding_reasons = validate_binding(binding, target, now=now, max_age_s=freshness.binding_max_age_s)
 
+    for offer in offers:
+        if (
+            not isinstance(offer, OfferPreview)
+            or not isinstance(offer.offer_id, str) or not offer.offer_id
+            or not isinstance(offer.product_input, Mapping)
+        ):
+            raise TypeError("offer_not_mapper_preview")
     groups: Dict[Tuple[str, str, str], Dict[str, list]] = {}
 
     def slot(key: Tuple[str, str, str]) -> Dict[str, list]:
@@ -474,6 +511,46 @@ def _send(transport, request, now, policy, attempts, schedule):
         clock, attempt = nxt, attempt + 1
 
 
+_ACTION_OPS = {ACTION_INSERT: OP_INSERT, ACTION_PATCH: OP_PATCH, ACTION_DELETE: OP_DELETE}
+
+
+def _integrity_reason(binding: MerchantApiBinding, action: PlannedAction) -> Optional[str]:
+    """The request about to be sent must still target exactly the decided identity."""
+    req = action.request
+    op = _ACTION_OPS.get(action.action)
+    if not isinstance(req, MerchantRequest) or op is None:
+        return "request_missing"
+    if (req.op, req.method, req.path) != (op, *write_target(binding, op, action.offer_id)):
+        return "request_target_mismatch"
+    if not req.query or req.query[0] != ("dataSource", binding.data_source_name):
+        return "request_data_source_mismatch"
+    desired = action.desired_attributes
+    if op == OP_DELETE:
+        return None if req.query == (("dataSource", binding.data_source_name),) and req.body is None else (
+            "request_shape_mismatch")
+    if not isinstance(req.body, Mapping) or not isinstance(desired, Mapping):
+        return "request_shape_mismatch"
+    if op == OP_INSERT:
+        identity = (req.body.get("offerId"), req.body.get("contentLanguage"), req.body.get("feedLabel"))
+        if identity != (action.offer_id, binding.content_language, binding.feed_label):
+            return "request_identity_mismatch"
+        if len(req.query) != 1 or canonical_json(req.body.get("productAttributes")) != canonical_json(desired):
+            return "request_payload_mismatch"
+        return None
+    sent = req.body.get("productAttributes")
+    if set(req.body) != {"productAttributes"} or not isinstance(sent, Mapping):
+        return "request_payload_mismatch"
+    mask = dict(req.query[1:]).get("updateMask", "") if len(req.query) == 2 else ""
+    expected_mask = {UPDATE_MASK_ATTRIBUTE_PREFIX + k for k in (*sent, *action.removed_attributes)}
+    if (
+        any(k not in desired or canonical_json(v) != canonical_json(desired[k]) for k, v in sent.items())
+        or any(k in desired or k in sent for k in action.removed_attributes)
+        or set(mask.split(",")) != expected_mask
+    ):
+        return "request_payload_mismatch"
+    return None
+
+
 def _simulate_action(binding, action, transport, now, policy) -> Tuple[SimulationResult, int]:
     attempts: List[AttemptRecord] = []
     schedule: List[int] = []
@@ -485,6 +562,9 @@ def _simulate_action(binding, action, transport, now, policy) -> Tuple[Simulatio
             desired_attributes=action.desired_attributes, **extra,
         ), clock
 
+    integrity = _integrity_reason(binding, action)
+    if integrity:
+        return result(OUTCOME_REFUSED, [integrity], now)
     _resp, cls, clock, gave_up = _send(transport, action.request, now, policy, attempts, schedule)
     if gave_up:
         return result(OUTCOME_GAVE_UP, ["write_retries_exhausted"], clock)
@@ -503,7 +583,9 @@ def _simulate_action(binding, action, transport, now, policy) -> Tuple[Simulatio
         return result(OUTCOME_UNRESOLVED, note + [f"readback_{rcls.kind}"], clock)
     if rcls.kind != RESP_ACCEPTED:
         return result(OUTCOME_UNRESOLVED, note + [f"readback_{rcls.kind}"], clock)
-    readback = parse_product_readback(rb_resp.body or {})
+    readback = parse_product_readback(rb_resp.body)
+    if readback.malformed:
+        return result(OUTCOME_UNRESOLVED, note + ["readback_malformed"], clock, readback=readback)
     identity = readback_identity_state(readback, binding, action.offer_id)
     if identity != READBACK_IDENTITY_MATCHES:
         return result(OUTCOME_UNRESOLVED, note + [f"readback_{identity}"], clock, readback=readback)

@@ -133,7 +133,7 @@ class TestBinding:
 class TestRequests:
 
     def test_insert_shape(self):
-        req = insert_request(_binding(), _input())
+        req = insert_request(_binding(), _input(), offer_id="PRF-100")
         assert (req.method, req.path) == ("POST", f"/products/v1/accounts/{ACCOUNT}/productInputs:insert")
         assert req.query == (("dataSource", f"accounts/{ACCOUNT}/dataSources/{SOURCE}"),)
         assert req.body == _input()
@@ -143,18 +143,23 @@ class TestRequests:
 
     def test_insert_body_is_a_copy(self):
         body = _input()
-        req = insert_request(_binding(), body)
+        req = insert_request(_binding(), body, offer_id="PRF-100")
         body["productAttributes"]["title"] = "changed"
         assert req.body["productAttributes"]["title"] == ATTRS["title"]
 
     @pytest.mark.parametrize("override", [{"contentLanguage": "en"}, {"feedLabel": "AE"}, {"offerId": ""}])
     def test_insert_refuses_target_mismatch_or_missing_identity(self, override):
         with pytest.raises(ProtocolShapeError):
-            insert_request(_binding(), _input(**override))
+            insert_request(_binding(), _input(**override), offer_id="PRF-100")
+
+    @pytest.mark.parametrize("payload_id,decided", [("FOREIGN-B", "PRF-100"), ("prf-100", "PRF-100"), ("PRF-100", "")])
+    def test_insert_payload_identity_must_equal_decided_offer(self, payload_id, decided):
+        with pytest.raises(ProtocolShapeError):
+            insert_request(_binding(), _input(offer_id=payload_id), offer_id=decided)
 
     def test_insert_refuses_attribute_outside_supported_schema(self):
         with pytest.raises(ProtocolShapeError, match="attribute_not_in_supported_schema"):
-            insert_request(_binding(), _input(attrs={**ATTRS, "customLabel0": "x"}))
+            insert_request(_binding(), _input(attrs={**ATTRS, "customLabel0": "x"}), offer_id="PRF-100")
 
     def test_patch_masks_changed_and_removed_only(self):
         previous = {**ATTRS, "brand": "علامة", "salePrice": {"amountMicros": "1000000", "currencyCode": "SAR"}}
@@ -212,7 +217,8 @@ class TestRequests:
 
 def _product(offer_id="PRF-100", *, status=None, data_source=None, attrs=None, **extra):
     raw = {
-        "name": f"accounts/{ACCOUNT}/products/{product_input_encoded_id('ar', 'SA', offer_id)}",
+        "name": f"accounts/{ACCOUNT}/products/ar~SA~{offer_id}",
+        "base64EncodedName": f"accounts/{ACCOUNT}/products/{product_input_encoded_id('ar', 'SA', offer_id)}",
         "offerId": offer_id, "contentLanguage": "ar", "feedLabel": "SA",
         "dataSource": data_source or f"accounts/{ACCOUNT}/dataSources/{SOURCE}",
         "productAttributes": dict(ATTRS if attrs is None else attrs),
@@ -282,14 +288,77 @@ class TestReadback:
     def test_identity_and_source_checks(self):
         b = _binding()
         assert readback_identity_state(parse_product_readback(_product()), b, "PRF-100") == READBACK_IDENTITY_MATCHES
-        plain = _product(name=f"accounts/{ACCOUNT}/products/ar~SA~PRF-100")
-        assert readback_identity_state(parse_product_readback(plain), b, "PRF-100") == READBACK_IDENTITY_MATCHES
+        no_encoded = {k: v for k, v in _product().items() if k != "base64EncodedName"}
+        assert readback_identity_state(parse_product_readback(no_encoded), b, "PRF-100") == READBACK_IDENTITY_MATCHES
         foreign = _product(data_source=f"accounts/{ACCOUNT}/dataSources/3333333333")
         assert readback_identity_state(parse_product_readback(foreign), b, "PRF-100") == READBACK_FOREIGN_SOURCE
         other_offer = _product("PRF-200")
         assert readback_identity_state(parse_product_readback(other_offer), b, "PRF-100") == READBACK_IDENTITY_MISMATCH
-        other_account = _product(name=f"accounts/4444444444/products/{product_input_encoded_id('ar', 'SA', 'PRF-100')}")
-        assert readback_identity_state(parse_product_readback(other_account), b, "PRF-100") == READBACK_IDENTITY_MISMATCH
+
+    def test_official_raw_name_with_reserved_characters_and_encoded_name(self):
+        # Official form: raw ``name`` keeps "/" and "~"-free offer ids verbatim;
+        # ``base64EncodedName`` carries the unpadded base64url last segment.
+        b = _binding()
+        rb = parse_product_readback(_product("sku/123"))
+        assert rb.name == f"accounts/{ACCOUNT}/products/ar~SA~sku/123"
+        assert readback_identity_state(rb, b, "sku/123") == READBACK_IDENTITY_MATCHES
+        assert readback_identity_state(rb, b, "sku") == READBACK_IDENTITY_MISMATCH
+
+    @pytest.mark.parametrize("override", [
+        {"name": f"accounts/4444444444/products/ar~SA~PRF-100"},
+        {"name": f"accounts/{ACCOUNT}/products/ar~SA~prf-100"},
+        {"name": f"accounts/{ACCOUNT}/products/{product_input_encoded_id('ar', 'SA', 'PRF-100')}"},
+        {"base64EncodedName": f"accounts/{ACCOUNT}/products/{product_input_encoded_id('ar', 'SA', 'PRF-200')}"},
+        {"base64EncodedName": f"accounts/4444444444/products/{product_input_encoded_id('ar', 'SA', 'PRF-100')}"},
+        {"base64EncodedName": ""},
+        {"offerId": "prf-100"},
+        {"feedLabel": "AE"},
+    ])
+    def test_inconsistent_or_case_variant_identity_is_mismatch(self, override):
+        rb = parse_product_readback(_product(**override))
+        assert readback_identity_state(rb, _binding(), "PRF-100") == READBACK_IDENTITY_MISMATCH
+
+    @pytest.mark.parametrize("raw", [
+        _product(status=1),
+        _product(status={"destinationStatuses": 1}),
+        _product(status={"destinationStatuses": "SHOPPING_ADS"}),
+        _product(status={"destinationStatuses": {"reportingContext": "SHOPPING_ADS"}}),
+        _product(status={"destinationStatuses": [1]}),
+        _product(status={"destinationStatuses": [{"approvedCountries": ["SA"]}]}),
+        _product(status={"destinationStatuses": [{"reportingContext": 7, "approvedCountries": ["SA"]}]}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": 1}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": "x"}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": [1]}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": [{"severity": "DEMOTED"}]}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": [{"code": 5, "severity": "DEMOTED"}]}),
+        _product(status={"destinationStatuses": [_dest()], "itemLevelIssues": [{"code": "x", "severity": 2}]}),
+        _product(status={"destinationStatuses": [_dest()],
+                         "itemLevelIssues": [{"code": "x", "severity": "DEMOTED", "attribute": 3}]}),
+        _product(status={"destinationStatuses": [_dest()],
+                         "itemLevelIssues": [{"code": "x", "severity": "DEMOTED", "applicableCountries": "SA"}]}),
+        _product(status={"destinationStatuses": [{**_dest(), "disapprovedCountries": "SA"}]}),
+        _product(status={"destinationStatuses": [{**_dest(), "pendingCountries": "SA"}]}),
+        _product(status={"destinationStatuses": [{**_dest(), "pendingCountries": 1}]}),
+        _product(status={"destinationStatuses": [_dest(approved=("",))]}),
+        _product(status={"destinationStatuses": [_dest(approved=(1,))]}),
+        _product(status={"destinationStatuses": [_dest(approved=("sa",))]}),
+        _product(status={"destinationStatuses": [{**_dest(), "approvedCountries": "SA"}]}),
+        _product(status={"destinationStatuses": [_dest()]}, productAttributes=1),
+        _product(status={"destinationStatuses": [_dest()]}, name=1),
+        _product(status={"destinationStatuses": [_dest()]}, base64EncodedName=1),
+        _product(status={"destinationStatuses": [_dest()]}, dataSource=["x"]),
+    ])
+    def test_malformed_containers_and_members_fail_closed(self, raw):
+        rb = parse_product_readback(raw)  # never raises
+        assert rb.malformed
+        assert any(f.endswith("_malformed") for f in rb.flags)
+        assert rb.publication_state == PUBLICATION_UNKNOWN
+
+    @pytest.mark.parametrize("raw", [None, 1, "x", [], [_product()]])
+    def test_non_object_readback_is_malformed(self, raw):
+        rb = parse_product_readback(raw)
+        assert rb.flags == ("readback_malformed", "status_field_missing")
+        assert rb.publication_state == PUBLICATION_UNKNOWN
 
     def test_attribute_projection_match(self):
         assert attributes_match(ATTRS, {**ATTRS, "googleAddedField": "x"})

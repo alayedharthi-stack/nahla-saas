@@ -38,7 +38,6 @@ from urllib.parse import urlencode
 from services.google_merchant_products_v1 import (
     GoogleMerchantTarget,
     product_input_encoded_id,
-    product_input_plain_id,
 )
 
 API_HOST = "https://merchantapi.googleapis.com"
@@ -100,6 +99,8 @@ _DIGITS_RE = re.compile(r"^[1-9][0-9]{0,19}$")
 _CONTENT_LANGUAGE_RE = re.compile(r"^[a-z]{2}$")
 _FEED_LABEL_RE = re.compile(r"^[A-Z0-9_-]{1,20}$")
 _RETRY_AFTER_SECONDS_RE = re.compile(r"^[0-9]{1,9}$")
+_COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+MALFORMED_SUFFIX = "_malformed"
 
 
 class InvalidBindingError(ValueError):
@@ -223,22 +224,34 @@ def _check_attributes(attrs: Mapping[str, Any]) -> None:
         raise ProtocolShapeError("attribute_not_in_supported_schema:" + ",".join(unknown))
 
 
-def insert_request(binding: MerchantApiBinding, product_input: Mapping[str, Any]) -> MerchantRequest:
+def write_target(binding: MerchantApiBinding, op: str, offer_id: str) -> Tuple[str, str]:
+    """``(method, path)`` every write for *offer_id* under *binding* must use."""
+    if op == OP_INSERT:
+        return "POST", f"{API_VERSION_PATH}/{binding.account_name}/productInputs:insert"
+    rid = _resource_id(binding.content_language, binding.feed_label, offer_id)
+    method = {OP_PATCH: "PATCH", OP_DELETE: "DELETE"}.get(op)
+    if method is None:
+        raise ProtocolShapeError("not_a_write_op")
+    return method, f"{API_VERSION_PATH}/{binding.account_name}/productInputs/{rid}"
+
+
+def insert_request(binding: MerchantApiBinding, product_input: Mapping[str, Any], *, offer_id: str) -> MerchantRequest:
+    """The payload identity must equal the decided *offer_id* exactly."""
+    if not isinstance(offer_id, str) or not offer_id:
+        raise ProtocolShapeError("offer_id_missing")
+    if product_input.get("offerId") != offer_id:
+        raise ProtocolShapeError("offer_identity_mismatch")
     if (product_input.get("contentLanguage"), product_input.get("feedLabel")) != (
         binding.content_language, binding.feed_label,
     ):
         raise ProtocolShapeError("product_input_target_mismatch")
-    if not isinstance(product_input.get("offerId"), str) or not product_input["offerId"]:
-        raise ProtocolShapeError("offer_id_missing")
     attrs = product_input.get("productAttributes")
     if not isinstance(attrs, Mapping):
         raise ProtocolShapeError("product_attributes_missing")
     _check_attributes(attrs)
     body = json.loads(canonical_json(product_input))
-    return MerchantRequest(
-        OP_INSERT, "POST", f"{API_VERSION_PATH}/{binding.account_name}/productInputs:insert",
-        (("dataSource", binding.data_source_name),), body,
-    )
+    method, path = write_target(binding, OP_INSERT, offer_id)
+    return MerchantRequest(OP_INSERT, method, path, (("dataSource", binding.data_source_name),), body)
 
 
 def attribute_changes(
@@ -264,19 +277,15 @@ def patch_request(
         raise ProtocolShapeError("patch_without_changes")
     mask = ",".join(UPDATE_MASK_ATTRIBUTE_PREFIX + k for k in sorted(changed + removed))
     body = {"productAttributes": json.loads(canonical_json({k: desired[k] for k in changed}))}
-    rid = _resource_id(binding.content_language, binding.feed_label, offer_id)
+    method, path = write_target(binding, OP_PATCH, offer_id)
     return MerchantRequest(
-        OP_PATCH, "PATCH", f"{API_VERSION_PATH}/{binding.account_name}/productInputs/{rid}",
-        (("dataSource", binding.data_source_name), ("updateMask", mask)), body,
+        OP_PATCH, method, path, (("dataSource", binding.data_source_name), ("updateMask", mask)), body,
     )
 
 
 def delete_request(binding: MerchantApiBinding, offer_id: str) -> MerchantRequest:
-    rid = _resource_id(binding.content_language, binding.feed_label, offer_id)
-    return MerchantRequest(
-        OP_DELETE, "DELETE", f"{API_VERSION_PATH}/{binding.account_name}/productInputs/{rid}",
-        (("dataSource", binding.data_source_name),), None,
-    )
+    method, path = write_target(binding, OP_DELETE, offer_id)
+    return MerchantRequest(OP_DELETE, method, path, (("dataSource", binding.data_source_name),), None)
 
 
 def get_product_request(binding: MerchantApiBinding, offer_id: str) -> MerchantRequest:
@@ -332,6 +341,7 @@ class ItemIssue:
 @dataclass(frozen=True)
 class ProductReadback:
     name: str
+    base64_encoded_name: Optional[str]
     offer_id: str
     content_language: str
     feed_label: str
@@ -342,20 +352,47 @@ class ProductReadback:
     flags: Tuple[str, ...]
     publication_state: str
 
+    @property
+    def malformed(self) -> bool:
+        return any(f.endswith(MALFORMED_SUFFIX) for f in self.flags)
 
-def _str(value: Any) -> str:
-    return value if isinstance(value, str) else ""
+
+def _opt_str(item: Mapping[str, Any], key: str, flags: List[str], flag: str) -> str:
+    """Absent → ""; a present non-string is malformed (flagged), never coerced."""
+    value = item.get(key)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    flags.append(flag)
+    return ""
 
 
-def _str_tuple(value: Any) -> Tuple[str, ...]:
+def _members(value: Any, flags: List[str], flag: str) -> List[Any]:
+    """Absent → []; any non-array container is malformed (flagged)."""
+    if value is None:
+        return []
     if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(v for v in value if isinstance(v, str))
+        flags.append(flag)
+        return []
+    return list(value)
+
+
+def _countries(value: Any, flags: List[str]) -> Tuple[str, ...]:
+    out: List[str] = []
+    for member in _members(value, flags, "countries_malformed"):
+        if isinstance(member, str) and _COUNTRY_RE.match(member):
+            out.append(member)
+        else:
+            flags.append("countries_malformed")
+    return tuple(out)
 
 
 def _publication_state(
     destinations: Tuple[DestinationStatus, ...], issues: Tuple[ItemIssue, ...], flags: List[str],
 ) -> str:
+    if any(f.endswith(MALFORMED_SUFFIX) for f in flags):
+        return PUBLICATION_UNKNOWN
     if any(d.disapproved_countries for d in destinations) or any(i.severity == "DISAPPROVED" for i in issues):
         return PUBLICATION_DISAPPROVED
     if flags or not destinations:
@@ -367,55 +404,97 @@ def _publication_state(
     return PUBLICATION_UNKNOWN
 
 
-def parse_product_readback(raw: Mapping[str, Any]) -> ProductReadback:
-    """Parse an ``accounts.products`` resource. Never raises on odd shapes."""
-    if not isinstance(raw, Mapping):
-        raw = {}
+def _destination(item: Any, flags: List[str]) -> Optional[DestinationStatus]:
+    if not isinstance(item, Mapping):
+        flags.append("destination_malformed")
+        return None
+    context = item.get("reportingContext")
+    if not isinstance(context, str) or not context:
+        flags.append("destination_malformed")
+        return None
+    known = context in KNOWN_REPORTING_CONTEXTS
+    if not known:
+        flags.append("unknown_reporting_context")
+    return DestinationStatus(
+        context,
+        _countries(item.get("approvedCountries"), flags),
+        _countries(item.get("pendingCountries"), flags),
+        _countries(item.get("disapprovedCountries"), flags),
+        known,
+    )
+
+
+def _issue(item: Any, flags: List[str]) -> Optional[ItemIssue]:
+    if not isinstance(item, Mapping):
+        flags.append("issue_malformed")
+        return None
+    code = item.get("code")
+    raw_severity = item.get("severity")
+    if not isinstance(code, str) or not code or not isinstance(raw_severity, (str, type(None))):
+        flags.append("issue_malformed")
+        return None
+    raw_severity = raw_severity or ""
+    severity = raw_severity if raw_severity in KNOWN_SEVERITIES else SEVERITY_UNKNOWN
+    if severity == SEVERITY_UNKNOWN:
+        flags.append("unknown_issue_severity")
+    context = _opt_str(item, "reportingContext", flags, "issue_malformed")
+    if context and context not in KNOWN_REPORTING_CONTEXTS:
+        flags.append("unknown_reporting_context")
+    return ItemIssue(
+        code, severity, raw_severity,
+        _opt_str(item, "attribute", flags, "issue_malformed"), context,
+        _opt_str(item, "resolution", flags, "issue_malformed"),
+        _countries(item.get("applicableCountries"), flags),
+    )
+
+
+def parse_product_readback(raw: Any) -> ProductReadback:
+    """Parse an ``accounts.products`` resource. Never raises on odd shapes.
+
+    Every container and member is validated; anything malformed is flagged
+    (``*_malformed``) and makes the publication state ``unknown`` — nothing
+    is silently discarded into a more favourable state.
+    """
     flags: List[str] = []
+    if not isinstance(raw, Mapping):
+        flags.append("readback_malformed")
+        raw = {}
     status = raw.get("productStatus")
-    if not isinstance(status, Mapping):
+    if status is None:
         flags.append("obsolete_status_field" if "productStatuses" in raw else "status_field_missing")
         status = {}
+    elif not isinstance(status, Mapping):
+        flags.append("status_malformed")
+        status = {}
 
-    destinations: List[DestinationStatus] = []
-    for item in status.get("destinationStatuses") or ():
-        if not isinstance(item, Mapping):
-            flags.append("destination_malformed")
-            continue
-        context = _str(item.get("reportingContext"))
-        known = context in KNOWN_REPORTING_CONTEXTS
-        if not known:
-            flags.append("unknown_reporting_context")
-        destinations.append(DestinationStatus(
-            context, _str_tuple(item.get("approvedCountries")),
-            _str_tuple(item.get("pendingCountries")), _str_tuple(item.get("disapprovedCountries")), known,
-        ))
-
-    issues: List[ItemIssue] = []
-    for item in status.get("itemLevelIssues") or ():
-        if not isinstance(item, Mapping):
-            flags.append("issue_malformed")
-            continue
-        raw_severity = _str(item.get("severity"))
-        severity = raw_severity if raw_severity in KNOWN_SEVERITIES else SEVERITY_UNKNOWN
-        if severity == SEVERITY_UNKNOWN:
-            flags.append("unknown_issue_severity")
-        context = _str(item.get("reportingContext"))
-        if context and context not in KNOWN_REPORTING_CONTEXTS:
-            flags.append("unknown_reporting_context")
-        issues.append(ItemIssue(
-            _str(item.get("code")), severity, raw_severity, _str(item.get("attribute")), context,
-            _str(item.get("resolution")), _str_tuple(item.get("applicableCountries")),
-        ))
+    destinations = [
+        d for d in (_destination(item, flags) for item in _members(
+            status.get("destinationStatuses"), flags, "destinations_malformed",
+        )) if d is not None
+    ]
+    issues = [
+        i for i in (_issue(item, flags) for item in _members(
+            status.get("itemLevelIssues"), flags, "issues_malformed",
+        )) if i is not None
+    ]
 
     attrs = raw.get("productAttributes")
+    if attrs is not None and not isinstance(attrs, Mapping):
+        flags.append("product_attributes_malformed")
+    encoded = raw.get("base64EncodedName")
+    if encoded is not None and not isinstance(encoded, str):
+        flags.append("identity_malformed")
+        encoded = ""
+    identity = {key: _opt_str(raw, key, flags, "identity_malformed")
+                for key in ("name", "offerId", "contentLanguage", "feedLabel", "dataSource")}
     flags = sorted(set(flags))
     return ProductReadback(
-        name=_str(raw.get("name")),
-        offer_id=_str(raw.get("offerId")),
-        content_language=_str(raw.get("contentLanguage")),
-        feed_label=_str(raw.get("feedLabel")),
-        data_source=_str(raw.get("dataSource")),
+        name=identity["name"],
+        base64_encoded_name=encoded,
+        offer_id=identity["offerId"],
+        content_language=identity["contentLanguage"],
+        feed_label=identity["feedLabel"],
+        data_source=identity["dataSource"],
         product_attributes=dict(attrs) if isinstance(attrs, Mapping) else None,
         destinations=tuple(destinations),
         issues=tuple(issues),
@@ -425,14 +504,19 @@ def parse_product_readback(raw: Mapping[str, Any]) -> ProductReadback:
 
 
 def readback_identity_state(readback: ProductReadback, binding: MerchantApiBinding, offer_id: str) -> str:
-    """Does the read-back describe exactly this offer in exactly this API source?"""
+    """Does the read-back describe exactly this offer in exactly this API source?
+
+    Official forms: ``name`` is the raw ``accounts/{account}/products/
+    {contentLanguage}~{feedLabel}~{offerId}`` (any characters, compared
+    exactly); ``base64EncodedName``, when present, must be the same name
+    with the last segment unpadded-base64url encoded. Case-sensitive.
+    """
     lang, label = binding.content_language, binding.feed_label
-    accepted_names = {f"{binding.account_name}/products/{_resource_id(lang, label, offer_id)}"}
-    plain = product_input_plain_id(lang, label, offer_id)
-    if plain:
-        accepted_names.add(f"{binding.account_name}/products/{plain}")
+    raw_name = f"{binding.account_name}/products/{lang}~{label}~{offer_id}"
+    encoded_name = f"{binding.account_name}/products/{_resource_id(lang, label, offer_id)}"
     if (
-        readback.name not in accepted_names
+        readback.name != raw_name
+        or (readback.base64_encoded_name is not None and readback.base64_encoded_name != encoded_name)
         or (readback.offer_id, readback.content_language, readback.feed_label) != (offer_id, lang, label)
     ):
         return READBACK_IDENTITY_MISMATCH
@@ -587,4 +671,5 @@ __all__ = [
     "payload_fingerprint",
     "readback_identity_state",
     "validate_binding",
+    "write_target",
 ]

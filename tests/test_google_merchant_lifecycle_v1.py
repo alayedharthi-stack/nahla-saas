@@ -38,6 +38,7 @@ from services.google_merchant_lifecycle_v1 import (  # noqa: E402
     OUTCOME_CONFIRMED,
     OUTCOME_GAVE_UP,
     OUTCOME_PERMANENT_FAILURE,
+    OUTCOME_REFUSED,
     OUTCOME_UNRESOLVED,
     SIMULATION_ACK,
     CatalogSnapshotProof,
@@ -197,7 +198,8 @@ def _readback(offer, attrs=None, data_source=None, status="approved"):
         "pending": {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "pendingCountries": ["SA"]}]},
     }
     body = {
-        "name": f"accounts/{ACCOUNT}/products/{_rid(offer.offer_id)}",
+        "name": f"accounts/{ACCOUNT}/products/ar~SA~{offer.offer_id}",
+        "base64EncodedName": f"accounts/{ACCOUNT}/products/{_rid(offer.offer_id)}",
         "offerId": offer.offer_id, "contentLanguage": "ar", "feedLabel": "SA",
         "dataSource": data_source or f"accounts/{ACCOUNT}/dataSources/{SOURCE}",
         "productAttributes": dict(offer.product_input["productAttributes"] if attrs is None else attrs),
@@ -312,19 +314,20 @@ class TestInsert:
 
     def test_duplicate_identity_by_case_is_blocked(self):
         a = _perfume(external_id="SKU-1")
-        b = OfferPreview("sku-1", 99, None, {**a.product_input, "offerId": "sku-1"}, "active")
+        b = OfferPreview("sku-1", 99, None, {**a.product_input, "offerId": "sku-1"}, "active", tenant_id=TENANT)
         action = _only(_plan([a, b], observations=[_absent("SKU-1")]))
         assert action.action == ACTION_BLOCKED and "duplicate_offer_identity" in action.reasons
 
     def test_offer_for_other_language_or_label_is_blocked(self):
         offer = _perfume()
-        moved = OfferPreview(offer.offer_id, 1, None, {**offer.product_input, "feedLabel": "AE"}, "active")
+        moved = OfferPreview(offer.offer_id, 1, None, {**offer.product_input, "feedLabel": "AE"}, "active", tenant_id=TENANT)
         assert "offer_target_mismatch" in _only(_plan([moved])).reasons
 
     def test_attribute_outside_supported_schema_is_blocked(self):
         offer = _perfume()
         attrs = {**offer.product_input["productAttributes"], "customLabel0": "x"}
-        odd = OfferPreview(offer.offer_id, 1, None, {**offer.product_input, "productAttributes": attrs}, "active")
+        odd = OfferPreview(offer.offer_id, 1, None, {**offer.product_input, "productAttributes": attrs}, "active",
+                           tenant_id=TENANT)
         assert _only(_plan([odd], observations=[_absent(offer.offer_id)])).reasons == (
             "attribute_not_in_supported_schema",)
 
@@ -631,3 +634,160 @@ class TestReplay:
         assert actions[ok.offer_id].action == ACTION_NOOP
         assert actions[unsure.offer_id].reasons == ("prior_write_unresolved",)
         assert replay.executable == ()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Review regressions: tenant provenance, envelope identity, exact case,
+# official read-back names, malformed status
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestTenantProvenance:
+
+    def test_real_mapper_offer_from_other_tenant_never_inserts(self):
+        other = GoogleMerchantTarget(tenant_id=TENANT + 1, content_language="ar", feed_label="SA")
+        row = _product(id=80, tenant_id=TENANT + 1, external_id="PRF-100")
+        foreign = map_product(other, row, []).offers[0]
+        own = _perfume()
+        assert (foreign.tenant_id, own.tenant_id) == (TENANT + 1, TENANT)
+        assert foreign.status == own.status == "passes_offline_checks"
+        assert foreign.offer_id == own.offer_id
+
+        plan = _plan([foreign], observations=[_absent(foreign.offer_id)])
+        action = _only(plan)
+        assert (action.action, action.reasons, action.request) == (ACTION_BLOCKED, ("offer_tenant_mismatch",), None)
+        fake = FakeMerchantTransport()
+        assert simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY) == ()
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("tenant,reason", [
+        (None, "offer_tenant_provenance_missing"), (TENANT + 1, "offer_tenant_mismatch"),
+        (str(TENANT), "offer_tenant_mismatch"), (True, "offer_tenant_mismatch"),
+    ])
+    def test_offer_without_matching_tenant_provenance_is_blocked(self, tenant, reason):
+        src = _perfume()
+        offer = OfferPreview(src.offer_id, 1, None, src.product_input, "active", tenant_id=tenant)
+        assert _only(_plan([offer], observations=[_absent(src.offer_id)])).reasons == (reason,)
+
+    def test_non_mapper_offer_objects_are_refused(self):
+        with pytest.raises(TypeError):
+            _plan([SimpleNamespace(offer_id="PRF-100", product_input={}, tenant_id=TENANT)])
+
+
+class TestEnvelopeIdentity:
+
+    def test_payload_offer_id_must_equal_envelope(self):
+        src = _perfume()
+        body = {**src.product_input, "offerId": "FOREIGN-B"}
+        smuggled = OfferPreview("PRF-100", 1, None, body, "active", tenant_id=TENANT)
+        for obs in ([_absent("PRF-100")], [_absent("PRF-100"), _absent("FOREIGN-B")], [_absent("FOREIGN-B")]):
+            action = _only(_plan([smuggled], observations=obs))
+            assert action.action == ACTION_BLOCKED and action.request is None
+            assert "offer_identity_envelope_mismatch" in action.reasons
+
+    @pytest.mark.parametrize("tamper,reason", [
+        (lambda r: r.body.__setitem__("offerId", "FOREIGN-B"), "request_identity_mismatch"),
+        (lambda r: r.body.__setitem__("feedLabel", "AE"), "request_identity_mismatch"),
+        (lambda r: r.body["productAttributes"].__setitem__("title", "x"), "request_payload_mismatch"),
+    ])
+    def test_tampered_insert_request_is_refused_unsent(self, tamper, reason):
+        offer = _perfume()
+        plan = _insert_plan(offer)
+        tamper(plan.executable[0].request)
+        fake = FakeMerchantTransport()
+        (res,) = simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY)
+        assert (res.outcome, res.reasons) == (OUTCOME_REFUSED, (reason,))
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("tamper", [
+        lambda body: body["productAttributes"].__setitem__("brand", "dropped"),
+        lambda body: body["productAttributes"].__setitem__("title", "x"),
+        lambda body: body.__setitem__("productAttributes", 1),
+        lambda body: body.__setitem__("offerId", "FOREIGN-B"),
+    ])
+    def test_tampered_patch_request_is_refused_unsent(self, tamper):
+        offer = _shirt_offers()[0]
+        old = {**offer.product_input["productAttributes"], "title": "old", "mpn": "OLD-1"}
+        plan = _plan([offer], owned=[_owned(offer, attrs=old)], observations=[_present(offer.offer_id)])
+        tamper(plan.executable[0].request.body)
+        fake = FakeMerchantTransport()
+        (res,) = simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY)
+        assert (res.outcome, res.reasons, fake.calls) == (OUTCOME_REFUSED, ("request_payload_mismatch",), [])
+
+
+class TestExactCaseIdentity:
+
+    def test_lowercase_get_404_never_authorizes_uppercase_insert(self):
+        offer = _perfume()
+        assert offer.offer_id == "PRF-100"
+        action = _only(_plan([offer], observations=[_absent("prf-100")]))
+        assert (action.action, action.reasons, action.request) == (ACTION_BLOCKED, ("offer_id_case_conflict",), None)
+
+    def test_exact_probe_still_inserts(self):
+        assert _only(_plan([_perfume()], observations=[_absent("PRF-100")])).action == ACTION_INSERT
+
+    @pytest.mark.parametrize("kw", [
+        {"pending": [PendingWrite(_scope("prf-100"), NOW - 5)]},
+        {"owned": [OwnedOfferEvidence(_scope("prf-100"), {}, NOW - 5)]},
+        {"observations": [_absent("PRF-100"), _absent("prf-100")]},
+    ])
+    def test_any_case_variant_record_blocks(self, kw):
+        kw.setdefault("observations", [_absent("PRF-100")])
+        action = _only(_plan([_perfume()], **kw))
+        assert action.action == ACTION_BLOCKED and "offer_id_case_conflict" in action.reasons
+
+    def test_case_variant_observation_never_authorizes_delete(self):
+        sku = _perfume(external_id="SKU-9")
+        proof = CatalogSnapshotProof(TENANT, "ar", "SA", True, NOW - 5)
+        exact = _only(_plan([], owned=[_owned(sku)], observations=[_present("SKU-9")], snapshot_proof=proof))
+        assert exact.action == ACTION_DELETE
+        action = _only(_plan([], owned=[_owned(sku)], observations=[_present("sku-9")], snapshot_proof=proof))
+        assert (action.action, action.reasons) == (ACTION_BLOCKED, ("offer_id_case_conflict",))
+
+
+class TestOfficialReadbackForms:
+
+    def test_raw_name_with_slash_confirms_insert(self):
+        offer = _perfume(external_id="sku/123")
+        assert offer.offer_id == "sku/123"
+        ins, _patch, get = _paths(offer.offer_id)
+        (res,), _ = _sim(_insert_plan(offer), {("POST", ins): [TransportResponse(200, body={})],
+                                               ("GET", get): [_readback(offer)]})
+        assert res.readback.name == f"accounts/{ACCOUNT}/products/ar~SA~sku/123"
+        assert res.outcome == OUTCOME_CONFIRMED
+
+    def test_inconsistent_encoded_name_stays_unresolved(self):
+        offer = _perfume()
+        ins, _patch, get = _paths(offer.offer_id)
+        rb = _readback(offer)
+        rb.body["base64EncodedName"] = f"accounts/{ACCOUNT}/products/{_rid('OTHER')}"
+        (res,), _ = _sim(_insert_plan(offer), {("POST", ins): [TransportResponse(200, body={})], ("GET", get): [rb]})
+        assert (res.outcome, res.reasons) == (OUTCOME_UNRESOLVED, ("readback_identity_mismatch",))
+
+
+class TestMalformedReadbackSimulation:
+
+    @pytest.mark.parametrize("status", [
+        1, {"destinationStatuses": 1}, {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS",
+                                                                "approvedCountries": ["SA"]}], "itemLevelIssues": 1},
+        {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "approvedCountries": ["SA"],
+                                  "disapprovedCountries": "SA"}]},
+        {"destinationStatuses": [{"reportingContext": "SHOPPING_ADS", "approvedCountries": [""]}]},
+    ])
+    def test_malformed_status_never_confirms(self, status):
+        offer = _perfume()
+        ins, _patch, get = _paths(offer.offer_id)
+        rb = _readback(offer)
+        rb.body["productStatus"] = status
+        (res,), _ = _sim(_insert_plan(offer), {("POST", ins): [TransportResponse(200, body={})], ("GET", get): [rb]})
+        assert (res.outcome, res.reasons) == (OUTCOME_UNRESOLVED, ("readback_malformed",))
+        assert res.readback.publication_state == "unknown"
+        assert evidence_after_apply((), [res]) == ()
+
+    @pytest.mark.parametrize("body", [None, [], 1])
+    def test_non_object_readback_body_never_confirms(self, body):
+        offer = _perfume()
+        ins, _patch, get = _paths(offer.offer_id)
+        (res,), _ = _sim(_insert_plan(offer), {("POST", ins): [TransportResponse(200, body={})],
+                                               ("GET", get): [TransportResponse(200, body=body)]})
+        assert res.outcome == OUTCOME_UNRESOLVED

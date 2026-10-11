@@ -187,6 +187,9 @@ class OfferPreview:
     lifecycle: str
     issues: List[Issue] = field(default_factory=list)
     provenance: Dict[str, str] = field(default_factory=dict)
+    # Tenant of the GoogleMerchantTarget that produced this offer. None means
+    # the offer did not come from map_product and has no tenant provenance.
+    tenant_id: Optional[int] = None
 
     @property
     def blocking(self) -> bool:
@@ -893,6 +896,7 @@ def _build_offer(
         lifecycle=lifecycle,
         issues=issues,
         provenance=provenance,
+        tenant_id=target.tenant_id,
     )
 
 
