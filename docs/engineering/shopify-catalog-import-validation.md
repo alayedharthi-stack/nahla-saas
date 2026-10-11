@@ -35,18 +35,51 @@ SHA-1 `0a36625fa44dc0d65cb1cee6041e468d96bdbb8d` verified) on 5434, role
 
 | Check | Command | Result |
 |---|---|---|
-| Root unit suite (CI "Run unit tests") | `python -m pytest -q --maxfail=1` | RC 0 — 9529 passed, 790 skipped, 7 xfailed, 0 failed |
-| Strict proofs, PG16 first run (trust auth) | `scripts/required_postgres_proofs.py --manifest scripts/required_postgres_proofs.json …` | RC 1 — **NOT PROVEN 754/755** (proofs 752/753, runner regressions 2/2, 0 skipped); see below |
-| Strict proofs, PG16 re-run (SCRAM auth) | same | RC 0 — **PROVEN 755/755** (753/753 + 2/2), 28/28 suites, 0 skipped |
-| Strict proofs, PG18 (SCRAM auth) | same, PostgreSQL 18.6 | RC 0 — **PROVEN 755/755** (753/753 + 2/2), 28/28 suites, 0 skipped |
+| Root unit suite (CI "Run unit tests") | `PATH=/tmp/claude-0/venv312/bin:$PATH timeout 5400 python -m pytest -q --maxfail=1` (repository root) | RC 0 — 9529 passed, 790 skipped, 7 xfailed, 0 failed |
+| Strict proofs, PG16 first run (trust auth) | [strict command](#strict-proofs-command), port 5433, label `final_pg16` | RC 1 — **NOT PROVEN 754/755** (proofs 752/753, runner regressions 2/2, 0 skipped); see below |
+| Strict proofs, PG16 re-run (SCRAM auth) | [strict command](#strict-proofs-command), port 5433, label `final_pg16_scram` | RC 0 — **PROVEN 755/755** (753/753 + 2/2), 28/28 suites, 0 skipped |
+| Strict proofs, PG18 (SCRAM auth) | [strict command](#strict-proofs-command), port 5434, label `final_pg18`, PostgreSQL 18.6 | RC 0 — **PROVEN 755/755** (753/753 + 2/2), 28/28 suites, 0 skipped |
 | `lint-and-test` remaining 16 steps | each step's `run:` block from `ci.yml`, verbatim | all RC 0 (silent-except lint OK; WhatsApp OAuth boundary 16; sibling identity 94; manual gift 36; orders newest-first 15; Salla browse 41, card 75, compose 85, PR 888 69; coupon L0 156; coupon shadow 10; coupon verify 29; real-channel probe 59; staging migration operators; tenant clone 112 passed 1 skipped (pre-existing); DR parity 7) |
-| GOV-002 (scanner from merge-base `53bd7a4`, `--trusted-base-scanner`) | `python <scanner> --repo . --base 53bd7a4 --head 7b4328a --trusted-base-scanner` | RC 0 — `FINDINGS=none`; MODEL / PROMPT / PERSONA / PHRASE_MAP / KEYWORD_ROUTER / CUSTOMER_REGEX changed = NO |
-| Constitution compliance | `python -m pytest backend/tests/test_constitution_compliance.py backend/tests/test_intelligence_non_interference_guard.py -q` | RC 0 — 98 passed |
-| Dashboard typecheck / build | `npx tsc --noEmit -p .`; `npm run build` | RC 0 / RC 0 (tracked `dist/index.html` restored afterwards) |
-| Dashboard platform policy | `npm run check:platform-policy` | RC 0 — 598 OK, 0 FAIL |
-| Import UI source/model check | `npm run check:shopify-catalog-import-ui` | RC 0 — 39 passed |
-| Connection UI check (unchanged guard) | `npm run check:shopify-connection-ui` | RC 0 — 295 passed |
-| Real-browser harness (local) | `node scripts/verify-shopify-catalog-import-ui.mjs` | RC 0 — 20/20; the old busy gate fails scenario 8 (mutation-checked) |
+| GOV-002 (scanner from merge-base `53bd7a4`, `--trusted-base-scanner`) | `git show 53bd7a484a3b19ceb08f8d351e21067b87bcb78d:scripts/lint_intelligence_non_interference.py > /tmp/claude-0/nahla_intelligence_guard.py && python /tmp/claude-0/nahla_intelligence_guard.py --repo . --base 53bd7a484a3b19ceb08f8d351e21067b87bcb78d --head 7b4328ae046072b076b20f39c40e8d2887ba42fa --trusted-base-scanner` | RC 0 — `FINDINGS=none`; MODEL / PROMPT / PERSONA / PHRASE_MAP / KEYWORD_ROUTER / CUSTOMER_REGEX changed = NO |
+| Constitution compliance | `/tmp/claude-0/venv312/bin/python -m pytest backend/tests/test_constitution_compliance.py backend/tests/test_intelligence_non_interference_guard.py -q` | RC 0 — 98 passed |
+| Dashboard typecheck / build (in `dashboard/`) | `npx tsc --noEmit -p .`; `npm run build` | RC 0 / RC 0 (tracked `dist/index.html` restored afterwards with `git checkout -- dashboard/dist/index.html`) |
+| Dashboard platform policy (in `dashboard/`) | `npm run check:platform-policy` | RC 0 — 598 OK, 0 FAIL |
+| Import UI source/model check (in `dashboard/`) | executed: `npx --yes tsx@4 scripts/check-shopify-catalog-import-ui.mts` (npm-script equivalent: `npm run check:shopify-catalog-import-ui`) | RC 0 — 39 passed |
+| Connection UI check, unchanged guard (in `dashboard/`) | executed: `npx --yes tsx@4 scripts/check-shopify-connection-ui.mts` (npm-script equivalent: `npm run check:shopify-connection-ui`) | RC 0 — 295 passed |
+| Real-browser harness, local (in `dashboard/`) | executed: `timeout 600 node scripts/verify-shopify-catalog-import-ui.mjs` | RC 0 — 20/20; the old busy gate fails scenario 8 (mutation-checked) |
+
+### Strict proofs command
+
+Executed by a local wrapper (`run_strict.sh <port> <label>`) from the
+repository root, verbatim apart from `${PORT}` / `${LABEL}` (5433 /
+`final_pg16`, 5433 / `final_pg16_scram`, 5434 / `final_pg18`). The DSNs use
+the synthetic credentials of CI's disposable PostgreSQL service
+(`nahla` / `nahla_password`) on local throw-away clusters; no live
+database or credential is involved.
+
+```bash
+set -u
+export NAHLA_RELIABILITY_REQUIRE_PG=1
+export NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@127.0.0.1:${PORT}/postgres
+export CUSTOMER_NAME_PROVENANCE_PG_REQUIRED=1
+export LEGACY_MIG_PG_TEST_DATABASE_URL=postgresql://nahla:nahla_password@127.0.0.1:${PORT}/nahla_saas
+OUT=/tmp/claude-0/proofs/${LABEL}
+rm -rf "$OUT"; mkdir -p "$OUT"
+git rev-parse HEAD > "$OUT/head.txt"; git status --porcelain > "$OUT/status.txt"
+/tmp/claude-0/venv312/bin/python -c 'import os; import sqlalchemy as sa; e=sa.create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"]); c=e.connect(); print("server_version_num=", c.exec_driver_sql("SHOW server_version_num").scalar()); print(c.exec_driver_sql("select version()").scalar()); c.close(); e.dispose()' > "$OUT/server.txt" 2>&1
+PATH=/tmp/claude-0/venv312/bin:$PATH python scripts/required_postgres_proofs.py \
+  --manifest scripts/required_postgres_proofs.json \
+  --junit-dir "$OUT/junit" --report "$OUT/report.json" > "$OUT/runner.log" 2>&1
+echo $? > "$OUT/rc.txt"
+```
+
+Recorded per run: `head.txt` (`1cc9613c7b78b6525f0e972f533a937fb7c72691` for
+`final_pg16`, `7b4328ae046072b076b20f39c40e8d2887ba42fa` for
+`final_pg16_scram` and `final_pg18`), an empty `status.txt` (clean tree),
+`server.txt` (`server_version_num= 160015` / `180006`), `report.json`
+(verdict and per-suite counts) and `rc.txt`. This mirrors the CI step's
+environment (same four variables, same manifest, `--junit-dir` and
+`--report` flags).
 
 Catalog suites inside every strict run: `shopify_catalog_import` 55/55 and
 `shopify_connection_foundation` 73/73, 0 skipped.
@@ -58,7 +91,9 @@ Catalog suites inside every strict run: `shopify_catalog_import` 55/55 and
 wrong password. The disposable PG16 cluster had been initialised with
 `--auth=trust`, so any password was accepted; CI's `postgres:16` service
 authenticates TCP clients with SCRAM. Both clusters were switched to
-`host … scram-sha-256` (verified: wrong password refused, CI password
+`pg_hba.conf` lines `local all all trust`,
+`host all all 127.0.0.1/32 scram-sha-256` and
+`host all all ::1/128 scram-sha-256` (verified: wrong password refused, CI password
 accepted) — PG18 before its run started, PG16 after its first run ended —
 and the full inventory was re-run on PG16 under a new label. The first
 report is kept as evidence, not replaced. No test, manifest, rule or source
@@ -94,7 +129,8 @@ checks. The local runs above are the evidence until the stack reaches
   (2026-10-11); this environment's fetch of shopify.dev was refused by the
   network policy (HTTP 403).
 * Migration `0122` was applied only to disposable databases (in-process and
-  on the real alembic chain `0093 → … → 0121 → 0122 → 0121`); it has not
+  on the real alembic chain: `alembic upgrade` to `0093`, `0111`, `0113`,
+  `0120`, `0121`, `0122`, then `alembic downgrade 0122@-1`); it has not
   been applied to any shared or live database.
 * `read_inventory` is not requested or granted by the foundation; the
   per-location inventory path is exercised only with a mocked wider grant.
