@@ -54,6 +54,7 @@ jobs:
         working-directory: driver
     steps:
       - name: Fetch exact accepted and deployed sources plus test driver
+        id: sources
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -125,7 +126,7 @@ jobs:
           date -u +'%Y-%m-%dT%H:%M:%SZ'
 
       - name: Record final source identity
-        if: always()
+        if: always() && steps.sources.outcome == 'success'
         run: |
           set -euo pipefail
           git -C ../candidate diff --exit-code

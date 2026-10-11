@@ -145,23 +145,31 @@ def test_candidate_startup_preserves_schema_rows_and_is_idempotent(started_state
     for report in (state["legacy"], *state["candidate"]):
         assert report["db_tasks"] == ["_bootstrap_db_schema_bg", "_migrate_background"]
         assert report["safe_alters_ready"] and report["bootstrap_ready"]
-        assert report["sql_or_bootstrap_errors"] == []
         assert report["subprocesses"] == [{"operation": "cleanup", "returncode": 0},
                                           {"operation": "upgrade 0093", "returncode": 0}]
         assert report["withheld_tasks"] == ["_coexistence_client_id_repair_bg",
                                             "_reconcile_pending_moyasar_sweep", "run_runtime_heartbeat"]
     expected = topo.S0 if state["phase"] == "S0" else topo.S3
-    topo.assert_rows(state["url"], expected, "after full startup")
+    topo.assert_rows(state["url"], expected, "after isolated startup DB tasks")
     actual = topo.schema_snapshot(state["url"], exclude_prefixes=(), exclude=())
     assert actual == state["schema"], topo.schema_diff(actual, state["schema"])
     assert _identities(state["url"]) == state["identities"]
-    topo.assert_sentinels(state["url"], state["sentinels"], "after full startup")
+    topo.assert_sentinels(state["url"], state["sentinels"], "after isolated startup DB tasks")
     assert topo.row_counts(state["url"], topo.SENTINEL_TABLES) == state["counts"]
     for table, hashes in state["extra"].items():
         assert _sql(state["url"], f"SELECT encode(sha256(convert_to(CAST(t AS text),'UTF8')),'hex') "
                     f"FROM {table} t ORDER BY CAST(t AS text)") == hashes, table
     if state["phase"] == "S0":
         assert not any(name.startswith("shopify_") for name in actual)
+    print("STARTUP_PRESERVATION", state["phase"], "PASS", json.dumps({
+        "public_tables": len(actual), "relation_identities": len(state["identities"]),
+        "sentinel_tables": len(topo.SENTINEL_TABLES), "integration_and_shopify_row_tables": len(state["extra"]),
+        "candidate_boots": len(state["candidate"]), "version_rows": sorted(expected),
+    }, sort_keys=True))
+    # Keep startup cleanliness strict, but let the independent preservation
+    # assertions execute first so an existing warning cannot hide their result.
+    for report in (state["legacy"], *state["candidate"]):
+        assert report["sql_or_bootstrap_errors"] == []
 
 
 def test_release_gate_accepts_the_schema_after_actual_startup(started_state):
