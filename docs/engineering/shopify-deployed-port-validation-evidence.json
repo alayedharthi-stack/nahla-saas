@@ -1,15 +1,19 @@
 {
  "schema": "nahla.shopify-deployed-compat-port.validation-evidence/v2",
  "evidence_revision": {
-  "revision": 2,
-  "supersedes_docs_commit": "301b2cf743ba8d95a973a6e542ca5dfe2b3852fc",
-  "nature": "docs-only correction bundle rebuilt from the retained artifacts; no test re-run, no source change",
+  "revision": 3,
+  "supersedes_docs_commits": [
+   "301b2cf743ba8d95a973a6e542ca5dfe2b3852fc",
+   "ffcf458d6fed848d054ee6276e5f6f5dd47ee52f"
+  ],
+  "nature": "docs-only correction bundles rebuilt from the retained artifacts; no test re-run, no source change",
   "changes": [
    "ci_steps.*.started_utc/finished_utc now carry the corrected attempt's own start and end lines; the invalid first attempt keeps its own start/end under invalid_first_attempt",
    "owner_regression_gate.gate_*.cases: complete (classname, name, outcome) tuples for independent recomputation of the published digests",
    "ci_steps.run_block_verification.run_blocks: the 17 verbatim run: blocks with their step names",
    "leakage_reproductions: executed and deselected node counts per reproduction",
-   "labels: a246580519f9 is the SOURCE head; evidence commits are docs-only"
+   "labels: a246580519f9 is the SOURCE head; evidence commits are docs-only",
+   "revision 3: ci_steps.constituent_results publishes every pytest command's own result for the two multi-command blocks (14 and 16), because the step harness used bash -o pipefail -c without -e and the outer rc alone does not prove each constituent command"
   ]
  },
  "status": "evidence only: sanitized subset derived from retained artifacts; not itself a test run",
@@ -802,6 +806,154 @@
     }
    ],
    "run_blocks_note": "verbatim run: text of the deployed workflow's lint-and-test job at the base, in workflow order, executed under bash -o pipefail -c on both sides; the /tmp paths inside them are the workflow's own artifact paths"
+  },
+  "constituent_results": {
+   "why": "the replay ran each run: block under bash -o pipefail -c (no -e); for a block with several commands the block's exit code is the last command's, so every constituent command's own pytest summary is published here from the retained log",
+   "blocks": {
+    "14": {
+     "name": "Guarded staging migration operator tests",
+     "commands": [
+      "python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1",
+      "python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1",
+      "python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1",
+      "python -m pytest backend/tests/test_staging_migration_0088_to_0089_operators.py -q --maxfail=1"
+     ]
+    },
+    "16": {
+     "name": "Staging DR canonical parity unit tests",
+     "commands": [
+      "python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1",
+      "python -m pytest backend/tests/test_staging_dr_executor_image.py -q --maxfail=1"
+     ]
+    }
+   },
+   "per_side": {
+    "ci_cand": {
+     "14": {
+      "retained_log": "ci_cand/step_14.log (per-step capture of the corrected attempt; stdout then a '--- stderr ---' section)",
+      "log_sha256": "8326790d02a0dd0bed7e185c7d2d65e4d26dc81d64de040d336cbb902479bcba",
+      "log_mtime_utc": "2026-10-11T13:24:33Z",
+      "stderr_empty": true,
+      "ordering": "one summary line per command, in the block's command order",
+      "results": [
+       {
+        "order": 1,
+        "command": "python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1",
+        "pytest_summary": "39 passed in 0.85s",
+        "passed": 39,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 2,
+        "command": "python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1",
+        "pytest_summary": "37 passed in 0.89s",
+        "passed": 37,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 3,
+        "command": "python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1",
+        "pytest_summary": "49 passed in 0.93s",
+        "passed": 49,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 4,
+        "command": "python -m pytest backend/tests/test_staging_migration_0088_to_0089_operators.py -q --maxfail=1",
+        "pytest_summary": "16 passed in 0.76s",
+        "passed": 16,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       }
+      ]
+     },
+     "16": {
+      "retained_log": "ci_cand/step_16.log (per-step capture of the corrected attempt; stdout then a '--- stderr ---' section)",
+      "log_sha256": "b3a967a57f0a8dc3654d552c8675a4e6b94b889db102305b4debb6b98d657f4f",
+      "log_mtime_utc": "2026-10-11T13:24:37Z",
+      "stderr_empty": true,
+      "ordering": "one summary line per command, in the block's command order",
+      "results": [
+       {
+        "order": 1,
+        "command": "python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1",
+        "pytest_summary": "17 passed in 0.77s",
+        "passed": 17,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 2,
+        "command": "python -m pytest backend/tests/test_staging_dr_executor_image.py -q --maxfail=1",
+        "pytest_summary": "7 passed in 0.62s",
+        "passed": 7,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       }
+      ]
+     }
+    },
+    "ci_base": {
+     "14": {
+      "retained_log": "ci_base/step_14.log (per-step capture of the corrected attempt; stdout then a '--- stderr ---' section)",
+      "log_sha256": "bcb283d1f6dca9e92d3aa872812cba8a71d8e7ca04188036d69fdb406d1ef82c",
+      "log_mtime_utc": "2026-10-11T13:45:45Z",
+      "stderr_empty": true,
+      "ordering": "one summary line per command, in the block's command order",
+      "results": [
+       {
+        "order": 1,
+        "command": "python -m pytest backend/tests/test_staging_migration_0016_to_0024_operator.py -q --maxfail=1",
+        "pytest_summary": "39 passed in 0.88s",
+        "passed": 39,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 2,
+        "command": "python -m pytest backend/tests/test_staging_migration_0024_to_0030_operator.py -q --maxfail=1",
+        "pytest_summary": "37 passed in 0.73s",
+        "passed": 37,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 3,
+        "command": "python -m pytest backend/tests/test_staging_migration_0030_to_0087_operators.py -q --maxfail=1",
+        "pytest_summary": "49 passed in 0.75s",
+        "passed": 49,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 4,
+        "command": "python -m pytest backend/tests/test_staging_migration_0088_to_0089_operators.py -q --maxfail=1",
+        "pytest_summary": "16 passed in 1.04s",
+        "passed": 16,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       }
+      ]
+     },
+     "16": {
+      "retained_log": "ci_base/step_16.log (per-step capture of the corrected attempt; stdout then a '--- stderr ---' section)",
+      "log_sha256": "97f80e3c94529613f1c2650726213b36defd5747fa3d8506b05eba4c50702968",
+      "log_mtime_utc": "2026-10-11T13:45:49Z",
+      "stderr_empty": true,
+      "ordering": "one summary line per command, in the block's command order",
+      "results": [
+       {
+        "order": 1,
+        "command": "python -m pytest backend/tests/test_staging_dr_canonical_parity.py -q --maxfail=1",
+        "pytest_summary": "17 passed in 0.66s",
+        "passed": 17,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       },
+       {
+        "order": 2,
+        "command": "python -m pytest backend/tests/test_staging_dr_executor_image.py -q --maxfail=1",
+        "pytest_summary": "7 passed in 0.35s",
+        "passed": 7,
+        "failed_or_error_or_skipped_or_xfailed_or_warnings_tokens": []
+       }
+      ]
+     }
+    }
+   },
+   "total_constituent_results": 12
   }
  },
  "owner_regression_gate": {

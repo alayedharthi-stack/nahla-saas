@@ -1,6 +1,6 @@
 # Shopify deployed-compatible port — validation evidence (Draft PR #1209)
 
-Status: **dormant port, source frozen, validation terminal; evidence revision 2.**
+Status: **dormant port, source frozen, validation terminal; evidence revision 3.**
 This document records what was run against the port of the reviewed Shopify
 stack onto the exact deployed ops base, with the results as observed. The
 original `main`-based stack cannot be applied to the deployed base unchanged;
@@ -12,9 +12,11 @@ activation, and the owner's approval. No live schema, preflight or activation
 step was performed, every Shopify flag defaults OFF, and this document is not a
 merge or deployment proposal.
 
-Evidence revision 2 is a docs-only correction bundle rebuilt from the retained
-artifacts (no test re-run, no source change); it supersedes the first evidence
-commit `301b2cf743ba`. The JSON's `evidence_revision` lists the changes.
+Evidence revisions 2 and 3 are docs-only correction bundles rebuilt from the
+retained artifacts (no test re-run, no source change); they supersede the
+evidence commits `301b2cf743ba` and `ffcf458d6fed`. Revision 3 adds the
+constituent command results of the two multi-command CI blocks (§4.3). The
+JSON's `evidence_revision` lists the changes.
 
 Machine-readable companion (sanitized subset of the retained artifacts):
 [`shopify-deployed-port-validation-evidence.json`](shopify-deployed-port-validation-evidence.json).
@@ -29,7 +31,7 @@ Staging runbook (not executed):
 | `main` at port time (the reviewed stack's base) | [`b7d2d6811911`](https://github.com/alayedharthi-stack/nahla-saas/commit/b7d2d6811911) |
 | **Tested source** (the acceptance chain's checkout) | [`d199035ca163`](https://github.com/alayedharthi-stack/nahla-saas/commit/d199035ca163) |
 | **Source head** (parent-accepted; every later commit on the PR is docs-only evidence) | [`a246580519f9`](https://github.com/alayedharthi-stack/nahla-saas/commit/a246580519f9) |
-| Evidence commits (docs-only, no source change) | first [`301b2cf743ba`](https://github.com/alayedharthi-stack/nahla-saas/commit/301b2cf743ba); this revision is the commit that carries this file |
+| Evidence commits (docs-only, no source change) | [`301b2cf743ba`](https://github.com/alayedharthi-stack/nahla-saas/commit/301b2cf743ba), [`ffcf458d6fed`](https://github.com/alayedharthi-stack/nahla-saas/commit/ffcf458d6fed); this revision is the commit that carries this file |
 
 Commit chain on the PR branch (three logical commits, 68 files added, 29
 modified, 0 deleted against the base):
@@ -187,6 +189,19 @@ PostgreSQL postmaster unchanged across every PostgreSQL stage: **yes**. Every st
 Last output line of each step is in the JSON, together with the 17 verbatim `run:` blocks (`ci_steps.run_block_verification.run_blocks`), verified byte-equal and in order against the deployed workflow at the base. Overall: base rc 0, candidate rc 0. Run with the virtual environment first on PATH (the deployed job uses setup-python 3.12 with the requirements installed), strict-PostgreSQL and Shopify variables unset. Corrected attempt: candidate 2026-10-11T13:02:26Z → 2026-10-11T13:24:38Z, base 2026-10-11T13:24:38Z → 2026-10-11T13:45:49Z.
 
 **Invalid first attempt (kept, not counted):** candidate 2026-10-11T13:00:49Z → 2026-10-11T13:01:04Z, base 2026-10-11T13:01:04Z → 2026-10-11T13:01:18Z, with a scratch-harness defect: the step harness ran the deployed run: blocks without the virtual environment on PATH, so python resolved to the system interpreter (3.13) without pytest; no test executed. 16 of 17 steps per side exited immediately with `/usr/bin/python: No module named pytest`; only `Lint — no new silent excepts` ran. These are unexecuted commands, not test failures. The attempt is kept under `invalid_first_attempt` in the JSON; both stages were re-run with the virtual environment on PATH and no other change, and the chain's final completion line (13:45:49Z) follows both corrected stage ends.
+
+**Constituent commands of the multi-command blocks (revision 3):** the replay ran each run: block under bash -o pipefail -c (no -e); for a block with several commands the block's exit code is the last command's, so every constituent command's own pytest summary is published here from the retained log.
+
+| Block | Command (in order) | Candidate `d199035ca163` | Base `462ede1aff60` |
+|---|---|---|---|
+| 14 Guarded staging migration operator tests | `backend/tests/test_staging_migration_0016_to_0024_operator.py` | 39 passed in 0.85s | 39 passed in 0.88s |
+| 14 Guarded staging migration operator tests | `backend/tests/test_staging_migration_0024_to_0030_operator.py` | 37 passed in 0.89s | 37 passed in 0.73s |
+| 14 Guarded staging migration operator tests | `backend/tests/test_staging_migration_0030_to_0087_operators.py` | 49 passed in 0.93s | 49 passed in 0.75s |
+| 14 Guarded staging migration operator tests | `backend/tests/test_staging_migration_0088_to_0089_operators.py` | 16 passed in 0.76s | 16 passed in 1.04s |
+| 16 Staging DR canonical parity unit tests | `backend/tests/test_staging_dr_canonical_parity.py` | 17 passed in 0.77s | 17 passed in 0.66s |
+| 16 Staging DR canonical parity unit tests | `backend/tests/test_staging_dr_executor_image.py` | 7 passed in 0.62s | 7 passed in 0.35s |
+
+Provenance: `ci_cand/step_14.log` sha256 `8326790d02a0dd0b…` mtime 2026-10-11T13:24:33Z, stderr empty: True; `ci_cand/step_16.log` sha256 `b3a967a57f0a8dc3…` mtime 2026-10-11T13:24:37Z, stderr empty: True; `ci_base/step_14.log` sha256 `bcb283d1f6dca9e9…` mtime 2026-10-11T13:45:45Z, stderr empty: True; `ci_base/step_16.log` sha256 `97f80e3c94529613…` mtime 2026-10-11T13:45:49Z, stderr empty: True. 12 constituent results in total, every one `passed` with no failed, error, skipped, xfailed or warnings token in its summary line; these are the only two blocks with more than one pytest invocation.
 
 Root-suite step 1 output: base `9583 passed, 790 skipped, 7 xfailed, 45657 warnings in 1100.71s (0:18:20)`; candidate `9890 passed, 790 skipped, 7 xfailed, 45657 warnings in 1165.52s (0:19:25)` (the candidate collects the DB-free Shopify suites and the repair's added tests; skipped and xfailed counts are identical).
 
