@@ -43,6 +43,7 @@ const MERCHANT_PATHS = [
   '/operations-center',
   '/operations-center/branches/123',
   '/integrations',
+  '/integrations/shopify/complete',
   '/analytics',
   '/settings',
   '/settings/security',

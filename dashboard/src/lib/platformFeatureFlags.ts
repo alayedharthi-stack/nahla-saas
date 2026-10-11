@@ -28,6 +28,15 @@ export function isNavSimplified8Enabled(): boolean {
   return isTruthyEnv(import.meta.env.VITE_PLATFORM_NAV_SIMPLIFIED_8)
 }
 
+/**
+ * Shopify connection merchant UI (card on /integrations + completion page).
+ * Default OFF. The backend has its own default-off flag
+ * (NAHLA_SHOPIFY_CONNECTION_ENABLED); both must be on. No local override.
+ */
+export function isShopifyConnectionUiEnabled(): boolean {
+  return isTruthyEnv(import.meta.env.VITE_SHOPIFY_CONNECTION_UI)
+}
+
 /** Overview command-center layout experiment (future). */
 export function isOverviewCommandCenterEnabled(): boolean {
   return isTruthyEnv(import.meta.env.VITE_OVERVIEW_COMMAND_CENTER)

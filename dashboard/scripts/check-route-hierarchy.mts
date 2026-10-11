@@ -24,6 +24,10 @@ assert(child.showBack === true, 'intelligence must show Back')
 assert(child.parentPath === '/settings-hub', `intelligence parent got ${child.parentPath}`)
 assert(child.kind === 'child', 'intelligence must be child')
 
+const shopifyComplete = resolveRouteHierarchy('/integrations/shopify/complete')
+assert(shopifyComplete.parentPath === '/integrations' && shopifyComplete.kind === 'deep_child',
+  'shopify completion page is a deep child of /integrations')
+
 const ltrParent = resolveRouteHierarchy('/whatsapp-connect')
 assert(ltrParent.parentPath === '/channels', 'whatsapp-connect parent is channels hub')
 
