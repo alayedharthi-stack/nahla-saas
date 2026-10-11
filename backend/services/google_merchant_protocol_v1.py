@@ -52,6 +52,10 @@ SUPPORTED_PRODUCT_ATTRIBUTES = frozenset({
     "price", "salePrice", "availability", "brand", "gtins", "mpn",
     "itemGroupId", "color", "size", "material", "pattern",
 })
+# The ONLY top-level ProductInput fields an insert may carry. Anything else
+# (``legacyLocal``, ``customAttributes``, ``name``, ``versionNumber``, ...)
+# is refused: some of them change the Google identity of the offer.
+INSERT_BODY_FIELDS = frozenset({"offerId", "contentLanguage", "feedLabel", "productAttributes"})
 # updateMask path prefix for top-level ProductAttributes fields. Re-verify
 # against the productInputs.patch reference before any live slice.
 UPDATE_MASK_ATTRIBUTE_PREFIX = "productAttributes."
@@ -95,11 +99,12 @@ RESP_PERMANENT_PERMISSION = "permanent_permission"
 RESP_PERMANENT_VALIDATION = "permanent_validation"
 RESP_PERMANENT_UNEXPECTED = "permanent_unexpected"
 
-_DIGITS_RE = re.compile(r"^[1-9][0-9]{0,19}$")
-_CONTENT_LANGUAGE_RE = re.compile(r"^[a-z]{2}$")
-_FEED_LABEL_RE = re.compile(r"^[A-Z0-9_-]{1,20}$")
-_RETRY_AFTER_SECONDS_RE = re.compile(r"^[0-9]{1,9}$")
-_COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+# Always used with ``fullmatch``: ``$`` would also accept a trailing newline.
+_DIGITS_RE = re.compile(r"[1-9][0-9]{0,19}")
+_CONTENT_LANGUAGE_RE = re.compile(r"[a-z]{2}")
+_FEED_LABEL_RE = re.compile(r"[A-Z0-9_-]{1,20}")
+_RETRY_AFTER_SECONDS_RE = re.compile(r"[0-9]{1,9}")
+_COUNTRY_RE = re.compile(r"[A-Z]{2}")
 MALFORMED_SUFFIX = "_malformed"
 
 
@@ -137,13 +142,13 @@ class MerchantApiBinding:
             raise InvalidBindingError("tenant_id_invalid")
         for name in ("account_id", "data_source_id"):
             value = getattr(self, name)
-            if not isinstance(value, str) or not _DIGITS_RE.match(value):
+            if not isinstance(value, str) or not _DIGITS_RE.fullmatch(value):
                 raise InvalidBindingError(f"{name}_invalid")
         if not isinstance(self.data_source_input, str):
             raise InvalidBindingError("data_source_input_invalid")
-        if not isinstance(self.content_language, str) or not _CONTENT_LANGUAGE_RE.match(self.content_language):
+        if not isinstance(self.content_language, str) or not _CONTENT_LANGUAGE_RE.fullmatch(self.content_language):
             raise InvalidBindingError("content_language_invalid")
-        if not isinstance(self.feed_label, str) or not _FEED_LABEL_RE.match(self.feed_label):
+        if not isinstance(self.feed_label, str) or not _FEED_LABEL_RE.fullmatch(self.feed_label):
             raise InvalidBindingError("feed_label_invalid")
         if not _is_epoch(self.observed_at):
             raise InvalidBindingError("observed_at_invalid")
@@ -239,6 +244,8 @@ def insert_request(binding: MerchantApiBinding, product_input: Mapping[str, Any]
     """The payload identity must equal the decided *offer_id* exactly."""
     if not isinstance(offer_id, str) or not offer_id:
         raise ProtocolShapeError("offer_id_missing")
+    if not isinstance(product_input, Mapping) or set(product_input) != INSERT_BODY_FIELDS:
+        raise ProtocolShapeError("product_input_field_not_allowed")
     if product_input.get("offerId") != offer_id:
         raise ProtocolShapeError("offer_identity_mismatch")
     if (product_input.get("contentLanguage"), product_input.get("feedLabel")) != (
@@ -249,7 +256,12 @@ def insert_request(binding: MerchantApiBinding, product_input: Mapping[str, Any]
     if not isinstance(attrs, Mapping):
         raise ProtocolShapeError("product_attributes_missing")
     _check_attributes(attrs)
-    body = json.loads(canonical_json(product_input))
+    body = {
+        "offerId": offer_id,
+        "contentLanguage": binding.content_language,
+        "feedLabel": binding.feed_label,
+        "productAttributes": json.loads(canonical_json(attrs)),
+    }
     method, path = write_target(binding, OP_INSERT, offer_id)
     return MerchantRequest(OP_INSERT, method, path, (("dataSource", binding.data_source_name),), body)
 
@@ -307,6 +319,17 @@ def list_products_request(
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def request_snapshot(request: MerchantRequest) -> str:
+    """Immutable canonical text of a request (op, method, path, query, body)."""
+    return canonical_json([request.op, request.method, request.path, [list(q) for q in request.query], request.body])
+
+
+def request_from_snapshot(snapshot: str) -> MerchantRequest:
+    """A fresh request rebuilt from :func:`request_snapshot` text (no shared objects)."""
+    op, method, path, query, body = json.loads(snapshot)
+    return MerchantRequest(op, method, path, tuple(tuple(q) for q in query), body)
 
 
 def payload_fingerprint(value: Any) -> str:
@@ -381,7 +404,7 @@ def _members(value: Any, flags: List[str], flag: str) -> List[Any]:
 def _countries(value: Any, flags: List[str]) -> Tuple[str, ...]:
     out: List[str] = []
     for member in _members(value, flags, "countries_malformed"):
-        if isinstance(member, str) and _COUNTRY_RE.match(member):
+        if isinstance(member, str) and _COUNTRY_RE.fullmatch(member):
             out.append(member)
         else:
             flags.append("countries_malformed")
@@ -571,7 +594,7 @@ def parse_retry_after(value: Any, now: int) -> Optional[int]:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
-    if _RETRY_AFTER_SECONDS_RE.match(text):
+    if _RETRY_AFTER_SECONDS_RE.fullmatch(text):
         return int(text)
     try:
         when = parsedate_to_datetime(text)
@@ -646,6 +669,7 @@ def next_retry_at(policy: RetryPolicy, attempt: int, now: int, retry_after_s: Op
 __all__ = [
     "Classification",
     "DATA_SOURCE_INPUT_API",
+    "INSERT_BODY_FIELDS",
     "InvalidBindingError",
     "MerchantApiBinding",
     "MerchantRequest",
@@ -670,6 +694,8 @@ __all__ = [
     "patch_request",
     "payload_fingerprint",
     "readback_identity_state",
+    "request_from_snapshot",
+    "request_snapshot",
     "validate_binding",
     "write_target",
 ]

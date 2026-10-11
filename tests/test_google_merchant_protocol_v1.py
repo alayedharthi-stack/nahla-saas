@@ -116,6 +116,8 @@ class TestBinding:
             "binding_evidence_future",)
 
     @pytest.mark.parametrize("field,value", [
+        ("account_id", "1111111111\n"), ("data_source_id", "2222222222\n"), ("account_id", " 1111111111"),
+        ("content_language", "ar\n"), ("feed_label", "SA\n"), ("feed_label", "SA\r\n"),
         ("account_id", "acc-1"), ("account_id", ""), ("account_id", 1111111111),
         ("data_source_id", "0123"), ("tenant_id", 0), ("tenant_id", True),
         ("content_language", "AR"), ("feed_label", "sa"), ("observed_at", -1),
@@ -151,6 +153,18 @@ class TestRequests:
     def test_insert_refuses_target_mismatch_or_missing_identity(self, override):
         with pytest.raises(ProtocolShapeError):
             insert_request(_binding(), _input(**override), offer_id="PRF-100")
+
+    @pytest.mark.parametrize("field,value", [
+        ("legacyLocal", True), ("legacyLocal", False), ("customAttributes", [{"name": "x", "value": "y"}]),
+        ("versionNumber", "7"), ("name", "accounts/1/productInputs/x"), ("product", "accounts/1/products/x"),
+    ])
+    def test_insert_refuses_any_extra_top_level_field(self, field, value):
+        with pytest.raises(ProtocolShapeError, match="product_input_field_not_allowed"):
+            insert_request(_binding(), _input(**{field: value}), offer_id="PRF-100")
+
+    def test_insert_body_has_exactly_the_allowed_fields(self):
+        req = insert_request(_binding(), _input(), offer_id="PRF-100")
+        assert set(req.body) == {"offerId", "contentLanguage", "feedLabel", "productAttributes"}
 
     @pytest.mark.parametrize("payload_id,decided", [("FOREIGN-B", "PRF-100"), ("prf-100", "PRF-100"), ("PRF-100", "")])
     def test_insert_payload_identity_must_equal_decided_offer(self, payload_id, decided):
@@ -353,6 +367,26 @@ class TestReadback:
         assert rb.malformed
         assert any(f.endswith("_malformed") for f in rb.flags)
         assert rb.publication_state == PUBLICATION_UNKNOWN
+
+    @pytest.mark.parametrize("field", ["approvedCountries", "pendingCountries", "disapprovedCountries",
+                                       "applicableCountries"])
+    @pytest.mark.parametrize("bad", ["SA\n", "SA\r\n", "SA ", " SA", "S A", "SA\t", "SA\x00", "sa", "Sa",
+                                     "\uff33\uff21", "SAU", "S", ""])
+    def test_every_country_array_requires_exact_two_letter_codes(self, field, bad):
+        dest = _dest(approved=("SA",))
+        issue = {"code": "x", "severity": "DEMOTED", "reportingContext": "SHOPPING_ADS", "applicableCountries": ["SA"]}
+        if field == "applicableCountries":
+            issue[field] = ["SA", bad]
+        else:
+            dest[field] = ["SA", bad] if field == "approvedCountries" else [bad]
+        rb = parse_product_readback(_product(status={"destinationStatuses": [dest], "itemLevelIssues": [issue]}))
+        assert rb.malformed and "countries_malformed" in rb.flags
+        assert rb.publication_state == PUBLICATION_UNKNOWN
+
+    def test_exact_country_codes_still_parse(self):
+        rb = parse_product_readback(_product(status={"destinationStatuses": [_dest(approved=("SA", "AE"))]}))
+        assert (rb.malformed, rb.publication_state, rb.destinations[0].approved_countries) == (
+            False, PUBLICATION_APPROVED, ("SA", "AE"))
 
     @pytest.mark.parametrize("raw", [None, 1, "x", [], [_product()]])
     def test_non_object_readback_is_malformed(self, raw):

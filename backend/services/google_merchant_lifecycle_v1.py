@@ -22,8 +22,13 @@ Identity rules
 * Offer ids are case-sensitive. Case-folding is used only to DETECT
   collisions: any offer or record whose id differs from the decided id
   (even by case) blocks; it never authorizes a write.
-* Before a simulated send, the request must still target exactly the
-  decided identity, data source and payload, or it is refused unsent.
+* An insert payload may carry only ``offerId`` / ``contentLanguage`` /
+  ``feedLabel`` / ``productAttributes``; identity-affecting options such as
+  ``legacyLocal`` are refused.
+* Executable actions carry an immutable canonical snapshot taken at
+  planning time. Before a simulated send the action must still equal it
+  and target exactly the decided identity, data source and payload, or it
+  is refused unsent; what is sent is rebuilt from the snapshot.
 
 Decision rules (per offer identity)
 ───────────────────────────────────
@@ -41,7 +46,8 @@ Decision rules (per offer identity)
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from services.google_merchant_products_v1 import (
@@ -51,6 +57,7 @@ from services.google_merchant_products_v1 import (
 )
 from services.google_merchant_protocol_v1 import (
     READBACK_FOREIGN_SOURCE,
+    INSERT_BODY_FIELDS,
     OP_DELETE,
     OP_INSERT,
     OP_PATCH,
@@ -79,6 +86,8 @@ from services.google_merchant_protocol_v1 import (
     patch_request,
     payload_fingerprint,
     readback_identity_state,
+    request_from_snapshot,
+    request_snapshot,
     validate_binding,
     write_target,
 )
@@ -226,6 +235,32 @@ class PlannedAction:
     request: Optional[MerchantRequest] = None
     desired_attributes: Optional[Dict[str, Any]] = None
     removed_attributes: Tuple[str, ...] = ()
+    # Immutable canonical text of the decision taken at planning time.
+    # Simulation refuses an action whose current state no longer matches it.
+    snapshot: str = ""
+
+
+def action_snapshot(
+    offer_id: str, action: str, request: Optional[MerchantRequest],
+    desired: Optional[Mapping[str, Any]], removed: Sequence[str],
+) -> str:
+    return canonical_json({
+        "offer_id": offer_id,
+        "action": action,
+        "request": None if request is None else json.loads(request_snapshot(request)),
+        "desired": desired,
+        "removed": list(removed),
+    })
+
+
+def _executable(
+    offer_id: str, action: str, reasons: Tuple[str, ...], request: MerchantRequest,
+    desired: Optional[Dict[str, Any]] = None, removed: Tuple[str, ...] = (),
+) -> PlannedAction:
+    return PlannedAction(
+        offer_id, action, reasons, request, desired, removed,
+        action_snapshot(offer_id, action, request, desired, removed),
+    )
 
 
 @dataclass(frozen=True)
@@ -329,6 +364,8 @@ def _decide(
             reasons.append("offer_tenant_mismatch")
         if body.get("offerId") != offer.offer_id:
             reasons.append("offer_identity_envelope_mismatch")
+        if set(body) != INSERT_BODY_FIELDS:
+            reasons.append("product_input_field_not_allowed")
         if offer.status != OFFER_STATUS_PASSES_OFFLINE_CHECKS:
             reasons.append("offer_blocked_offline")
         if (body.get("contentLanguage"), body.get("feedLabel")) != (binding.content_language, binding.feed_label):
@@ -363,7 +400,7 @@ def _decide(
         if offer is not None and owned is None:
             if remote == OBS_PRESENT_IN_SOURCE:
                 return _blocked(offer_id, ["ownership_evidence_missing"])
-            return PlannedAction(
+            return _executable(
                 offer_id, ACTION_INSERT, ("absence_verified",),
                 insert_request(binding, offer.product_input, offer_id=offer_id), desired,
             )
@@ -373,13 +410,13 @@ def _decide(
             if payload_fingerprint(desired) == owned.fingerprint:
                 return PlannedAction(offer_id, ACTION_NOOP, ("fingerprint_unchanged",))
             _changed, removed = attribute_changes(desired, owned.product_attributes)
-            return PlannedAction(
+            return _executable(
                 offer_id, ACTION_PATCH, ("fingerprint_changed",),
                 patch_request(binding, offer_id, desired, owned.product_attributes), desired, removed,
             )
         if remote == OBS_ABSENT:
             return PlannedAction(offer_id, ACTION_NOOP, ("already_absent",))
-        return PlannedAction(offer_id, ACTION_DELETE, ("retired_from_complete_snapshot",), delete_request(binding, offer_id))
+        return _executable(offer_id, ACTION_DELETE, ("retired_from_complete_snapshot",), delete_request(binding, offer_id))
     except ProtocolShapeError as exc:
         return _blocked(offer_id, [str(exc)])
 
@@ -520,6 +557,14 @@ def _integrity_reason(binding: MerchantApiBinding, action: PlannedAction) -> Opt
     op = _ACTION_OPS.get(action.action)
     if not isinstance(req, MerchantRequest) or op is None:
         return "request_missing"
+    try:
+        current = action_snapshot(
+            action.offer_id, action.action, req, action.desired_attributes, action.removed_attributes,
+        )
+    except (TypeError, ValueError):
+        return "request_not_serializable"
+    if not action.snapshot or current != action.snapshot:
+        return "request_mutated_after_planning"
     if (req.op, req.method, req.path) != (op, *write_target(binding, op, action.offer_id)):
         return "request_target_mismatch"
     if not req.query or req.query[0] != ("dataSource", binding.data_source_name):
@@ -531,6 +576,8 @@ def _integrity_reason(binding: MerchantApiBinding, action: PlannedAction) -> Opt
     if not isinstance(req.body, Mapping) or not isinstance(desired, Mapping):
         return "request_shape_mismatch"
     if op == OP_INSERT:
+        if set(req.body) != INSERT_BODY_FIELDS:
+            return "request_field_not_allowed"
         identity = (req.body.get("offerId"), req.body.get("contentLanguage"), req.body.get("feedLabel"))
         if identity != (action.offer_id, binding.content_language, binding.feed_label):
             return "request_identity_mismatch"
@@ -565,6 +612,16 @@ def _simulate_action(binding, action, transport, now, policy) -> Tuple[Simulatio
     integrity = _integrity_reason(binding, action)
     if integrity:
         return result(OUTCOME_REFUSED, [integrity], now)
+    # From here on work only on a copy rebuilt from the verified snapshot: no
+    # object the caller (or the transport) holds can alter what is sent or
+    # what a read-back is compared against.
+    frozen = json.loads(action.snapshot)
+    action = replace(
+        action,
+        request=request_from_snapshot(canonical_json(frozen["request"])),
+        desired_attributes=frozen["desired"],
+        removed_attributes=tuple(frozen["removed"]),
+    )
     _resp, cls, clock, gave_up = _send(transport, action.request, now, policy, attempts, schedule)
     if gave_up:
         return result(OUTCOME_GAVE_UP, ["write_retries_exhausted"], clock)
@@ -657,6 +714,7 @@ __all__ = [
     "SimulationNotPermitted",
     "SimulationOptIn",
     "SimulationResult",
+    "action_snapshot",
     "evidence_after_apply",
     "observation_absent_from_get",
     "observation_from_readback",

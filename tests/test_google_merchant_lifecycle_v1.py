@@ -11,6 +11,7 @@ call counts and state — never prose.
 """
 from __future__ import annotations
 
+import dataclasses
 import socket
 import sys
 import time
@@ -47,9 +48,11 @@ from services.google_merchant_lifecycle_v1 import (  # noqa: E402
     OfferScope,
     OwnedOfferEvidence,
     PendingWrite,
+    PlannedAction,
     RemoteObservation,
     SimulationNotPermitted,
     SimulationOptIn,
+    action_snapshot,
     evidence_after_apply,
     observation_absent_from_get,
     plan_lifecycle,
@@ -685,34 +688,145 @@ class TestEnvelopeIdentity:
             assert action.action == ACTION_BLOCKED and action.request is None
             assert "offer_identity_envelope_mismatch" in action.reasons
 
-    @pytest.mark.parametrize("tamper,reason", [
-        (lambda r: r.body.__setitem__("offerId", "FOREIGN-B"), "request_identity_mismatch"),
-        (lambda r: r.body.__setitem__("feedLabel", "AE"), "request_identity_mismatch"),
-        (lambda r: r.body["productAttributes"].__setitem__("title", "x"), "request_payload_mismatch"),
+    @pytest.mark.parametrize("field,value", [
+        ("legacyLocal", True), ("customAttributes", [{"name": "x", "value": "y"}]), ("versionNumber", "7"),
     ])
-    def test_tampered_insert_request_is_refused_unsent(self, tamper, reason):
+    def test_extra_top_level_field_in_offer_payload_is_blocked_before_planning(self, field, value):
+        src = _perfume()
+        offer = OfferPreview(src.offer_id, 1, None, {**src.product_input, field: value}, "active", tenant_id=TENANT)
+        action = _only(_plan([offer], observations=[_absent(src.offer_id)]))
+        assert (action.action, action.reasons, action.request) == (
+            ACTION_BLOCKED, ("product_input_field_not_allowed",), None)
+
+
+    @pytest.mark.parametrize("field,value", [
+        ("legacyLocal", True), ("customAttributes", [{"name": "x", "value": "y"}]), ("versionNumber", "7"),
+    ])
+    def test_extra_top_level_field_blocks_owned_offer_patch_and_noop(self, field, value):
+        src = _perfume()
+        offer = OfferPreview(src.offer_id, 1, None, {**src.product_input, field: value}, "active", tenant_id=TENANT)
+        for attrs in (src.product_input["productAttributes"], {**src.product_input["productAttributes"], "title": "old"}):
+            action = _only(_plan([offer], owned=[_owned(src, attrs=attrs)], observations=[_present(src.offer_id)]))
+            assert (action.action, action.reasons) == (ACTION_BLOCKED, ("product_input_field_not_allowed",))
+
+
+_INSERT_FIELD_TAMPERS = [
+    ("legacyLocal", True), ("customAttributes", [{"name": "x", "value": "y"}]), ("versionNumber", "7"),
+]
+_INSERT_TAMPERS = [
+    *[(lambda b, f=f, v=v: b.__setitem__(f, v), "request_field_not_allowed") for f, v in _INSERT_FIELD_TAMPERS],
+    (lambda b: b.__setitem__("offerId", "FOREIGN-B"), "request_identity_mismatch"),
+    (lambda b: b.__setitem__("feedLabel", "AE"), "request_identity_mismatch"),
+    (lambda b: b["productAttributes"].__setitem__("title", "x"), "request_payload_mismatch"),
+]
+_PATCH_TAMPERS = [
+    lambda b: b["productAttributes"].__setitem__("brand", "dropped"),
+    lambda b: b["productAttributes"].__setitem__("title", "x"),
+    lambda b: b.__setitem__("productAttributes", 1),
+    lambda b: b.__setitem__("offerId", "FOREIGN-B"),
+    *[lambda b, f=f, v=v: b.__setitem__(f, v) for f, v in _INSERT_FIELD_TAMPERS],
+]
+_IDS = ["legacyLocal", "customAttributes", "versionNumber", "offerId", "feedLabel", "title"]
+
+
+def _forge(action):
+    """Re-snapshot a tampered action, as if the snapshot guard were bypassed."""
+    return dataclasses.replace(action, snapshot=action_snapshot(
+        action.offer_id, action.action, action.request, action.desired_attributes, action.removed_attributes,
+    ))
+
+
+def _patch_plan():
+    offer = _shirt_offers()[0]
+    old = {**offer.product_input["productAttributes"], "title": "old", "mpn": "OLD-1"}
+    return _plan([offer], owned=[_owned(offer, attrs=old)], observations=[_present(offer.offer_id)])
+
+
+def _refused(plan, reason):
+    fake = FakeMerchantTransport()
+    (res,) = simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY)
+    assert (res.outcome, res.reasons) == (OUTCOME_REFUSED, (reason,))
+    assert fake.calls == []
+
+
+class TestPostPlanIntegrity:
+
+    @pytest.mark.parametrize("tamper,_reason", _INSERT_TAMPERS, ids=_IDS)
+    def test_post_plan_insert_mutation_is_refused_unsent(self, tamper, _reason):
+        plan = _insert_plan(_perfume())
+        tamper(plan.executable[0].request.body)
+        _refused(plan, "request_mutated_after_planning")
+
+    @pytest.mark.parametrize("tamper,reason", _INSERT_TAMPERS, ids=_IDS)
+    def test_forged_snapshot_insert_still_fails_structural_checks(self, tamper, reason):
+        plan = _insert_plan(_perfume())
+        tamper(plan.executable[0].request.body)
+        _refused(dataclasses.replace(plan, actions=(_forge(plan.executable[0]),)), reason)
+
+    @pytest.mark.parametrize("tamper", _PATCH_TAMPERS)
+    def test_post_plan_patch_mutation_is_refused_unsent(self, tamper):
+        plan = _patch_plan()
+        tamper(plan.executable[0].request.body)
+        _refused(plan, "request_mutated_after_planning")
+
+    @pytest.mark.parametrize("tamper", _PATCH_TAMPERS)
+    def test_forged_snapshot_patch_still_fails_structural_checks(self, tamper):
+        plan = _patch_plan()
+        tamper(plan.executable[0].request.body)
+        _refused(dataclasses.replace(plan, actions=(_forge(plan.executable[0]),)), "request_payload_mismatch")
+
+    def test_consistent_mutation_of_desired_and_body_is_refused(self):
+        plan = _insert_plan(_perfume())
+        action = plan.executable[0]
+        action.request.body["productAttributes"]["title"] = "x"
+        action.desired_attributes["title"] = "x"
+        _refused(plan, "request_mutated_after_planning")
+
+    def test_action_without_planning_snapshot_is_refused(self):
+        plan = _insert_plan(_perfume())
+        bare = dataclasses.replace(plan.executable[0], snapshot="")
+        _refused(dataclasses.replace(plan, actions=(bare,)), "request_mutated_after_planning")
+
+    def test_unserializable_mutation_is_refused(self):
+        plan = _insert_plan(_perfume())
+        plan.executable[0].request.body["productAttributes"]["title"] = object()
+        _refused(plan, "request_not_serializable")
+
+    def test_sent_request_is_rebuilt_from_snapshot(self):
         offer = _perfume()
         plan = _insert_plan(offer)
-        tamper(plan.executable[0].request)
-        fake = FakeMerchantTransport()
+        ins, _patch, get = _paths(offer.offer_id)
+        fake = FakeMerchantTransport({("POST", ins): [TransportResponse(200, body={})], ("GET", get): [_readback(offer)]})
         (res,) = simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY)
-        assert (res.outcome, res.reasons) == (OUTCOME_REFUSED, (reason,))
-        assert fake.calls == []
+        assert res.outcome == OUTCOME_CONFIRMED
+        sent = fake.calls[0]
+        assert sent == plan.executable[0].request and sent is not plan.executable[0].request
+        assert set(sent.body) == {"offerId", "contentLanguage", "feedLabel", "productAttributes"}
+        sent.body["legacyLocal"] = True  # mutating what the transport saw cannot reach the plan
+        assert "legacyLocal" not in plan.executable[0].request.body
+        assert res.desired_attributes == plan.executable[0].desired_attributes
+        assert res.desired_attributes is not plan.executable[0].desired_attributes
 
-    @pytest.mark.parametrize("tamper", [
-        lambda body: body["productAttributes"].__setitem__("brand", "dropped"),
-        lambda body: body["productAttributes"].__setitem__("title", "x"),
-        lambda body: body.__setitem__("productAttributes", 1),
-        lambda body: body.__setitem__("offerId", "FOREIGN-B"),
-    ])
-    def test_tampered_patch_request_is_refused_unsent(self, tamper):
-        offer = _shirt_offers()[0]
-        old = {**offer.product_input["productAttributes"], "title": "old", "mpn": "OLD-1"}
-        plan = _plan([offer], owned=[_owned(offer, attrs=old)], observations=[_present(offer.offer_id)])
-        tamper(plan.executable[0].request.body)
-        fake = FakeMerchantTransport()
+    def test_transport_mutating_request_cannot_change_confirmation(self):
+        offer = _perfume()
+        plan = _insert_plan(offer)
+        ins, _patch, get = _paths(offer.offer_id)
+
+        fake = FakeMerchantTransport({("POST", ins): [TransportResponse(200, body={})],
+                                      ("GET", get): [_readback(offer, attrs={**offer.product_input["productAttributes"],
+                                                                             "title": "x"})]})
+        original_send = fake.send
+
+        def send(request):  # instance attribute; still the exact FakeMerchantTransport type
+            if request.body:
+                request.body["productAttributes"]["title"] = "x"
+            return original_send(request)
+
+        fake.send = send
         (res,) = simulate_plan(plan, fake, opt_in=OPT_IN, now=NOW, retry_policy=POLICY)
-        assert (res.outcome, res.reasons, fake.calls) == (OUTCOME_REFUSED, ("request_payload_mismatch",), [])
+        assert (res.outcome, res.reasons) == (OUTCOME_UNRESOLVED, ("readback_content_not_matching",))
+        assert plan.executable[0].request.body["productAttributes"]["title"] == offer.product_input[
+            "productAttributes"]["title"]
 
 
 class TestExactCaseIdentity:
