@@ -16,8 +16,8 @@ Two pieces, neither reachable from a route or a scheduler:
 
 ``execute_shop_redaction``
     Operator-only. Refuses unless ``NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED``
-    is on **and** an ``ApprovedErasurePolicy`` naming the ``catalog_mirror``
-    scope is passed. This slice ships no approved policy
+    is on **and** an ``ApprovedErasurePolicy`` whose scope is exactly the
+    supported ``{catalog_mirror}`` is passed (any extra scope refuses). This slice ships no approved policy
     (``approved_policy()`` returns ``None``): the owner, legal and business
     decisions listed in ``docs/engineering/shopify-privacy-webhooks.md`` come
     first, and a policy is a reviewed code change. Under the policy it
@@ -33,8 +33,9 @@ Two pieces, neither reachable from a route or a scheduler:
     open in ``blocked_policy``. A reinstall that
     commits first is therefore refused; one that starts later waits for this
     transaction and builds a new generation. Completion records the deleted
-    counts and the policy's retained categories — it is a statement about the
-    approved scope only, never about every shop-data obligation.
+    counts and the policy's retained categories, and states explicitly that
+    only the approved mirror scope was executed, that legal fulfilment is not
+    asserted and that retained obligations stay pending owner policy.
 """
 from __future__ import annotations
 
@@ -61,10 +62,14 @@ from services.shopify_privacy.store import event, utcnow
 logger = logging.getLogger("nahla.shopify_privacy")
 
 SCOPE_CATALOG_MIRROR = "catalog_mirror"
+# The only scope this helper can execute. A policy naming anything else is
+# refused as a whole: nothing outside the mirror is ever labelled deleted.
+SUPPORTED_SCOPES = frozenset({SCOPE_CATALOG_MIRROR})
 _OPERATOR_REF_RE = re.compile(r"[a-z0-9][a-z0-9_\-]{0,63}")
 
 C_DESTRUCTIVE_DISABLED = "destructive_disabled"
 C_POLICY_NOT_APPROVED = "policy_not_approved"
+C_POLICY_SCOPE_UNSUPPORTED = "policy_scope_unsupported"
 C_OPERATOR_REF_INVALID = "operator_ref_invalid"
 C_NOT_FOUND = "not_found"
 C_NOT_BLOCKED_POLICY = "not_blocked_policy"
@@ -120,6 +125,19 @@ def delete_shop_mirror(db: Session, *, connection_id: int, tenant_id: int) -> Di
     return deleted
 
 
+def connection_lock_statement(connection_id: int, tenant_id: int):
+    """``SELECT … FOR NO KEY UPDATE`` of the one connection row
+    (SQLAlchemy: ``key_share=True`` with ``read=False``; ``read=True`` would be
+    the much weaker FOR KEY SHARE). It conflicts with a reinstall's claim and
+    an uninstall (FOR UPDATE) and with the catalog fence (FOR SHARE), so none
+    of them interleaves with the deletion, but it does not block inserts whose
+    foreign key references the row (an authorization start's audit row takes
+    FOR KEY SHARE). Ownership keys are never changed here."""
+    return (select(ShopifyConnection)
+            .where(ShopifyConnection.id == int(connection_id), ShopifyConnection.tenant_id == int(tenant_id))
+            .with_for_update(key_share=True))
+
+
 def _refuse(db: Session, code: str) -> ExecutionRefused:
     db.rollback()
     logger.warning("[SHOPIFY_PRIVACY] execution refused code=%s", code)
@@ -140,9 +158,10 @@ def execute_shop_redaction(
     current = now or utcnow()
     if not destructive_enabled(env):
         raise _refuse(db, C_DESTRUCTIVE_DISABLED)
-    if (not isinstance(policy, ApprovedErasurePolicy) or not policy.version or not policy.approved_by
-            or SCOPE_CATALOG_MIRROR not in policy.scope):
+    if not isinstance(policy, ApprovedErasurePolicy) or not policy.version or not policy.approved_by:
         raise _refuse(db, C_POLICY_NOT_APPROVED)
+    if frozenset(policy.scope) != SUPPORTED_SCOPES:
+        raise _refuse(db, C_POLICY_SCOPE_UNSUPPORTED)
     if not isinstance(operator_ref, str) or not _OPERATOR_REF_RE.fullmatch(operator_ref):
         raise _refuse(db, C_OPERATOR_REF_INVALID)
     head = db.get(ShopifyPrivacyRequest, int(request_id), populate_existing=True)
@@ -152,9 +171,7 @@ def execute_shop_redaction(
     db.rollback()
     # Lock order: connection → request (as everywhere).
     conn = db.execute(
-        select(ShopifyConnection).where(ShopifyConnection.id == connection_id,
-                                        ShopifyConnection.tenant_id == tenant_id)
-        .with_for_update().execution_options(populate_existing=True)
+        connection_lock_statement(connection_id, tenant_id).execution_options(populate_existing=True)
     ).scalar_one_or_none()
     request = db.execute(
         select(ShopifyPrivacyRequest).where(ShopifyPrivacyRequest.id == int(request_id))
@@ -187,8 +204,10 @@ def execute_shop_redaction(
     request.policy_version = policy.version
     request.completion_evidence = {
         "audit_version": AUDIT_VERSION,
-        "scope": sorted(policy.scope),
+        "executed_scope": "catalog_mirror_only",
         "deleted": deleted,
+        "legal_fulfillment": "not_asserted",
+        "retained_obligations": "pending_owner_policy",
         "retained_by_policy": dict(policy.retained),
         "operator_ref": operator_ref,
         "connection_generation": int(conn.generation),

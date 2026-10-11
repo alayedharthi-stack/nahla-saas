@@ -185,7 +185,7 @@ slice does not claim its own fetch succeeded.
      probe (existing durable reconcile path) per newer delivery, then
      `awaiting_evidence`; a retained probe → `manual_review` /
      `active_installation_retained`; a delivery observed before the current
-     installation → `manual_review` / `reinstalled_after_last_delivery`.
+     installation → `manual_review` / `installed_after_last_delivery`.
      Both stay **open** with the 30-day deadline visible: they prove that
      erasing the current installation is unsafe, not that the obligation is
      inapplicable or fulfilled (historic / retained shop data stays an owner
@@ -197,11 +197,16 @@ slice does not claim its own fetch succeeded.
 6. **Destructive scaffolding** — a fixture-tested provider-owned cleanup
    helper (mirror rows, staged rows and import runs of exactly one
    `(connection, tenant)`), and an operator-only executor that refuses unless
-   the destructive flag **and** an approved policy object are present, and
-   re-validates under the connection lock the audit version, the audited
+   the destructive flag **and** an approved policy object whose scope is
+   exactly `{catalog_mirror}` are present (any extra scope refuses), holds the
+   connection row `FOR NO KEY UPDATE` (blocks a reinstall claim, an uninstall
+   and the catalog fence; does not block foreign-key audit inserts), and
+   re-validates under that lock the audit version, the audited
    schema snapshot and the legacy footprint (any change refuses, deletes
    nothing and leaves the request open). The runtime's approved policy is
-   `None`; no route or scheduler calls the executor. The connection ownership tombstone, audit rows, uninstall events,
+   `None`; no route or scheduler calls the executor. Completion evidence says
+   `executed_scope = catalog_mirror_only`, `legal_fulfillment = not_asserted`
+   and `retained_obligations = pending_owner_policy`. The connection ownership tombstone, audit rows, uninstall events,
    OAuth states and privacy receipts are never deleted by this slice.
 
 7. **Observability** — `services.shopify_privacy` and
@@ -212,8 +217,12 @@ slice does not claim its own fetch succeeded.
 
 8. **Audit script** — `scripts/audit_shopify_privacy_readonly.py`, one
    `READ ONLY` transaction, counts only (no raw rows, config or customer
-   values): 0123 collision/presence, legacy Shopify footprint, request states,
-   overdue requests, integrity.
+   values): 0123 collision/presence (privacy tables not recorded by an
+   `alembic_version` 0123 — absent table included — or with other columns
+   fail), audited-schema drift, legacy Shopify footprint, and, only on a
+   validated schema, requests by known topic/state under fixed labels
+   (anything else counted under one fixed label, never printed), overdue
+   requests and cap integrity.
 
 9. **Tests** — DB-free root-suite tests (HMAC, content type, size, topic
    confusion, identity, middleware non-2xx, Sentry/log scrubbing) and a new

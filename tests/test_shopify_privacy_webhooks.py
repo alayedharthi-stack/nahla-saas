@@ -308,11 +308,15 @@ def test_executor_refuses_without_flag_or_policy_before_touching_storage():
         cleanup.execute_shop_redaction(_NoDb(), request_id=1, policy=policy, operator_ref="op-1", env={})
     assert excinfo.value.code == cleanup.C_DESTRUCTIVE_DISABLED
     env = {"NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED": "1"}
-    for bad in (None, cleanup.approved_policy(),
-                cleanup.ApprovedErasurePolicy(version="v", approved_by="x", scope=frozenset({"other"}))):
+    for bad in (None, cleanup.approved_policy()):
         with pytest.raises(cleanup.ExecutionRefused) as excinfo:
             cleanup.execute_shop_redaction(_NoDb(), request_id=1, policy=bad, operator_ref="op-1", env=env)
         assert excinfo.value.code == cleanup.C_POLICY_NOT_APPROVED
+    for scope in ({"other"}, {"catalog_mirror", "unsupported_scope"}, set()):
+        wider = cleanup.ApprovedErasurePolicy(version="v", approved_by="x", scope=frozenset(scope))
+        with pytest.raises(cleanup.ExecutionRefused) as excinfo:
+            cleanup.execute_shop_redaction(_NoDb(), request_id=1, policy=wider, operator_ref="op-1", env=env)
+        assert excinfo.value.code == cleanup.C_POLICY_SCOPE_UNSUPPORTED
     with pytest.raises(cleanup.ExecutionRefused) as excinfo:
         cleanup.execute_shop_redaction(_NoDb(), request_id=1, policy=policy, operator_ref=_email(), env=env)
     assert excinfo.value.code == cleanup.C_OPERATOR_REF_INVALID
@@ -823,7 +827,9 @@ def test_exhausted_receipt_slots_answer_503_at_once_without_backlog(intake, monk
     assert intake.post(TOPIC_PATHS[SR], content=data, headers=_headers(data, SR)).status_code == 200
 
 
-def test_exhausted_pool_checkout_is_a_fast_503(intake, monkeypatch):
+def test_simulated_pool_timeout_is_a_fast_503(intake, monkeypatch):
+    """Unit check with a simulated PoolTimeout (no database). The real pool
+    exhaustion proof is in the PostgreSQL suite."""
     from sqlalchemy.exc import TimeoutError as PoolTimeout
 
     def pool_exhausted(_db):
@@ -893,3 +899,13 @@ def test_receipt_rolls_back_instead_of_committing_after_the_deadline():
     assert tx.committed == 0 and tx.rolled_back == 1
     store._commit_before(tx, time.monotonic() + 5)
     assert tx.committed == 1
+
+
+def test_executor_lock_compiles_to_for_no_key_update():
+    from sqlalchemy.dialects import postgresql
+
+    from services.shopify_privacy import cleanup
+
+    sql = str(cleanup.connection_lock_statement(1, 2).compile(dialect=postgresql.dialect()))
+    assert sql.rstrip().endswith("FOR NO KEY UPDATE")
+    assert "FOR KEY SHARE" not in sql and "FOR SHARE" not in sql

@@ -42,8 +42,9 @@ Decisions (never from an unsigned header, delivery id or timestamp)
         ``manual_review`` / ``active_installation_retained`` (erasing the
         current installation is unsafe; the request stays open with its
         deadline — it is not "inapplicable" or fulfilled);
-      - the latest delivery predates the current installation (reinstall) →
-        ``manual_review`` / ``reinstalled_after_last_delivery``;
+      - the latest delivery predates the current installation (a reinstall,
+        or a first install after a delivery received for an unknown shop) →
+        ``manual_review`` / ``installed_after_last_delivery``;
       - Shopify-confirmed ``uninstalled`` (the tombstone bumps the
         generation once, so the latest delivery must have been observed at
         that generation or the one just before it), nothing in flight →
@@ -109,7 +110,7 @@ R_IDENTITY_RESOLVABLE = "identity_resolvable"
 R_NO_CUSTOMER_RESOURCES = "no_structured_customer_records_in_audited_scope"
 R_AWAITING_UNINSTALL = "awaiting_uninstall_evidence"
 R_ACTIVE_RETAINED = "active_installation_retained"
-R_REINSTALLED = "reinstalled_after_last_delivery"
+R_REINSTALLED = "installed_after_last_delivery"
 R_NO_CONFIRMED_UNINSTALL = "no_confirmed_uninstall"
 R_EVIDENCE_TIMEOUT = "uninstall_evidence_timeout"
 R_IN_FLIGHT_TIMEOUT = "in_flight_timeout"

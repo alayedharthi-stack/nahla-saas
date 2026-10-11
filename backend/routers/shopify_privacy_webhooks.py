@@ -45,9 +45,10 @@ Event loop and budget
   then attaches to the same open request (idempotent), so the outcome is a
   duplicate delivery count, never a lost or falsely acknowledged receipt.
 
-Never logged, stored or reflected: the body, any header value, the HMAC, the
-secret, a customer email / phone / id or order ids. Unsigned webhook id and
-triggered-at are kept only in canonical UUID / timestamp form.
+Never logged, stored or reflected: the body, raw / unvalidated header values,
+the HMAC, the secret, a customer email / phone / id or order ids. The unsigned
+webhook id and triggered-at are persisted only after validation, in canonical
+UUID / parsed-timestamp form (diagnostics, never evidence).
 """
 from __future__ import annotations
 
