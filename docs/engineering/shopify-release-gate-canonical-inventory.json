@@ -1,0 +1,84 @@
+{
+  "canonical": {
+    "source_sha": "1257e4c10bad28ab189c6d1ff7d4e3c2add15781",
+    "count": 143,
+    "git_inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+    "git_gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "git_database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50"
+  },
+  "windows_materialization": {
+    "count": 143,
+    "differences": [
+      {
+        "path": "backend/services/shopify_catalog/config.py",
+        "local_sha256": "64f6ce2ef0dddcfa39bac7a10b911e24d6b368ec555121e04988b337d798d6e1",
+        "git_sha256": "6d7554df2bdcec919ce59d0e35d90f75e0aeff02ae663480823411e2721e05ed",
+        "line_endings_only": true,
+        "local_crlf": 85
+      },
+      {
+        "path": "backend/services/shopify_connection/config.py",
+        "local_sha256": "e4c3ebd66cfecc363eb89026c5cf50c3e903dc3a4c6b02bfbf159f105e24e7be",
+        "git_sha256": "c8861a55e6e391a98b7f898d4ac8decd12d9737c72a46cd7e3deebb523db2911",
+        "line_endings_only": true,
+        "local_crlf": 225
+      },
+      {
+        "path": "backend/services/shopify_privacy/config.py",
+        "local_sha256": "223b7c25199eba393413c010b73f16c9094817a46cc8995b48092ac0b8d41bd2",
+        "git_sha256": "3ef56ff771e1a7172ac6ce5e1467a63e4bcb41b017edb34ea986dd0cde2b94b9",
+        "line_endings_only": true,
+        "local_crlf": 115
+      },
+      {
+        "path": "requirements.txt",
+        "local_sha256": "99eb6d5129eef5dea91842c10ce577f1c1fa9148d23b4615121f4c8c268a82b6",
+        "git_sha256": "61bd69b24e99e5db9827233fcb2a0370bb04e01ba44b0e1eb5552307b42fff28",
+        "line_endings_only": true,
+        "local_crlf": 78
+      },
+      {
+        "path": "scripts/operators/__init__.py",
+        "local_sha256": "7306988a5711f556a8a9497c6c34e5389daf45e5eb54969b3148c29946f906ec",
+        "git_sha256": "2f013ecc50a18bddad0519b276c882d46b13a4bc831c5f9ad98738212289bb9f",
+        "line_endings_only": true,
+        "local_crlf": 1
+      },
+      {
+        "path": "scripts/operators/bootstrap_migration_contract.py",
+        "local_sha256": "7200b10c3f4d3fb7c37fd483a4821f3050a85e2f509da14933b06e39e5d8ce83",
+        "git_sha256": "8b786c6fd619b1d6214e4e66281e58e9ac51ce1d24d06960980351234b0c1690",
+        "line_endings_only": true,
+        "local_crlf": 117
+      },
+      {
+        "path": "scripts/operators/commerce_runtime_pilot_migration.py",
+        "local_sha256": "dde587f2f2afbf8cc7d942cfd3a025964a8e8f3091a3ffb5dee0ca4b6aa5a282",
+        "git_sha256": "d5cf2528f76cf5ff896f49f6754b89d3c6459b91d342da4e0504f491a59dfa6a",
+        "line_endings_only": true,
+        "local_crlf": 432
+      },
+      {
+        "path": "scripts/operators/commerce_runtime_pilot_migration_contract.py",
+        "local_sha256": "315d623d16755cdc8ae3683395ef68908a579fc5f915bfe87a1bc007e71244f3",
+        "git_sha256": "c27a79dd7900e978558cb6ab46a9dd6a8465228e5309f9d33b51561d5585f21b",
+        "line_endings_only": true,
+        "local_crlf": 213
+      },
+      {
+        "path": "scripts/operators/shopify_release_gate_contract.py",
+        "local_sha256": "584e44b4bda9796f79cfc8d55310f05205e2b1746f782d946be73cafcb70195c",
+        "git_sha256": "a5054cdfba21302c1a12214e0c159bc8b0ca17a0ccf148dfa10fc012d2fe10a6",
+        "line_endings_only": true,
+        "local_crlf": 594
+      },
+      {
+        "path": "scripts/operators/shopify_release_schema_expectations.json",
+        "local_sha256": "72f1b3bed6af28b630e361d04ee2c2804c7082946828668ac24fc35ee6c48703",
+        "git_sha256": "3ceb8b54d39b5839f1f909ccc3728d3983b0000e287860c34fe1e22d4e53cbec",
+        "line_endings_only": true,
+        "local_crlf": 4849
+      }
+    ]
+  }
+}
