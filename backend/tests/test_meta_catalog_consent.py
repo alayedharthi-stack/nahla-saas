@@ -31,7 +31,7 @@ for _p in (str(_REPO), str(_REPO / "backend"), str(_REPO / "database")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from backend.tests._log_redaction_isolation import remove_added_log_filters, snapshot_log_filters  # noqa: E402
+from backend.tests._log_redaction_isolation import restoring_log_filters  # noqa: E402
 import core.config as core_config  # noqa: E402
 import core.review_environment as review_env_mod  # noqa: E402
 import core.whatsapp_oauth_nonce as nonce_mod  # noqa: E402
@@ -208,21 +208,20 @@ def world(monkeypatch, caplog):
     app.dependency_overrides[router_mod.get_db] = _db
     client = TestClient(app)
     # The production log path: main.py installs this at import. It attaches to
-    # pytest's own root handlers here, so take off exactly what it added once
-    # the test is done.
+    # pytest's own root handlers here, so take off exactly what it added when
+    # the test is done, or if the rest of this setup fails.
     from core.log_redaction import install_log_redaction
 
-    added_filters = snapshot_log_filters()
-    install_log_redaction()
-    caplog.set_level(logging.DEBUG)
+    with restoring_log_filters():
+        install_log_redaction()
+        caplog.set_level(logging.DEBUG)
 
-    class W:
-        pass
+        class W:
+            pass
 
-    w = W()
-    w.client, w.factory, w.graph, w.secrets, w.engine = client, factory, graph, seen, engine
-    yield w
-    remove_added_log_filters(added_filters)
+        w = W()
+        w.client, w.factory, w.graph, w.secrets, w.engine = client, factory, graph, seen, engine
+        yield w
 
 
 def _jwt(tenant_id: int = TENANT, **extra) -> Dict[str, str]:
