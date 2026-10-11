@@ -340,6 +340,7 @@ class ShopifyCatalogInventoryItem(ShopifyCatalogBase):
     connection_id = Column(BigInteger, nullable=False)
     inventory_item_gid = Column(String(64), nullable=False)
     tracking = Column(String(10), nullable=False)
+    source_updated_at = Column(DateTime(timezone=True), nullable=False)
     lifecycle, removed_at, first_seen_run_id, last_seen_run_id, created_at, updated_at = _mirror_columns()
 
 

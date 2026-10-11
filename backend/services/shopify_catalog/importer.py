@@ -152,47 +152,46 @@ class CatalogImporter:
             self._drop_token()
             raise
 
-    async def _preflight_call(self) -> Tuple[Dict[str, Any], int]:
-        rotations = 0
+    def _rotated(self) -> None:
+        self._drop_token()
+        self.rotations += 1
+        if self.rotations > MAX_CREDENTIAL_ROTATIONS:
+            raise E.ImportFailure(E.R_CREDENTIAL_CHURN)
+
+    async def _preflight(self) -> Tuple[Dict[str, str], bool]:
+        """Shop identity, currency and grant evidence, recorded under the same
+        credential version they were read with. A rotation anywhere in
+        between discards the whole reading and starts it again."""
         while True:
             try:
-                return await self._query(queries.PREFLIGHT, {}, 10)
+                data, version = await self._query(queries.PREFLIGHT, {}, 10)
+                shop = parse.shop(data.get("shop"))
+                if shop["gid"] != self.handle.shop_gid or shop["domain"] != self.handle.shop_domain:
+                    raise E.ImportFailure(E.R_IDENTITY_MISMATCH)
+                granted = parse.access_scopes(data.get("currentAppInstallation"))
+                if SCOPE_PRODUCTS not in granted or SCOPE_PRODUCTS not in self._stored_scopes:
+                    raise E.ImportFailure(E.R_SCOPE_MISSING)
+                # Inventory per location only when Shopify itself reports the
+                # scope AND the stored grant carries it; otherwise it is
+                # explicitly not read (and reported as not read).
+                per_location = SCOPE_INVENTORY in granted and SCOPE_INVENTORY in self._stored_scopes
+                expected, precision = parse.count(data.get("productsCount"))
+                if precision != "EXACT" or expected > PAGINATION_CAP:
+                    raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)
+                mode = INVENTORY_PER_LOCATION if per_location else INVENTORY_SCOPE_MISSING
+                with self._db() as db:
+                    store.record_preflight(db, self.handle, currency=shop["currency"], inventory_mode=mode,
+                                           expected_products=expected, credential_version=version)
+                return shop, per_location
             except E.CredentialRotated:
-                rotations += 1
-                if rotations > MAX_CREDENTIAL_ROTATIONS:
-                    raise E.ImportFailure(E.R_CREDENTIAL_CHURN) from None
+                self._rotated()
 
     # ── the run ──────────────────────────────────────────────────────────────
 
     async def _execute(self) -> Dict[str, Any]:
         with self._db() as db:
             store.heartbeat(db, self.handle)
-        data, version = await self._preflight_call()
-        shop = parse.shop(data.get("shop"))
-        if shop["gid"] != self.handle.shop_gid or shop["domain"] != self.handle.shop_domain:
-            raise E.ImportFailure(E.R_IDENTITY_MISMATCH)
-        granted = parse.access_scopes(data.get("currentAppInstallation"))
-        if SCOPE_PRODUCTS not in granted or SCOPE_PRODUCTS not in self._stored_scopes:
-            raise E.ImportFailure(E.R_SCOPE_MISSING)
-        # Inventory per location only when Shopify itself reports the scope
-        # AND the stored grant carries it. Otherwise it is explicitly not read.
-        per_location = SCOPE_INVENTORY in granted and SCOPE_INVENTORY in self._stored_scopes
-        expected, precision = parse.count(data.get("productsCount"))
-        if precision != "EXACT" or expected > PAGINATION_CAP:
-            raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)
-        mode = INVENTORY_PER_LOCATION if per_location else INVENTORY_SCOPE_MISSING
-        while True:
-            try:
-                with self._db() as db:
-                    store.record_preflight(db, self.handle, currency=shop["currency"], inventory_mode=mode,
-                                           expected_products=expected, credential_version=version)
-                break
-            except E.CredentialRotated:
-                self._drop_token()
-                self.rotations += 1
-                if self.rotations > MAX_CREDENTIAL_ROTATIONS:
-                    raise E.ImportFailure(E.R_CREDENTIAL_CHURN) from None
-                _, version = await self._acquire_token()
+        shop, per_location = await self._preflight()
         traversal = CatalogTraversal(query=self._query, stage=self._stage, sleep=self._sleep,
                                      currency=shop["currency"])
         if per_location:

@@ -15,7 +15,7 @@ not validated against a live store):
 * ``ProductVariant.price`` / ``compareAtPrice`` — decimal strings in the
   shop's default currency (``shop.currencyCode``); contextual (market)
   pricing is not read.
-* ``InventoryItem { id tracked }`` — readable with ``read_products``.
+* ``InventoryItem { id tracked updatedAt }`` — readable with ``read_products``.
 * ``InventoryLevel`` (``quantities(names: ["available"])``, ``updatedAt``,
   ``location``) and ``Location`` (``isActive``, ``fulfillsOnlineOrders``) —
   only requested when ``read_inventory`` is granted.
@@ -48,7 +48,7 @@ fragment NahlaVariant on ProductVariant {
   createdAt
   updatedAt
   selectedOptions { name value }
-  inventoryItem { id tracked }
+  inventoryItem { id tracked updatedAt }
 }
 """
 
@@ -84,6 +84,7 @@ query NahlaCatalogPreflight {
 
 PRODUCTS_COUNT = """
 query NahlaCatalogCount {
+  shop { currencyCode }
   productsCount(limit: null) { count precision }
 }
 """
@@ -166,6 +167,7 @@ query NahlaCatalogInventory($ids: [ID!]!, $first: Int!) {
     ... on InventoryItem {
       id
       tracked
+      updatedAt
       inventoryLevels(first: $first) { pageInfo { hasNextPage endCursor } nodes { ...NahlaLevel } }
     }
   }

@@ -14,9 +14,16 @@ completeness rather than assuming it, and refuses whenever it cannot:
 * the shop's ``productsCount`` (EXACT, at most 25,000) must equal the products
   read, after one bounded re-read;
 * every identity is unique where Shopify says it is (product, variant,
-  location, inventory level, media) — a repeat is ``duplicate_identity``;
+  location, inventory level) — a repeat is ``duplicate_identity``;
   an inventory item may be shared by several variants (2026-10) but must
   report one tracking value;
+* media belong to one product. A variant's media are associations to its
+  product's own media (Shopify links existing product media to variants),
+  so the same media GID may legitimately appear in the product's list and
+  in any number of its variants' lists — with the identical payload. A
+  repeat inside one media connection is ``duplicate_identity``; a variant
+  media that is not one of its product's media, a media owned by another
+  product, or a reused GID with a different payload is ``identity_conflict``;
 * every inventory level must name its parent item in its own GID and a
   location the location pass returned;
 * a follow-up for an object that has meanwhile disappeared ends the run
@@ -57,10 +64,10 @@ class Snapshot:
 
     products: Dict[str, None] = field(default_factory=dict)
     variants: Dict[str, str] = field(default_factory=dict)          # variant gid -> product gid
-    items: Dict[str, str] = field(default_factory=dict)             # item gid -> tracking
+    items: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # item gid -> (tracking, updatedAt)
     locations: Set[str] = field(default_factory=set)
     levels: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # level gid -> (item gid, location gid)
-    media: Set[str] = field(default_factory=set)
+    media_owner: Dict[str, str] = field(default_factory=dict)   # media gid -> owning product gid
     images_absent: int = 0
 
 
@@ -169,21 +176,31 @@ class CatalogTraversal:
         return collected
 
     async def _media_list(self, versions: Set[int], conn_value: Any, *, document: str, root: str, owner_gid: str,
-                          cap: int, nested_page: int, seen_media: Set[str]) -> List[Dict[str, Any]]:
+                          cap: int, nested_page: int) -> List[Dict[str, Any]]:
+        """All media of one connection (one owner); a GID twice in the same
+        connection is a duplicate. Cross-owner reuse is judged by the caller."""
         first = parse.connection(conn_value, limit=nested_page)
         nodes = await self._rest_of(versions, first, document=document, root=root, owner_gid=owner_gid,
                                     field_name="media", page=C.FOLLOWUP_MEDIA_PAGE, cap=cap)
-        out = []
+        out, seen = [], set()
         for node in nodes:
             item = parse.media(node)
-            if item["gid"] in seen_media or item["gid"] in self.snapshot.media:
+            if item["gid"] in seen:
                 raise E.ImportFailure(E.R_DUPLICATE_IDENTITY)
-            seen_media.add(item["gid"])
+            seen.add(item["gid"])
             out.append(item)
         return out
 
+    @staticmethod
+    def _associated(media: List[Dict[str, Any]], owned: Dict[str, Dict[str, Any]]) -> None:
+        """Every media of a variant (or the featured media) must be one of
+        its product's own media, with the identical payload."""
+        for item in media:
+            if owned.get(item["gid"]) != item:
+                raise E.ImportFailure(E.R_IDENTITY_CONFLICT)
+
     async def _variants_of(self, versions: Set[int], product_gid: str, first_conn: Any, expected: int,
-                           seen_media: Set[str]) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
+                           owned_media: Dict[str, Dict[str, Any]]) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
         """All variants of one product with their media; the count must match."""
         for attempt in (0, 1):
             if attempt == 0:
@@ -211,7 +228,6 @@ class CatalogTraversal:
                 break
             if attempt == 1:
                 raise E.ImportFailure(E.R_SOURCE_CHANGED)
-            seen_media.clear()
         out = []
         seen: Set[str] = set()
         for node in nodes:
@@ -222,7 +238,8 @@ class CatalogTraversal:
             variant_media = await self._media_list(versions, parse.obj(node).get("media"),
                                                    document=queries.VARIANT_MEDIA, root="productVariant",
                                                    owner_gid=record["gid"], cap=C.MAX_MEDIA_PER_VARIANT,
-                                                   nested_page=C.NESTED_VARIANT_MEDIA_PAGE, seen_media=seen_media)
+                                                   nested_page=C.NESTED_VARIANT_MEDIA_PAGE)
+            self._associated(variant_media, owned_media)
             out.append((record, variant_media))
         return out
 
@@ -286,18 +303,20 @@ class CatalogTraversal:
                 raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)
             if product["variants_count_precision"] != "EXACT" or product["variants_count"] > C.MAX_VARIANTS_PER_PRODUCT:
                 raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)
-            seen_media: Set[str] = set(unit.media)
             n = parse.obj(node)
             product_media = await self._media_list(versions, n.get("media"), document=queries.PRODUCT_MEDIA,
                                                    root="product", owner_gid=pgid, cap=C.MAX_MEDIA_PER_PRODUCT,
-                                                   nested_page=C.NESTED_PRODUCT_MEDIA_PAGE, seen_media=seen_media)
+                                                   nested_page=C.NESTED_PRODUCT_MEDIA_PAGE)
+            owned = {m["gid"]: m for m in product_media}
+            for media_gid in owned:
+                owner = self.snapshot.media_owner.get(media_gid, unit.media_owner.get(media_gid))
+                if owner is not None and owner != pgid:
+                    raise E.ImportFailure(E.R_IDENTITY_CONFLICT)   # one media, two products
             featured = product.pop("featured_media")
-            if featured is not None and featured["gid"] not in {m["gid"] for m in product_media}:
-                raise E.ImportFailure(E.R_IDENTITY_CONFLICT)   # featured media must be one of the product's media
+            if featured is not None:
+                self._associated([featured], owned)   # the featured media is one of the product's media
             image = parse.resolve_images(product_media, featured)
-            variant_seen_media = set(seen_media)
-            variants = await self._variants_of(versions, pgid, n.get("variants"), product["variants_count"],
-                                               variant_seen_media)
+            variants = await self._variants_of(versions, pgid, n.get("variants"), product["variants_count"], owned)
             product["variants_count"] = len(variants)
             product.pop("variants_count_precision")
             product["image_url"], product["image_alt"] = image
@@ -306,20 +325,22 @@ class CatalogTraversal:
                 unit.images_absent += 1
             records.append((KIND_PRODUCT, pgid, None, product))
             unit.products[pgid] = None
-            unit.media.update(variant_seen_media)
+            unit.media_owner.update({media_gid: pgid for media_gid in owned})
             for record, variant_media in variants:
                 vgid = record["gid"]
                 if vgid in self.snapshot.variants or vgid in unit.variants:
                     raise E.ImportFailure(E.R_DUPLICATE_IDENTITY)
                 if len(self.snapshot.variants) + len(unit.variants) + 1 > C.MAX_VARIANTS_TOTAL:
                     raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)
-                item_gid, tracking = record["inventory_item_gid"], record["tracking"]
+                item_gid = record["inventory_item_gid"]
+                observed = (record["tracking"], record.pop("item_updated_at"))
                 known = self.snapshot.items.get(item_gid, unit.items.get(item_gid))
                 if known is None:
-                    unit.items[item_gid] = tracking
-                    records.append((KIND_ITEM, item_gid, None, {"gid": item_gid, "tracking": tracking}))
-                elif known != tracking:
-                    raise E.ImportFailure(E.R_IDENTITY_CONFLICT)   # one item, two tracking values
+                    unit.items[item_gid] = observed
+                    records.append((KIND_ITEM, item_gid, None, {"gid": item_gid, "tracking": observed[0],
+                                                                "source_updated_at": observed[1]}))
+                elif known != observed:
+                    raise E.ImportFailure(E.R_IDENTITY_CONFLICT)   # one shared item, two different readings
                 url, alt, source = parse.variant_image(variant_media, image)
                 if url is None:
                     unit.images_absent += 1
@@ -333,7 +354,7 @@ class CatalogTraversal:
         self.snapshot.products.update(unit.products)
         self.snapshot.variants.update(unit.variants)
         self.snapshot.items.update(unit.items)
-        self.snapshot.media.update(unit.media)
+        self.snapshot.media_owner.update(unit.media_owner)
         self.snapshot.images_absent += unit.images_absent
 
     async def inventory(self) -> None:
@@ -358,9 +379,10 @@ class CatalogTraversal:
                     n = parse.obj(node)
                     if n.get("__typename") != "InventoryItem" or n.get("id") != item_gid:
                         raise E.ImportFailure(E.R_INVALID_IDENTITY)
-                    tracking = "tracked" if parse.boolean(n.get("tracked")) else "untracked"
-                    if tracking != self.snapshot.items[item_gid]:
-                        raise E.ImportFailure(E.R_SOURCE_CHANGED)
+                    observed = ("tracked" if parse.boolean(n.get("tracked")) else "untracked",
+                                parse.timestamp(n.get("updatedAt")))
+                    if observed != self.snapshot.items[item_gid]:
+                        raise E.ImportFailure(E.R_SOURCE_CHANGED)   # the item changed between passes
                     first = parse.connection(n.get("inventoryLevels"), limit=C.NESTED_LEVELS_PAGE)
                     level_nodes = await self._rest_of(versions, first, document=queries.INVENTORY_LEVELS,
                                                       root="inventoryItem", owner_gid=item_gid,
@@ -383,9 +405,13 @@ class CatalogTraversal:
             await self._unit(fetch)
 
     async def verify_product_count(self) -> int:
-        """Shopify's EXACT product count must equal the products read."""
+        """Shopify's EXACT product count must equal the products read, and the
+        shop's default currency must still be the one every staged price was
+        labelled with (a change mid-run is refused, never mixed)."""
         for attempt in (0, 1):
             data = await self._call(queries.PRODUCTS_COUNT, {}, 10)
+            if parse.currency(parse.obj(data.get("shop")).get("currencyCode")) != self.currency:
+                raise E.ImportFailure(E.R_SOURCE_CHANGED)
             total, precision = parse.count(data.get("productsCount"))
             if precision != "EXACT" or total > C.PAGINATION_CAP:
                 raise E.ImportFailure(E.R_CATALOG_TOO_LARGE)

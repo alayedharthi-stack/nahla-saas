@@ -7,23 +7,34 @@ Concurrency model
 * At most one ``running`` run per connection (partial unique index): a second
   start is refused (``import_in_progress``), never queued.
 * A run is owned through ``lease_id`` + ``lease_expires_at``. Every write by
-  the runner (heartbeat, staging, preflight, publish, finish) goes through
-  ``fence``, which locks the run row (``FOR UPDATE``) and then the connection
-  row (``FOR SHARE``) and checks, against the clock **at write time**:
+  the runner (heartbeat, staging, preflight, publish) goes through ``fence``,
+  which takes **all** its locks first — the connection row (``FOR SHARE``),
+  then the run row (``FOR UPDATE``) — and only then reads the write-time
+  clock, so a runner that waited on a lock past its lease's expiry is
+  refused rather than renewed. It checks:
     - the run is still ``running`` with this lease, not expired;
     - the connection still belongs to the run's tenant, is ``active`` and has
       the run's generation and shop identity (disconnect, uninstall,
       quarantine, re-authorization and reinstall all fail this);
     - optionally, the credential version the data was fetched with is still
       the stored one (a rotation discards the page; it is fetched again).
-  Lock order is always run → connection; the foundation never locks runs.
+  Lock order is always connection → run, everywhere (``begin_run``,
+  ``fence``, ``publish``); the foundation only ever locks the connection, so
+  a queued exclusive disconnect / uninstall / refresh cannot close a cycle.
+  Every run predicate carries the run's full identity (id, lease, tenant,
+  connection, generation, shop): a handle with a valid lease but another
+  tenant's or connection's identity matches nothing.
+  ``publish`` re-checks the lease against the clock immediately before it
+  commits.
 * A run whose lease expired without a result is ``interrupted``: it is
   closed by the next start for that connection (never by a status read), and
   its staged records are deleted.
 * Publishing is one transaction under the same fence: the mirror moves from
   the previous committed snapshot to this run's snapshot, or not at all.
   Rows whose stored Shopify ``updatedAt`` is newer than the staged one are
-  not overwritten (``stale_skipped``). Absent products, variants and
+  not overwritten (``stale_skipped``) and keep their previous
+  ``last_seen_run_id``: being seen with older data is not a refresh, so the
+  availability view keeps calling them stale. Absent products, variants and
   locations become ``deleted`` only if Shopify confirmed each of them gone;
   inventory items and levels no longer referenced become ``detached``.
   Nothing is ever hard-deleted from the mirror.
@@ -207,6 +218,18 @@ def begin_run(db: Session, *, tenant_id: int, user_id: Optional[int], shop_domai
 
 # ── Fences ────────────────────────────────────────────────────────────────────
 
+def _run_identity(handle: RunHandle) -> list:
+    """Every predicate that names a run carries its full identity."""
+    return [Run.id == handle.run_id, Run.lease_id == handle.lease_id, Run.tenant_id == handle.tenant_id,
+            Run.connection_id == handle.connection_id, Run.generation == handle.generation,
+            Run.shop_gid == handle.shop_gid, Run.shop_domain == handle.shop_domain]
+
+
+def _lease_valid(run: Optional[Run], handle: RunHandle, fnow: datetime) -> bool:
+    return (run is not None and run.status == RUN_RUNNING and run.lease_id == handle.lease_id
+            and run.lease_expires_at is not None and run.lease_expires_at > fnow)
+
+
 def fence(db: Session, handle: RunHandle, *, now: Optional[datetime] = None,
           credential_version: Optional[int] = None, extend: bool = True) -> Tuple[Run, ShopifyConnection]:
     """Lock and verify ownership; extend the lease. The caller commits.
@@ -215,20 +238,19 @@ def fence(db: Session, handle: RunHandle, *, now: Optional[datetime] = None,
     ``connection_unavailable`` / ``connection_changed`` (the run must be
     cancelled), or ``CredentialRotated`` (refetch).
     """
-    fnow = _fence_now(now or utcnow())
-    run = db.execute(
-        select(Run).where(Run.id == handle.run_id, Run.connection_id == handle.connection_id,
-                          Run.tenant_id == handle.tenant_id)
-        .with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-    if (run is None or run.status != RUN_RUNNING or run.lease_id != handle.lease_id
-            or run.lease_expires_at is None or run.lease_expires_at <= fnow):
-        raise E.LeaseLost()
+    # Locks first, in the global order connection → run.
     conn = db.execute(
         select(ShopifyConnection).where(
             ShopifyConnection.id == handle.connection_id, ShopifyConnection.tenant_id == handle.tenant_id,
         ).with_for_update(read=True).execution_options(populate_existing=True)
     ).scalar_one_or_none()
+    run = db.execute(
+        select(Run).where(*_run_identity(handle)).with_for_update().execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    # Only now, with every lock held, read the write-time clock.
+    fnow = _fence_now(now or utcnow())
+    if not _lease_valid(run, handle, fnow):
+        raise E.LeaseLost()
     if conn is None or conn.status != STATUS_ACTIVE:
         raise E.ImportFailure(E.R_CONNECTION_UNAVAILABLE)
     if (int(conn.generation) != handle.generation or conn.shop_gid != handle.shop_gid
@@ -314,13 +336,15 @@ def finish(db: Session, handle: RunHandle, *, status: str, reason: str, now: Opt
     assert status in (RUN_FAILED, RUN_CANCELLED)
     current = now or utcnow()
     values = {"status": status, "reason": reason if reason in E.FAILURE_REASONS else E.R_INTERNAL_ERROR,
-              "now": current, "id": handle.run_id, "lease": handle.lease_id}
+              "now": current, "id": handle.run_id, "lease": handle.lease_id, "t": handle.tenant_id,
+              "c": handle.connection_id, "g": handle.generation, "s": handle.shop_gid, "d": handle.shop_domain}
     try:
         closed = db.execute(text(
             "UPDATE shopify_catalog_import_runs SET status = :status, failure_reason = :reason,"
             " lease_id = NULL, lease_expires_at = NULL, finished_at = :now"
             + (", pages_fetched = :pages" if pages is not None else "")
-            + " WHERE id = :id AND status = 'running' AND lease_id = :lease RETURNING id"
+            + " WHERE id = :id AND status = 'running' AND lease_id = :lease AND tenant_id = :t"
+            " AND connection_id = :c AND generation = :g AND shop_gid = :s AND shop_domain = :d RETURNING id"
         ), {**values, **({"pages": int(pages)} if pages is not None else {})}).first()
         if closed is not None:
             db.execute(delete(Staged).where(Staged.run_id == handle.run_id))
@@ -393,16 +417,6 @@ def _id_map(db: Session, model, gid_column: str, connection_id: int) -> Dict[str
     return {r[gid_column]: r for r in rows}
 
 
-def _touch_seen(db: Session, model, gid_column: str, connection_id: int, gids: Set[str], run_id: int,
-                now: datetime) -> None:
-    table = model.__table__
-    pending = sorted(gids)
-    for start in range(0, len(pending), _CHUNK):
-        db.execute(table.update().where(table.c.connection_id == connection_id,
-                                        table.c[gid_column].in_(pending[start:start + _CHUNK]))
-                   .values(last_seen_run_id=run_id))
-
-
 def _tombstone(db: Session, sql: str, params: Dict[str, Any]) -> Set[str]:
     return set(db.execute(text(sql), params).scalars())
 
@@ -450,16 +464,16 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
                 source_created_at=_ts(p["source_created_at"]), source_updated_at=_ts(p["source_updated_at"]),
             ))
         written = _upsert(db, Product, rows, key=["connection_id", "product_gid"], gid_column="product_gid", guard=True)
-        skipped = {r["product_gid"] for r in rows} - written
-        stale += len(skipped)
-        _touch_seen(db, Product, "product_gid", cid, skipped, rid, current)
+        stale += len({r["product_gid"] for r in rows} - written)
         products = _id_map(db, Product, "product_gid", cid)
 
         # Inventory items (item-owned inventory; may be shared by variants).
-        rows = [dict(base, inventory_item_gid=r.gid, tracking=r.payload["tracking"])
+        rows = [dict(base, inventory_item_gid=r.gid, tracking=r.payload["tracking"],
+                     source_updated_at=_ts(r.payload["source_updated_at"]))
                 for r in staged.get(KIND_ITEM, [])]
-        _upsert(db, Item, rows, key=["connection_id", "inventory_item_gid"], gid_column="inventory_item_gid",
-                guard=False)
+        written = _upsert(db, Item, rows, key=["connection_id", "inventory_item_gid"],
+                          gid_column="inventory_item_gid", guard=True)
+        stale += len({r["inventory_item_gid"] for r in rows} - written)
         items = _id_map(db, Item, "inventory_item_gid", cid)
 
         # Variants: a variant never moves to another product.
@@ -486,9 +500,7 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
                 source_created_at=_ts(v["source_created_at"]), source_updated_at=_ts(v["source_updated_at"]),
             ))
         written = _upsert(db, Variant, rows, key=["connection_id", "variant_gid"], gid_column="variant_gid", guard=True)
-        skipped = {r["variant_gid"] for r in rows} - written
-        stale += len(skipped)
-        _touch_seen(db, Variant, "variant_gid", cid, skipped, rid, current)
+        stale += len({r["variant_gid"] for r in rows} - written)
 
         # Inventory levels: keyed by (item, location), never by variant.
         if mode == INVENTORY_PER_LOCATION:
@@ -510,9 +522,7 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
                                  source_updated_at=_ts(level["source_updated_at"])))
             written = _upsert(db, Level, rows, key=["inventory_item_id", "location_id"],
                               gid_column="inventory_level_gid", guard=True)
-            skipped = {r["inventory_level_gid"] for r in rows} - written
-            stale += len(skipped)
-            _touch_seen(db, Level, "inventory_level_gid", cid, skipped, rid, current)
+            stale += len({r["inventory_level_gid"] for r in rows} - written)
 
         # Removals: only what Shopify confirmed gone; detach what is no longer referenced.
         params = {"c": cid, "r": rid, "now": current}
@@ -570,6 +580,11 @@ def publish(db: Session, handle: RunHandle, *, confirmed_absent: Dict[str, Set[s
         run.status = RUN_COMMITTED
         run.committed_at = current
         run.finished_at = current
+        # Immediately before committing: the lease extended by the fence must
+        # still hold against the clock now (a publish that outlived it — or a
+        # wait on the locks above — commits nothing).
+        if run.lease_id != handle.lease_id or run.lease_expires_at <= _fence_now(utcnow()):
+            raise E.LeaseLost()
         run.lease_id = None
         run.lease_expires_at = None
         db.execute(delete(Staged).where(Staged.run_id == rid))
@@ -587,12 +602,14 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value is not None else None
 
 
-def run_evidence(run: Optional[Run]) -> Optional[Dict[str, Any]]:
+def run_evidence(run: Optional[Run], *, current_generation: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """What a committed run proves. Inventory counts are ``None`` — not 0 —
-    when inventory was not read (``scope_missing``)."""
+    when inventory was not read (``scope_missing``). ``current_installation``
+    says whether it belongs to the connection's current generation."""
     if run is None or run.status != RUN_COMMITTED:
         return None
     return {
+        "current_installation": current_generation is not None and int(run.generation) == int(current_generation),
         "completed_at": _iso(run.committed_at),
         "api_version": run.api_version,
         "run": int(run.run_seq),
@@ -609,8 +626,15 @@ def run_evidence(run: Optional[Run]) -> Optional[Dict[str, Any]]:
 
 
 def import_state(db: Session, conn: ShopifyConnection, *, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """State of the **current installation** (generation). A success from an
+    earlier installation stays visible as ``last_success`` with
+    ``current_installation: false`` but never makes the state ``imported``;
+    neither does any success while the connection is not active (the mirror
+    can no longer be refreshed or trusted as current)."""
     current = now or utcnow()
-    latest = db.execute(select(Run).where(Run.connection_id == conn.id, Run.tenant_id == conn.tenant_id)
+    generation = int(conn.generation)
+    latest = db.execute(select(Run).where(Run.connection_id == conn.id, Run.tenant_id == conn.tenant_id,
+                                          Run.generation == generation)
                         .order_by(Run.run_seq.desc()).limit(1)).scalar_one_or_none()
     success = db.execute(select(Run).where(Run.connection_id == conn.id, Run.tenant_id == conn.tenant_id,
                                            Run.status == RUN_COMMITTED)
@@ -628,11 +652,13 @@ def import_state(db: Session, conn: ShopifyConnection, *, now: Optional[datetime
         state = ST_IMPORTED
     else:
         state, reason = ST_ERROR, latest.failure_reason
+    if conn.status != STATUS_ACTIVE and state in (ST_IMPORTED, ST_IMPORTING):
+        state, reason, started_at = ST_ERROR, E.R_CONNECTION_UNAVAILABLE, None
     return {
         "state": state,
         "reason": reason,
         "started_at": started_at,
-        "last_success": run_evidence(success),
+        "last_success": run_evidence(success, current_generation=generation),
         "can_start": conn.status == STATUS_ACTIVE and state != ST_IMPORTING,
     }
 
@@ -657,9 +683,15 @@ def variant_availability(db: Session, *, tenant_id: int, connection_id: int, var
     published = db.execute(select(Run).where(Run.connection_id == int(connection_id),
                                              Run.tenant_id == int(tenant_id), Run.status == RUN_COMMITTED)
                            .order_by(Run.run_seq.desc()).limit(1)).scalar_one_or_none()
+    conn = db.execute(select(ShopifyConnection).where(ShopifyConnection.id == int(connection_id),
+                                                      ShopifyConnection.tenant_id == int(tenant_id))).scalar_one_or_none()
     try:
-        if variant is None or published is None:
+        if variant is None or published is None or conn is None:
             return {"state": "unknown", "basis": "not_in_mirror"}
+        if conn.status != STATUS_ACTIVE:
+            return {"state": "unknown", "basis": "connection_inactive"}
+        if int(published.generation) != int(conn.generation):
+            return {"state": "unknown", "basis": "previous_installation"}
         if variant.lifecycle != PRESENT:
             return {"state": "unknown", "basis": "deleted_at_source"}
         if variant.requires_components:

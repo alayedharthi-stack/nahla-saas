@@ -12,11 +12,11 @@ unique key on ``shopify_connections`` that their composite foreign keys use:
                                      running per connection (partial unique
                                      index); commit evidence CHECK
   shopify_catalog_staged_records     validated records of a running import
-  shopify_catalog_products           \
-  shopify_catalog_inventory_items     \  provider-scoped mirror keyed by
-  shopify_catalog_variants            /  (connection, Shopify GID) with
-  shopify_catalog_locations          /   tenant-carrying composite FKs
-  shopify_catalog_inventory_levels  /
+  shopify_catalog_products,          provider-scoped mirror keyed by
+  shopify_catalog_inventory_items,   (connection, Shopify GID) with
+  shopify_catalog_variants,          tenant-carrying composite FKs;
+  shopify_catalog_locations,         inventory levels are item-owned
+  shopify_catalog_inventory_levels   (item, location)
 
 Nothing is written to ``products`` / ``product_variants`` or any other
 existing table; the only change to an existing table is the additive
@@ -227,6 +227,7 @@ def _definitions() -> dict:
         sa.Column("connection_id", sa.BigInteger(), nullable=False),
         sa.Column("inventory_item_gid", sa.String(64), nullable=False),
         sa.Column("tracking", sa.String(10), nullable=False),
+        _ts("source_updated_at", nullable=False),
         *_mirror(ITEMS, "detached"),
         _connection_fk(ITEMS),
         sa.UniqueConstraint("connection_id", "inventory_item_gid", name="uq_shopify_catalog_items_identity"),

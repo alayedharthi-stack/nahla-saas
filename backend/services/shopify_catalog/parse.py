@@ -288,6 +288,7 @@ def variant(node: Any) -> Dict[str, Any]:
         "selected_options": selected,
         "inventory_item_gid": gid(item.get("id"), "InventoryItem"),
         "tracking": "tracked" if boolean(item.get("tracked")) else "untracked",
+        "item_updated_at": timestamp(item.get("updatedAt")),
     }
 
 
