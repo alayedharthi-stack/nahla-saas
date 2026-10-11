@@ -67,7 +67,7 @@
      "created_at",
      "timestamp with time zone",
      true,
-     "CURRENT_TIMESTAMP",
+     null,
      "",
      ""
     ]

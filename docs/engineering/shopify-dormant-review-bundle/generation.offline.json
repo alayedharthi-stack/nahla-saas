@@ -1,21 +1,29 @@
 {
   "bootstraps_executed": false,
   "canonical_source_kind": "partial Git-byte inventory export; not deployable checkout",
+  "correction": {
+    "comparator_and_normalization_changed": false,
+    "field": "retained.nonce.columns[created_at].default",
+    "live_schema_altered": false,
+    "new": null,
+    "old": "CURRENT_TIMESTAMP",
+    "path": "scripts/operators/shopify_release_schema_expectations.json"
+  },
   "network_or_database_calls": 0,
   "phases": {
     "S0": {
       "approval_reason": "approval_missing",
       "approval_status": "FAIL",
-      "bootstrap_source_sha256": "d3c233660b7955faf5a05df7376dd301a7d8d44bcb630148a7e45b96445e97df",
-      "preview_command_sha256": "245ad06f7e9ba03b64a8c1e0802cadfe0cb144983f94494e9602fa35793f2012",
-      "unapproved_payload_sha256": "c4d7546736e642284a81f88ab07ab8f3b17563d3241cc89f9011fbc9beddefad"
+      "bootstrap_source_sha256": "ac0b04828a9b205413e20759c1e71ec248bce7951f3e0617e3fdb0fcca825c36",
+      "preview_command_sha256": "4737cf4cb1e8b0fae651b9bb09bfc3938e84d846418e0a5419a462695c5358c5",
+      "unapproved_payload_sha256": "2cce74574c5ad0849b4d8595e0a1409740edb50164fe35bc1dd73615112d92e6"
     },
     "S3": {
       "approval_reason": "approval_missing",
       "approval_status": "FAIL",
-      "bootstrap_source_sha256": "d278fd4c11b089f7e5364ddbb168e8906f8d8dc5dd162acfe56906ac8c59a23f",
-      "preview_command_sha256": "c24ac24cba62cf461dfd722dd57fc4bc8f24ef9753d066f88d72be1b8667871d",
-      "unapproved_payload_sha256": "e9ddd4167b4477d52ffbff260ba3990a56bd3659228d460abbcf07e00524d967"
+      "bootstrap_source_sha256": "c6a9c43ec36c0e037ef82e00d99ab5fcff921bf1e349eeee5ea18e491d89a20e",
+      "preview_command_sha256": "e2a2145ebe8aac3f7de49df195f0ed96a87553743f4e1aca03bdb3cc032a3a7c",
+      "unapproved_payload_sha256": "0e96bf07ab298fbf832229e810839c760124ae86e1e387126af9bbc352f3cbe4"
     }
   },
   "runtime_inventory": {
@@ -23,9 +31,9 @@
     "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
     "gate_version": 2,
     "inventory_count": 143,
-    "inventory_digest": "1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4",
+    "inventory_digest": "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d",
     "unexpected_initializers": []
   },
-  "source_release": "e345ecf6f637b54b9c26d95906fb6143e0a48f09",
+  "source_release": "94da9e2bcb41248180808e791d98f384c46f5779",
   "strict_cli_can_render_current_payloads": false
 }

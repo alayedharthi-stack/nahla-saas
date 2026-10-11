@@ -1,0 +1,88 @@
+{
+  "adopted_nonce_proof": {
+    "baseline_creations": 1,
+    "candidate_s0_boots": 1,
+    "candidate_s3_boots": 2,
+    "candidate_startup_errors": 0,
+    "fixture_resets": 0,
+    "legacy_known_missing_column_warnings": 2,
+    "legacy_s0_boots": 1,
+    "migration_steps": [
+      "0121",
+      "0122",
+      "0123"
+    ],
+    "nonce_oid_preserved": true,
+    "nonce_operations": [
+      {
+        "consume_successes": 1,
+        "insert_created_at": true,
+        "phase": "S0",
+        "replay_rejections": 1,
+        "tenant_mode_redirect_expiry_rejections": 5
+      },
+      {
+        "consume_successes": 1,
+        "insert_created_at": true,
+        "phase": "S3",
+        "replay_rejections": 1,
+        "tenant_mode_redirect_expiry_rejections": 5
+      }
+    ],
+    "retained_definitions_and_oids_preserved": true,
+    "server_default": null
+  },
+  "canonical_runtime_inventory_count": 143,
+  "canonical_runtime_inventory_digest": "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d",
+  "comparator_normalization_model_nonce_writer_migrations_changed": false,
+  "completed_at_utc": "2026-10-11T23:57:22Z",
+  "corrected_retained_sha256": "d4a6915c412b91a17f1d743c8fd53c8d6e09a46402124099505420fc39a2d867",
+  "full_application_rerun": false,
+  "independent_review_pending": true,
+  "job_id": 114608624899,
+  "junit": {
+    "errors": 0,
+    "failures": 0,
+    "ok": true,
+    "skipped": 0,
+    "tests": 5
+  },
+  "live_changes": false,
+  "local_focused_tests": "2 passed in 1.50s on Python 3.13.14; local Docker unavailable",
+  "log_representation": {
+    "canonical_bytes": 48560,
+    "canonical_sha256": "2e48db3a619de8e90ddc12b06e72abdc74f4a6ac607632d6466f018b93d9eebb",
+    "canonicalization": "Remove exactly one leading UTF-8 BOM, normalize CRLF to LF, preserve every other byte including terminal LF",
+    "crlf_count": 0,
+    "decoded_utf8_bytes": 48563,
+    "decoded_utf8_sha256": "ea1c21d3aff58015f89a33ac34c6dd3ba333bcafda7acfb54a215b1b1f70d572",
+    "leading_utf8_bom": true,
+    "patch_capture_equals_decoded_plus_one_lf": true,
+    "terminal_lf_count": 1
+  },
+  "postgres_server_version_num": 180006,
+  "provider_client_calls": 0,
+  "provider_network_attempts": 0,
+  "pytest": "5 passed in 57.55s",
+  "python_version": "3.11.17",
+  "release_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
+  "run_id": 38186099701,
+  "run_url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38186099701",
+  "scheduler_registrations": 0,
+  "started_at_utc": "2026-10-11T23:55:50Z",
+  "status": "PASS",
+  "superseded_runs": [
+    {
+      "outcome": "1 failed, 4 passed in 51.55s",
+      "reason": "new fixture name refused by unchanged startup target prefix guard; no startup executed",
+      "run_id": 38185783134,
+      "source_sha": "40b39dcc5f706fe2ed0cdae8d1ea6ba4db6d4973"
+    },
+    {
+      "outcome": "1 failed, 4 passed in 38.72s",
+      "reason": "new legacy control wrongly required zero warnings from immutable deployed 462 source; exact two known missing-column warnings now classified; candidate remains zero-error",
+      "run_id": 38185917684,
+      "source_sha": "560816101a8f971a0b767da4acb16978048dda20"
+    }
+  ]
+}

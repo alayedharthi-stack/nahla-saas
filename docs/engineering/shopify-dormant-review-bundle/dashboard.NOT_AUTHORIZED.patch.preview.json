@@ -2,8 +2,8 @@
   "services": {
     "446edf49-05bf-4578-b403-72e1e86b384c": {
       "source": {
-        "branch": "codex/shopify-callback-service-key-20261011",
-        "commitSha": "e345ecf6f637b54b9c26d95906fb6143e0a48f09"
+        "branch": "codex/shopify-live-nonce-baseline-20261011",
+        "commitSha": "94da9e2bcb41248180808e791d98f384c46f5779"
       },
       "variables": {
         "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
