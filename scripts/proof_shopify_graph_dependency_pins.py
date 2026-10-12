@@ -137,8 +137,9 @@ def positive():
         assert set(before['rows']) == {'0111', '0113', '0120'}
         assert before['footprint'] == {'tables': [], 'stray_count': 0, 'definitions': {}, 'sequences': []}
         with engine.connect().execution_options(postgresql_readonly=True) as conn:
-            financial = conn.exec_driver_sql("SELECT count(*) FROM pg_tables WHERE schemaname='public' AND "
-                "(tablename LIKE 'merchant_payment_%' OR tablename LIKE 'merchant_balance_%')").scalar()
+            financial = conn.execute(sa.text("SELECT count(*) FROM pg_tables WHERE schemaname='public' AND "
+                "(tablename LIKE :payments OR tablename LIKE :balances)"),
+                {'payments': 'merchant_payment_%', 'balances': 'merchant_balance_%'}).scalar()
             assert financial == 0
         print('GRAPH_POSITIVE_REPORT ' + json.dumps({**identity, 'status': 'PASS', 'checks': checks,
               'source_only_guard_unchanged': True, 'schema_rows_oids_preserved': True,
