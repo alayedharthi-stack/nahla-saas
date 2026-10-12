@@ -7,6 +7,7 @@ on:
       - .github/workflows/shopify-graph-dependency-proof.yml
       - scripts/proof_shopify_graph_dependency_pins.py
       - scripts/operators/shopify_release_gate_contract.py
+      - tests/test_shopify_release_gate.py
 
 permissions:
   contents: read
@@ -17,6 +18,7 @@ jobs:
     timeout-minutes: 20
     env:
       BASELINE_SHA: 94da9e2bcb41248180808e791d98f384c46f5779
+      PG_IMAGE: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     steps:
       - name: Fetch frozen full source and proof driver
         id: sources
@@ -36,6 +38,23 @@ jobs:
           cmp baseline/Dockerfile driver/Dockerfile
           cmp baseline/requirements.txt driver/requirements.txt
           cmp baseline/.dockerignore driver/.dockerignore
+          git -C driver fetch --no-tags --depth=1 origin "$BASELINE_SHA"
+          test "$(git -C driver diff --name-only "$BASELINE_SHA" HEAD -- backend database integrations modules dashboard requirements.txt Dockerfile nixpacks.toml start.sh scripts/operators scripts/preflight_check.py scripts/cleanup_salla_duplicates.py)" = 'scripts/operators/shopify_release_gate_contract.py'
+          python3 - <<'PY'
+          import ast,pathlib
+          name='scripts/operators/shopify_release_gate_contract.py'
+          old=ast.parse(pathlib.Path('baseline',name).read_text())
+          new=ast.parse(pathlib.Path('driver',name).read_text())
+          closure={'backend/__init__.py','backend/payments/__init__.py','backend/payments/models.py'}
+          node=next(n for n in new.body if isinstance(n,ast.AnnAssign) and getattr(n.target,'id',None)=='RUNTIME_EXTRA_FILES')
+          selected=[n for n in node.value.elts if isinstance(n,ast.Constant) and n.value in closure]
+          assert {n.value for n in selected}==closure and len(selected)==3
+          node.value.elts=[n for n in node.value.elts if n not in selected]
+          assert ast.dump(old)==ast.dump(new)
+          for filename in ('scripts/operators/shopify_release_gate.py','scripts/operators/shopify_release_gate_render.py',*closure):
+              assert pathlib.Path('baseline',filename).read_bytes()==pathlib.Path('driver',filename).read_bytes()
+          print('SOURCE_SCOPE PASS exact three additional file pins; import guard/gate/dependencies unchanged')
+          PY
 
       - name: Build unchanged real production Dockerfile from complete frozen source
         id: build
@@ -45,6 +64,7 @@ jobs:
           docker image inspect python:3.11-slim --format 'BASE_IMAGE={{.Id}} REPO_DIGESTS={{json .RepoDigests}}'
           docker build --progress=plain --tag nahla-graph-proof:baseline baseline
           docker image inspect nahla-graph-proof:baseline --format 'BASELINE_IMAGE_ID={{.Id}} LAYERS={{json .RootFS.Layers}}'
+          docker image inspect nahla-graph-proof:baseline --format '{{json .RootFS.Layers}}' > baseline-layers.json
           docker run --rm --network none nahla-graph-proof:baseline python --version
           docker run --rm --network none nahla-graph-proof:baseline python -m pip check
 
@@ -54,6 +74,95 @@ jobs:
           docker run --rm --network none --env "GRAPH_PROOF_SOURCE_SHA=$BASELINE_SHA" \
             --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_graph_dependency_pins.py,target=/proof.py,readonly" \
             nahla-graph-proof:baseline python -B /proof.py baseline | tee baseline-graph-report.log
+
+      - name: Build full corrected source with identical production dependency layers
+        run: |
+          set -euo pipefail
+          docker build --progress=plain --tag nahla-graph-proof:candidate driver
+          docker image inspect nahla-graph-proof:candidate --format 'CANDIDATE_IMAGE_ID={{.Id}}'
+          docker image inspect nahla-graph-proof:candidate --format '{{json .RootFS.Layers}}' > candidate-layers.json
+          python3 - <<'PY'
+          import json,pathlib
+          a=json.loads(pathlib.Path('baseline-layers.json').read_text())
+          b=json.loads(pathlib.Path('candidate-layers.json').read_text())
+          assert a[:-2]==b[:-2]
+          print('PRODUCTION_DEPENDENCY_LAYERS identical')
+          PY
+          docker run --rm --network none nahla-graph-proof:candidate python --version
+          docker run --rm --network none nahla-graph-proof:candidate python -m pip check
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.17'
+
+      - name: Provision isolated PostgreSQL 18.6 and only host fixture dependencies
+        id: pg
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/graph-fixture-venv"
+          echo "$RUNNER_TEMP/graph-fixture-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/graph-fixture-venv/bin/python" -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps \
+            alembic==1.13.1 SQLAlchemy==2.0.30 psycopg2-binary==2.9.9 pytest==9.1.1 \
+            Mako==1.4.3 MarkupSafe==3.0.4 greenlet==3.5.6 typing-extensions==4.16.0 \
+            iniconfig==2.3.1 packaging==26.3 pluggy==1.6.0 Pygments==2.21.0 \
+            cryptography==45.0.7 cffi==2.1.1 pycparser==3.11
+          "$RUNNER_TEMP/graph-fixture-venv/bin/python" -m pip check
+          docker network create --internal graph-guard-proof
+          docker run --detach --name graph-guard-pg --network graph-guard-proof --network-alias postgres \
+            --publish 127.0.0.1:5433:5432 --env POSTGRES_USER=nahla --env POSTGRES_PASSWORD=nahla_password \
+            --env POSTGRES_DB=postgres "$PG_IMAGE"
+          for attempt in {1..20}; do
+            if docker exec graph-guard-pg pg_isready -U nahla -d postgres; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Build only an adopted S0 fixture and run four focused inventory tests
+        env:
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: postgres
+          NAHLA_RELIABILITY_REQUIRE_PG: '1'
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        working-directory: driver
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from backend.tests import test_shopify_release_gate_pg as pg
+          pg._admin('CREATE DATABASE graph_guard_proof')
+          result=pg._build('graph_guard_proof')
+          assert result['adopted_nonce_created'] and result['pre_0103_oid']==result['post_build_oid']
+          print('DISPOSABLE_S0_FIXTURE genuine upgrades, adopted nonce without server default, no0115/Shopify revision applied')
+          PY
+          python -B -m pytest -q --tb=short \
+            tests/test_shopify_release_gate.py::test_graph_dependency_pins_are_exact_sources_without_backend_wildcard \
+            tests/test_shopify_release_gate.py::test_inventory_digest_is_sorted_path_nul_bytes_nul \
+            tests/test_shopify_release_gate.py::test_inventory_rule_on_the_repository_is_the_legacy_rule_plus_the_gate_files \
+            tests/test_shopify_release_gate.py::test_source_tamper_and_planted_initializer_are_refused \
+            --junitxml="$RUNNER_TEMP/graph-inventory.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/graph-inventory.xml"
+
+      - name: Full production image S0 gate positive proof
+        run: |
+          set -euo pipefail
+          docker run --rm --network graph-guard-proof --env "GRAPH_PROOF_SOURCE_SHA=$GITHUB_SHA" \
+            --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_graph_dependency_pins.py,target=/proof.py,readonly" \
+            nahla-graph-proof:candidate python -B /proof.py positive | tee candidate-positive.log
+
+      - name: Exact pinned file and arbitrary module tamper negative proofs
+        run: |
+          set -euo pipefail
+          for case in backend/__init__.py backend/payments/__init__.py backend/payments/models.py unreviewed_module; do
+            docker run --rm --network none --env "GRAPH_PROOF_SOURCE_SHA=$GITHUB_SHA" \
+              --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_graph_dependency_pins.py,target=/proof.py,readonly" \
+              nahla-graph-proof:candidate python -B /proof.py tamper --case "$case"
+          done
+
+      - name: Remove only disposable proof resources
+        if: always() && steps.pg.outcome != 'skipped'
+        run: |
+          docker rm --force --volumes graph-guard-pg || true
+          docker network rm graph-guard-proof || true
 
       - name: Verify source stayed frozen
         if: always() && steps.sources.outcome == 'success'

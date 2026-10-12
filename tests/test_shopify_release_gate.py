@@ -134,6 +134,24 @@ def test_inventory_rule_on_the_repository_is_the_legacy_rule_plus_the_gate_files
     assert count == len(legacy) + len(k.RUNTIME_EXTRA_FILES) and k.DIGEST_RE.match(digest)
 
 
+def test_graph_dependency_pins_are_exact_sources_without_backend_wildcard(tmp_path):
+    closure = {
+        "backend/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "backend/payments/__init__.py": "e9405f349df7e7078d53d10552a647912b8d395777df0606b6a7bff600aecbf4",
+        "backend/payments/models.py": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88",
+    }
+    assert all(k.RUNTIME_EXTRA_FILES.count(path) == 1 for path in closure)
+    assert all(gate.file_sha256(REPO / path) == digest for path, digest in closure.items())
+    revision = ast.parse((REPO / "database/migrations/versions/0115_merchant_payments_foundation.py").read_text())
+    assert any(isinstance(n, ast.ImportFrom) and n.module == "backend.payments.models" for n in revision.body)
+    root = harness.build_root(tmp_path / "root")
+    before = gate.inventory(root)
+    planted = root / "backend/payments/unreviewed_guard_probe.py"
+    planted.write_text("raise RuntimeError('must never execute')\n")
+    assert planted.relative_to(root).as_posix() not in gate.inventory_paths(root)
+    assert gate.inventory(root) == before
+
+
 def test_legacy_guard_digest_is_reproduced_on_the_deployed_checkout_when_available():
     checkout = os.environ.get("NAHLA_LEGACY_462_CHECKOUT", "").strip()
     if not checkout:
