@@ -131,7 +131,7 @@ def positive():
     before = snapshot()
     try:
         code, output, checks = run(command, env)
-        assert code == 0 and 'RESULT PASS' in output, output[-3500:]
+        assert code == 0 and 'RESULT=PASS phase=S0' in output, output[-3500:]
         assert len(checks) == 19 and all(value == 'PASS' for value in checks.values()), checks
         assert snapshot() == before
         assert set(before['rows']) == {'0111', '0113', '0120'}
@@ -206,7 +206,7 @@ def tamper(kind):
         path = ROOT / kind
         original = path.read_bytes()
         path.write_bytes(original + b"\n__import__('pathlib').Path('/tmp/graph_pin_execution_sentinel').write_text('executed')\n")
-        expected = 'inventory_mismatch'
+        expected = 'inventory_digest_mismatch'
     elif kind == 'unreviewed_module':
         path = ROOT / 'backend/payments/unreviewed_guard_probe.py'
         assert not path.exists()
