@@ -1,0 +1,62 @@
+name: Shopify full-image graph dependency proof
+
+on:
+  push:
+    branches: [codex/shopify-graph-dependency-pins-20261012]
+    paths:
+      - .github/workflows/shopify-graph-dependency-proof.yml
+      - scripts/proof_shopify_graph_dependency_pins.py
+      - scripts/operators/shopify_release_gate_contract.py
+
+permissions:
+  contents: read
+
+jobs:
+  full-image-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BASELINE_SHA: 94da9e2bcb41248180808e791d98f384c46f5779
+    steps:
+      - name: Fetch frozen full source and proof driver
+        id: sources
+        run: |
+          set -euo pipefail
+          for name in baseline driver; do
+            git init "$name"
+            git -C "$name" config core.autocrlf false
+            git -C "$name" remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+            revision="$BASELINE_SHA"
+            if [ "$name" = driver ]; then revision="$GITHUB_SHA"; fi
+            git -C "$name" fetch --no-tags --depth=1 origin "$revision"
+            git -C "$name" checkout --detach FETCH_HEAD
+            test "$(git -C "$name" rev-parse HEAD)" = "$revision"
+            git -C "$name" show -s --format="$name=%H tree=%T"
+          done
+          cmp baseline/Dockerfile driver/Dockerfile
+          cmp baseline/requirements.txt driver/requirements.txt
+          cmp baseline/.dockerignore driver/.dockerignore
+
+      - name: Build unchanged real production Dockerfile from complete frozen source
+        id: build
+        run: |
+          set -euo pipefail
+          docker pull python:3.11-slim
+          docker image inspect python:3.11-slim --format 'BASE_IMAGE={{.Id}} REPO_DIGESTS={{json .RepoDigests}}'
+          docker build --progress=plain --tag nahla-graph-proof:baseline baseline
+          docker image inspect nahla-graph-proof:baseline --format 'BASELINE_IMAGE_ID={{.Id}} LAYERS={{json .RootFS.Layers}}'
+          docker run --rm --network none nahla-graph-proof:baseline python --version
+          docker run --rm --network none nahla-graph-proof:baseline python -m pip check
+
+      - name: Reproduce unmodified full-tree refusal and identify exact rejected origin
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --env "GRAPH_PROOF_SOURCE_SHA=$BASELINE_SHA" \
+            --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_graph_dependency_pins.py,target=/proof.py,readonly" \
+            nahla-graph-proof:baseline python -B /proof.py baseline | tee baseline-graph-report.log
+
+      - name: Verify source stayed frozen
+        if: always() && steps.sources.outcome == 'success'
+        run: |
+          git -C baseline diff --exit-code
+          git -C driver diff --exit-code
