@@ -1,0 +1,51 @@
+{
+  "backend_namespace_wildcard_added": false,
+  "baseline_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
+  "byte_unchanged_files": {
+    ".dockerignore": "4a6c5126e76463721c65dc0250cfbe5fb333b2d6490111e0c1a9d18f9d11d5af",
+    "Dockerfile": "984650f9fa58cf404465881510c61d666523b8093f4936bdeea4163d6b5d5a5c",
+    "backend/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "backend/payments/__init__.py": "e9405f349df7e7078d53d10552a647912b8d395777df0606b6a7bff600aecbf4",
+    "backend/payments/models.py": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88",
+    "requirements.txt": "61bd69b24e99e5db9827233fcb2a0370bb04e01ba44b0e1eb5552307b42fff28",
+    "scripts/operators/shopify_release_gate.py": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "scripts/operators/shopify_release_gate_render.py": "87050e9af88fcc102bb49e170c81866d064a4fddef6e358e5ebf95ecd81dd8de",
+    "scripts/operators/shopify_release_schema_expectations.json": "a0eed9f6dcae4ac852187da9e4baf9a559f0d7315a30453f619fcd4d319f6f4d"
+  },
+  "files": [
+    {
+      "bytes": 0,
+      "path": "backend/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 217,
+      "path": "backend/payments/__init__.py",
+      "sha256": "e9405f349df7e7078d53d10552a647912b8d395777df0606b6a7bff600aecbf4"
+    },
+    {
+      "bytes": 10882,
+      "path": "backend/payments/models.py",
+      "sha256": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88"
+    }
+  ],
+  "financial_or_shopify_revision_applied": false,
+  "guard_renderer_dependencies_dockerfile_and_migrations_unchanged": true,
+  "migration_import": {
+    "module": "backend.payments.models",
+    "revision": "database/migrations/versions/0115_merchant_payments_foundation.py",
+    "symbol": "PaymentBase"
+  },
+  "model_module_level_imports": [
+    "__future__",
+    "datetime",
+    "sqlalchemy",
+    "sqlalchemy.orm"
+  ],
+  "payment_model_uses_separate_metadata": true,
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "runtime_changed_files": [
+    "scripts/operators/shopify_release_gate_contract.py"
+  ],
+  "whole_contract_ast_unchanged_after_removing_exact_three_entries": true
+}

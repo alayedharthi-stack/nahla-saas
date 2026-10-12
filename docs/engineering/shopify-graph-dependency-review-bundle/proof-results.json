@@ -1,0 +1,238 @@
+{
+  "actual_failed_railway_artifact": {
+    "config_digest": "sha256:704b169c0031dac1add3383e3ffca150cdf8cce00f55b61cefcea0eb91feb17b",
+    "container_image_manifest_digest": "sha256:1ccbb46617e497c1860b0df43bb307534e12d18b6c1cd0a5d05874d2e83fe340",
+    "deployment_id": "83c84a64-e6a6-4096-b8e9-d204ce834642",
+    "reason": "No registry credentials requested; local Docker daemon unavailable. CI rebuilt full frozen checkout with the unchanged actual production Dockerfile.",
+    "registry_artifact_reexecuted": false,
+    "source_sha": "94da9e2bcb41248180808e791d98f384c46f5779"
+  },
+  "baseline_reproduced_before_inventory_change": {
+    "baseline_source_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
+    "completed_at_utc": "2026-10-12T11:05:32Z",
+    "driver_only_sha": "4f73ebee127461ba2fd076f25df4f6d5cf663a25",
+    "job_id": 114780904990,
+    "run_id": 38240282982,
+    "started_at_utc": "2026-10-12T11:04:15Z",
+    "status": "success"
+  },
+  "deployments_by_this_correction": 0,
+  "docker_images": {
+    "base_image_id": "sha256:541096ae9b05d3b850341b78790e2ed31e94d5aa0ea086933c6ff0c09ffa2e63",
+    "base_image_repository_digests": [
+      "python@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce"
+    ],
+    "baseline_and_corrected_image_pip_check": "PASS",
+    "baseline_image_id": "sha256:44530fb35875555f83ce26a2c431ac5ce12454bd8bfeaae002b1e69a37bb3806",
+    "baseline_layers": [
+      "sha256:15f1c8eb1ab18eae260c7fb6296434cbe1ff0e1e30fd814ae92a80dd54005e62",
+      "sha256:56864e09c37360dbf846cf5ac9fc3090034f02e382fd0fbe4c7b576207436200",
+      "sha256:ba18d048b43a42f86dc288babadbdfe01602571200fd60c9e172deb8abf4147f",
+      "sha256:020f37c339b9fc549a11bcc5a937b81e3500281270bb62edde29022b27919d86",
+      "sha256:a6b91fe168691167b3e4d7cf0eb967525c6012d3579b232d1119ade56ec794d5",
+      "sha256:064a34d71eb053198aa11c65f93ca7d7f223042f41215090eddc1927d060d3f8",
+      "sha256:b07582ed284f363c82933c8182060ccf50a2e28ac2e44eb427baf0a716e4bd44",
+      "sha256:a5585abbaac345314bc8d72fe9d41d4d80f30c0b71bacb1a5535f0999f609b9c",
+      "sha256:bfb703271b0d83b5d62bc8d14ae9b14978df5877b362175f43a506027a263502",
+      "sha256:81d92026d4f8f0d41547259e9430c5f0efba31dfc0e62becafd42bf60c3cfbdd"
+    ],
+    "candidate_image_id": "sha256:cda1c1b0d2008de8a739ee23a3a0272749f55d73c0a4f6fdde35da8c6feffd03",
+    "dependency_layers": "identical except the final COPY/source and start.sh layers, enforced by successful CI step",
+    "inventory_pytest": "4 passed in 0.46s",
+    "python_version": "3.11.17"
+  },
+  "final_documentation_head_may_follow_tested_source": true,
+  "focused_inventory_pytest": {
+    "count": 4,
+    "duration_seconds": 0.46,
+    "status": "PASS"
+  },
+  "full_application_asgi_or_salla_tests_rerun": false,
+  "independent_review_of_this_correction": "PENDING_PARENT_REVIEW",
+  "live_database_queries_by_this_proof": 0,
+  "live_retry_allowed_before_that_review": false,
+  "log_provenance": [
+    {
+      "canonical_log_bytes": 204523,
+      "canonical_log_sha256": "3de12255f0b94ee6edf32cd6d1133014a7d7b8d7b0a087ac7f0895fd8013424c",
+      "canonicalization": "remove exactly one leading UTF-8 BOM; CRLF -> LF; preserve all other bytes including terminal LF",
+      "crlf_count": 0,
+      "decoded_tool_log_bytes": 204526,
+      "decoded_tool_log_sha256": "18b8b9df47deec061127679ae0c8941beb4dd94a4c2acf163cb9ff1d428a4452",
+      "job_id": 114780904990,
+      "leading_utf8_bom": true,
+      "provenance": "GitHub connector decoded UTF-8 job log, base64 round-trip to private filesystem; raw logs not committed",
+      "run_id": 38240282982,
+      "terminal_lf_count": 1,
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38240282982/job/114780904990"
+    },
+    {
+      "canonical_log_bytes": 239047,
+      "canonical_log_sha256": "a20d5ededff2e6e9c1121f1d8597f18849285c7c7076e658b73443c6ec8c4e08",
+      "canonicalization": "remove exactly one leading UTF-8 BOM; CRLF -> LF; preserve all other bytes including terminal LF",
+      "crlf_count": 0,
+      "decoded_tool_log_bytes": 239050,
+      "decoded_tool_log_sha256": "19a7a68dafb2df45da0f4c12479b1bdf2c028f2413a6024116ae261b7756a0e7",
+      "job_id": 114791905740,
+      "leading_utf8_bom": true,
+      "provenance": "GitHub connector decoded UTF-8 job log, base64 round-trip to private filesystem; raw logs not committed",
+      "run_id": 38243591231,
+      "terminal_lf_count": 1,
+      "url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38243591231/job/114791905740"
+    }
+  ],
+  "postgres_fixture_image": "public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336",
+  "prior_accepted_proofs_carried_forward": true,
+  "reports": {
+    "GRAPH_BASELINE_REPORT": [
+      {
+        "database_checks_reached": false,
+        "dependency_hashes": {
+          "backend/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "backend/payments/__init__.py": "e9405f349df7e7078d53d10552a647912b8d395777df0606b6a7bff600aecbf4",
+          "backend/payments/models.py": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88"
+        },
+        "diagnostic_profile_did_not_change_refusal": true,
+        "docker_source_tree": "complete repository as copied by unchanged production Dockerfile",
+        "inventory_count": 143,
+        "inventory_digest": "589ed9d8805d773ca4d5957038e69c9e0eb1684d341fff1e59e8165d64b4108d",
+        "rejected_origin": {
+          "callsite": "find_spec",
+          "module": "backend",
+          "origin": "backend/__init__.py"
+        },
+        "release": "94da9e2bcb41248180808e791d98f384c46f5779",
+        "status": "EXPECTED_REFUSAL_REPRODUCED",
+        "stock_command_unmodified": true
+      }
+    ],
+    "GRAPH_FIXTURE_REPORT": [
+      {
+        "adoption_preserved_nonce_oid": true,
+        "heads": [
+          "0111",
+          "0113",
+          "0120"
+        ],
+        "no_0115_or_shopify_revision_applied": true,
+        "nonce_server_default": null,
+        "postgres_server_version_num": 180006,
+        "private_disposable_database": true,
+        "status": "PASS"
+      }
+    ],
+    "GRAPH_POSITIVE_REPORT": [
+      {
+        "checks": {
+          "approval": "PASS",
+          "connect": "PASS",
+          "database_target": "PASS",
+          "expectations": "PASS",
+          "graph": "PASS",
+          "identity": "PASS",
+          "inventory": "PASS",
+          "libraries": "PASS",
+          "lock": "PASS",
+          "migration_preflight": "PASS",
+          "relation_identity": "PASS",
+          "release_sha": "PASS",
+          "retained_schema": "PASS",
+          "root": "PASS",
+          "server": "PASS",
+          "shopify_flags": "PASS",
+          "shopify_footprint": "PASS",
+          "unlock": "PASS",
+          "version_rows": "PASS"
+        },
+        "financial_tables": 0,
+        "full_application_started": false,
+        "inventory_count": 146,
+        "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+        "provider_calls": 0,
+        "release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+        "schema_rows_oids_preserved": true,
+        "shopify_tables": 0,
+        "source_only_guard_unchanged": true,
+        "status": "PASS",
+        "stock_command_unmodified": true
+      }
+    ],
+    "GRAPH_TAMPER_REPORT": [
+      {
+        "arbitrary_import_allowance_added": false,
+        "case": "backend/__init__.py",
+        "database_checks_reached": false,
+        "inventory_count": 146,
+        "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+        "planted_code_executed": false,
+        "refusal": "inventory_digest_mismatch",
+        "release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+        "status": "PASS"
+      },
+      {
+        "arbitrary_import_allowance_added": false,
+        "case": "backend/payments/__init__.py",
+        "database_checks_reached": false,
+        "inventory_count": 146,
+        "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+        "planted_code_executed": false,
+        "refusal": "inventory_digest_mismatch",
+        "release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+        "status": "PASS"
+      },
+      {
+        "arbitrary_import_allowance_added": false,
+        "case": "backend/payments/models.py",
+        "database_checks_reached": false,
+        "inventory_count": 146,
+        "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+        "planted_code_executed": false,
+        "refusal": "inventory_digest_mismatch",
+        "release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+        "status": "PASS"
+      },
+      {
+        "arbitrary_import_allowance_added": false,
+        "case": "unreviewed_module",
+        "database_checks_reached": false,
+        "inventory_count": 146,
+        "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+        "planted_code_executed": false,
+        "refusal": "repository_import_unverified",
+        "release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+        "status": "PASS"
+      }
+    ]
+  },
+  "successful_full_image_proof": {
+    "completed_at": "2026-10-12T11:36:57Z",
+    "conclusion": "success",
+    "head_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+    "html_url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38243591231/job/114791905740",
+    "id": 114791905740,
+    "run_id": 38243591231,
+    "started_at": "2026-10-12T11:35:11Z"
+  },
+  "superseded_attempts": [
+    {
+      "conclusion": "failure",
+      "reason": "Host fixture connection refused before positive proof; moved disposable fixture into private Docker network.",
+      "run_id": 38241113666,
+      "source_sha": "1636d60cb0f50e5abab8ac8363ec1acb52336749"
+    },
+    {
+      "conclusion": "failure",
+      "reason": "All 19 stock gate checks passed; proof driver expected the wrong RESULT marker. Preservation assertions and negatives were not completed.",
+      "run_id": 38242133730,
+      "source_sha": "83f7f170dc1a35ed664cb0ef7843d1b886d30fd1"
+    },
+    {
+      "conclusion": "failure",
+      "reason": "Gate and schema/rows/OID preservation passed; auxiliary financial-table query had a DBAPI parameter formatting error. Negatives were not completed.",
+      "run_id": 38242824925,
+      "source_sha": "aad9b752a90a51d7dd4319703e9abd6c1130e297"
+    }
+  ],
+  "tested_release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "unchanged_production_dockerfile_and_dependency_layers": true
+}

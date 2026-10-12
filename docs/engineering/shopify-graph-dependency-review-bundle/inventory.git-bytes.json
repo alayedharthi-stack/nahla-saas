@@ -1,0 +1,8 @@
+{
+  "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+  "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+  "gate_version": 2,
+  "inventory_count": 146,
+  "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+  "unexpected_initializers": []
+}
