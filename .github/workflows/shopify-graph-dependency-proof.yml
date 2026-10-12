@@ -109,31 +109,28 @@ jobs:
           "$RUNNER_TEMP/graph-fixture-venv/bin/python" -m pip check
           docker network create --internal graph-guard-proof
           docker run --detach --name graph-guard-pg --network graph-guard-proof --network-alias postgres \
-            --publish 127.0.0.1:5433:5432 --env POSTGRES_USER=nahla --env POSTGRES_PASSWORD=nahla_password \
+            --env POSTGRES_USER=nahla --env POSTGRES_PASSWORD=nahla_password \
             --env POSTGRES_DB=postgres "$PG_IMAGE"
           for attempt in {1..20}; do
-            if docker exec graph-guard-pg pg_isready -U nahla -d postgres; then exit 0; fi
+            if docker exec graph-guard-pg pg_isready -h 127.0.0.1 -p 5432 -U nahla -d postgres; then exit 0; fi
             sleep 1
           done
           exit 1
 
-      - name: Build only an adopted S0 fixture and run four focused inventory tests
+      - name: Build only an adopted S0 fixture inside the private Docker network
+        run: |
+          set -euo pipefail
+          docker run --rm --network graph-guard-proof --env "GRAPH_PROOF_SOURCE_SHA=$GITHUB_SHA" \
+            --mount "type=bind,source=$PWD/driver/scripts/proof_shopify_graph_dependency_pins.py,target=/proof.py,readonly" \
+            nahla-graph-proof:candidate python -B /proof.py fixture
+
+      - name: Run four focused inventory tests without database access
         env:
-          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
-          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: postgres
-          NAHLA_RELIABILITY_REQUIRE_PG: '1'
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONDONTWRITEBYTECODE: '1'
         working-directory: driver
         run: |
           set -euo pipefail
-          python - <<'PY'
-          from backend.tests import test_shopify_release_gate_pg as pg
-          pg._admin('CREATE DATABASE graph_guard_proof')
-          result=pg._build('graph_guard_proof')
-          assert result['adopted_nonce_created'] and result['pre_0103_oid']==result['post_build_oid']
-          print('DISPOSABLE_S0_FIXTURE genuine upgrades, adopted nonce without server default, no0115/Shopify revision applied')
-          PY
           python -B -m pytest -q --tb=short \
             tests/test_shopify_release_gate.py::test_graph_dependency_pins_are_exact_sources_without_backend_wildcard \
             tests/test_shopify_release_gate.py::test_inventory_digest_is_sorted_path_nul_bytes_nul \

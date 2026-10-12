@@ -148,6 +148,55 @@ def positive():
         engine.dispose()
 
 
+def fixture():
+    """Create only the synthetic adopted S0 database on the private proof network."""
+    import sqlalchemy as sa
+    admin = sa.create_engine('postgresql://nahla:nahla_password@postgres:5432/postgres',
+                             poolclass=sa.pool.NullPool, isolation_level='AUTOCOMMIT')
+    try:
+        with admin.connect() as conn:
+            assert int(conn.exec_driver_sql('SHOW server_version_num').scalar()) == 180006
+            conn.exec_driver_sql('CREATE DATABASE graph_guard_proof')
+    finally:
+        admin.dispose()
+    url = 'postgresql://nahla:nahla_password@postgres:5432/graph_guard_proof'
+    env = {name: os.environ[name] for name in ('PATH', 'LANG') if name in os.environ}
+    env.update({'DATABASE_URL': url, 'PYTHONDONTWRITEBYTECODE': '1', 'ENVIRONMENT': 'test'})
+    env.update({flag: '0' for flag in k.SHOPIFY_FLAG_ENVS})
+    def upgrade(revision):
+        result = subprocess.run([sys.executable, '-B', '-m', 'alembic', 'upgrade', revision],
+            cwd=ROOT / 'database', env=env, capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stderr[-2500:]
+    upgrade('0093')
+    upgrade('0102')
+    engine = sa.create_engine(url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.begin() as conn:
+            assert conn.exec_driver_sql("SELECT to_regclass('public.whatsapp_oauth_nonces')").scalar() is None
+            conn.exec_driver_sql("""CREATE TABLE whatsapp_oauth_nonces (
+                id SERIAL PRIMARY KEY, nonce_hash VARCHAR(64) NOT NULL,
+                tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                connection_mode VARCHAR(32) NOT NULL, redirect_uri_fingerprint VARCHAR(64) NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                CONSTRAINT uq_whatsapp_oauth_nonces_hash UNIQUE (nonce_hash))""")
+            conn.exec_driver_sql('CREATE INDEX ix_whatsapp_oauth_nonces_expires_at ON whatsapp_oauth_nonces (expires_at)')
+            conn.exec_driver_sql('CREATE INDEX ix_whatsapp_oauth_nonces_tenant_id ON whatsapp_oauth_nonces (tenant_id)')
+            nonce_oid = conn.exec_driver_sql("SELECT 'whatsapp_oauth_nonces'::regclass::oid").scalar()
+        for revision in ('0103', '0111', '0113', '0120'):
+            upgrade(revision)
+        with engine.connect() as conn:
+            assert set(gate.read_version_rows(conn)) == {'0111', '0113', '0120'}
+            assert gate.nonce_definition(conn, k.NONCE_TABLE)['columns'][-1][3] is None
+            assert conn.exec_driver_sql("SELECT 'whatsapp_oauth_nonces'::regclass::oid").scalar() == nonce_oid
+        print('GRAPH_FIXTURE_REPORT ' + json.dumps({'status': 'PASS', 'private_disposable_database': True,
+              'postgres_server_version_num': 180006, 'heads': ['0111', '0113', '0120'],
+              'nonce_server_default': None, 'adoption_preserved_nonce_oid': True,
+              'no_0115_or_shopify_revision_applied': True}, sort_keys=True))
+    finally:
+        engine.dispose()
+
+
 def tamper(kind):
     command, source, env, identity = inputs()
     assert identity['inventory_count'] == 146
@@ -187,9 +236,10 @@ def tamper(kind):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=('baseline', 'positive', 'tamper'))
+    parser.add_argument('mode', choices=('baseline', 'fixture', 'positive', 'tamper'))
     parser.add_argument('--case', choices=DEPENDENCIES + ('unreviewed_module',))
     args = parser.parse_args()
     if args.mode == 'baseline': baseline()
+    elif args.mode == 'fixture': fixture()
     elif args.mode == 'positive': positive()
     else: tamper(args.case)
