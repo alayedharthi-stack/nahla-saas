@@ -1279,7 +1279,7 @@
       "id": "google_merchant_ledger_repository",
       "kind": "proof",
       "module": "backend/tests/test_google_merchant_ledger_repository_pg.py",
-      "origin": "Dormant caller-transaction ledger adapter over frozen revision 0124; synthetic observations only",
+      "origin": "Dormant caller-transaction ledger adapter over frozen revision 0125; synthetic observations only",
       "required_env": {
         "NAHLA_RELIABILITY_REQUIRE_PG": "1",
         "NAHLA_RELIABILITY_PG_ADMIN_DSN": null

@@ -1,4 +1,4 @@
-"""Dormant adapter proofs against revision 0124 in disposable loopback databases."""
+"""Dormant adapter proofs against revision 0125 in disposable loopback databases."""
 from __future__ import annotations
 
 import importlib.util
@@ -50,7 +50,7 @@ def pg():
             c.execute(text("INSERT INTO tenants VALUES (1), (2)"))
             from alembic.migration import MigrationContext
             from alembic.operations import Operations
-            spec = importlib.util.spec_from_file_location("ledger_0124", ROOT / "database/migrations/versions/0124_google_merchant_ledger.py")
+            spec = importlib.util.spec_from_file_location("ledger_0125", ROOT / "database/migrations/versions/0125_google_merchant_ledger.py")
             migration = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(migration)
             with Operations.context(MigrationContext.configure(c)):
