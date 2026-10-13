@@ -54,7 +54,9 @@ SHOPIFY_PRIVACY_ALEMBIC_HEAD = "0123"
 # The dormant Google Merchant connection binding and offer ledger extend the
 # Shopify privacy branch and replace 0123 as its head. Additive, never applied
 # by normal bootstrap; 0123 itself remains a valid explicit upgrade target.
-GOOGLE_MERCHANT_ALEMBIC_HEAD = "0124"
+# Revision 0124 is reserved for the separate Shopify install-first draft.
+# Google 0125 is a sibling from 0123, with no dependency on that dormant DDL.
+GOOGLE_MERCHANT_ALEMBIC_HEAD = "0125"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -105,7 +107,7 @@ def repository_heads_expected(heads) -> bool:
     ``{0092, 0111, 0114, 0115, 0121}``, the Shopify catalog mirror
     ``{0092, 0111, 0114, 0115, 0122}``, the Shopify privacy requests
     ``{0092, 0111, 0114, 0115, 0123}`` and the Google Merchant ledger
-    ``{0092, 0111, 0114, 0115, 0124}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115, 0125}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS
