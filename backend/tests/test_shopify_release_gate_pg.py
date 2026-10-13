@@ -295,6 +295,39 @@ def test_s3_footprint_is_checked_by_definition_across_every_user_schema(gate_roo
         _drop(db)
 
 
+def test_source_install_first_revision_does_not_authorize_its_database_state(gate_root):
+    db = _fresh_db("gate_install_state")
+    try:
+        _build(db, "0123")
+        _assert_pass(gate_root, "S3", db, "source 0124 with dormant database 0123")
+        proc = _alembic(db, "upgrade", "0124")
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        out = _assert_fail(gate_root, "S3", db, "database 0124 has no deployment authorization",
+                           check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
+        assert harness.checks(out)["shopify_footprint"] == (k.FAIL, k.R_FOOTPRINT_UNEXPECTED)
+        assert _sql(db, "SELECT version_num FROM alembic_version ORDER BY version_num") == [("0111",), ("0113",), ("0124",)]
+    finally:
+        _drop(db)
+
+
+@pytest.mark.parametrize("keep", ["shopify_install_flows", "shopify_owner_identities", "both"])
+def test_false_s3_version_rows_cannot_hide_install_tables(gate_root, keep):
+    db = _fresh_db("gate_false_install")
+    try:
+        _build(db, "0124")
+        # Deliberately corrupt only this disposable database to exercise independent footprint refusal.
+        _sql(db, "UPDATE alembic_version SET version_num = '0123' WHERE version_num = '0124'")
+        for table in ("shopify_install_flows", "shopify_owner_identities"):
+            if keep != "both" and table != keep:
+                _sql(db, f"DROP TABLE {table}")
+        out = _assert_fail(gate_root, "S3", db, "falsely stamped S3 with install footprint",
+                           check="shopify_footprint", reason=k.R_FOOTPRINT_UNEXPECTED)
+        assert harness.checks(out)["version_rows"] == (k.PASS, None)
+        assert _sql(db, "SELECT version_num FROM alembic_version ORDER BY version_num") == [("0111",), ("0113",), ("0123",)]
+    finally:
+        _drop(db)
+
+
 def test_s0_refuses_any_shopify_object(gate_root):
     db = _fresh_db("gate_s0_strays")
     try:

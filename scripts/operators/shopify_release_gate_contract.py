@@ -31,9 +31,10 @@ Bindings (none circular)
 Phases
 ──────
 Normal deployment is allowed in exactly two states: S0 (the deployed
-topology before any Shopify revision) and S3 (every Shopify revision
-applied). S1 and S2 are intermediate states of the separately approved manual
-migration window; they are named here so tests can prove they are refused,
+topology before any Shopify revision) and S3 (the foundation, catalog and
+privacy revisions through 0123 applied). Source-only install-first revision
+0124 is not an authorized database state. S1 and S2 are intermediate states of
+the separately approved manual migration window; they are named here so tests can prove they are refused,
 and they are never a deployment phase.
 """
 from __future__ import annotations
@@ -97,6 +98,7 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "backend/payments/__init__.py",
     "backend/payments/models.py",
     "backend/services/shopify_connection/config.py",
+    "backend/services/shopify_connection/install_config.py",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
@@ -125,8 +127,9 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0121": "0120",
     "0122": "0121",
     "0123": "0122",
+    "0124": "0123",
 }
-EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0123"})
+EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0124"})
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
@@ -213,11 +216,13 @@ ADVISORY_LOCK_KEY = 8182734029736770447
 # separate owner evidence.
 SHOPIFY_FLAG_ENVS: Tuple[str, ...] = (
     "NAHLA_SHOPIFY_CONNECTION_ENABLED",
+    "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED",
     "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED",
     "VITE_SHOPIFY_CONNECTION_UI",
+    "VITE_SHOPIFY_INSTALL_FIRST_ENABLED",
     "VITE_SHOPIFY_CATALOG_IMPORT_UI",
 )
 TRUTHY = frozenset({"1", "true", "yes", "on"})
