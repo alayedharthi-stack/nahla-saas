@@ -1,0 +1,603 @@
+{
+  "binding": "Canonical Git index bytes; the source commit is bound externally by the CI artifact and any future release approval.",
+  "database_py_digest": "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09",
+  "files": [
+    {
+      "path": "backend/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "backend/payments/__init__.py",
+      "sha256": "e9405f349df7e7078d53d10552a647912b8d395777df0606b6a7bff600aecbf4"
+    },
+    {
+      "path": "backend/payments/models.py",
+      "sha256": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88"
+    },
+    {
+      "path": "backend/services/shopify_catalog/config.py",
+      "sha256": "6d7554df2bdcec919ce59d0e35d90f75e0aeff02ae663480823411e2721e05ed"
+    },
+    {
+      "path": "backend/services/shopify_connection/config.py",
+      "sha256": "c8861a55e6e391a98b7f898d4ac8decd12d9737c72a46cd7e3deebb523db2911"
+    },
+    {
+      "path": "backend/services/shopify_connection/install_config.py",
+      "sha256": "5334026a6a4d2ba5a2ed049d21b3a8798a3331f5c63fb72cda59f8e65fda3986"
+    },
+    {
+      "path": "backend/services/shopify_privacy/config.py",
+      "sha256": "3ef56ff771e1a7172ac6ce5e1467a63e4bcb41b017edb34ea986dd0cde2b94b9"
+    },
+    {
+      "path": "database/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "database/ai_usage_dedup_helpers.py",
+      "sha256": "d993781679501ceef80a982e67f374a09e831e49c7f5546246f2eeb5a28ac080"
+    },
+    {
+      "path": "database/alembic.ini",
+      "sha256": "7008911e6322822e8329c38be10d5e95bff2b9081eeddb988f5bf9450a7af44f"
+    },
+    {
+      "path": "database/catalog_membership_uniqueness.py",
+      "sha256": "765bf7108391d5d7ed5454b4fc07c1bf3bf9cab62a929afba27707bc206e99eb"
+    },
+    {
+      "path": "database/catalog_meta_item_uniqueness.py",
+      "sha256": "4efbcde849ff8e6242f520824ddbd0483319f839d3a51d8e93ab9dce8ee5c3b5"
+    },
+    {
+      "path": "database/migration_inspector_helpers.py",
+      "sha256": "4b69ce9f866cf68f9a6114ba249268fbd71f938175ebb9b4866b3051e4e3e548"
+    },
+    {
+      "path": "database/migrations/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "database/migrations/env.py",
+      "sha256": "55477f47612ae73ba8c2db2c9bfdeb74b9f44634991ed2f6414bf0e11d725a01"
+    },
+    {
+      "path": "database/migrations/versions/0001_initial_schema.py",
+      "sha256": "844b4b78e5ab0eba256497ddc78a6d44937be91f4d47af94b1725e1f320df3ee"
+    },
+    {
+      "path": "database/migrations/versions/0002_customer_intelligence.py",
+      "sha256": "c01b3499b2d298c6e979cb9e24a83ae68bc73cd374e6efc90dcfc869137d891f"
+    },
+    {
+      "path": "database/migrations/versions/0003_commerce_permissions.py",
+      "sha256": "49430ec121fa508ce81f7dd4463f145404290d2857b2f89afca0680d53566508"
+    },
+    {
+      "path": "database/migrations/versions/0004_settings_fields.py",
+      "sha256": "67659ae54e4c44d994cf3489db9afdce3eb271d177803350ee65f92020f495f3"
+    },
+    {
+      "path": "database/migrations/versions/0005_campaigns.py",
+      "sha256": "1df1816811d01934c5f816f76e5b2877f9c7803afa0851b739d167ee8d4d9f24"
+    },
+    {
+      "path": "database/migrations/versions/0006_whatsapp_templates.py",
+      "sha256": "f992ad5aa576853b41771b16def99d6a042c2066523fbee74f327cdfe6b07ca2"
+    },
+    {
+      "path": "database/migrations/versions/0007_intelligence.py",
+      "sha256": "e6dc84dda03424d01f70a1075664b0fe9438b10373e2c8929b72711cabd347ff"
+    },
+    {
+      "path": "database/migrations/versions/0008_ai_sales_tables.py",
+      "sha256": "aeda398fb61ab1949e85c9f88671fec2a9883852ce66d0fec26082fc3d308901"
+    },
+    {
+      "path": "database/migrations/versions/0009_template_ai_columns.py",
+      "sha256": "d2afa7123e2c32a7a7727ef602e7a05fe18f261032427e0e5a6a2d91545be52f"
+    },
+    {
+      "path": "database/migrations/versions/0010_billing_stripe_hyperpay.py",
+      "sha256": "bdf658d1c17552369f90bc1bd5dbcb08e21bcfb365282d925987191a7c8b66ef"
+    },
+    {
+      "path": "database/migrations/versions/0011_whatsapp_connection_store_sync.py",
+      "sha256": "cde8313e76648742aff678a65d8ff59194502baae9c5fc5b32d167cd661a3b23"
+    },
+    {
+      "path": "database/migrations/versions/0012_whatsapp_usage.py",
+      "sha256": "0468a8aee4dbd4517db903c1e576f00c9cd1700f0a22933c0791e4ddc6321947"
+    },
+    {
+      "path": "database/migrations/versions/0013_wa_conversation_logs.py",
+      "sha256": "7db4f79758843f287dd6e56d266b92b30edecff9e342dfd30426bca8f0f597f9"
+    },
+    {
+      "path": "database/migrations/versions/0014_merchant_addons.py",
+      "sha256": "46643e855f45374f958e8c9c25faf1aea833c8099c3982be11f1287606a847da"
+    },
+    {
+      "path": "database/migrations/versions/0015_merchant_widgets.py",
+      "sha256": "f36ef199c37ffec812a91befa59d5d5e15b757fbb344d7c10489766aa33c0919"
+    },
+    {
+      "path": "database/migrations/versions/0016_whatsapp_connection_type.py",
+      "sha256": "f244a2817c047459fd35b98f461ecdfbdeae8bb738a60de0c2838ae620fbf526"
+    },
+    {
+      "path": "database/migrations/versions/0017_integration_external_store_unique.py",
+      "sha256": "623e77775ed28542edbed8d8c912aa4792ba0512d6e26ce222a9193456cd92ff"
+    },
+    {
+      "path": "database/migrations/versions/0018_whatsapp_disconnect_audit.py",
+      "sha256": "f08ca2ec2b8ff692739ac6abc1a314590ade4b6411cb11926a1870b08a19b96e"
+    },
+    {
+      "path": "database/migrations/versions/0019_customer_profile_intelligence_fields.py",
+      "sha256": "375e95b852ff1c0421fe136b595664b2ef146a062f94db98bbe5ed6e4abfeb04"
+    },
+    {
+      "path": "database/migrations/versions/0020_automation_engine.py",
+      "sha256": "02ba1caa06f475ed7d0779abb523f5688d130e1c362baa956184a29c23aa39ea"
+    },
+    {
+      "path": "database/migrations/versions/0021_webhook_guardian.py",
+      "sha256": "239a975b16f1238f34da471bd75aac11f499a07597b83bdd4c481fe1604d9007"
+    },
+    {
+      "path": "database/migrations/versions/0022_tenant_integrity.py",
+      "sha256": "88976610fd22f0edd0477b1b83bcd55fcccbb983ebdba25201a8c19576cd6454"
+    },
+    {
+      "path": "database/migrations/versions/0023_webhook_events.py",
+      "sha256": "a62371325d7fa89c6f6f90c85ffc78bdc04eb07db823ab03174937a28c62e602"
+    },
+    {
+      "path": "database/migrations/versions/0024_automation_triggers_normalize.py",
+      "sha256": "e242e94a71e0cb613f517b7ff58ba3d28ad9400eef3560043bf1baa962d12a83"
+    },
+    {
+      "path": "database/migrations/versions/0025_product_interests.py",
+      "sha256": "2cddc8dd0a49426527b22f1b9ebe4b9b00209a398214ef5736f229aa283522da"
+    },
+    {
+      "path": "database/migrations/versions/0026_order_dashboard_fields.py",
+      "sha256": "7fcc063a6b43e8a68195323bf9043de4813dc7c740e923781c78693b59b948d9"
+    },
+    {
+      "path": "database/migrations/versions/0027_automation_engine_column.py",
+      "sha256": "1dd9ca7fac6c428800235c277f9f9e7cb2827250ea1f40cb1d9489d1f73ea13e"
+    },
+    {
+      "path": "database/migrations/versions/0028_promotions.py",
+      "sha256": "3d6b0c58f59fa9d15b6f69f69beb599396d35e51303508c1847195d15842cdfc"
+    },
+    {
+      "path": "database/migrations/versions/0029_offer_decisions.py",
+      "sha256": "1b78193d767a024c1e03da2e16e8c3d15deb5842a3abc0175c36cf03a167bfa0"
+    },
+    {
+      "path": "database/migrations/versions/0030_tenant_is_platform_flag.py",
+      "sha256": "35a6d07a867122d3312862cd389620cc298d0375fdd59ed4332629fbcb4afeaa"
+    },
+    {
+      "path": "database/migrations/versions/0031_customer_isolation_and_source.py",
+      "sha256": "2df18bc6a99b110c3d0657280c8aeddfbbdafbeadacaf13e00358022f3572f7d"
+    },
+    {
+      "path": "database/migrations/versions/0032_normalized_phone_e164.py",
+      "sha256": "79c8e545a2cdfa7aeae5592070ec62f15b701964e82bf5fac9d230f9ffdb8b5d"
+    },
+    {
+      "path": "database/migrations/versions/0033_cross_merchant_signals.py",
+      "sha256": "03d8e9ec7e219c3d7229f775c7e02c103b866adff335cabbfe46a3ce3d8972b0"
+    },
+    {
+      "path": "database/migrations/versions/0034_learned_sales_policies.py",
+      "sha256": "b1a5f3547955ba7a27823145070ce9f74eb72d150a067c5aa69646e13e84cd19"
+    },
+    {
+      "path": "database/migrations/versions/0035_template_nahla_display_management.py",
+      "sha256": "af286d380bacf646f2128e358ebe3fab4a761319203f27d552b685c40159667c"
+    },
+    {
+      "path": "database/migrations/versions/0036_wa_connection_meta_tier.py",
+      "sha256": "646f914bf6b7399bb8c1d1ca5ab1b16f7f481ccc07da10462bf0101287fd4ead"
+    },
+    {
+      "path": "database/migrations/versions/0037_customer_import_batches.py",
+      "sha256": "ad6ce679188faaefff97fb64ef02a5c88a4c2cc106f344aa19580c2cb5822d08"
+    },
+    {
+      "path": "database/migrations/versions/0038_coupon_taxonomy.py",
+      "sha256": "f9cf5283168270ed2c54553b3c257b7ada384e70e697fb03cd7136aabe263ed1"
+    },
+    {
+      "path": "database/migrations/versions/0039_governor_send_log.py",
+      "sha256": "e933f52f309ccc4531a731acef83f5ddec3f4db43aa6dffd953a3dbf35f7bb28"
+    },
+    {
+      "path": "database/migrations/versions/0040_notification_logs.py",
+      "sha256": "c5484210b8b264fb33877d5313ed1785f2581b07cbfd729ff0c588e92e78eac5"
+    },
+    {
+      "path": "database/migrations/versions/0041_conversation_trace_outcomes.py",
+      "sha256": "c23342d6e7190b1b3c646f273f68056fcfb682ad8cfe86948b7880380eec24ea"
+    },
+    {
+      "path": "database/migrations/versions/0042_salla_trial_ledger.py",
+      "sha256": "69290b4ba70714b713174f4d62d499240564df95783184058b499e3d833f74ac"
+    },
+    {
+      "path": "database/migrations/versions/0043_coexistence_client_id_cleanup.py",
+      "sha256": "1d2f61a733fdc752f1d1055dd08141a3cc9f900281b75d612e9d968534651abb"
+    },
+    {
+      "path": "database/migrations/versions/0044_wa_webhook_receipt_columns.py",
+      "sha256": "2d809621f9cf1bf4a6c7175f1e5d06362e55a2c8231a1d531d6df6056f424a3b"
+    },
+    {
+      "path": "database/migrations/versions/0045_ai_pause_state.py",
+      "sha256": "27d38293e33504dbd33bd371306a17e1c30e0ebc7f1435b22d18a43c558ac42f"
+    },
+    {
+      "path": "database/migrations/versions/0046_clean_legacy_ai_pause.py",
+      "sha256": "5b94cc334536df25c4d9dc43f9dfc9cc4f2a2119ebe95f09b6a5d84cd3511daa"
+    },
+    {
+      "path": "database/migrations/versions/0047_wa_ai_live_since_history_sync.py",
+      "sha256": "d2678766e13125eb0f2bf6e81853a0632a2a4efe2242e017b8e11b6e9ed3e9ad"
+    },
+    {
+      "path": "database/migrations/versions/0048_conversation_human_takeover.py",
+      "sha256": "4154ae9981c416bb71e8043a0900504988ae19aae115c291e7d8b3beb3747a6f"
+    },
+    {
+      "path": "database/migrations/versions/0049_conversation_last_read_at.py",
+      "sha256": "1c5fc9f81b01f75d275141c57a13a3b0685752d4ac1677b13870fc3ced344c94"
+    },
+    {
+      "path": "database/migrations/versions/0050_manual_coupons_ai_media_library.py",
+      "sha256": "04e4f77baf69887862082a977d6b13b21943fb53b1c8db3b66ebc59fa15878df"
+    },
+    {
+      "path": "database/migrations/versions/0051_campaign_send_logs.py",
+      "sha256": "33fd0baed7efa5cffca528eab86374f093e748c810ac0a5cb36584499eabc482"
+    },
+    {
+      "path": "database/migrations/versions/0052_customer_segments_manual.py",
+      "sha256": "f2887d0c991c03ef928bf0deeeff42c5871687cff8982d576b682b549950db96"
+    },
+    {
+      "path": "database/migrations/versions/0053_customer_segments_manual_mode.py",
+      "sha256": "e79a182a7da65b9719b2f5b15495408450ea0f6d0587a65da54f29709ad91b7d"
+    },
+    {
+      "path": "database/migrations/versions/0054_campaign_send_log_delivery_tracking.py",
+      "sha256": "cfc7772f275862bba98ccfbdf5327802b7edeab3f959f9be2e5b5966e449d80f"
+    },
+    {
+      "path": "database/migrations/versions/0055_customer_name_audit.py",
+      "sha256": "639adb276d4cc851614417f942d7b5c0a0bc4e53cf4113d2639503906be29d2b"
+    },
+    {
+      "path": "database/migrations/versions/0056_customer_name_cleanup_drafts.py",
+      "sha256": "e610f3c06b9d3982ad17a41d29de759bbe5dfeefedd4487bf90786005d60408f"
+    },
+    {
+      "path": "database/migrations/versions/0057_delivery_quality_layer.py",
+      "sha256": "034aed80c65fc2864539571cd9bd45d37ffb730f78f600539fe669b6b4379456"
+    },
+    {
+      "path": "database/migrations/versions/0058_wave_sending.py",
+      "sha256": "c1a35631b031476dd400ec58f85247dfc87fafff851c2ab29e5181ce24d6f859"
+    },
+    {
+      "path": "database/migrations/versions/0059_media_key.py",
+      "sha256": "19d1be532f36a52ec80082a79a3943750d7e08f0d2d5550a2b075bb51a76afed"
+    },
+    {
+      "path": "database/migrations/versions/0060_message_events_perf_index.py",
+      "sha256": "b507d2c86378fe565be8d17a47bd8f2704ac712784fbcac41a7978d56e6b381a"
+    },
+    {
+      "path": "database/migrations/versions/0061_meta_catalog.py",
+      "sha256": "a6214babdf74f618feddf0b2eb60418c3f4de8841aad9445d4dd6e9fe0568c45"
+    },
+    {
+      "path": "database/migrations/versions/0062_product_source.py",
+      "sha256": "7890983eac5b8ac8064722e6d5be2a57564fbb7f5d0af3e8cdfde97dca7eca50"
+    },
+    {
+      "path": "database/migrations/versions/0063_conversation_last_payment_confirmed_at.py",
+      "sha256": "c06f4279df4d667a7974d49cab28973f5f7fb1692f1feedda66fb10e3311038e"
+    },
+    {
+      "path": "database/migrations/versions/0064_product_variants.py",
+      "sha256": "002cf3ea93c1d06014d66ab6d8fd5a1bb6454555f462071cf3a2cd709702ab12"
+    },
+    {
+      "path": "database/migrations/versions/0065_user_totp.py",
+      "sha256": "27c8f666499c6e8f5f19d3901520d85b811c60ea6b2052e17fb3b7b9d7937b04"
+    },
+    {
+      "path": "database/migrations/versions/0066_ai_quality_events.py",
+      "sha256": "3e890d5b9d283208024be1004f23edecf99ff4a953d074d28050bab49dc4bdae"
+    },
+    {
+      "path": "database/migrations/versions/0067_merchant_knowledge.py",
+      "sha256": "e04e5ecf414e2d9c481cf43f34ccb8874cf3f4d3833bc52f91af2ffe231bdce8"
+    },
+    {
+      "path": "database/migrations/versions/0068_merchant_knowledge_drafts.py",
+      "sha256": "c5ab2ee0d2f7a68f6c9ad8a2a79b3a1ea89cfc52c4a03792e99d4d54880ad4a2"
+    },
+    {
+      "path": "database/migrations/versions/0069_section_products.py",
+      "sha256": "a2b4a33f8250d89069a4320d66ac2e181eb64d78d3b15c60b663d92865044871"
+    },
+    {
+      "path": "database/migrations/versions/0070_ai_quality_category.py",
+      "sha256": "e1e0034efc77783f1edca128a062d6e1a300ac076d0e01259f57a3466c0f2a53"
+    },
+    {
+      "path": "database/migrations/versions/0071_meta_catalog_import_metadata.py",
+      "sha256": "1f6fa9cf8675571aff788be18068ce7b39588cefc45ed93b6f4198211f6db291"
+    },
+    {
+      "path": "database/migrations/versions/0072_product_catalog_visibility.py",
+      "sha256": "d7f34db5289f4bd81a1aae9752ca550fb0cba2a544820e2dde659ae0ed6de92b"
+    },
+    {
+      "path": "database/migrations/versions/0073_kb_section_deleted_at.py",
+      "sha256": "f5a3b7f5b61255160675d263f92f77cd007ebcf908da32b7bc5f5cd2c369b6ce"
+    },
+    {
+      "path": "database/migrations/versions/0074_ai_usage_events.py",
+      "sha256": "fc0c234fe227c57841ad99faba32f2d0014daba12fe34e762cf7a0e909aa4e17"
+    },
+    {
+      "path": "database/migrations/versions/0076_merchant_branches_operations_center.py",
+      "sha256": "653eb6d7b65122266e620d3afda62c50da140014e4bc8b04207cf92e3d6425b3"
+    },
+    {
+      "path": "database/migrations/versions/0077_branch_contact_default_reception.py",
+      "sha256": "77988bf5625b933595c826eabc924a77aaffcf7423b7100ad4493d8412883a65"
+    },
+    {
+      "path": "database/migrations/versions/0078_escalation_step_contact_link.py",
+      "sha256": "08910ddd187ca5bcd553624f8465e8f20b25ce4c75527e53085f2a02cca93214"
+    },
+    {
+      "path": "database/migrations/versions/0079_branch_arrival_keywords_pr_c.py",
+      "sha256": "b44c7fd513380d0ed4496c77c1f14cb38bb0b477f52a81b6ccaa3fe157b3fbd2"
+    },
+    {
+      "path": "database/migrations/versions/0080_order_shipments_foundation.py",
+      "sha256": "0d2f3daa88ee6a071f4ac55b6b7e36e4b0a38db78fd4890774c302f852d43c8c"
+    },
+    {
+      "path": "database/migrations/versions/0081_trial_whatsapp_lifecycle.py",
+      "sha256": "f89c61afeef75c87d96c8f7a067cc7af5217fe9bf7833ecc38ac892d6fe64b25"
+    },
+    {
+      "path": "database/migrations/versions/0082_whatsapp_usage_subscription_id.py",
+      "sha256": "c8311d0bc4e3419ea70e1ca4af47650684f4ad11f59c92c8f27c9c434506fb9d"
+    },
+    {
+      "path": "database/migrations/versions/0083_catalog_intelligence_phase1.py",
+      "sha256": "59e6931d8a4a45e799a67b2a83ef06440a37a6ef957c06fe108b2b587a558bfd"
+    },
+    {
+      "path": "database/migrations/versions/0084_products_tenant_external_id_unique.py",
+      "sha256": "5a34a643dea2d0c70ea50cebd8a23857e6e5647c449ff03148135fc1b0c1c5c7"
+    },
+    {
+      "path": "database/migrations/versions/0085_product_ownership.py",
+      "sha256": "87f627055beec2e847ed7936c67f31ad80ed05954a00f432a20df79b946c770d"
+    },
+    {
+      "path": "database/migrations/versions/0086_commerce_lifecycle_notification_ledger.py",
+      "sha256": "7961584ef5ab1907066ac500c891fda630b346ca330e2f8c7389f3acda49544c"
+    },
+    {
+      "path": "database/migrations/versions/0087_order_customer_identity_a1_v37.py",
+      "sha256": "87db090840711ac0a6315fc8c5f5a7dd30af1dd61babb76a2f7b7343ec19336a"
+    },
+    {
+      "path": "database/migrations/versions/0088_order_customer_identity_a1_validate.py",
+      "sha256": "9412bd1e15017b629bc0b8414d483c8df9855df1617496dd31e52c667f2f3b85"
+    },
+    {
+      "path": "database/migrations/versions/0089_conversation_a1_subject_bindings.py",
+      "sha256": "26b5fb1fb0e9a6589e91439a55893e0b8e444543a3148257b8c607af40c6d7b6"
+    },
+    {
+      "path": "database/migrations/versions/0090_cross_merchant_model_path_128.py",
+      "sha256": "e2a7113649418756033996bc4eb846a35fe7f67f42abe15210e3adcf4d74d8df"
+    },
+    {
+      "path": "database/migrations/versions/0091_cross_merchant_model_path_128.py",
+      "sha256": "eb9c69a6ca173c057dd97799eff802ef946ca6c7e246031b34636ad48164f0ce"
+    },
+    {
+      "path": "database/migrations/versions/0092_whatsapp_connections_provider.py",
+      "sha256": "b7a6e8a4fdf62452be41b2490786647a7542a056b2fdccd6838b53b4cf12e4cd"
+    },
+    {
+      "path": "database/migrations/versions/0093_whatsapp_connections_provider.py",
+      "sha256": "bd911ad02d63760dc2435ea6cd1088f5e37de999bc5192fa6e8ba61ceb2ffba5"
+    },
+    {
+      "path": "database/migrations/versions/0094_commerce_lifecycle_send_audit.py",
+      "sha256": "352b6f3ce73511bfe07020ccfd54a2223c476261a89c063862a1be5e30367838"
+    },
+    {
+      "path": "database/migrations/versions/0095_commerce_lifecycle_send_method.py",
+      "sha256": "9c7296eb41c1541e47270a69a58bc760a881b217ad858561cf620496e52aa96f"
+    },
+    {
+      "path": "database/migrations/versions/0096_order_update_template_revisions.py",
+      "sha256": "f42df687cc863d9324add516e70abf8cbcb26cc6e4a4a9e326228b09e4f2e257"
+    },
+    {
+      "path": "database/migrations/versions/0097_conversation_history_summary_source_turn.py",
+      "sha256": "d6d3e9c79214e8614ba6ba889f73002838d1c7716a9377089629578dcd4a93d1"
+    },
+    {
+      "path": "database/migrations/versions/0098_tenant_config_hygiene.py",
+      "sha256": "a169838a1795ca479134f7ff15c92a7f5da0c062e8313c39adfda571a95ba48e"
+    },
+    {
+      "path": "database/migrations/versions/0099_meta_catalog_memberships.py",
+      "sha256": "d9a91a9bf83661d1149f452df94e1ae37f262adcb150622d8a908ec08c46c59c"
+    },
+    {
+      "path": "database/migrations/versions/0100_salla_embedded_identity_bindings.py",
+      "sha256": "4a40a4fedda355a2873054b22a4b8979a4008754e33ebf5b9376581f4bd7bc0a"
+    },
+    {
+      "path": "database/migrations/versions/0101_active_meta_item_unique.py",
+      "sha256": "b4f8a842d6b53a0210a8cd1794b98cb86157ec5a974541b592ab85027969fda5"
+    },
+    {
+      "path": "database/migrations/versions/0102_catalog_membership_variant_identity.py",
+      "sha256": "a551162d81605e3f102793778d77b6f45cf3a86b34817db534f34744845e5f9d"
+    },
+    {
+      "path": "database/migrations/versions/0103_whatsapp_oauth_nonces.py",
+      "sha256": "cf13bcd1ce0a216c06c9da6b7ea57fb9d61c40584d4e20e1a3d596a83c9352ce"
+    },
+    {
+      "path": "database/migrations/versions/0104_active_lifecycle_template_null_step.py",
+      "sha256": "a26def67b41231bed6e907150ec1fbf8187c5fd8609b15c7bc6a401f7f03a404"
+    },
+    {
+      "path": "database/migrations/versions/0105_last_customer_inbound_at.py",
+      "sha256": "74a550975df08c90c26dcde3f0d04e20ef7510bbd071155370727bfaee5a02dc"
+    },
+    {
+      "path": "database/migrations/versions/0106_commerce_agent_v2_shadow_runs.py",
+      "sha256": "ab3e142912be2db21f8063aa9bd61f20a4ee3911f5952e3e2ab49413e9bbf608"
+    },
+    {
+      "path": "database/migrations/versions/0107_customer_name_provenance.py",
+      "sha256": "f0ffdb6df468ae09d3092967517732d870d67a8ac76a1f67a09bac2323bf14e7"
+    },
+    {
+      "path": "database/migrations/versions/0108_commerce_runtime_foundation.py",
+      "sha256": "6c3fd0f0ea189768b864502d22aa101fe208eb38a81352c957cfb457338b8035"
+    },
+    {
+      "path": "database/migrations/versions/0109_commerce_runtime_ledgers.py",
+      "sha256": "ff5b04c29870f9907c98cfeb9b7a8abcf5277bde15718dc0496526356389757b"
+    },
+    {
+      "path": "database/migrations/versions/0110_customer_address_provenance.py",
+      "sha256": "a758c750673383ee029af2e2faf9ae19cf97dd1107278800a001ca2ad26e533f"
+    },
+    {
+      "path": "database/migrations/versions/0111_commerce_runtime_handover.py",
+      "sha256": "84d769bafb0ae8e03cad6482053bc7951d47a70b51a2206a53aaa92536b30a56"
+    },
+    {
+      "path": "database/migrations/versions/0112_salla_shipment_tracking.py",
+      "sha256": "76b55bd3ff29e0353e756cabea93f70da23ff60cdbc96596bf1960affaba46b2"
+    },
+    {
+      "path": "database/migrations/versions/0113_commerce_runtime_navigation.py",
+      "sha256": "83f9946bd20f30630dfb0a21f146865e793da0eb8f0252d6e828cb385a0599da"
+    },
+    {
+      "path": "database/migrations/versions/0114_ai_usage_request_dedup.py",
+      "sha256": "46c5a157d345082d6834eff34c477155fd7ef54c4229e485ed5dacf9e34c2be6"
+    },
+    {
+      "path": "database/migrations/versions/0115_merchant_payments_foundation.py",
+      "sha256": "9c014c9a17c1a469912d2dfb9f234694a732048541b3c43d8b3e62040985af54"
+    },
+    {
+      "path": "database/migrations/versions/0118_catalog_channel_retirements.py",
+      "sha256": "91dffc5c9ddad6769e7aeeaf85920ed126874440bd795899e139d7ef49d1f661"
+    },
+    {
+      "path": "database/migrations/versions/0120_meta_catalog_authorizations.py",
+      "sha256": "179b4200233fda79933c42030673a197a3496f68022c6ad44066904036edfa96"
+    },
+    {
+      "path": "database/migrations/versions/0121_shopify_connection_foundation.py",
+      "sha256": "a02cfdfcfa88b0c252f3d2ab60b67d3c46363a5c8031611e988b3f4bd2430c65"
+    },
+    {
+      "path": "database/migrations/versions/0122_shopify_catalog_mirror.py",
+      "sha256": "514f4784b3156dd4e69f6b7364451bc268240251613f1d9913434a829bdb8e93"
+    },
+    {
+      "path": "database/migrations/versions/0123_shopify_privacy_requests.py",
+      "sha256": "323f91080d26f9390ea9faa1a55ff6a3df9b92f5c6a398240fb394da95ad8312"
+    },
+    {
+      "path": "database/migrations/versions/0124_shopify_install_first.py",
+      "sha256": "3fad0e350d89689d1af9f10f9f6a46ed286fa47360bd224d90baf7908d9d4a50"
+    },
+    {
+      "path": "database/migrations/versions/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "database/models.py",
+      "sha256": "1ca00283f3bf208d80f3f8ffb14ad9c58613331e991e39d828e9da10f3d3bdde"
+    },
+    {
+      "path": "database/runtime_schema_guarantees.py",
+      "sha256": "bfeeba90a5af4bc4fdcbc55fbec8d2e8a64a505abdc960fcb776a8af6f213049"
+    },
+    {
+      "path": "database/session.py",
+      "sha256": "31e3c609b7da957d0128f6b3b149ba9a150a02f032b4234dc24bb62cb26c0842"
+    },
+    {
+      "path": "database/whatsapp_connections_provider_helpers.py",
+      "sha256": "a6e753058056327b00b5cd9ed6feb87ba905bd5944e5a1472cec60318ff45dc2"
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "61bd69b24e99e5db9827233fcb2a0370bb04e01ba44b0e1eb5552307b42fff28"
+    },
+    {
+      "path": "scripts/operators/__init__.py",
+      "sha256": "2f013ecc50a18bddad0519b276c882d46b13a4bc831c5f9ad98738212289bb9f"
+    },
+    {
+      "path": "scripts/operators/bootstrap_migration_contract.py",
+      "sha256": "be838ef7f860935dde9d1db9268a57c5c54239fa72dde6e04cb0b89d795f80bc"
+    },
+    {
+      "path": "scripts/operators/commerce_runtime_pilot_migration.py",
+      "sha256": "d5cf2528f76cf5ff896f49f6754b89d3c6459b91d342da4e0504f491a59dfa6a"
+    },
+    {
+      "path": "scripts/operators/commerce_runtime_pilot_migration_contract.py",
+      "sha256": "c27a79dd7900e978558cb6ab46a9dd6a8465228e5309f9d33b51561d5585f21b"
+    },
+    {
+      "path": "scripts/operators/shopify_release_gate.py",
+      "sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157"
+    },
+    {
+      "path": "scripts/operators/shopify_release_gate_contract.py",
+      "sha256": "ba1745865683b1a2f55679cf13e14d7ebf63304539d11057c92599d25c8c2345"
+    },
+    {
+      "path": "scripts/operators/shopify_release_schema_expectations.json",
+      "sha256": "13e2d23e44cd10017a0a2fddfe3317ea9609a14ef147e6cc5c0bf634bc3a0988"
+    }
+  ],
+  "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+  "gate_version": 2,
+  "inventory_count": 148,
+  "inventory_digest": "cedaee7f2045a43a6e7a368147db376f7e3918087113195af95e9117e9741b7f",
+  "unexpected_initializers": []
+}

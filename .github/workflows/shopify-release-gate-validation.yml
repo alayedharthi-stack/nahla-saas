@@ -138,7 +138,12 @@ jobs:
           import alembic, sqlalchemy, psycopg2
           for module in (alembic, sqlalchemy, psycopg2):
               print('library_origin=', module.__name__, module.__version__, module.__file__)
-          print('inventory=', json.dumps(render.inventory_report(root), sort_keys=True))
+          report = render.inventory_report(root)
+          manifest = json.loads((root / 'docs/engineering/shopify-install-first-canonical-inventory.json').read_text())
+          for key, value in report.items():
+              assert manifest[key] == value, key
+          assert manifest['files'] == [{'path': path, 'sha256': gate.file_sha256(root / path)} for path in gate.inventory_paths(root)]
+          print('inventory=', json.dumps(report, sort_keys=True))
           engine = sa.create_engine(os.environ['NAHLA_RELIABILITY_PG_ADMIN_DSN'], poolclass=NullPool)
           try:
               with engine.connect() as connection:
@@ -202,9 +207,25 @@ jobs:
           retention-days: 14
 
   google-schema:
-    name: Exact Google draft schema / PostgreSQL 16
+    name: Exact Google draft ${{ matrix.pr }} / PostgreSQL 16
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: '1212'
+            sha: 5189989efba7fe1feeb7bf4bd29cd3b747a21ebc
+            pure_tests: tests/test_google_merchant_models.py tests/test_normal_bootstrap_migration_target.py
+            pure_minimum: 23
+            pg_tests: backend/tests/test_google_merchant_schema_pg.py
+            pg_minimum: 122
+          - pr: '1215'
+            sha: 0f0447dca5b265c62c243515881e74ee0c7709c9
+            pure_tests: tests/test_google_merchant_models.py tests/test_normal_bootstrap_migration_target.py tests/test_google_merchant_ledger_repository.py
+            pure_minimum: 43
+            pg_tests: backend/tests/test_google_merchant_schema_pg.py backend/tests/test_google_merchant_ledger_repository_pg.py
+            pg_minimum: 161
     services:
       postgres:
         image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
@@ -218,7 +239,11 @@ jobs:
           --health-cmd "pg_isready -U nahla -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      GOOGLE_SOURCE_SHA: 5189989efba7fe1feeb7bf4bd29cd3b747a21ebc
+      GOOGLE_SOURCE_SHA: ${{ matrix.sha }}
+      GOOGLE_PURE_TESTS: ${{ matrix.pure_tests }}
+      GOOGLE_PURE_MINIMUM: ${{ matrix.pure_minimum }}
+      GOOGLE_PG_TESTS: ${{ matrix.pg_tests }}
+      GOOGLE_PG_MINIMUM: ${{ matrix.pg_minimum }}
       NAHLA_RELIABILITY_REQUIRE_PG: '1'
       NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
@@ -263,13 +288,14 @@ jobs:
           python --version
           python -m pip freeze > "$RUNNER_TEMP/google-schema-evidence/dependencies.txt"
 
-      - name: Google models and bootstrap contract (zero skips)
+      - name: Google models, bootstrap, and applicable adapter contract (zero skips)
         run: |
           set -euo pipefail
-          python -B -m pytest tests/test_google_merchant_models.py tests/test_normal_bootstrap_migration_target.py -q -ra --tb=short \
+          read -r -a test_paths <<< "$GOOGLE_PURE_TESTS"
+          python -B -m pytest "${test_paths[@]}" -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/google-schema-evidence/google-models-bootstrap.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/google-schema-evidence/google-models-bootstrap.xml"
-          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-models-bootstrap.xml"); print(result); assert result["ok"] and result["tests"] >= 23'
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-models-bootstrap.xml"); print(result); assert result["ok"] and result["tests"] >= int(os.environ["GOOGLE_PURE_MINIMUM"])'
 
       - name: Google actual schema invariants on disposable PostgreSQL (zero skips)
         if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
@@ -288,10 +314,11 @@ jobs:
           finally:
               engine.dispose()
           PY
-          python -B -m pytest backend/tests/test_google_merchant_schema_pg.py -q -ra --tb=short \
+          read -r -a test_paths <<< "$GOOGLE_PG_TESTS"
+          python -B -m pytest "${test_paths[@]}" -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/google-schema-evidence/google-schema-pg.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/google-schema-evidence/google-schema-pg.xml"
-          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-schema-pg.xml"); print(result); assert result["ok"] and result["tests"] >= 122'
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-schema-pg.xml"); print(result); assert result["ok"] and result["tests"] >= int(os.environ["GOOGLE_PG_MINIMUM"])'
 
       - name: Verify Google proof did not alter its source tree
         if: ${{ always() && steps.google-source.outcome == 'success' }}
