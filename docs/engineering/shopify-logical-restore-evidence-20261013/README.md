@@ -1,5 +1,26 @@
 # Private logical restore rehearsal — 2026-10-13
 
+Latest update, 09:27 UTC: the independent review accepted the exact eight
+retained-constraint representations for a **clone-only** baseline. The migration
+rehearsal remains **blocked before code upload or DDL**: automatic approval review
+rejected transfer of the pinned repository bundle to the private clone for lack
+of explicit authorization covering that payload and destination. No retry or
+alternate transfer was attempted. See [the pause record](clone-rehearsal-pause.json)
+and [prepared, unexecuted harness](clone_rehearsal.prepared-not-run.py).
+
+The restarted target is stopped again: PostgreSQL shut down at 09:27:05.175 UTC,
+and Railway reported zero running replicas at 09:27:25 UTC. The retained archive
+hash still matches. No source connection, restore, baseline freeze or migration
+ran during this attempt, and no production gate PASS is claimed.
+
+Correction to the earlier access-revocation evidence: empty-value updates did
+not remove the five source references from a fresh runtime. Presence checks
+caught this before any source connection. Each was replaced with a fixed invalid
+sentinel, verified exactly in a newly deployed container, and unset in the
+operator process. No credential values were displayed. The original report and
+archive manifests remain as historical records; the pause record supersedes the
+earlier empty-value revocation conclusion.
+
 The new logical archive was restored successfully on a private PostgreSQL 18.6
 target. Source-snapshot row counts matched for 128 tables, Alembic heads remained
 `0111, 0113, 0120`, and 117 restored sequences matched the values captured in the
