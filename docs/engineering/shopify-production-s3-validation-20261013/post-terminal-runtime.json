@@ -1,0 +1,62 @@
+{
+  "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "library_versions": {
+    "alembic": "1.13.1",
+    "cryptography": "50.0.2",
+    "fastapi": "0.111.0",
+    "psycopg2-binary": "2.9.9",
+    "sqlalchemy": "2.0.30"
+  },
+  "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+  "python": "3.11.17",
+  "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+  "shopify_flags": {
+    "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED": {
+      "effective": "OFF",
+      "present": true
+    },
+    "NAHLA_SHOPIFY_CONNECTION_ENABLED": {
+      "effective": "OFF",
+      "present": true
+    },
+    "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED": {
+      "effective": "OFF",
+      "present": true
+    },
+    "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED": {
+      "effective": "OFF",
+      "present": true
+    },
+    "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": {
+      "effective": "OFF",
+      "present": true
+    },
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+      "effective": "OFF",
+      "present": false
+    },
+    "VITE_SHOPIFY_CONNECTION_UI": {
+      "effective": "OFF",
+      "present": false
+    }
+  },
+  "source_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "startup_selectors": {
+    "NAHLA_DISABLE_SCHEDULERS": {
+      "effective": "OFF",
+      "present": true
+    },
+    "NAHLA_MINIMAL_ASGI": {
+      "effective": "OFF",
+      "present": false
+    },
+    "NAHLA_SKIP_DB_BOOTSTRAP": {
+      "effective": "OFF",
+      "present": false
+    },
+    "NAHLA_SKIP_PREFLIGHT": {
+      "effective": "ON",
+      "present": true
+    }
+  }
+}

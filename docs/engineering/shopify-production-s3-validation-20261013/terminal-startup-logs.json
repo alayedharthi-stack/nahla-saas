@@ -1,0 +1,14 @@
+{
+  "scope": "deployment",
+  "deploymentId": "ade73b62-6127-4aff-bc3b-c0fd97d06c58",
+  "serviceId": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+  "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "status": "SUCCESS",
+  "deploy": [
+    {
+      "timestamp": "2026-10-13T17:19:24.614994031Z",
+      "message": "INFO:     Application startup complete.",
+      "severity": "error"
+    }
+  ]
+}

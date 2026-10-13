@@ -1,0 +1,119 @@
+{
+  "scope": "deployment",
+  "deploymentId": "ade73b62-6127-4aff-bc3b-c0fd97d06c58",
+  "serviceId": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+  "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "status": "SUCCESS",
+  "deploy": [
+    {
+      "timestamp": "2026-10-13T17:18:42.201320982Z",
+      "message": "[shopify-release-gate] CHECK migration_preflight PASS {\"files\":119,\"revisions\":119}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201364251Z",
+      "message": "[shopify-release-gate] BOOTSTRAP PASS gate_version=2 inventory_count=146",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201369721Z",
+      "message": "[shopify-release-gate] gate_version=2 phase=S3 release=a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201373801Z",
+      "message": "[shopify-release-gate] CHECK root PASS {\"root\":\"container\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201379231Z",
+      "message": "[shopify-release-gate] CHECK release_sha PASS {\"release\":\"a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201383951Z",
+      "message": "[shopify-release-gate] CHECK inventory PASS {\"count\":146,\"digest\":\"31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.201388081Z",
+      "message": "[shopify-release-gate] CHECK libraries PASS {\"pins\":{\"alembic\":\"1.13.1\",\"psycopg2-binary\":\"2.9.9\",\"sqlalchemy\":\"2.0.30\"}}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272506134Z",
+      "message": "[shopify-release-gate] CHECK graph PASS {\"branch_delta\":[\"0118\",\"0120\",\"0121\",\"0122\",\"0123\"],\"heads\":[\"0092\",\"0111\",\"0114\",\"0115\",\"0123\"]}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272512524Z",
+      "message": "[shopify-release-gate] CHECK identity PASS {\"expected\":{\"environment\":\"ede962ce-3042-4dae-94de-623837e83ed9\",\"project\":\"f0090862-0a40-4293-bd5d-e94df58762b5\",\"service\":\"686b36c5-a926-4e58-912a-5e9d13fbc2e7\"}}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272517324Z",
+      "message": "[shopify-release-gate] CHECK database_target PASS {\"target\":\"postgres-ancu.railway.internal:5432/railway\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272521404Z",
+      "message": "[shopify-release-gate] CHECK approval PASS {\"phase\":\"S3\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272525733Z",
+      "message": "[shopify-release-gate] CHECK shopify_flags PASS {\"enabled\":[]}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.272739760Z",
+      "message": "[shopify-release-gate] CHECK expectations PASS {\"generated_from_source_sha\":\"8308c16e39a1\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599376840Z",
+      "message": "[shopify-release-gate] CHECK connect PASS",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599388380Z",
+      "message": "[shopify-release-gate] CHECK lock PASS",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599393000Z",
+      "message": "[shopify-release-gate] CHECK server PASS {\"schema\":\"public\",\"search_path\":\"public,pg_catalog\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599400220Z",
+      "message": "[shopify-release-gate] CHECK version_rows PASS {\"row_count\":3,\"rows\":[\"0111\",\"0113\",\"0123\"],\"unknown_row_count\":0}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599403679Z",
+      "message": "[shopify-release-gate] CHECK shopify_footprint PASS {\"drift\":[],\"missing\":[],\"stray_count\":0,\"unexpected_count\":0}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599407959Z",
+      "message": "[shopify-release-gate] CHECK retained_schema PASS {\"drift\":[],\"identity\":[],\"missing\":[]}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599411629Z",
+      "message": "[shopify-release-gate] CHECK relation_identity PASS {\"relations\":25}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599415629Z",
+      "message": "[shopify-release-gate] CHECK unlock PASS",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T17:18:42.599419139Z",
+      "message": "[shopify-release-gate] RESULT=PASS phase=S3 release=a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec checks=19 failed=[]",
+      "severity": "info"
+    }
+  ]
+}

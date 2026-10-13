@@ -1,0 +1,25 @@
+{
+  "api_health_http_status": 200,
+  "compiled_flag_predicates": [
+    "function yM(){return N_(\"0\")}",
+    "function pU(){return N_(\"0\")}"
+  ],
+  "compiled_flag_usage_snippets": {
+    "pU": [
+      "true\")}function yM(){return N_(\"0\")}function pU(){return N_(\"0\")}const vM=[{destKey:\"dest_overview\",destLab",
+      "a.steps.productImportNotStarted]})]});return pU()&&r.load===\"ready\"?t.jsx(Rwe,{copy:a,lang:e,readOnly:r.rea"
+    ],
+    "yM": [
+      "\"1\"}function xU(){return N_(\"true\")}function yM(){return N_(\"0\")}function pU(){return N_(\"0\")}const vM=[{de",
+      "yConnection),[n]=p.useState(()=>Cwe({enabled:yM,readOnly:Bwe,sessionKey:qj,status:Om.status,start:Om.start,",
+      "dsHandle:()=>r!==null}}const Ll=Wwe({enabled:yM,sessionKey:qj,now:()=>Date.now(),take:()=>aD(Date.now()),di"
+    ]
+  },
+  "dashboard_http_status": 200,
+  "full_authenticated_ui_or_browser_e2e_executed": false,
+  "public_asset_bytes": 3060870,
+  "public_asset_sha256": "dc062cf415bb3f62b15b971a6e5d2a8cd66942cea00b7cf7b2c094d64e8d3d97",
+  "public_asset_url": "https://app.nahlah.ai/assets/index-C8bWDogl.js",
+  "served_asset_matches_deployed_container": true,
+  "shared_truthy_helper": "function N_(e){if(e===void 0)return!1;const s=e.trim().toLowerCase();return s===\"true\"||s===\"1\"}"
+}

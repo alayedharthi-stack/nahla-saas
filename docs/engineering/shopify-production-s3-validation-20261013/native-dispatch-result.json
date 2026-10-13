@@ -1,0 +1,16 @@
+{
+  "observed_at_utc": "2026-10-13T17:17:51Z",
+  "result": {
+    "committed": true,
+    "deploymentStatus": "triggered",
+    "project": {
+      "id": "f0090862-0a40-4293-bd5d-e94df58762b5",
+      "name": "desirable-growth"
+    },
+    "environment": {
+      "id": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "name": "production"
+    },
+    "workflowId": "commitChanges/ede962ce-3042-4dae-94de-623837e83ed9/f0f77d80-a3e0-4377-a4a5-a4420283940e"
+  }
+}

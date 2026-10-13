@@ -1,0 +1,52 @@
+{
+  "observed_before_dispatch": true,
+  "exact_approved_command_match": true,
+  "command_sha256": "461c9981fc3632e7c09924bcad91e86e106bcb2beeacd2d4c000dc5d85be30df",
+  "source": {
+    "repo": "alayedharthi-stack/nahla-saas",
+    "branch": "release/shopify-dormant-s0-a8fb88e3",
+    "commitSha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+    "rootDirectory": ""
+  },
+  "staged": {
+    "project": {
+      "id": "f0090862-0a40-4293-bd5d-e94df58762b5",
+      "name": "desirable-growth"
+    },
+    "environment": {
+      "id": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "name": "production"
+    },
+    "staged": {
+      "patchId": "f0f77d80-a3e0-4377-a4a5-a4420283940e",
+      "status": "STAGED",
+      "changeCount": 2,
+      "message": null,
+      "createdAt": "2026-10-13T16:34:34.666Z",
+      "updatedAt": "2026-10-13T16:34:34.666Z"
+    },
+    "destructive": false,
+    "resources": [
+      {
+        "kind": "service",
+        "id": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+        "name": "nahla-saas",
+        "action": "update",
+        "changes": [
+          {
+            "path": "services.686b36c5-a926-4e58-912a-5e9d13fbc2e7.deploy.preDeployCommand",
+            "type": "updated",
+            "destructive": false
+          },
+          {
+            "path": "services.686b36c5-a926-4e58-912a-5e9d13fbc2e7.variables.NAHLA_SHOPIFY_RELEASE_APPROVAL_B64.encryptedValue",
+            "type": "added",
+            "destructive": false
+          }
+        ]
+      }
+    ],
+    "sharedVariables": [],
+    "privateNetworkDisabled": null
+  }
+}

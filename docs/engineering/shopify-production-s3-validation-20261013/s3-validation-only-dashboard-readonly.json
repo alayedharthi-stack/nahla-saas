@@ -1,0 +1,28 @@
+{
+  "flags": {
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+      "effective": "OFF",
+      "exact_zero": true,
+      "present": true
+    },
+    "VITE_SHOPIFY_CONNECTION_UI": {
+      "effective": "OFF",
+      "exact_zero": true,
+      "present": true
+    }
+  },
+  "public_built_assets": [
+    {
+      "bytes": 3060870,
+      "enabled_snippets": [],
+      "name": "index-C8bWDogl.js",
+      "sha256": "dc062cf415bb3f62b15b971a6e5d2a8cd66942cea00b7cf7b2c094d64e8d3d97",
+      "zero_argument_predicates": [
+        "function yM(){return N_(\"0\")}",
+        "function pU(){return N_(\"0\")}"
+      ]
+    }
+  ],
+  "source_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "status": "PASS"
+}

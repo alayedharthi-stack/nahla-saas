@@ -1,0 +1,11 @@
+{
+  "at_utc": "2026-10-13T16:34:34.511396+00:00",
+  "exit_code": 0,
+  "gate_log_lines": 0,
+  "kind": "stage",
+  "mode": "validation_only",
+  "payload_sha256": "e913a3f5121ac221dfe602554eccee5b5e2fcee8024be93b8fe9057bfb3d4cc7",
+  "phase": "S3",
+  "status": "PASS",
+  "stdout_sha256": "e76455d419640f411555b8ce3540e6eba8fd81658852ae19e90836ed21282514"
+}

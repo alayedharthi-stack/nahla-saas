@@ -1,0 +1,9 @@
+{
+  "requested_at_utc": "2026-10-13 16:35:45 UTC",
+  "owner_window_end": "2026-10-13T17:28:41.424Z",
+  "remaining_minutes": 52,
+  "patch_id": "f0f77d80-a3e0-4377-a4a5-a4420283940e",
+  "scope": "one exact a8fb88e3 API validation deployment; no DDL; Shopify OFF",
+  "payload_sha256": "e913a3f5121ac221dfe602554eccee5b5e2fcee8024be93b8fe9057bfb3d4cc7",
+  "command_sha256": "461c9981fc3632e7c09924bcad91e86e106bcb2beeacd2d4c000dc5d85be30df"
+}
