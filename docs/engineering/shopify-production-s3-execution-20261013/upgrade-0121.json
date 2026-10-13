@@ -1,0 +1,10 @@
+{
+  "before": "S0",
+  "block_status": "PASS",
+  "exit_code": 0,
+  "expected_after": "S1",
+  "finished_at_utc": "2026-10-13T15:42:05.277825+00:00",
+  "operation": "upgrade 0121",
+  "phase_audit_required": true,
+  "reviewed_block_sha256": "7ccb9133c36e4003ee467c9f896b2b40e63f6e403647fb92bed3342c0161c013"
+}
