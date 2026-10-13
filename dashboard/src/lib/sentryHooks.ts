@@ -22,6 +22,9 @@ const SENSITIVE_KEYS = [
   'x-hub-signature',
   'x-hub-signature-256',
   'shopify_handle',
+  'install_handle',
+  'browser',
+  'totp',
 ]
 
 function scrubObject<T>(input: T): T {

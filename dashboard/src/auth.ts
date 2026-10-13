@@ -223,6 +223,23 @@ export interface LoginResult {
   email?:           string
 }
 
+/** Only the owner-verified Shopify handoff may install this short session. */
+export function persistShopifySession(token: string): void {
+  const c = _decodeJwtPayload(token)
+  if (c.auth_source !== 'shopify' || c.role !== 'merchant' || c.impersonation || !c.shopify_session
+      || typeof c.exp !== 'number' || c.exp * 1000 <= Date.now()) throw new Error('invalid_shopify_session')
+  logout()
+  localStorage.removeItem(IMPERSONATE_KEY)
+  _persistSession(token)
+}
+
+export function shopifyReauthPath(): string | null {
+  const c = _decodeJwtPayload(getToken())
+  if (c.auth_source !== 'shopify' || typeof c.shopify_shop !== 'string'
+      || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/.test(c.shopify_shop)) return null
+  return `/app/shopify?shop=${encodeURIComponent(c.shopify_shop)}`
+}
+
 /**
  * Attempt a login. Returns a structured result so the UI can render a
  * specific error message and console can show exactly what happened.
@@ -542,6 +559,7 @@ const SESSION_REFRESH_SKEW_MS = 24 * 3600_000
 export async function refreshSession(): Promise<boolean> {
   const token = getToken()
   if (!token || !isAuthenticated()) return false
+  if (_decodeJwtPayload(token).auth_source === 'shopify') return (getTokenExpiryMs() || 0) > Date.now()
 
   const controller = new AbortController()
   const timeoutId  = setTimeout(() => controller.abort(), 15_000)
@@ -590,12 +608,16 @@ export async function bootstrapAuthSession(): Promise<boolean> {
 
 /** Refresh on visibility + every 12h while the dashboard stays open. */
 export function installSessionRefreshLoop(): () => void {
-  const tick = () => { void bootstrapAuthSession() }
+  const shopifyPath = shopifyReauthPath()
+  const tick = () => {
+    if (shopifyPath && (getTokenExpiryMs() || 0) <= Date.now()) { window.location.replace(shopifyPath); return }
+    void bootstrapAuthSession()
+  }
   const onVis = () => {
     if (document.visibilityState === 'visible') tick()
   }
   document.addEventListener('visibilitychange', onVis)
-  const id = window.setInterval(tick, 12 * 3600_000)
+  const id = window.setInterval(tick, shopifyPath ? 15_000 : 12 * 3600_000)
   return () => {
     document.removeEventListener('visibilitychange', onVis)
     window.clearInterval(id)

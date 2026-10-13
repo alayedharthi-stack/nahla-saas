@@ -219,6 +219,30 @@ def parse_token_grant(body: Mapping[str, Any]) -> TokenGrant:
     return TokenGrant(access, refresh, expires_in, refresh_expires_in, scopes)
 
 
+@dataclass(frozen=True)
+class OwnerGrant:
+    access_token: str = field(repr=False)
+    expires_in: int
+    user_id: int
+
+
+def parse_owner_grant(body: Dict[str, Any]) -> OwnerGrant:
+    """Only an explicitly identified Shopify account owner may bootstrap a tenant."""
+    access = body.get("access_token")
+    lifetime = _positive_int(body.get("expires_in"), upper=86400)
+    user = body.get("associated_user")
+    if not isinstance(access, str) or not _TOKEN_RE.fullmatch(access) or lifetime is None:
+        raise ShopifyApiError("invalid_response", "owner_unverified")
+    if not isinstance(user, dict) or user.get("account_owner") is not True or user.get("collaborator") is not False:
+        raise ShopifyApiError("permanent", "owner_required")
+    uid = user.get("id")
+    if type(uid) is not int or not 0 < uid < 2**63:
+        raise ShopifyApiError("invalid_response", "owner_unverified")
+    validate_scopes(parse_scopes(body.get("scope")))
+    validate_scopes(parse_scopes(body.get("associated_user_scope")))
+    return OwnerGrant(access, lifetime, uid)
+
+
 class ShopifyApi:
     """Minimal Admin API client. ``transport`` is injectable (tests use a mock)."""
 
@@ -290,6 +314,15 @@ class ShopifyApi:
         if status != 200:
             raise self._classify_token_failure(status)
         return parse_token_grant(body)
+
+    async def exchange_owner_code(self, *, shop_domain: str, code: str) -> OwnerGrant:
+        status, body = await self._post(
+            self._admin_url(shop_domain, "oauth/access_token"),
+            {"client_id": self._client_id, "client_secret": self.__client_secret, "code": code}, {},
+        )
+        if status != 200:
+            raise self._classify_token_failure(status)
+        return parse_owner_grant(body)
 
     async def refresh(self, *, shop_domain: str, refresh_token: str) -> TokenGrant:
         status, body = await self._post(

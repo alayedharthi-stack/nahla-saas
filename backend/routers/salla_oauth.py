@@ -1171,6 +1171,9 @@ async def launch_dashboard(request: Request, db: Session = Depends(get_db)):
         logger.warning("[LaunchDashboard] JWT decode failed: %s", _e)
         raise HTTPException(status_code=401, detail="invalid_or_expired_token")
 
+    # A Shopify owner session cannot become a rolling native session through a Salla handoff.
+    if decoded.get("auth_source") == "shopify" or "shopify_session" in decoded:
+        raise HTTPException(status_code=403, detail="shopify_reauthentication_required")
     tenant_id = int(decoded.get("tenant_id", 0))
     email     = str(decoded.get("sub", ""))
     role      = str(decoded.get("role", "merchant"))
@@ -1497,6 +1500,8 @@ async def salla_check_session(request: Request, db: Session = Depends(get_db)):
         except HTTPException:
             raise HTTPException(status_code=401, detail="session_expired")
 
+        if payload.get("auth_source") == "shopify" or "shopify_session" in payload:
+            raise HTTPException(status_code=403, detail="shopify_reauthentication_required")
         tenant_id = int(payload.get("tenant_id", 0))
         user_id   = payload.get("user_id")
         email     = str(payload.get("sub", ""))

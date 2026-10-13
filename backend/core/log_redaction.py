@@ -72,6 +72,11 @@ _EXACT_SENSITIVE_KEYS = frozenset({
     "state",
     # Shopify OAuth callback query signature and the webhook signature header.
     "hmac",
+    "browser",
+    "install_handle",
+    "handle",
+    "handoff_hash",
+    "totp",
     "x-shopify-hmac-sha256",
 })
 # Any key *containing* one of these fragments is treated as a secret

@@ -173,6 +173,13 @@ async def run_recovery_tick(
     try:
         if not lifecycle.tables_present(db):
             return {"skipped": "storage_unavailable"}
+        from services.shopify_connection.install_config import enabled as install_enabled
+        if install_enabled(env):
+            from sqlalchemy import inspect
+            from services.shopify_connection.install_models import INSTALL_TABLES
+            from services.shopify_connection.install import sweep_expired
+            if all(inspect(db.get_bind()).has_table(t.name) for t in INSTALL_TABLES):
+                counts["install_expired"] = sweep_expired(db, now=now)
         cipher = crypto.TokenCipher(config.encryption_key)
         client = api or _api_for(config)
         for _ in range(int(limit)):

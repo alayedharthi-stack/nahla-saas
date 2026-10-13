@@ -421,6 +421,13 @@ def _is_enabled(totp_row: Optional[UserTotp]) -> bool:
     return bool(totp_row and totp_row.confirmed_at)
 
 
+def _require_recoverable_mfa_session(user: Dict[str, Any]) -> None:
+    # Passwordless Shopify identities cannot use native password-based MFA
+    # recovery/disable. Do not offer enrollment until scoped recovery ships.
+    if user.get("auth_source") == "shopify" or "shopify_session" in user:
+        raise HTTPException(status_code=403, detail="shopify_mfa_setup_unavailable")
+
+
 def _make_setup_token(*, user_id: int, secret_b32: str) -> str:
     """
     Short-lived JWT carrying the pending TOTP secret. Lives only between
@@ -541,6 +548,7 @@ async def two_factor_setup_start(
     to the DB yet — the secret travels back to the user inside a signed
     ``setup_token`` they MUST submit with the first OTP in /setup/confirm.
     """
+    _require_recoverable_mfa_session(user)
     user_id = _resolve_user_id(user, db)
 
     # Per-user rate limit: 5 starts / hour. Prevents abuse generating
@@ -626,6 +634,7 @@ async def two_factor_setup_candidates(
     min per user — effectively one refresh every ~10s which is plenty
     given the 30-sec TOTP step.
     """
+    _require_recoverable_mfa_session(user)
     user_id = _resolve_user_id(user, db)
 
     check_rate_limit_or_429(
@@ -663,6 +672,7 @@ async def two_factor_setup_confirm(
     On success: persist ``user_totp`` + 10 bcrypt-hashed recovery codes,
     return the plaintext codes ONCE. Failure leaves nothing behind.
     """
+    _require_recoverable_mfa_session(user)
     user_id = _resolve_user_id(user, db)
 
     # OTP confirmation rate limit — 5 attempts / 15 min per user.
