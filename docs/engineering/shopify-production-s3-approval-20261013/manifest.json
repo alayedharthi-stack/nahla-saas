@@ -1,0 +1,62 @@
+{
+  "artifact_sha256": {
+    "README.md": "d60a56676a84348b29a086b49b38a46a6ca2a87ae67fc70c61427cb0173491b8",
+    "finalize_after_owner_approval.py": "744457edf76a2dbda849dcca553181ce93072332fcfb184dd8d062cdbf503934",
+    "fresh-s0-preflight.json": "243b3b9ac150cc30e924c368b76d034daf9fc5a3dcc11a4e397fe72b2a4376ae",
+    "owner-approval.ar.txt": "6a57843a2e4621c2d78087ffad720a92aff5c3f8129254cc019aae156f9bda22",
+    "production-phase-S0-preapproval.json": "98f82aeb172c8fadb51321858b2ae8a9c1c4fc431b40f996fcde3127274b3466",
+    "production_phase_audit.py": "a09e886750176dbdf06f38944571bb40d32ddff3065a905e8433d745b508d45d",
+    "run_production_phase_audit.py": "144da9f7215c2dc011dbc21de05242c3939b5533b6ecedf51f4c5b5c0322992c",
+    "s0-rollback-approval.unsigned.json": "0ed38ddd30512fd6863b9ee1b437855e46bdade15128b8d0597ab841b8b1a27f",
+    "s0-rollback-bootstrap.unsigned.py": "c13cc2677677a98679635c6a0919ae116a7cb5eb2358989d65709551320add64",
+    "s0-rollback-command.unsigned.txt": "9ec3cadce9dd6f41ee3bff721d533fd698a09e52238e65c71ffa8c45d8f59aeb",
+    "s3-approval.unsigned.json": "3461523bc26f22d2a0f0a11ca9d21b3703dec767e30c28f86f4943fabbd2e6a3",
+    "s3-bootstrap.unsigned.py": "0f5fc8441ab2a035f432b82f6fffc89308573a28938f48e1718667cb540629bc",
+    "s3-command.unsigned.txt": "0f195588a97420ca1b07a5200cfd572eac7523b5652696ba263f4afa2d20ab8f"
+  },
+  "backup_pins_proposed": {
+    "service": "6afcbd3e-15dd-46c1-9183-932fe02d075f",
+    "volume": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9"
+  },
+  "created_at_utc": "2026-10-13T14:41:18.004745+00:00",
+  "ddl_run": false,
+  "inventory": {
+    "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+    "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "gate_version": 2,
+    "inventory_count": 146,
+    "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+    "unexpected_initializers": []
+  },
+  "payloads": {
+    "S0": {
+      "command_file": "s0-rollback-command.unsigned.txt",
+      "command_sha256": "56801d69cf5ac7dc257a30cf3c283958500733fb9fc96afa5729fdfe0c091a5b",
+      "current_approval_verdict": "FAIL",
+      "file": "s0-rollback-approval.unsigned.json",
+      "offline_shape_simulation": "PASS; no approval authority and no runtime execution",
+      "reason": "approval_missing",
+      "sha256": "0ed38ddd30512fd6863b9ee1b437855e46bdade15128b8d0597ab841b8b1a27f"
+    },
+    "S3": {
+      "command_file": "s3-command.unsigned.txt",
+      "command_sha256": "9ecc0ab8e1911d654aa7db7dacddac062ce51098a885b3d875fe538bdae5793a",
+      "current_approval_verdict": "FAIL",
+      "file": "s3-approval.unsigned.json",
+      "offline_shape_simulation": "PASS; no approval authority and no runtime execution",
+      "reason": "approval_missing",
+      "sha256": "3461523bc26f22d2a0f0a11ca9d21b3703dec767e30c28f86f4943fabbd2e6a3"
+    }
+  },
+  "production_changes_made": false,
+  "production_target": {
+    "db": "postgres-ancu.railway.internal:5432/railway",
+    "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+    "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+    "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
+  },
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "selected_archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+  "status": "UNSIGNED_PENDING_OWNER_AND_BACKUP_BINDING_REVIEW",
+  "strict_renderer_executed_against_production": false
+}
