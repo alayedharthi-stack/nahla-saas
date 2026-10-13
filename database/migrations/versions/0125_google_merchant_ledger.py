@@ -1,6 +1,6 @@
 """Dormant Google Merchant connection binding and offer ledger.
 
-Revision ID: 0124
+Revision ID: 0125
 Revises: 0123
 
 Creates the two Google Merchant tables declared on ``GoogleMerchantBase`` in
@@ -38,7 +38,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0124"
+revision = "0125"
 down_revision = "0123"
 branch_labels = None
 depends_on = None
@@ -526,10 +526,10 @@ def upgrade() -> None:
         # New in this revision. Any pre-existing table or guard function —
         # complete, partial or malformed — was created outside this migration
         # and its constraints cannot be trusted. Refuse without changing
-        # anything; an operator inspects and removes it before applying 0124.
+        # anything; an operator inspects and removes it before applying 0125.
         raise RuntimeError(
             "Google Merchant objects already exist (" + ", ".join(present) + "); they were not created "
-            "by revision 0124. Inspect and remove them manually before applying this revision."
+            "by revision 0125. Inspect and remove them manually before applying this revision."
         )
     connections, ledger = _definitions()
     connections.create(bind)

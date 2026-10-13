@@ -1,7 +1,7 @@
 """
 tests/test_google_merchant_schema_pg.py
 ───────────────────────────────────────
-PostgreSQL proofs of the dormant Google Merchant schema (revision 0124,
+PostgreSQL proofs of the dormant Google Merchant schema (revision 0125,
 ``services/google_merchant_models.py``). Every invariant is exercised with
 explicit SQL against a disposable database built by the revision itself (plus
 ``tenants`` from ``models.Base`` as the foreign-key target) — not through ORM
@@ -65,7 +65,7 @@ from services.google_merchant_models import (  # noqa: E402
     create_google_merchant_tables,
 )
 
-_MIGRATION_PATH = _REPO / "database/migrations/versions/0124_google_merchant_ledger.py"
+_MIGRATION_PATH = _REPO / "database/migrations/versions/0125_google_merchant_ledger.py"
 CONN = "google_merchant_connections"
 LEDGER = "google_merchant_offer_ledger"
 
@@ -99,7 +99,7 @@ def _url(db: str) -> str:
 
 
 def _load_migration():
-    spec = importlib.util.spec_from_file_location("google_merchant_migration_0124", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("google_merchant_migration_0125", _MIGRATION_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -519,7 +519,7 @@ def _upgrade_to_production_shape(alembic, eng) -> None:
 _PRESENT = (tuple(sorted(GOOGLE_MERCHANT_TABLE_NAMES)), tuple(sorted(GOOGLE_MERCHANT_GUARD_FUNCTIONS)))
 
 
-def test_alembic_chain_upgrades_0123_to_0124_and_back():
+def test_alembic_chain_upgrades_0123_to_0125_and_back():
     name = _fresh_db("gmc_chain")
     alembic = _alembic(name)
     eng = create_engine(_url(name), poolclass=NullPool, future=True)
@@ -528,30 +528,30 @@ def test_alembic_chain_upgrades_0123_to_0124_and_back():
         _ok(alembic("upgrade", "0123"))
         assert _versions(eng) == {"0111", "0113", "0123"}
         assert _google_objects(eng) == ((), ())
-        _ok(alembic("upgrade", "0124"))
-        assert _versions(eng) == {"0111", "0113", "0124"}
+        _ok(alembic("upgrade", "0125"))
+        assert _versions(eng) == {"0111", "0113", "0125"}
         assert _google_objects(eng) == _PRESENT
-        for downgrade_target in ("0124@-1", "0123"):
+        for downgrade_target in ("0125@-1", "0123"):
             _ok(alembic("downgrade", downgrade_target))
             assert _versions(eng) == {"0111", "0113", "0123"}, downgrade_target
             assert _google_objects(eng) == ((), ()), downgrade_target
             assert _SHOPIFY_TABLES <= set(inspect(eng).get_table_names()), downgrade_target
-            if downgrade_target == "0124@-1":
-                _ok(alembic("upgrade", "0124"))
-                assert _versions(eng) == {"0111", "0113", "0124"}
+            if downgrade_target == "0125@-1":
+                _ok(alembic("upgrade", "0125"))
+                assert _versions(eng) == {"0111", "0113", "0125"}
     finally:
         eng.dispose()
         _drop(name)
 
 
-def test_production_shaped_heads_upgrade_to_0124_and_a_refused_downgrade_keeps_everything():
+def test_production_shaped_heads_upgrade_to_0125_and_a_refused_downgrade_keeps_everything():
     name = _fresh_db("gmc_prod")
     alembic = _alembic(name)
     eng = create_engine(_url(name), poolclass=NullPool, future=True)
     try:
         _upgrade_to_production_shape(alembic, eng)
-        _ok(alembic("upgrade", "0124"))
-        assert _versions(eng) == {"0111", "0113", "0124"}
+        _ok(alembic("upgrade", "0125"))
+        assert _versions(eng) == {"0111", "0113", "0125"}
         assert _google_objects(eng) == _PRESENT
         with eng.begin() as conn:
             tenant = conn.execute(text("INSERT INTO tenants (name, is_active, is_platform_tenant)"
@@ -561,7 +561,7 @@ def test_production_shaped_heads_upgrade_to_0124_and_a_refused_downgrade_keeps_e
                               " VALUES (:t, :a, 'ar', 'SA', 'authorized')"), {"t": tenant, "a": ACCOUNT_A})
         proc = alembic("downgrade", "0123")
         assert proc.returncode != 0 and "hold evidence" in proc.stderr
-        assert _versions(eng) == {"0111", "0113", "0124"}
+        assert _versions(eng) == {"0111", "0113", "0125"}
         assert _google_objects(eng) == _PRESENT
         assert _SHOPIFY_TABLES <= set(inspect(eng).get_table_names())
         with eng.connect() as conn:

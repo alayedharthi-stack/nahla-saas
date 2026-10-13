@@ -236,7 +236,7 @@ def test_committed_inventory_matches_pytest_collection_exactly() -> None:
                    # receipts, replay/reinstall fences, bounded audit scope and
                    # fixture-only cleanup.
                    "shopify_privacy_webhooks",
-                   # Dormant Google Merchant binding and offer ledger: migration 0124,
+                   # Dormant Google Merchant binding and offer ledger: migration 0125,
                    # frozen scope and dispatched operations, lease fences, high-water
                    # generations and retained evidence.
                    "google_merchant_ledger"]
