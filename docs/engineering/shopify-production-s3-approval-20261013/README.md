@@ -24,7 +24,7 @@ independently passed at `cf01b8bd948fc8007684361006f9bf4864f3c31f`.
 The database target is the original production database. The archive identifiers
 are its **actual storage location**, not the original production volume.
 
-## Recovery binding needing explicit review
+## Recovery binding accepted by independent review
 
 The unchanged gate defaults to the original DB service/volume, and its template
 describes `backup.card_timestamp_utc` as a native backup-card timestamp. The
@@ -39,9 +39,11 @@ archive service/volume. The legacy `card_timestamp_utc` field is openly identifi
 as the logical snapshot timestamp. These are supported command inputs; production
 guard code, pinned expectations and the 146-file inventory are unchanged.
 
-This mapping is a **review proposal**, not a conclusion from the clone test.
-Independent review must accept this exact evidence mapping, and the new owner
-approval must explicitly select it. Offline shape/chronology checks pass under a
+Independent review accepted this exact mapping: the private archive identifiers
+are valid explicit backup inputs to the unchanged guard, while the original DB
+identity, archive hash and timestamps remain separately bound. This acceptance
+is distinct from the clone test result. The new owner approval must still
+explicitly select the archive. Offline shape/chronology checks pass under a
 simulated approval; that simulation was not persisted or used against production.
 If review requires a native card instead, stop and obtain a separate plan. Do not
 substitute another artifact or alter the guard to make this bundle pass.
@@ -89,8 +91,17 @@ The owner must approve this scope in the **main chat**, explicitly accept the
 selected logical archive and its recovery limitation, and confirm that no team
 member or automation will deploy or migrate the API, dashboard or original DB
 during the window. Check native pending work again. The planned same-release API
-validation deployment is the sole deployment exception. Any platform approval
+validation deployment and, if required, same-source API validation after S0
+rollback are the only deployment exceptions. Any platform approval
 prompt must also be surfaced in the main chat; none has been requested here.
+
+The operator enforces the 30-minute execution window, deployment exclusion,
+empty-Shopify-table prerequisite, rollback scope and checks before each step.
+The approval record's extra fields document these conditions; they do not add
+enforcement to the unchanged release guard. The final owner text explicitly
+covers the matching S0 rollback payload/command and a same-source API validation
+redeploy if required after a qualifying rollback. Owner S3 approval has not yet
+been requested.
 
 All five backend Shopify flags and both dashboard flags remain OFF throughout.
 Do not change AI/runtime/persona/model settings, Salla behavior, dashboard build,
@@ -128,6 +139,7 @@ is needed. The source branch stays frozen at the release above.
    prior command and phase audit pass. The inherited URL is never echoed.
 
    ```bash
+   set -euo pipefail
    cd /app
    python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120 --json
    (cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic upgrade 0121)
@@ -143,6 +155,9 @@ is needed. The source branch stays frozen at the release above.
    Then the next separately checked block:
 
    ```bash
+   set -euo pipefail
+   cd /app
+   python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121 --json
    (cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic upgrade 0122)
    python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122 --json
    ```
@@ -154,6 +169,9 @@ is needed. The source branch stays frozen at the release above.
    Then the final separately checked block:
 
    ```bash
+   set -euo pipefail
+   cd /app
+   python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122 --json
    (cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic upgrade 0123)
    python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0123 --json
    ```
@@ -167,6 +185,8 @@ is needed. The source branch stays frozen at the release above.
    publish counts and verdicts only. Exact deployed audit entry points are:
 
    ```bash
+   set -euo pipefail
+   cd /app
    python -B scripts/audit_shopify_catalog_collisions_readonly.py
    python -B scripts/audit_shopify_privacy_readonly.py
    python -B scripts/audit_catalog_product_identity_readonly.py
@@ -184,6 +204,12 @@ is needed. The source branch stays frozen at the release above.
    The dashboard needs no deployment. The current S0 pre-deploy payload is
    expired and must not be reused or relabeled.
 
+All seven Bash blocks use `set -euo pipefail`. Local Git Bash syntax checks and
+24 stubbed success/failure cases verify that a failed topology precheck prevents
+DDL, failed DDL prevents the postcheck, and a failed postcheck stops the block.
+These checks executed no real migration or database connection; see the
+[shell validation record](shell-validation.json).
+
 No `upgrade head/heads`, `stamp`, `merge`, bare `downgrade -1`, manual version-row
 DML, other migrations, schema repair, product sync, or Shopify activation is
 authorized by this proposal.
@@ -197,12 +223,45 @@ Apply only the necessary suffix of this rehearsed reverse path, one command
 and phase audit at a time:
 
 ```bash
-(cd /app/database && PGOPTIONS='-c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0123@-1)
-# Require S2: 0111,0113,0122; phase audit against the same S0 baseline.
-(cd /app/database && PGOPTIONS='-c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0122@-1)
-# Require S1: 0111,0113,0121; phase audit against the same S0 baseline.
-(cd /app/database && PGOPTIONS='-c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0121@-1)
-# Require S0: 0111,0113,0120; phase audit against the same S0 baseline.
+set -euo pipefail
+cd /app
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0123 --json
+(cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0123@-1)
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122 --json
+```
+
+Require the S2 phase audit before the next rollback block:
+
+```powershell
+py run_production_phase_audit.py --phase S2 --baseline-file production-phase-S0-preapproval.json
+```
+
+```bash
+set -euo pipefail
+cd /app
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0122 --json
+(cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0122@-1)
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121 --json
+```
+
+Require the S1 phase audit before the last rollback block:
+
+```powershell
+py run_production_phase_audit.py --phase S1 --baseline-file production-phase-S0-preapproval.json
+```
+
+```bash
+set -euo pipefail
+cd /app
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0121 --json
+(cd /app/database && PGOPTIONS='-c search_path=public,pg_catalog -c lock_timeout=3000 -c statement_timeout=120000' python -B -m alembic downgrade 0121@-1)
+python -B scripts/audit_alembic_topology_readonly.py --expect 0111,0113,0120 --json
+```
+
+Require the final S0 phase audit:
+
+```powershell
+py run_production_phase_audit.py --phase S0 --baseline-file production-phase-S0-preapproval.json
 ```
 
 Stop/cancel only this window's failed or pending S3 validation deployment before
