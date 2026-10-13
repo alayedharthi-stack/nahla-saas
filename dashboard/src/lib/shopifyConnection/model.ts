@@ -291,11 +291,12 @@ export function messageKeyForFailure(f: SafeFailure): MessageKey {
 
 const SCRUBBED = '[scrubbed]'
 const INSTALL_MARKER_RE = /install(?:_|%5f|%255f)(?:handle|error)/i
+const PILOT_MARKER_RE = /pilot(?:_|%5f|%255f)code/i
 
 /** A Shopify connection path (any case, percent-encoding or slash form) or return key. */
 export function isShopifyConnectionText(text: string): boolean {
   if (typeof text !== 'string' || !text) return false
-  if (RETURN_MARKER_RE.test(text) || INSTALL_MARKER_RE.test(text)) return true
+  if (RETURN_MARKER_RE.test(text) || INSTALL_MARKER_RE.test(text) || PILOT_MARKER_RE.test(text)) return true
   let decoded = text
   try {
     decoded = decodeURIComponent(text)
@@ -312,6 +313,9 @@ export function isShopifyConnectionText(text: string): boolean {
  * but no query/fragment is replaced). Everything else is returned unchanged.
  */
 export function redactShopifyUrl(url: string): string {
+  // This may be free text containing a credential BEFORE a later URL's ?/#.
+  // Truncating only the URL suffix would retain that admission credential.
+  if (typeof url === 'string' && PILOT_MARKER_RE.test(url)) return SCRUBBED
   if (typeof url !== 'string' || !isShopifyConnectionText(url)) return url
   const cut = url.search(/[?#]/)
   if (cut !== -1) return url.slice(0, cut)
@@ -326,7 +330,7 @@ export function redactShopifyDeep<T>(value: T, depth = 0, shopifyContext = false
   shopifyContext ||= Object.values(bag).some(v => typeof v === 'string' && isShopifyConnectionText(v))
   for (const key of Object.keys(bag)) {
     const v = bag[key]
-    if (['install_handle', 'browser', 'totp'].includes(key.toLowerCase()) || (shopifyContext && key.toLowerCase() === 'handle')) {
+    if (['install_handle', 'pilot_code', 'browser', 'totp'].includes(key.toLowerCase()) || (shopifyContext && key.toLowerCase() === 'handle')) {
       bag[key] = SCRUBBED
       continue
     }
@@ -344,7 +348,7 @@ function scrubHandleKeys(value: unknown, depth = 0): void {
   if (!value || typeof value !== 'object' || depth > 16) return
   const bag = value as Record<string, unknown>
   for (const key of Object.keys(bag)) {
-    if (['handle', 'install_handle', 'browser', 'totp'].includes(key.toLowerCase())) bag[key] = SCRUBBED
+    if (['handle', 'install_handle', 'pilot_code', 'browser', 'totp'].includes(key.toLowerCase())) bag[key] = SCRUBBED
     else scrubHandleKeys(bag[key], depth + 1)
   }
 }

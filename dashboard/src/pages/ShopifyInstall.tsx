@@ -11,6 +11,7 @@ let boot: Promise<string> | undefined
 let redeeming: Promise<string> | undefined
 let confirmationBinding: string | undefined
 let confirmationShop = ''
+let pilotBinding: string | undefined
 
 async function sessionDigest(binding = getSessionBindingKey()) {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(binding))
@@ -51,7 +52,7 @@ function singleRedeem(totp?: string) {
   return redeeming
 }
 
-async function begin(confirmedBinding?: string): Promise<string> {
+async function begin(confirmedBinding?: string, pilotCode?: string): Promise<string> {
   if (!enabled) return 'disabled'
   if (installReturn.error) return 'refused'
   try {
@@ -73,6 +74,11 @@ async function begin(confirmedBinding?: string): Promise<string> {
       sessionStorage.setItem(KEY, JSON.stringify(p))
       return singleRedeem()
     }
+    if (pilotCode === undefined) {
+      pilotBinding = binding
+      return 'pilot_required'
+    }
+    if (!/^[a-f0-9]{64}$/.test(pilotCode)) return 'pilot_required'
     const browser = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
     sessionStorage.setItem(KEY, JSON.stringify({ browser, binding: hashed, shop: installReturn.shop,
       switchConfirmed: !getToken() || confirmedBinding === binding, expires: Date.now() + 900_000 }))
@@ -80,7 +86,7 @@ async function begin(confirmedBinding?: string): Promise<string> {
     const form = document.createElement('form')
     form.method = 'POST'
     form.action = `${base()}/start`
-    for (const [name, value] of Object.entries({ shop: installReturn.shop, browser })) {
+    for (const [name, value] of Object.entries({ shop: installReturn.shop, browser, pilot_code: pilotCode })) {
       const input = document.createElement('input')
       input.type = 'hidden'; input.name = name; input.value = value
       form.appendChild(input)
@@ -99,6 +105,7 @@ async function begin(confirmedBinding?: string): Promise<string> {
 export default function ShopifyInstall() {
   const [state, setState] = useState('working')
   const [otp, setOtp] = useState('')
+  const [pilotCode, setPilotCode] = useState('')
   useEffect(() => {
     let live = true
     boot ??= begin()
@@ -107,6 +114,27 @@ export default function ShopifyInstall() {
   }, [])
   const mfa = state === 'totp_required' || state === 'totp_invalid'
   return <main dir="rtl" data-install-state={state} className="max-w-lg mx-auto my-20 p-6 space-y-4">
+    {state === 'pilot_required' && <form onSubmit={event => {
+      event.preventDefault()
+      const expected = pilotBinding
+      const code = pilotCode
+      setPilotCode('')
+      if (expected === undefined || expected !== getSessionBindingKey()) { setState('session_changed'); return }
+      setState('working')
+      void begin(expected, code).then(setState)
+    }} className="space-y-3">
+      <p>الربط متاح حاليًا للتجربة بدعوة خاصة بهذا المتجر.</p>
+      <p dir="ltr">{installReturn.shop}</p>
+      <label className="block">رمز قبول التجربة
+        <input name="pilot_code" type="password" autoComplete="off" spellCheck={false} required
+          pattern="[a-f0-9]{64}" minLength={64} maxLength={64} dir="ltr"
+          value={pilotCode} onChange={event => setPilotCode(event.target.value)} className="input block" />
+      </label>
+      <button className="btn-primary" type="submit">متابعة إلى Shopify</button>
+      <button className="btn-secondary" type="button" onClick={() => {
+        setPilotCode(''); sessionStorage.removeItem(KEY); window.location.replace('/overview')
+      }}>إلغاء</button>
+    </form>}
     {state === 'confirm_switch' && <section role="dialog" aria-label="تأكيد تبديل الجلسة" className="space-y-3">
       <p>لديك جلسة حالية في نحلة. المتابعة ستستبدلها بجلسة مالك متجر Shopify بعد التحقق من هويته، ولن تربط المتجر بحسابك الحالي.</p>
       <p dir="ltr">{confirmationShop}</p>
@@ -122,7 +150,7 @@ export default function ShopifyInstall() {
       }}>إلغاء والاحتفاظ بالجلسة الحالية</button>
     </section>}
     <h1 className="text-xl font-bold">ربط متجر Shopify بنحلة</h1>
-    <p role="status" hidden={state === 'confirm_switch'}>{state === 'working' ? 'جارٍ التحقق من المتجر وفتح حسابه في نحلة…'
+    <p role="status" hidden={state === 'confirm_switch' || state === 'pilot_required'}>{state === 'working' ? 'جارٍ التحقق من المتجر وفتح حسابه في نحلة…'
       : state === 'disabled' ? 'الربط مع Shopify غير متاح حاليًا.'
       : mfa ? 'أدخل رمز التحقق الثنائي لحساب نحلة.'
       : state === 'session_changed' ? 'تغيّر الحساب في هذا المتصفح. افتح التطبيق مجددًا من Shopify.'

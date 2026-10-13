@@ -20,11 +20,15 @@ def _error(code="install_refused", status=400):
     return JSONResponse({"error": code}, status_code=status, headers=HEADERS)
 
 
-def _config(db):
+def _storage_available(db):
+    return all(inspect(db.get_bind()).has_table(t.name) for t in INSTALL_TABLES)
+
+
+def _config(db, *, check_storage=True):
     if not enabled():
         return None, _error("not_found", 404)
     config = configuration()
-    if not config or not all(inspect(db.get_bind()).has_table(t.name) for t in INSTALL_TABLES):
+    if not config or (check_storage and not _storage_available(db)):
         return None, _error("install_unavailable", 503)
     return config, None
 
@@ -49,17 +53,20 @@ async def _body(request, limit=2048):
 
 @router.post(PREFIX + "/start")
 async def start(request: Request, db: Session = Depends(get_db)):
-    config, error = _config(db)
+    config, error = _config(db, check_storage=False)
     if error:
         return error
     if not _same_origin(request, config) or request.headers.get("content-type", "").split(";")[0] != "application/x-www-form-urlencoded":
         return _error()
     try:
-        data = parse_qs((await _body(request)).decode("ascii"), strict_parsing=True, max_num_fields=2)
-        if set(data) != {"shop", "browser"} or any(len(v) != 1 for v in data.values()):
+        data = parse_qs((await _body(request)).decode("ascii"), strict_parsing=True, max_num_fields=3)
+        if set(data) != {"shop", "browser", "pilot_code"} or any(len(v) != 1 for v in data.values()):
             return _error()
         browser = data["browser"][0]
-        url = install.begin(db, shop=data["shop"][0], browser=browser, config=config)
+        install.validate_admission(shop=data["shop"][0], browser=browser, pilot_code=data["pilot_code"][0])
+        if not _storage_available(db):
+            return _error("install_unavailable", 503)
+        url = install.begin(db, shop=data["shop"][0], browser=browser, config=config, pilot_code=data["pilot_code"][0])
         response = RedirectResponse(url, status_code=303, headers=HEADERS)
         # Top-level form navigation sets a first-party cookie even with separate dashboard/API sites.
         response.set_cookie(COOKIE, browser, max_age=install.FLOW_SECONDS, secure=True, httponly=True, samesite="lax", path="/")

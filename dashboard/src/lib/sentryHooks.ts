@@ -23,6 +23,7 @@ const SENSITIVE_KEYS = [
   'x-hub-signature-256',
   'shopify_handle',
   'install_handle',
+  'pilot_code',
   'browser',
   'totp',
 ]

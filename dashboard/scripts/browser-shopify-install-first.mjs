@@ -7,6 +7,7 @@ import { chromium } from 'playwright'
 import { createHash } from 'node:crypto'
 
 const root = resolve('dist')
+const pilotCode = 'f'.repeat(64) // synthetic admission credential, local server only
 let received
 let starts = 0
 let redeems = 0
@@ -73,13 +74,21 @@ try {
   }
   const { context, page } = await isolated()
   await page.goto(origin + '/app/shopify?shop=demo.myshopify.com&hmac=synthetic-launch-hint')
+  await page.locator('[data-install-state="pilot_required"]').waitFor()
+  assert.equal(starts, 0, 'no automatic public admission')
+  await page.locator('input[name="pilot_code"]').fill(pilotCode)
+  const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))
+  assert.equal(storage.includes(pilotCode), false, 'pilot code stays out of durable browser storage')
+  assert.equal(page.url().includes(pilotCode), false)
+  await page.locator('[data-install-state="pilot_required"] button[type="submit"]').click()
   await page.waitForURL('**/merchant/integrations/shopify/install/start', { timeout: 20_000 })
   assert.equal(received.origin, origin, 'top-level form must send the expected Origin, not null')
   assert.equal(received.body.get('shop'), 'demo.myshopify.com')
   assert.match(received.body.get('browser'), /^[a-f0-9]{64}$/)
+  assert.equal(received.body.get('pilot_code'), pilotCode)
   assert.equal(received.referer, origin + '/', 'origin-only referrer contains no launch parameters')
   assert.equal(await page.textContent('body'), 'Synthetic install accepted')
-  console.log('PASS real Chromium: scrubbed install page posts exact Origin and browser binding; no external traffic')
+  console.log('PASS real Chromium: pilot required before POST; code absent from URL/storage; exact Origin and browser binding; no external traffic')
   await context.close()
 
   const cancel = await isolated({ existing: true })
@@ -107,11 +116,27 @@ try {
   await approve.page.goto(origin + '/app/shopify?shop=demo.myshopify.com')
   await approve.page.locator('[data-install-state="confirm_switch"]').waitFor()
   await approve.page.getByRole('dialog').getByRole('button').first().click()
+  await approve.page.locator('[data-install-state="pilot_required"]').waitFor()
+  await approve.page.locator('input[name="pilot_code"]').fill(pilotCode)
+  await approve.page.locator('[data-install-state="pilot_required"] button[type="submit"]').click()
   await approve.page.waitForURL('**/merchant/integrations/shopify/install/start')
   assert.equal(starts, 2)
   assert.equal(await approve.page.evaluate(() => localStorage.getItem('nahla_token')), oldToken)
   assert.equal(await approve.page.evaluate(() => JSON.parse(sessionStorage.getItem('nahla_shopify_install_browser_v1')).switchConfirmed), true)
   await approve.context.close()
+
+  const pilotRace = await isolated({ existing: true })
+  await pilotRace.page.goto(origin + '/app/shopify?shop=demo.myshopify.com')
+  await pilotRace.page.locator('[data-install-state="confirm_switch"]').waitFor()
+  await pilotRace.page.getByRole('dialog').getByRole('button').first().click()
+  await pilotRace.page.locator('[data-install-state="pilot_required"]').waitFor()
+  await pilotRace.page.locator('input[name="pilot_code"]').fill(pilotCode)
+  await pilotRace.page.evaluate(value => localStorage.setItem('nahla_token', value), otherToken)
+  await pilotRace.page.locator('[data-install-state="pilot_required"] button[type="submit"]').click()
+  await pilotRace.page.locator('[data-install-state="session_changed"]').waitFor()
+  assert.equal(starts, 2, 'typing a pilot code cannot rebaseline prior session consent')
+  assert.equal(await pilotRace.page.evaluate(() => localStorage.getItem('nahla_token')), otherToken)
+  await pilotRace.context.close()
 
   const complete = await isolated({ existing: true, flow: pending(false) })
   await complete.page.goto(origin + '/app/shopify#install_handle=' + 'a'.repeat(43))

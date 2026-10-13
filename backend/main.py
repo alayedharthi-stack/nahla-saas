@@ -1483,6 +1483,13 @@ async def on_startup() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[Scheduler] whatsapp_catalog_sync gate check failed: %s", exc)
 
+    # Local erasure of expired temporary install secrets is independent of
+    # activation/configuration. It only touches existing install-flow rows.
+    def _f_shopify_install_cleanup():
+        from services.shopify_connection.install_cleanup import run_cleanup_scheduler  # noqa: PLC0415
+        return run_cleanup_scheduler()
+    _start("shopify_install_cleanup", _f_shopify_install_cleanup, 23)
+
     # Dormant Shopify uninstall recovery: queued only when the Shopify
     # connection flag and every required configuration item are present.
     def _f_shopify_uninstall_recovery():

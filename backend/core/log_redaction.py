@@ -74,6 +74,7 @@ _EXACT_SENSITIVE_KEYS = frozenset({
     "hmac",
     "browser",
     "install_handle",
+    "pilot_code",
     "handle",
     "handoff_hash",
     "totp",
@@ -137,7 +138,7 @@ _KV_KEY_FRAGMENTS = (
     "secret", "password", "passwd", "apikey", "api_key", "api-key", "authorization", "cookie",
     "enc_key", "encryption_key", "fernet_key", "signing_key", "private_key",
 )
-_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof", "hmac", "x-shopify-hmac-sha256"})
+_KV_EXACT_KEYS = frozenset({"code", "state", "appsecret_proof", "hmac", "x-shopify-hmac-sha256", "pilot_code"})
 
 
 def _kv_key_is_sensitive(key: str) -> bool:

@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from models import Tenant, User, UserTotp
 from services.shopify_connection import lifecycle as lc
 from services.shopify_connection.crypto import TokenCipher
+from services.shopify_connection.install_admission import admitted
 from services.shopify_connection.install_models import ShopifyInstallFlow as Flow, ShopifyOwnerIdentity as Owner
 from services.shopify_connection.models import ShopifyConnection, STATUS_ACTIVE
 from services.shopify_connection.oauth import OwnerGrantRejected, numeric_shop_id
@@ -32,6 +33,7 @@ MAX_BROWSER_STARTS = 5
 MAX_SHOP_STARTS = 10
 MAX_GLOBAL_STARTS_PER_MINUTE = 100
 MAX_RETAINED_FLOWS = 1000
+MAX_SHOP_RETAINED_FLOWS = 100
 ADMISSION_LOCK = (0x4E41484C, 0x53484946)
 
 
@@ -93,10 +95,16 @@ def sweep_expired(db, *, now=None, limit=100, commit=True):
     return len(rows)
 
 
-def begin(db, *, shop, browser, config):
-    if canonical_shop_domain(shop) != shop or not BROWSER_RE.fullmatch(browser):
+def validate_admission(*, shop, browser, pilot_code, now=None):
+    if canonical_shop_domain(shop) != shop or not isinstance(browser, str) or not BROWSER_RE.fullmatch(browser):
         raise InstallRejected()
+    if not admitted(shop, pilot_code, now=now):
+        raise InstallRejected("install_admission_required")
+
+
+def begin(db, *, shop, browser, config, pilot_code=None):
     now = lc.utcnow()
+    validate_admission(shop=shop, browser=browser, pilot_code=pilot_code, now=now)
     # A single short, nonblocking transaction makes quotas work across workers.
     # No address headers (including X-Real-IP) are trusted or stored here.
     if not db.scalar(select(func.pg_try_advisory_xact_lock(*ADMISSION_LOCK))):
@@ -109,6 +117,7 @@ def begin(db, *, shop, browser, config):
         return db.scalar(select(func.count()).select_from(Flow).where(*conditions))
     browser_hash = digest("browser", browser)
     if (count() >= MAX_RETAINED_FLOWS
+            or count(Flow.shop_domain == shop) >= MAX_SHOP_RETAINED_FLOWS
             or count(Flow.created_at > now - timedelta(seconds=60)) >= MAX_GLOBAL_STARTS_PER_MINUTE
             or count(recent, Flow.shop_domain == shop) >= MAX_SHOP_STARTS
             or count(recent, Flow.browser_hash == browser_hash) >= MAX_BROWSER_STARTS):

@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select, text
 
 from backend.tests import test_shopify_connection_pg as foundation
-from backend.tests.test_shopify_install_first import env, make_app
+from backend.tests.test_shopify_install_first import env, make_app, PILOT_CODE
 from services.shopify_connection import install, lifecycle
 from services.shopify_connection.install_config import configuration
 from services.shopify_connection.install_models import ShopifyInstallFlow as Flow, ShopifyOwnerIdentity as Owner
@@ -25,7 +25,7 @@ SHOP = foundation.SHOP_SHOES
 
 
 @pytest.fixture
-def store(pg):
+def store(pg, monkeypatch):
     from alembic.operations import Operations
     from alembic.migration import MigrationContext
     path = foundation._REPO / "database/migrations/versions/0124_shopify_install_first.py"
@@ -35,6 +35,9 @@ def store(pg):
         with Operations.context(MigrationContext.configure(conn)):
             module.upgrade()
         Base.metadata.create_all(conn, tables=[UserTotp.__table__])
+    from backend.tests.test_shopify_install_first import pilot_env
+    for key, value in pilot_env([SHOP, foundation.SHOP_SHIRTS, foundation.SHOP_PERFUME]).items():
+        monkeypatch.setenv(key, value)
     return pg
 
 
@@ -53,7 +56,7 @@ class Fake(foundation.FakeShopify):
 
 def begin(pg, browser, shop=SHOP):
     with pg.Session() as db:
-        url = install.begin(db, shop=shop, browser=browser, config=CFG)
+        url = install.begin(db, shop=shop, browser=browser, config=CFG, pilot_code=PILOT_CODE)
     assert parse_qs(urlsplit(url).query)["grant_options[]"] == ["per-user"]
     return parse_qs(urlsplit(url).query)["state"][0]
 
@@ -291,9 +294,9 @@ def test_actual_asgi_start_cookie_cancelled_and_copied_callback(store, monkeypat
     app = make_app(store.Session)
     async def proof():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://api.example.test") as client:
-            refused = await client.post(PREFIX + "/start", data={"shop": SHOP, "browser": browser}, headers={"Origin": "null"})
+            refused = await client.post(PREFIX + "/start", data={"shop": SHOP, "browser": browser, "pilot_code": PILOT_CODE}, headers={"Origin": "null"})
             assert refused.status_code == 400
-            start = await client.post(PREFIX + "/start", data={"shop": SHOP, "browser": browser}, headers={"Origin": "https://app.example.test"})
+            start = await client.post(PREFIX + "/start", data={"shop": SHOP, "browser": browser, "pilot_code": PILOT_CODE}, headers={"Origin": "https://app.example.test"})
             assert start.status_code == 303
             cookie = start.headers["set-cookie"]
             assert all(value in cookie for value in (COOKIE, "Secure", "HttpOnly", "SameSite=lax", "Path=/"))
@@ -312,7 +315,7 @@ def test_actual_asgi_start_cookie_cancelled_and_copied_callback(store, monkeypat
         assert db.query(Tenant).count() == db.query(User).count() == 0
 
 
-def test_sixty_unauthenticated_starts_are_bounded_despite_forwarded_headers(store, monkeypatch):
+def test_sixty_pilot_starts_are_bounded_despite_forwarded_headers(store, monkeypatch):
     import httpx
     from routers import shopify_install as routes
     monkeypatch.setattr(routes, "enabled", lambda: True)
@@ -323,7 +326,7 @@ def test_sixty_unauthenticated_starts_are_bounded_despite_forwarded_headers(stor
             statuses = []
             for index in range(60):
                 response = await client.post(routes.PREFIX + "/start",
-                    data={"shop": SHOP, "browser": secrets.token_hex(32)},
+                    data={"shop": SHOP, "browser": secrets.token_hex(32), "pilot_code": PILOT_CODE},
                     headers={"Origin": "https://app.example.test", "X-Real-IP": f"192.0.2.{index}",
                              "X-Forwarded-For": f"198.51.100.{index}"})
                 statuses.append(response.status_code)
@@ -342,15 +345,15 @@ def test_sixty_unauthenticated_starts_are_bounded_despite_forwarded_headers(stor
 def test_browser_and_global_quotas_cannot_be_refunded_by_failed_callbacks(store, monkeypatch):
     fake, browser = Fake(), secrets.token_hex(32)
     for index in range(install.MAX_BROWSER_STARTS):
-        shop = f"neutral-{index}.myshopify.com"
+        shop = (SHOP, foundation.SHOP_SHIRTS, foundation.SHOP_PERFUME)[index % 3]
         state = begin(store, browser, shop)
         with pytest.raises(install.InstallRejected):
             callback(store, fake, secrets.token_hex(32), state, shop)
     with pytest.raises(install.InstallRejected, match="install_rate_limited"):
-        begin(store, browser, "another.myshopify.com")
+        begin(store, browser, foundation.SHOP_SHIRTS)
     monkeypatch.setattr(install, "MAX_GLOBAL_STARTS_PER_MINUTE", install.MAX_BROWSER_STARTS)
     with pytest.raises(install.InstallRejected, match="install_rate_limited"):
-        begin(store, secrets.token_hex(32), "other.myshopify.com")
+        begin(store, secrets.token_hex(32), foundation.SHOP_SHIRTS)
     with store.Session() as db:
         assert db.query(Flow).count() == install.MAX_BROWSER_STARTS
 
@@ -365,7 +368,7 @@ def test_admission_lock_is_nonblocking_and_concurrent_global_cap_is_atomic(store
     monkeypatch.setattr(install, "MAX_GLOBAL_STARTS_PER_MINUTE", 3)
     def attempt(index):
         try:
-            begin(store, secrets.token_hex(32), f"concurrent-{index}.myshopify.com")
+            begin(store, secrets.token_hex(32), (SHOP, foundation.SHOP_SHIRTS, foundation.SHOP_PERFUME)[index % 3])
             return "ok"
         except install.InstallRejected as exc:
             return exc.code
@@ -518,3 +521,135 @@ def test_offline_pre_dispatch_refusal_does_not_quarantine_recovered_connection(s
     assert fake.count("exchange") == 1 and calls == 2
     with store.Session() as db:
         assert db.query(lifecycle.ShopifyConnection).one().status == "active"
+
+
+def _expired_flow(now, *, phase="offline", recent=False):
+    return Flow(id=secrets.token_hex(24), state_hash=secrets.token_hex(32), browser_hash=secrets.token_hex(32),
+                shop_domain=SHOP, redirect_hash=secrets.token_hex(32), phase=phase, generation=0,
+                online_token_enc=None if phase in {"redeemed", "failed"} else "synthetic-ciphertext-to-erase",
+                handoff_hash=secrets.token_hex(32), expires_at=now - timedelta(seconds=1),
+                created_at=now - timedelta(seconds=60 if recent else 901))
+
+
+@pytest.mark.parametrize("gate", ["connection_off", "install_off", "missing_keys"])
+def test_gate_off_cleanup_erases_only_expired_flow_secrets_and_preserves_uncertainty(store, monkeypatch, gate):
+    from sqlalchemy import event
+    from services.shopify_connection import install_cleanup, recovery, crypto
+    fake, browser = Fake(), secrets.token_hex(32)
+    redeem(store, fake, browser, installed(store, fake, browser))
+    now = lifecycle.utcnow()
+    with store.Session() as db:
+        for phase in ("online", "offline", "ready", "redeeming", "redeemed", "failed", "exchanging_online", "exchanging_offline"):
+            db.add(_expired_flow(now, phase=phase))
+        recent = _expired_flow(now, recent=True)
+        db.add(recent); db.commit()
+        recent_id = recent.id
+        connection = db.query(lifecycle.ShopifyConnection).one()
+        before = {col.name: getattr(connection, col.name) for col in connection.__table__.columns}
+        live_id = db.query(Flow).filter(Flow.phase == "redeemed", Flow.expires_at > now).one().id
+    config = env()
+    if gate == "connection_off":
+        config["NAHLA_SHOPIFY_CONNECTION_ENABLED"] = "0"
+    elif gate == "install_off":
+        config["NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"] = "0"
+    else:
+        for key in ("SHOPIFY_CLIENT_SECRET", "SHOPIFY_TOKEN_ENC_KEY"):
+            config.pop(key); monkeypatch.delenv(key, raising=False)
+    for key, value in config.items():
+        monkeypatch.setenv(key, value)
+    statements = []
+    def observe(conn, cursor, statement, *args):
+        if statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")):
+            statements.append(statement)
+    event.listen(store.engine, "before_cursor_execute", observe)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cleanup touched activation, credentials, or network")
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(crypto, "TokenCipher", forbidden)
+            m.setattr(recovery, "_api_for", forbidden)
+            m.setattr(lifecycle, "_flag_possible_retirement", forbidden)
+            assert asyncio.run(install_cleanup.run_cleanup_tick(session_factory=store.Session, now=now)) == {"erased": 9}
+            assert asyncio.run(install_cleanup.run_cleanup_tick(session_factory=store.Session, now=now)) == {"erased": 0}
+    finally:
+        event.remove(store.engine, "before_cursor_execute", observe)
+    assert statements and all(statement.startswith(("UPDATE shopify_install_flows", "DELETE FROM shopify_install_flows")) for statement in statements)
+    with store.Session() as db:
+        assert db.query(Flow).count() == 4  # live session, recent quota history, two uncertainty markers
+        assert db.get(Flow, live_id).phase == "redeemed"
+        assert db.get(Flow, recent_id).phase == "failed"
+        for row in db.query(Flow).filter(Flow.expires_at <= now):
+            assert row.online_token_enc is row.handoff_hash is None
+        conn = db.query(lifecycle.ShopifyConnection).one()
+        assert {col.name: getattr(conn, col.name) for col in conn.__table__.columns} == before
+        assert db.query(Tenant).count() == db.query(User).count() == db.query(Owner).count() == 1
+        # Later active recovery can still see the marker and quarantine the incumbent.
+        assert install.sweep_expired(db, now=now) == 2
+        assert db.query(lifecycle.ShopifyConnection).one().status == "quarantined"
+
+
+def test_cleanup_missing_revision_never_creates_schema_or_calls_api(pg, monkeypatch):
+    from sqlalchemy import inspect
+    from services.shopify_connection import install_cleanup
+    before = set(inspect(pg.engine).get_table_names())
+    assert Flow.__tablename__ not in before
+    for key in env():
+        monkeypatch.delenv(key, raising=False)
+    assert asyncio.run(install_cleanup.run_cleanup_tick(session_factory=pg.Session)) == {"skipped": "storage_unavailable"}
+    assert set(inspect(pg.engine).get_table_names()) == before
+
+
+def test_cleanup_skips_locked_rows_and_overlapping_workers_are_bounded(store):
+    from services.shopify_connection import install_cleanup
+    now = lifecycle.utcnow()
+    with store.Session() as db:
+        rows = [_expired_flow(now) for _ in range(5)]
+        db.add_all(rows); db.commit()
+        first_id = min(row.id for row in rows)
+    with store.Session() as locked:
+        locked.get(Flow, first_id, with_for_update=True)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            counts = list(pool.map(lambda _: asyncio.run(install_cleanup.run_cleanup_tick(
+                session_factory=store.Session, now=now, limit=2))["erased"], range(2)))
+        assert counts == [2, 2]
+        with store.Session() as db:
+            assert db.query(Flow).count() == 1 and db.get(Flow, first_id).online_token_enc is not None
+        locked.rollback()
+    assert asyncio.run(install_cleanup.run_cleanup_tick(session_factory=store.Session, now=now)) == {"erased": 1}
+
+
+def test_scrubbed_uncertainty_markers_do_not_starve_later_cleanup(store):
+    from services.shopify_connection import install_cleanup
+    now = lifecycle.utcnow()
+    with store.Session() as db:
+        for _ in range(102):
+            row = _expired_flow(now, phase="exchanging_online")
+            row.online_token_enc = row.handoff_hash = None
+            row.expires_at -= timedelta(seconds=10)
+            db.add(row)
+        db.add(_expired_flow(now)); db.commit()
+    assert asyncio.run(install_cleanup.run_cleanup_tick(session_factory=store.Session, now=now)) == {"erased": 1}
+    with store.Session() as db:
+        assert db.query(Flow).count() == 102
+
+
+def test_anonymous_flood_cannot_consume_pilot_quota_and_admitted_shop_cannot_consume_peer_reserve(store, monkeypatch):
+    # Wrong secrets and a valid code replayed to an unlisted shop never insert rows.
+    with store.Session() as db:
+        for index in range(60):
+            with pytest.raises(install.InstallRejected, match="install_admission_required"):
+                install.begin(db, shop=SHOP if index % 2 else f"unknown-{index}.myshopify.com",
+                              browser=secrets.token_hex(32), config=CFG,
+                              pilot_code=secrets.token_hex(32) if index % 2 else PILOT_CODE)
+        assert db.query(Flow).count() == 0
+    monkeypatch.setattr(install, "MAX_SHOP_RETAINED_FLOWS", 2)
+    for _ in range(2):
+        begin(store, secrets.token_hex(32))
+    with pytest.raises(install.InstallRejected, match="install_rate_limited"):
+        begin(store, secrets.token_hex(32))
+    begin(store, secrets.token_hex(32), foundation.SHOP_SHIRTS)
+    with store.Session() as db:
+        assert db.query(Flow).filter(Flow.shop_domain == SHOP).count() == 2
+        assert db.query(Flow).filter(Flow.shop_domain == foundation.SHOP_SHIRTS).count() == 1
+        # No pilot admission credential/hash is persisted in a flow.
+        assert PILOT_CODE not in repr([{col.name: getattr(row, col.name) for col in Flow.__table__.columns} for row in db.query(Flow)])
