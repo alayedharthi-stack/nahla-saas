@@ -1,25 +1,64 @@
 # Private logical restore rehearsal — 2026-10-13
 
-Latest update, 09:27 UTC: the independent review accepted the exact eight
-retained-constraint representations for a **clone-only** baseline. The migration
-rehearsal remains **blocked before code upload or DDL**: automatic approval review
-rejected transfer of the pinned repository bundle to the private clone for lack
-of explicit authorization covering that payload and destination. No retry or
-alternate transfer was attempted. See [the pause record](clone-rehearsal-pause.json)
-and [prepared, unexecuted harness](clone_rehearsal.prepared-not-run.py).
+Latest result, 14:08 UTC: **PASS — private clone migration and rollback rehearsal**.
+The owner explicitly approved the 146-file transfer at 13:55 UTC. The previously
+denied upload was retried once and accepted. The original archive was restored
+on the same private target without reconnecting the source database. The exact
+reviewed harness and unchanged `a8fb88e3` observers, comparators and migrations
+completed all six operations below.
 
-The restarted target is stopped again: PostgreSQL shut down at 09:27:05.175 UTC,
-and Railway reported zero running replicas at 09:27:25 UTC. The retained archive
-hash still matches. No source connection, restore, baseline freeze or migration
-ran during this attempt, and no production gate PASS is claimed.
+| Operation actually executed | Verified heads | Shopify tables | Result |
+| --- | --- | ---: | --- |
+| `upgrade 0121` | `0111, 0113, 0121` | 5 | PASS |
+| `upgrade 0122` | `0111, 0113, 0122` | 12 | PASS |
+| `upgrade 0123` | `0111, 0113, 0123` | 15 | PASS |
+| `downgrade 0123@-1` | `0111, 0113, 0122` | 12 | PASS |
+| `downgrade 0122@-1` | `0111, 0113, 0121` | 5 | PASS |
+| `downgrade 0121@-1` | `0111, 0113, 0120` | 0 | PASS |
 
-Correction to the earlier access-revocation evidence: empty-value updates did
-not remove the five source references from a fresh runtime. Presence checks
-caught this before any source connection. Each was replaced with a fixed invalid
-sentinel, verified exactly in a newly deployed container, and unset in the
-operator process. No credential values were displayed. The original report and
-archive manifests remain as historical records; the pause record supersedes the
-earlier empty-value revocation conclusion.
+Every step preserved the contents and row counts of all 127 original data
+tables, all 117 original sequence values, and the definitions and relation OIDs
+of all 128 original tables. `alembic_version` was checked separately against the
+exact expected heads. Data equality used SHA256 of length-prefixed, sorted JSON
+row records on the same clone; customer rows were not exported. All snapshots
+also matched the same clone cluster, database, deployment and archive identity.
+
+The pre-DDL baseline allowed only the eight independently reviewed array-cast
+representations. Its SHA256 is
+`e30b3ec8c8ac21d527b757f2c224755f3681a9c93ecb70ef783ecd5fd9a41268`.
+The original production comparator still reports the expected
+`FAIL / retained_definition_drift` against stock retained expectations on this
+restored clone. **This is not a production-gate PASS.** No production guard,
+expectations, inventory, schema, app deployment or Shopify flag was changed.
+
+See the [execution record](clone-rehearsal-execution.json),
+[byte-identical remote result](clone-rehearsal-result.json), and
+[exact harness](clone_rehearsal.prepared-not-run.py). The harness keeps its
+historical filename; these exact bytes were executed in this continuation.
+The separate [Alembic environment](clone-alembic-env.py) runs the unchanged
+revision directory without importing the production application environment.
+The 146-file source inventory matched before and after execution.
+
+PostgreSQL shut down at `14:08:10.813 UTC`; Railway reported zero running replicas
+at `14:08:31 UTC`, with no pending work. The immutable archive, baseline and
+private proof files remain on the existing volume. Runtime setup and rehearsal
+used about seven capped compute minutes (CPU/RAM envelope `$0.004858`, not an
+invoice). Retained volume storage remains billable within the owner's existing
+`$1` total budget; permanent deletion is not authorized.
+
+**Remaining production scope:** independently review the completed evidence,
+then obtain separate, fresh, time-bound S3 authorization and an exclusion window
+with source/inventory, production target, backup/recovery and rollback bindings.
+Production migration and Shopify activation remain unauthorized.
+
+The [09:27 pause record](clone-rehearsal-pause.json) is retained as history.
+It also corrects the initial access-revocation claim: empty-value updates had
+not removed source references from a fresh runtime. All five were subsequently
+replaced by a fixed invalid sentinel, verified exactly in the current runtime,
+and unset in every operator process before any database operation. No source
+connection or credential display occurred during this continuation.
+
+## Earlier logical archive capture and restore proof
 
 The new logical archive was restored successfully on a private PostgreSQL 18.6
 target. Source-snapshot row counts matched for 128 tables, Alembic heads remained
@@ -28,11 +67,9 @@ archive. Locale/encoding also matched. The target was stopped at
 `2026-10-13T08:38:17.224Z`; Railway reported zero running replicas at 08:38:35 UTC.
 The retained archive volume was not deleted.
 
-**This is a logical restore result, not S3 release approval.** The release gate
-was not executed against the clone, and migration rehearsal was not run.
-The compatibility issue below requires independent review before this evidence
-is used in an S3 execution binding. No production DDL, Shopify activation,
-production settings change, or release-guard change was made.
+The paragraphs below describe the earlier 08:35 logical restore proof. At that
+point migration rehearsal had not run; the successful continuation above now
+supersedes that readiness state. Neither result grants production S3 approval.
 
 ## Retained artifact
 
