@@ -1,0 +1,43 @@
+{
+  "observed_at_utc": "2026-10-13 17:22:56 UTC",
+  "staged": {
+    "project": {
+      "id": "f0090862-0a40-4293-bd5d-e94df58762b5",
+      "name": "desirable-growth"
+    },
+    "environment": {
+      "id": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "name": "production"
+    },
+    "staged": null,
+    "destructive": false,
+    "resources": [],
+    "sharedVariables": [],
+    "privateNetworkDisabled": null
+  },
+  "dashboard": {
+    "deployments": [
+      {
+        "id": "49499c61-c777-4c62-a863-5104c84d7462",
+        "status": "SUCCESS",
+        "createdAt": "2026-10-12T19:59:03.353Z",
+        "updatedAt": "2026-10-12T20:00:37.507Z",
+        "serviceId": "446edf49-05bf-4578-b403-72e1e86b384c",
+        "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+        "url": null,
+        "snapshotId": "2ecd0178-d9a6-4d39-94d4-48b175f4bf28",
+        "canRollback": true,
+        "canRedeploy": true,
+        "regions": [
+          "us-east4-eqdc4a"
+        ],
+        "meta": {
+          "reason": "deploy",
+          "commitMessage": "test(shopify): bind fixture table-pattern query parameters",
+          "commitHash": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+          "branch": "release/shopify-dormant-s0-a8fb88e3"
+        }
+      }
+    ]
+  }
+}

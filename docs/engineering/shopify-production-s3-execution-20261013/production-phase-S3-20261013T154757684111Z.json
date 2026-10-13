@@ -1,0 +1,68 @@
+{
+  "baseline": {
+    "definition_sha256": {
+      "catalog_channel_retirements": "6c169cce1df0e1f3b9ed1a212107e5c4d76ff3d84fa7e3f5462ea3ae27313cf8",
+      "commerce_runtime_conversations": "982a5a47cd78626a52e3ba3c342b3efa534c68002755611b4ab872ce72edac68",
+      "commerce_runtime_deferred_inbound": "02b1da7c19e4992f96d1804d6c1e5f131c1204805deb3c28f41c34caa521aa09",
+      "commerce_runtime_handover_barrier": "a026d939b56cc4372eedda298f26372aa74fbf3283a2e3cc361e5532ad462fc3",
+      "commerce_runtime_handover_workers": "6a150ca955f1ad62b36ff3bd973193c3664403ef99adde24414e9366a38b5b72",
+      "commerce_runtime_navigation_snapshots": "79f6a8faaf844b0dfdb4a9b41dcb50847f33d3ec746d4f213be2a05ba02eade6",
+      "customer_address_provenance": "dd6afc9ebbb131a43ee2a990bc5af73ad05ddddf3d9e94d7facd91995935d491",
+      "customer_addresses": "98fd1c39841cef616a940dd47b4bfa6cfc278d1bf442a6d91e443b826fe1815f",
+      "customers": "202590e84da067a018f74b5dd263166a64b6bd16278af3aeaf35061b0a030857",
+      "meta_catalog_authorizations": "d7a4d8b032b2051b398a8d14d982a48715f658a4bfc3a70c705ec081980a4308",
+      "meta_catalog_memberships": "4e0b56593c812ab4b04cc0b6f2aa18fd3a862afb26d783497ce68aa2a94627d7",
+      "product_variants": "194b1ee8ccd95027413fdd5a528428055475a132df6f5ce5cdc4ca3370145237",
+      "products": "9fbc71769ccee0fc70d8735488bbbea0f2ea28a0a361239bcbc838c4c42203a9",
+      "tenants": "37451c6b0bd7e9d91403aeb8d31b2ee88d5035360f47209148f73abf853c60af",
+      "users": "d86f55a24ba71495c6769b667c00167114b266f7098f3282700cf4be4b075294",
+      "whatsapp_oauth_nonces": "ebf192ea645075e12ad3da60df2b8d8a1a490f8a5ceef812b82b7e890bdf1f43"
+    },
+    "relation_oids": {
+      "catalog_channel_retirements": 529481,
+      "commerce_runtime_conversations": 240728,
+      "commerce_runtime_deferred_inbound": 241144,
+      "commerce_runtime_handover_barrier": 241092,
+      "commerce_runtime_handover_workers": 241115,
+      "commerce_runtime_navigation_snapshots": 256231,
+      "customer_address_provenance": 241271,
+      "customer_addresses": 19176,
+      "customers": 19290,
+      "meta_catalog_authorizations": 529508,
+      "meta_catalog_memberships": 166584,
+      "product_variants": 19542,
+      "products": 19557,
+      "tenants": 19674,
+      "users": 19704,
+      "whatsapp_oauth_nonces": 206599
+    },
+    "retained_sha256": "26cc00602ccfbe3526f74be418b88be0d9a762edc177b60e8888221b712f3baf",
+    "target": {
+      "db": "postgres-ancu.railway.internal:5432/railway",
+      "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+      "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
+    }
+  },
+  "baseline_compared": true,
+  "baseline_sha256": "e933795b890205b18318b9f62fb39d7f7748237f3e49561e04eb476b9868f9cf",
+  "heads": [
+    "0111",
+    "0113",
+    "0123"
+  ],
+  "inventory_count": 146,
+  "inventory_sha256": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+  "kind": "production_phase_audit",
+  "observed_at_utc": "2026-10-13T15:47:57.627539+00:00",
+  "operator_sha256": "a09e886750176dbdf06f38944571bb40d32ddff3065a905e8433d745b508d45d",
+  "phase": "S3",
+  "production_gate_pass": false,
+  "readonly": true,
+  "shopify_flags": "OFF",
+  "shopify_nonempty_tables": 0,
+  "shopify_tables": 15,
+  "source_r": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "status": "PASS",
+  "stock_retained_definitions": "PASS"
+}

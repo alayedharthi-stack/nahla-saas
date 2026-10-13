@@ -1,0 +1,161 @@
+{
+  "all_blocks_fail_fast": true,
+  "all_migration_search_paths": "public,pg_catalog",
+  "bash": "GNU bash, version 5.2.37(1)-release (x86_64-pc-msys)",
+  "checked_at_utc": "2026-10-13T15:04:49.893825+00:00",
+  "checks": [
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "upgrade 0121",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "upgrade 0121",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "upgrade 0121",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "upgrade 0121",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "upgrade 0122",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "upgrade 0122",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "upgrade 0122",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "upgrade 0122",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "upgrade 0123",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "upgrade 0123",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "upgrade 0123",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "upgrade 0123",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "downgrade 0123@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "downgrade 0123@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "downgrade 0123@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "downgrade 0123@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "downgrade 0122@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "downgrade 0122@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "downgrade 0122@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "downgrade 0122@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "precheck",
+      "operation": "downgrade 0121@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 23,
+      "mode": "ddl",
+      "operation": "downgrade 0121@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 17,
+      "mode": "postcheck",
+      "operation": "downgrade 0121@-1",
+      "status": "PASS"
+    },
+    {
+      "exit_code": 0,
+      "mode": "pass",
+      "operation": "downgrade 0121@-1",
+      "status": "PASS"
+    }
+  ],
+  "database_or_network_access": false,
+  "migration_blocks": 6,
+  "owner_s3_approval_granted": false,
+  "production_changes": false,
+  "readme_sha256": "a9fe7d494b650f692d57ff2cbc8b9e02b4626e37086d14a3a5a92b8c374d6765",
+  "real_python_or_alembic_executed_by_tests": false,
+  "status": "PASS",
+  "stubbed_failure_and_success_cases": 24,
+  "syntax_checked_blocks": 7
+}

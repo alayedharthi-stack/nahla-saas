@@ -1,0 +1,74 @@
+{
+  "scope": "deployment",
+  "deploymentId": "7f45fdf1-368b-453d-a9c5-1ca6ad08b7c0",
+  "serviceId": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+  "environmentId": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "status": "FAILED",
+  "deploy": [
+    {
+      "timestamp": "2026-10-13T16:15:16.741179001Z",
+      "message": "[shopify-release-gate] BOOTSTRAP PASS gate_version=2 inventory_count=146",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741182751Z",
+      "message": "[shopify-release-gate] gate_version=2 phase=S3 release=a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741186241Z",
+      "message": "[shopify-release-gate] CHECK root PASS {\"root\":\"container\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741189471Z",
+      "message": "[shopify-release-gate] CHECK release_sha PASS {\"release\":\"a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741194141Z",
+      "message": "[shopify-release-gate] CHECK inventory PASS {\"count\":146,\"digest\":\"31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741197261Z",
+      "message": "[shopify-release-gate] CHECK libraries PASS {\"pins\":{\"alembic\":\"1.13.1\",\"psycopg2-binary\":\"2.9.9\",\"sqlalchemy\":\"2.0.30\"}}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741200441Z",
+      "message": "[shopify-release-gate] CHECK migration_preflight PASS {\"files\":119,\"revisions\":119}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741204141Z",
+      "message": "[shopify-release-gate] CHECK graph PASS {\"branch_delta\":[\"0118\",\"0120\",\"0121\",\"0122\",\"0123\"],\"heads\":[\"0092\",\"0111\",\"0114\",\"0115\",\"0123\"]}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741207261Z",
+      "message": "[shopify-release-gate] CHECK identity PASS {\"expected\":{\"environment\":\"ede962ce-3042-4dae-94de-623837e83ed9\",\"project\":\"f0090862-0a40-4293-bd5d-e94df58762b5\",\"service\":\"686b36c5-a926-4e58-912a-5e9d13fbc2e7\"}}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741210550Z",
+      "message": "[shopify-release-gate] CHECK database_target PASS {\"target\":\"postgres-ancu.railway.internal:5432/railway\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741214190Z",
+      "message": "[shopify-release-gate] CHECK approval FAIL reason=approval_expired {\"phase\":\"S3\"}",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741217540Z",
+      "message": "[shopify-release-gate] database checks skipped: a source-side check failed",
+      "severity": "info"
+    },
+    {
+      "timestamp": "2026-10-13T16:15:16.741220670Z",
+      "message": "[shopify-release-gate] RESULT=FAIL phase=S3 release=a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec checks=9 failed=[\"approval\"]",
+      "severity": "info"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "activation": false,
+  "api": {
+    "can_redeploy": true,
+    "can_rollback": true,
+    "deployment_id": "45d4e81d-3047-41a9-b2ac-44ab66268c28",
+    "health_http_status": 200,
+    "snapshot_id": "1ec2cd4a-57ac-43a0-ae7f-3a049dbece47",
+    "status": "SUCCESS"
+  },
+  "backup": {
+    "card_timestamp_utc": "2026-10-11T16:54:10.145Z",
+    "completed": true,
+    "must_reobserve_at_any_future_execution": true,
+    "parent_browser_observed_at_utc": "2026-10-12T07:19:57Z",
+    "restore_available": true,
+    "size_mb": 647
+  },
+  "branch": "ops/tenant1-haiku-20260921-f9021b59",
+  "catalog_regression": {
+    "blocking_findings": 0,
+    "meta_active_bindings": 1,
+    "method": "SQL-only existing catalog audits; no provider calls",
+    "salla_enabled_tenants": 7
+  },
+  "configuration_observed_through_utc": "2026-10-12T10:48:00Z",
+  "dashboard": {
+    "can_redeploy": true,
+    "can_rollback": true,
+    "deployment_id": "52cdbff2-8282-42f4-bf5b-82804d9d2066",
+    "http_status": 200,
+    "snapshot_id": "362c092f-9903-431f-8fd4-e46744b758d6",
+    "status": "SUCCESS"
+  },
+  "database": {
+    "heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "postgres_server_version_num": 180006,
+    "primary": true,
+    "retained_canonical_sha256": "d4a6915c412b91a17f1d743c8fd53c8d6e09a46402124099505420fc39a2d867",
+    "shopify_sequences": 0,
+    "shopify_strays": 0,
+    "shopify_tables": 0,
+    "ten_retained_relation_oids_preserved": true
+  },
+  "existing_protected_meta_flags": "unchanged",
+  "existing_skip_preflight": "1 unchanged",
+  "legacy_predeploy_and_all_prior_service_settings_restored": true,
+  "live_changes_in_this_correction": false,
+  "migrations": false,
+  "observation_kind": "carried prior read-only terminal recovery evidence; not a fresh deployment-time attestation",
+  "secrets_exported": false,
+  "shopify_flags": "all five backend flags and two Vite flags removed; effective OFF",
+  "source_sha": "462ede1aff602cad84e9569be859cca0087b190d",
+  "staged_changes": null,
+  "terminal_health_observed_at_utc": "2026-10-12T10:41:24Z"
+}

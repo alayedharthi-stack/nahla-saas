@@ -1,0 +1,10 @@
+{
+  "before": "S2",
+  "block_status": "PASS",
+  "exit_code": 0,
+  "expected_after": "S3",
+  "finished_at_utc": "2026-10-13T15:44:19.678288+00:00",
+  "operation": "upgrade 0123",
+  "phase_audit_required": true,
+  "reviewed_block_sha256": "2253e1f72761af102725f2d6ae56599fdf6040a94a788ea0e2e095a07e071e3b"
+}

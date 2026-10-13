@@ -1,0 +1,49 @@
+{
+  "environment": {
+    "id": "ede962ce-3042-4dae-94de-623837e83ed9",
+    "name": "production"
+  },
+  "services": [
+    {
+      "serviceId": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+      "serviceName": "nahla-saas",
+      "state": "online",
+      "statusText": "Online",
+      "activeDeployments": [
+        {
+          "id": "ade73b62-6127-4aff-bc3b-c0fd97d06c58",
+          "status": "SUCCESS",
+          "createdAt": "2026-10-13T17:17:33.861Z",
+          "statusUpdatedAt": "2026-10-13T17:19:28.021Z"
+        }
+      ],
+      "replicaStatus": {
+        "running": 1,
+        "crashed": 0,
+        "total": 1
+      },
+      "cronJob": null,
+      "issues": {
+        "warningCount": 0,
+        "criticalCount": 1
+      },
+      "recentFailures": 1,
+      "recentFailedDeployments": [
+        {
+          "id": "7f45fdf1-368b-453d-a9c5-1ca6ad08b7c0",
+          "status": "FAILED",
+          "createdAt": "2026-10-13T16:07:41.999Z"
+        }
+      ],
+      "hasIssues": true,
+      "isCronJob": false,
+      "hasVolume": true
+    }
+  ],
+  "pendingWork": [],
+  "summary": {
+    "totalServices": 1,
+    "servicesWithIssues": 1,
+    "totalFailures": 1
+  }
+}

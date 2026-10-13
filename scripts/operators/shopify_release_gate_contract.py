@@ -91,6 +91,11 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     EXPECTATIONS_RELATIVE_PATH,
     "scripts/operators/__init__.py",
     "scripts/operators/bootstrap_migration_contract.py",
+    # Graph discovery imports dormant revision 0115 even when it is not applied.
+    # Pin its exact package/model closure; no other backend imports are allowed.
+    "backend/__init__.py",
+    "backend/payments/__init__.py",
+    "backend/payments/models.py",
     "backend/services/shopify_connection/config.py",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",

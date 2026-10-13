@@ -1,0 +1,30 @@
+{
+  "approved_scope": "one API validation deployment; no DDL, rollback, dashboard deployment or activation",
+  "files": {
+    "README.md": "24e09bd2a33c5c5a7a9409c8b508605776fafd89127ee835398288a34b511e48",
+    "audits-report.json": "dd888d016be76de6603f659352fa2b14b90636c491bd57df8c41d1c94ad2805d",
+    "binding-report.json": "d00334f6f5d7c47a6aecc09234d18500a6a1dbd42457c6879605234db1b194e6",
+    "final-s3-phase-audit.json": "d2a50495b6492755ff9d3124c592c23531da09efae6a6108fae2a037097c2c79",
+    "fresh-s3-preflight.json": "d9732753d34f05815f6d1fe98b15e9bffcc77e690baa6b6f87684d7d60b8ebf1",
+    "gate-report.json": "ea8edf03eed54eb9895ff676263856da000153a579de673ba40aee7fcb4194c9",
+    "native-dispatch-intent.json": "e2254b2e452279e9df2041a7ecaf06bb4c00011a0504fb1498e40cf6ffabe2de",
+    "native-dispatch-result.json": "8d72f71d0a1337bb0c8b6d816d47d126044da1cf89edf320227fee0a9216fda0",
+    "native-staging-review.json": "8efc56a2af7c72ac0fd3494a06fa3446dc48ebbfdf05bdbbef8c685670b7555f",
+    "oneoff-gate.log": "d74b6f7c8faa9a3356d68f0fc63cd627619fd58a81be857e1b746228e118ce35",
+    "post-terminal-dashboard-and-staging.json": "4b3afe68d91aab750b985b90e5ce3de6eba59de6339f4d09f0e2a54da3b91772",
+    "post-terminal-health.json": "7246e39713c7726a3ef4e1f862f0e9d7e2d4fa284ff5db28971650ccb48002eb",
+    "post-terminal-native-state.json": "b935353f017936ac334d45b118b1e024bd61484a3298550fd9f234aa4174f154",
+    "post-terminal-runtime.json": "7ec382cdea81abacb4085744109328fcda749d6894953388678ca347040ec109",
+    "preflight-runtime.json": "7ec382cdea81abacb4085744109328fcda749d6894953388678ca347040ec109",
+    "s3-validation-approval.json": "e913a3f5121ac221dfe602554eccee5b5e2fcee8024be93b8fe9057bfb3d4cc7",
+    "s3-validation-only-dashboard-readonly.json": "22f87711239530bd40b4f3ec6274036921cf351a994339a6d219925d4f5080ec",
+    "s3-validation-only-health-and-asset.json": "24f403e4b8d82f16ce440a587bc323311476e896255ac7d76350fda3c4153d67",
+    "stage-report.json": "765593fdd53a7795d4d20b770ea65f517617a38f0c78633554a70a1dc9921cf5",
+    "terminal-deployments.json": "d604726ef99773ff6392a619c32b4d599fe562d3ae11bfa12bca49188a62e324",
+    "terminal-gate-logs.json": "5a9c4817b353cba5443f1b4ca82a90a863834706a98dd5e38e605789113b289d",
+    "terminal-startup-logs.json": "1e8e19c2dcfbf551957c623c520e2c9743374e0d87698b0c3152d5b47137fb3a"
+  },
+  "owner_window_end": "2026-10-13T17:28:41.424Z",
+  "owner_window_start": "2026-10-13T16:28:41.424Z",
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec"
+}

@@ -1,0 +1,79 @@
+{
+  "approval_block": {
+    "action": "py upload_clone_bundle.py via approved local exec",
+    "bundle_uploaded": false,
+    "destination": "Private /recovery/clone-rehearsal-20261013 on the exact approved target service",
+    "payload": "146 unchanged runtime inventory files from a8fb plus a clone-only harness and Alembic environment; no customer data or credentials",
+    "required_next_step": "Parent supplies transcript evidence explicitly authorizing this code transfer and target; retry the same denied call once only if evidence is sufficient.",
+    "retry_attempted": false,
+    "reviewer_reason": "This uploads a 146-file repository source bundle to an external Railway service; the payload and destination are not explicitly authorized by the user, creating sensitive code egress and an unapproved deployment-side effect."
+  },
+  "archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+  "archive_verified_unchanged_at_pause": true,
+  "archive_volume_id": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9",
+  "cost": {
+    "actual_invoice_obtained": false,
+    "archive_storage_remains_billable": true,
+    "owner_total_cap_usd": 1,
+    "this_attempt_cpu_ram_envelope_usd": 0.01388,
+    "this_restart_attempt_compute_upper_envelope_minutes": 20
+  },
+  "non_interference": {
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "MODEL_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO"
+  },
+  "prepared_harness": {
+    "database_execution": false,
+    "dependencies_still_required": "alembic==1.13.1, sqlalchemy==2.0.30, psycopg2-binary==2.9.9; a compatible Python runtime is not installed yet",
+    "extracted_observer_ast_compiled": true,
+    "path": "clone_rehearsal.prepared-not-run.py",
+    "python_syntax_checked": true,
+    "sha256": "0167efff6c69535fd50bd933dea324f7fbdcea268ef1b461020f17334b15bf39"
+  },
+  "rehearsal": {
+    "0121_applied": false,
+    "0122_applied": false,
+    "0123_applied": false,
+    "archive_restored_this_attempt": false,
+    "baseline_frozen": false,
+    "production_ddl": false,
+    "production_gate_pass": false,
+    "rollback_run": false,
+    "shopify_activated": false
+  },
+  "remaining_production_s3_scope": "Independent review of completed clone evidence, fresh time-bound production S3 approval/exclusion window, recovery and rollback bindings; no production S3 approval exists.",
+  "runtime_preflight": {
+    "clone_empty": true,
+    "latest_deployment_id": "421dc9d5-6132-4820-9349-ec68d99e692e",
+    "loopback_only": true,
+    "python3_present": false,
+    "python_dependencies_installed": false,
+    "source_credential_values_absent": true
+  },
+  "scope": "CLONE ONLY; paused before repository upload, restore, baseline freeze or DDL",
+  "shutdown": {
+    "crashed_replicas": 0,
+    "pending_work": false,
+    "postgres_shutdown_at_utc": "2026-10-13T09:27:05.175Z",
+    "provider_checked_at_utc": "2026-10-13T09:27:25Z",
+    "restart_policy": "NEVER",
+    "retained_volume_preserved": true,
+    "running_replicas": 0
+  },
+  "source_access_correction": {
+    "discovery": "Fresh runtime presence checks found all five SRC_PG variables still nonempty after empty-value updates; no values were printed and no source connection was attempted.",
+    "initial_refused_deployment": "63ae5eb0-8c72-42ab-b523-b0d747ddfdc9",
+    "prior_empty_value_revocation_was_not_sufficient": true,
+    "raw_credentials_exported": false,
+    "resolution": "Replaced all five variables atomically with the literal __REVOKED_NO_SOURCE_ACCESS__, redeployed, verified each exact sentinel in the new runtime, then unset them in the operator process.",
+    "second_refused_deployment": "29ecea29-c415-4d0a-a3a3-a80ff7ee5cbd",
+    "source_connection_made": false
+  },
+  "source_r": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "status": "BLOCKED_BY_AUTO_REVIEW",
+  "target_service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f"
+}

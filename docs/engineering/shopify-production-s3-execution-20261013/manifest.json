@@ -1,0 +1,29 @@
+{
+  "evidence_kind": "production_s3_execution_and_expired_validation_deployment",
+  "files": {
+    "README.md": "ab1446074ca20b5e2e537e1c84b7f4daafc8c20e0442efc3a35d23eed1f4edb6",
+    "execution-outcome-20261013T161015.json": "e470633820836c64009402c9c131478a98044c003cbfaf63e12a124eb3ad6b9f",
+    "execution-s0-baseline.json": "fdb3fad1607736b855f5e1e721dc0abd90ac753c20fc087e65d34593f755ced1",
+    "oneoff-s3-gate.log": "d74b6f7c8faa9a3356d68f0fc63cd627619fd58a81be857e1b746228e118ce35",
+    "post-terminal-service-state.json": "61d35aa582c3a4160d0e20d15fb43c691c6bdaba424e4f25d7d17f8abfe54a05",
+    "production-phase-S1-20261013T154220037729Z.json": "cebff07dbf8ea95dd96899986932c03e92761636a2b19154e28ae311e4262272",
+    "production-phase-S2-20261013T154302927344Z.json": "b30be17f83918fae20f4afb261686bc5532001a9e4f120d59438b1ac1654e6e7",
+    "production-phase-S3-20261013T154757684111Z.json": "7f5aaf4dae109570298e2155ee728b312153f9232a1cf0d5bb8833c1bda6f8b5",
+    "production-phase-S3-20261013T160845873425Z.json": "c4ec5d22f456e7230543dace4168470148a58718e21e8f8d95f4e09295391893",
+    "s3-approval.expired.json": "070e7810322c2a2414104616e2dcca9978bf10ce51b82f1f35f8428160e78d99",
+    "s3-audits.json": "ffaafdac047cddc6efb1099bf63d47b4e4f6396e49d874b0989dc53ed4448812",
+    "s3-gate.json": "dc679dca0d5770837bd9801d4757ef89204bc2213e7d41ac525f73fa62064b52",
+    "terminal-deployments.json": "5357e47f72db234cb5cf64bdb292089cbfb67bfaea17b85026b34fa5d30e7385",
+    "terminal-gate-logs.json": "68d015082ec20501bc6b67c9a70f71405e0c4e77442f850b225ed775a9e4d830",
+    "upgrade-0121.json": "b54276d6485f7e140f2a272758741ff8a0863300e578a97f5e97c25f2de46c7b",
+    "upgrade-0122.json": "7d0b3521e5b4e5ce84906f4d82c66da7c73afe1efc21936f0738429c17e1627f",
+    "upgrade-0123.json": "c71177b4b72920bc86bd9d40d03fedb47701d818d9a04d009d0c2a610955f77b"
+  },
+  "production_release": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "reviewed_base_commit": "d4e7a5bb2db3b2e519e748b6cf97e99387fcc5a9",
+  "reviewed_runbook_sha256": "a9fe7d494b650f692d57ff2cbc8b9e02b4626e37086d14a3a5a92b8c374d6765",
+  "s0_rollback_command_sha256": "3eaff298e6cbe2beb8d1dfd5302fcb2010c0cf8773dab32ab6c95ea074026567",
+  "s0_rollback_payload_sha256": "15f288b8d082b301753320dcfe2ef8658c703c332b322bbf1882185053dc77dd",
+  "s3_command_sha256": "0a52694a678f77f19efc282d521e27dd035f9314772c90912dcc85a3f389b9a0",
+  "s3_payload_sha256": "070e7810322c2a2414104616e2dcca9978bf10ce51b82f1f35f8428160e78d99"
+}

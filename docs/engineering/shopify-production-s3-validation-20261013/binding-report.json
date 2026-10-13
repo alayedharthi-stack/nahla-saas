@@ -1,0 +1,15 @@
+{
+  "api_deployment_limit": 1,
+  "approved_at_utc": "2026-10-13T16:28:41.424Z",
+  "command_sha256": "461c9981fc3632e7c09924bcad91e86e106bcb2beeacd2d4c000dc5d85be30df",
+  "generated_at_utc": "2026-10-13T16:32:33.183732+00:00",
+  "inventory_count": 146,
+  "inventory_sha256": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+  "mode": "validation_only",
+  "offline_approval": "PASS",
+  "payload_sha256": "e913a3f5121ac221dfe602554eccee5b5e2fcee8024be93b8fe9057bfb3d4cc7",
+  "phase": "S3",
+  "production_mutations": false,
+  "status": "PASS",
+  "valid_until_utc": "2026-10-13T17:28:41.424Z"
+}

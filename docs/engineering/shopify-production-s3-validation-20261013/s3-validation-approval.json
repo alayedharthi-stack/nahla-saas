@@ -1,0 +1,99 @@
+{
+  "_status": "New owner-approved S3 validation-only window. Already-completed migrations must not be repeated.",
+  "approval": {
+    "approved": true,
+    "approved_at_utc": "2026-10-13T16:28:41.424Z",
+    "independent_review_ref": "Independent PASS on production execution evidence 8178d593ba79b8471f3a0f4b8b463ae45eb77f31",
+    "reviewer": "Main chat User Sentinel_871c1aad915481918469a18f837d778b approved the 60-minute validation-only request Sentinel_8df10b7eb3448191a9a9170b833eb759",
+    "valid_until_utc": "2026-10-13T17:28:41.424Z"
+  },
+  "authorized_scope": {
+    "all_shopify_flags": "OFF",
+    "allowed": [
+      "Read-only S3/source/inventory/flags/health checks",
+      "Replace API preDeployCommand and sealed NAHLA_SHOPIFY_RELEASE_APPROVAL_B64 with this matching pair",
+      "One exact a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec API validation deployment",
+      "Read-only terminal gate, startup, health, schema and flag verification"
+    ],
+    "api_deployment_limit": 1,
+    "archive_restore": false,
+    "automatic_retry_deployment": false,
+    "dashboard_deployment": false,
+    "database_rollback": false,
+    "ddl": false,
+    "failure_policy": "Diagnose read-only and request any further change; no automatic deployment or database action.",
+    "mode": "validation_only",
+    "new_resources": false,
+    "shopify_activation": false,
+    "unrelated_changes": false
+  },
+  "db_recovery_evidence": {
+    "backup": {
+      "actual_bytes": 26077103,
+      "artifact_kind": "postgresql_custom_logical_archive",
+      "card_timestamp_utc": "2026-10-13T08:18:50Z",
+      "completed": true,
+      "completed_at_utc": "2026-10-13T08:18:55Z",
+      "observed_at_utc": "2026-10-13T14:08:10.697159Z",
+      "observed_by": "Verified immutable logical archive and private restore proof; final checkpoint checked same hash and mode0400 before stopping compute. This is not the older 647MB native volume backup card.",
+      "path": "/recovery/shopify-logical-20261013/nahla.dump",
+      "restore_available": true,
+      "service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f",
+      "sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+      "size_mb": 26.077103,
+      "snapshot_at_utc": "2026-10-13T08:18:50Z",
+      "source_database_service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+      "source_database_volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
+      "timestamp_semantics": "Legacy card_timestamp_utc field explicitly denotes logical snapshot time; no native provider backup card is claimed.",
+      "volume_id": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9"
+    },
+    "production_restore_authorized": false,
+    "production_restore_rpo_warning": "Restoring this archive would rewind data to2026-10-13T08:18:50Z and can lose later writes. Separate incident-specific owner approval is mandatory; never normal migration rollback.",
+    "restore_verification_ref": "https://github.com/alayedharthi-stack/nahla-saas/tree/cf01b8bd948fc8007684361006f9bf4864f3c31f/docs/engineering/shopify-logical-restore-evidence-20261013",
+    "restore_verified": true,
+    "restore_verified_at_utc": "2026-10-13T08:35:27Z",
+    "verification_scope": "This exact archive restored into isolated PostgreSQL18.6; all source-snapshot table counts and sequence values matched; clone migrations and rollback subsequently passed. Production startup, production disaster recovery execution and writes after08:18:50 are not proven by the clone harness."
+  },
+  "deployment_rollback_snapshot": {
+    "railway_deployment_id": "67f2a118-5733-41c8-90fc-a25bee392022",
+    "source_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+    "verified_by": "Railway metadata: SUCCESS and canRedeploy/canRollback true. This is build availability, not proof of S3 startup. Fresh S0 binding is required after branch rollback.",
+    "verified_redeployable_at_utc": "2026-10-13T14:34:05Z"
+  },
+  "execution_window": {
+    "actual_end_utc": "2026-10-13T17:28:41.424Z",
+    "actual_start_utc": "2026-10-13T16:28:41.424Z",
+    "confirmed_exclusion_ref": "Owner approved avoiding any other deployment during this window in Sentinel_871c1aad915481918469a18f837d778b; current preflight finds no concurrent work",
+    "duration_minutes": 60,
+    "final_submit_requires_current_time_and_scope_check": true,
+    "late_approval_extends_window": false
+  },
+  "fresh_preflight": {
+    "all_shopify_flags": "OFF",
+    "audit_sha256": "d9732753d34f05815f6d1fe98b15e9bffcc77e690baa6b6f87684d7d60b8ebf1",
+    "baseline_sha256": "e933795b890205b18318b9f62fb39d7f7748237f3e49561e04eb476b9868f9cf",
+    "heads": [
+      "0111",
+      "0113",
+      "0123"
+    ],
+    "observed_at_utc": "2026-10-13T16:30:20.393375+00:00",
+    "phase": "S3",
+    "retained_definitions": "PASS",
+    "shopify_nonempty_tables": 0,
+    "shopify_tables": 15
+  },
+  "historical_recovery_evidence_note": "Unchanged verified archive identity and actual timestamps are retained solely for the existing gate contract. No restoration or rollback is authorized by this validation-only record.",
+  "phase": "S3",
+  "production_startup_evidence": "Prior same-source API remains healthy against S3. The previous validation deployment failed approval_expired; new terminal startup success must be observed, not assumed.",
+  "record_version": 2,
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "runtime_inventory_count": 146,
+  "runtime_inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+  "target": {
+    "db": "postgres-ancu.railway.internal:5432/railway",
+    "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+    "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+    "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7"
+  }
+}

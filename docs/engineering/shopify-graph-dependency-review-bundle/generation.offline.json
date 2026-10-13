@@ -1,0 +1,14 @@
+{
+  "canonical_source": "exact Git-byte inventory export; not a deployable checkout",
+  "existing_owner_coding_and_dormant_S0_authorization": "held by parent; current independent review and action-time binding still pending",
+  "gate_or_bootstrap_executed": false,
+  "network_or_database_calls": 0,
+  "record_is_not_evidence_that_prior_human_authorization_is_absent": true,
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "s0_requires_clone_or_migration_or_s3_prerequisite": false,
+  "source_branch": "release/shopify-dormant-s0-a8fb88e3",
+  "source_branch_head_verified": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "strict_cli_unfilled_record_exit": 2,
+  "strict_cli_unfilled_record_reason": "approval_missing",
+  "subprocesses_after_git_export": 0
+}

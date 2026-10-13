@@ -1,0 +1,298 @@
+{
+  "all_unscoped_service_configuration_preserved": true,
+  "api": {
+    "canRedeploy": true,
+    "canRollback": true,
+    "createdAt": "2026-10-12T19:59:03.389Z",
+    "id": "67f2a118-5733-41c8-90fc-a25bee392022",
+    "snapshotId": "8b53a527-9d85-4806-a38e-2de5ca7f4ad4",
+    "status": "SUCCESS",
+    "updatedAt": "2026-10-12T20:02:23.867Z"
+  },
+  "backup_card": {
+    "matching_card_previously_verified_complete": true,
+    "new_browser_observation_claimed": false,
+    "parent_browser_observed_at_utc": "2026-10-12T12:01:14Z",
+    "restore_verified": false,
+    "restore_visible_and_enabled_at_observation": true,
+    "size_mb": 647,
+    "timestamp_utc": "2026-10-11T16:54:10.145Z"
+  },
+  "bootstrap": "PASS",
+  "combined_native_patch_sha256": "3dc4f6f01d4b7f6827473cf6d9a27bc764c584ab5af2e90d1358ee1271a1e1ba",
+  "committed_patch_id": "10eab6b4-1852-4a22-9c3c-19e9092fe0b7",
+  "dashboard": {
+    "canRedeploy": true,
+    "canRollback": true,
+    "createdAt": "2026-10-12T19:59:03.353Z",
+    "id": "49499c61-c777-4c62-a863-5104c84d7462",
+    "snapshotId": "2ecd0178-d9a6-4d39-94d4-48b175f4bf28",
+    "status": "SUCCESS",
+    "updatedAt": "2026-10-12T20:00:37.507Z"
+  },
+  "dashboard_flags": {
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+      "effective": "OFF",
+      "exact_zero": true,
+      "present": true
+    },
+    "VITE_SHOPIFY_CONNECTION_UI": {
+      "effective": "OFF",
+      "exact_zero": true,
+      "present": true
+    }
+  },
+  "direct_owner_authorization": "Direct user approval in this executing local task for this source/API/dashboard with Shopify disabled and no DB migration",
+  "draft_pr": "https://github.com/alayedharthi-stack/nahla-saas/pull/1221",
+  "environment_or_service_created": false,
+  "expired_record_reused": false,
+  "fresh_predeploy_command_sha256_utf8_no_terminal_lf": "0764bb0ce2ff13235fad8a0b71a9faa3633c50f72589a871e605bf13885d7dcc",
+  "fresh_record_bound_at_utc": "2026-10-12T19:44:00Z",
+  "fresh_record_sha256": "7339e5f9af8a1576bde6223d2886e295c21ea414140848aa7b2ee3d0470c47e0",
+  "fresh_record_valid_until_utc": "2026-10-12T23:44:00Z",
+  "frozen_release_branch": "release/shopify-dormant-s0-a8fb88e3",
+  "full_authenticated_browser_e2e_rerun": false,
+  "intelligence_policy": {
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "INTELLIGENCE_NON_INTERFERENCE_POLICY": "ACTIVE",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "MODEL_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO"
+  },
+  "migration_performed": false,
+  "provider_call_instrumentation": "Not measured. Earlier proof provider_calls:0 was a literal. Postchecks use metadata, read-only SQL and public static/health HTTP only.",
+  "provider_secrets_exported": false,
+  "public_health_and_asset": {
+    "api_health_http_status": 200,
+    "compiled_flag_predicates": [
+      "function yM(){return N_(\"0\")}",
+      "function pU(){return N_(\"0\")}"
+    ],
+    "compiled_flag_usage_snippets": {
+      "pU": [
+        "true\")}function yM(){return N_(\"0\")}function pU(){return N_(\"0\")}const vM=[{destKey:\"dest_overview\",destLab",
+        "a.steps.productImportNotStarted]})]});return pU()&&r.load===\"ready\"?t.jsx(Rwe,{copy:a,lang:e,readOnly:r.rea"
+      ],
+      "yM": [
+        "\"1\"}function xU(){return N_(\"true\")}function yM(){return N_(\"0\")}function pU(){return N_(\"0\")}const vM=[{de",
+        "yConnection),[n]=p.useState(()=>Cwe({enabled:yM,readOnly:Bwe,sessionKey:qj,status:Om.status,start:Om.start,",
+        "dsHandle:()=>r!==null}}const Ll=Wwe({enabled:yM,sessionKey:qj,now:()=>Date.now(),take:()=>aD(Date.now()),di"
+      ]
+    },
+    "dashboard_http_status": 200,
+    "full_authenticated_ui_or_browser_e2e_executed": false,
+    "public_asset_bytes": 3060870,
+    "public_asset_sha256": "dc062cf415bb3f62b15b971a6e5d2a8cd66942cea00b7cf7b2c094d64e8d3d97",
+    "public_asset_url": "https://app.nahlah.ai/assets/index-C8bWDogl.js",
+    "served_asset_matches_deployed_container": true,
+    "shared_truthy_helper": "function N_(e){if(e===void 0)return!1;const s=e.trim().toLowerCase();return s===\"true\"||s===\"1\"}"
+  },
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "restore_performed": false,
+  "result": "SUCCESS_S0_DORMANT_ROLLOUT",
+  "runtime": {
+    "environment": "ede962ce-3042-4dae-94de-623837e83ed9",
+    "library_versions": {
+      "alembic": "1.13.1",
+      "cryptography": "50.0.2",
+      "fastapi": "0.111.0",
+      "psycopg2-binary": "2.9.9",
+      "sqlalchemy": "2.0.30"
+    },
+    "project": "f0090862-0a40-4293-bd5d-e94df58762b5",
+    "python": "3.11.17",
+    "service": "686b36c5-a926-4e58-912a-5e9d13fbc2e7",
+    "shopify_flags": {
+      "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED": {
+        "effective": "OFF",
+        "present": true
+      },
+      "NAHLA_SHOPIFY_CONNECTION_ENABLED": {
+        "effective": "OFF",
+        "present": true
+      },
+      "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED": {
+        "effective": "OFF",
+        "present": true
+      },
+      "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED": {
+        "effective": "OFF",
+        "present": true
+      },
+      "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": {
+        "effective": "OFF",
+        "present": true
+      },
+      "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+        "effective": "OFF",
+        "present": false
+      },
+      "VITE_SHOPIFY_CONNECTION_UI": {
+        "effective": "OFF",
+        "present": false
+      }
+    },
+    "source_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+    "startup_selectors": {
+      "NAHLA_DISABLE_SCHEDULERS": {
+        "effective": "OFF",
+        "present": true
+      },
+      "NAHLA_MINIMAL_ASGI": {
+        "effective": "OFF",
+        "present": false
+      },
+      "NAHLA_SKIP_DB_BOOTSTRAP": {
+        "effective": "OFF",
+        "present": false
+      },
+      "NAHLA_SKIP_PREFLIGHT": {
+        "effective": "ON",
+        "present": true
+      }
+    }
+  },
+  "s0_gate": {
+    "checks": {
+      "approval": "PASS",
+      "connect": "PASS",
+      "database_target": "PASS",
+      "expectations": "PASS",
+      "graph": "PASS",
+      "identity": "PASS",
+      "inventory": "PASS",
+      "libraries": "PASS",
+      "lock": "PASS",
+      "migration_preflight": "PASS",
+      "relation_identity": "PASS",
+      "release_sha": "PASS",
+      "retained_schema": "PASS",
+      "root": "PASS",
+      "server": "PASS",
+      "shopify_flags": "PASS",
+      "shopify_footprint": "PASS",
+      "unlock": "PASS",
+      "version_rows": "PASS"
+    },
+    "inventory_count": 146,
+    "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+    "result_timestamp_utc": "2026-10-12T20:01:44.950240400Z",
+    "status": "PASS"
+  },
+  "schema": {
+    "heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "postgres_server_version_num": 180006,
+    "preflight_predicates_would_pass": true,
+    "primary": true,
+    "retained_relation_oids": {
+      "catalog_channel_retirements": 529481,
+      "commerce_runtime_conversations": 240728,
+      "commerce_runtime_deferred_inbound": 241144,
+      "commerce_runtime_handover_barrier": 241092,
+      "commerce_runtime_handover_workers": 241115,
+      "commerce_runtime_navigation_snapshots": 256231,
+      "meta_catalog_authorizations": 529508,
+      "tenants": 19674,
+      "users": 19704,
+      "whatsapp_oauth_nonces": 206599
+    },
+    "retained_schema_and_all_ten_relation_oids_preserved": true,
+    "retained_schema_sha256": "d4a6915c412b91a17f1d743c8fd53c8d6e09a46402124099505420fc39a2d867",
+    "shopify_sequences": 0,
+    "shopify_strays": 0,
+    "shopify_tables": 0
+  },
+  "scoped_native_fields": 14,
+  "shopify_activated": false,
+  "sql_only_catalog_regression": {
+    "audits": {
+      "active_meta_bindings": {
+        "active_duplicate_groups": 0,
+        "exit_code": 0,
+        "historical_overlap_count": 0,
+        "samples_exported": false,
+        "status": "PASS"
+      },
+      "catalog_identity": {
+        "checks": [
+          {
+            "count": 0,
+            "label": "Duplicate (tenant_id, external_id)",
+            "status": "PASS"
+          },
+          {
+            "count": 0,
+            "label": "products.external_id = ''",
+            "status": "PASS"
+          },
+          {
+            "count": 0,
+            "label": "manual products with external_id",
+            "status": "PASS"
+          },
+          {
+            "count": 0,
+            "label": "salla products missing external_id",
+            "status": "PASS"
+          },
+          {
+            "count": 0,
+            "label": "NULL source with external_id",
+            "status": "PASS"
+          },
+          {
+            "count": 0,
+            "label": "manual products without external_id",
+            "status": "INFO"
+          }
+        ],
+        "exit_code": 0,
+        "samples_exported": false,
+        "status": "PASS"
+      }
+    },
+    "meta_catalog_authorizations": {
+      "active": 1,
+      "total": 1
+    },
+    "protected_existing_flags": {
+      "NAHLA_CATALOG_REVIEW_ENV": "OFF",
+      "NAHLA_META_CATALOG_CONSENT_ENABLED": "ON",
+      "NAHLA_META_CATALOG_CONSENT_PRIMARY_ENABLED": "ON",
+      "NAHLA_WHATSAPP_CATALOG_AUTO_SYNC": "ON"
+    },
+    "readonly": true,
+    "salla_integrations": {
+      "enabled": 7,
+      "total": 7
+    },
+    "source_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+    "status": "PASS"
+  },
+  "staged_changes_remaining": null,
+  "startup": {
+    "events": [
+      {
+        "attributes": [
+          {
+            "key": "level",
+            "value": "\"error\""
+          }
+        ],
+        "message": "INFO:     Application startup complete.",
+        "severity": "error",
+        "timestamp": "2026-10-12T20:02:21.080488368Z"
+      }
+    ],
+    "message": "Application startup complete.",
+    "status": "PASS",
+    "transport_severity_note": "Uvicorn INFO is carried on stderr and tagged error by the transport; the message itself is INFO and terminal health/success are verified"
+  },
+  "verified_at_utc": "2026-10-12T20:09:01Z"
+}

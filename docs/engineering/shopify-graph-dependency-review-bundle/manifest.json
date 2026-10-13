@@ -1,0 +1,40 @@
+{
+  "artifact_sha256": {
+    "README.md": "af784410a646b00d05ff2541fbcabb88770d185f6b1591a73586f7a2dc67c805",
+    "api.S0.REVIEW_PENDING.patch.preview.json": "a13982fad2082919ad35cd7c7e0b5513d509d74c412e4f1e60566c51e3fc595f",
+    "approval.S0.REVIEW_PENDING.json": "0c1ea28056cebd6cd0181f041b8ac79555df491e9955ce8d2da3c9700193470b",
+    "bootstrap.S0.REVIEW_PENDING.preview.py": "e6908638fd95a19396bcd4713cd2da1ab80a8224238c83af7e01f73036774241",
+    "combined.S0.REVIEW_PENDING.patch.preview.json": "02af706425d04171929bdb6c92735065e5c850111691fcf4dc4fab9c03a018f9",
+    "dashboard.S0.REVIEW_PENDING.patch.preview.json": "1aa75d707eb1aec94b1b5d75474d20b55f3b060f1267d37510fc566bcc05ae17",
+    "dependency-closure.json": "3bdc736659709fd9aab4067afe068b9205bed9fa6f201cf49a7e3c89f0451861",
+    "generation.offline.json": "94fe0fdc1347783693e6c125861470472dad3e27e995aba47fe72cb754369ccf",
+    "inventory.git-bytes.json": "a3149ecf6f9d7430b694c47940c770ed242b3e12a6a5eb6fa8c01ecfba59f8d5",
+    "live-state.last-observation.json": "bda55c1f243fdc5ee4334580612ba86fdc87460268fc98f875bdd98757aa0192",
+    "predeploy.S0.REVIEW_PENDING.preview.txt": "173c1b67600723b9034982abe3e845adbf9a881a94ec224c0f8aa2b89a76a989",
+    "proof-results.json": "ecb212bf188c6c22ac99fbb081d56b2fcd316641d35ec0065ac70eccb92f3b51"
+  },
+  "baseline_sha": "94da9e2bcb41248180808e791d98f384c46f5779",
+  "external_execution_record_filled": false,
+  "frozen_release_branch": "release/shopify-dormant-s0-a8fb88e3",
+  "independent_review": "PENDING_PARENT_REVIEW",
+  "live_changes_performed": false,
+  "release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "runtime_inventory": {
+    "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+    "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+    "gate_version": 2,
+    "inventory_count": 146,
+    "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174",
+    "unexpected_initializers": []
+  },
+  "s0_review_pins": {
+    "combined_patch_file_sha256": "02af706425d04171929bdb6c92735065e5c850111691fcf4dc4fab9c03a018f9",
+    "preview_bootstrap_sha256_utf8": "e6908638fd95a19396bcd4713cd2da1ab80a8224238c83af7e01f73036774241",
+    "preview_command_sha256_utf8_no_terminal_lf": "f90cd0831848d36cb4c02a59ece73d4dbbaad700b97ccf0c599a3b925851ecdc",
+    "unfilled_payload_bytes": 1331,
+    "unfilled_payload_sha256": "0c1ea28056cebd6cd0181f041b8ac79555df491e9955ce8d2da3c9700193470b"
+  },
+  "source_change": "exact three existing dependency file inventory entries only",
+  "status": "REVIEW_PENDING_NO_LIVE_RETRY",
+  "tested_full_image_source": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec"
+}

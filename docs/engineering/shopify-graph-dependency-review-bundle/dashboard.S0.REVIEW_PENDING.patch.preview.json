@@ -1,0 +1,18 @@
+{
+  "services": {
+    "446edf49-05bf-4578-b403-72e1e86b384c": {
+      "source": {
+        "branch": "release/shopify-dormant-s0-a8fb88e3",
+        "commitSha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec"
+      },
+      "variables": {
+        "VITE_SHOPIFY_CATALOG_IMPORT_UI": {
+          "value": "0"
+        },
+        "VITE_SHOPIFY_CONNECTION_UI": {
+          "value": "0"
+        }
+      }
+    }
+  }
+}

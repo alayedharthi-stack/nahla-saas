@@ -1,0 +1,152 @@
+{
+  "actual_clone_identity": {
+    "archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+    "database_oid": 16384,
+    "deployment_id": "36a2d33d-ab11-4666-b91c-a1a5ca7a1590",
+    "platform": {
+      "CLONE_REHEARSAL_NONCE": "20261013T0924-no-source",
+      "RAILWAY_ENVIRONMENT_ID": "ede962ce-3042-4dae-94de-623837e83ed9",
+      "RAILWAY_PROJECT_ID": "f0090862-0a40-4293-bd5d-e94df58762b5",
+      "RAILWAY_SERVICE_ID": "6afcbd3e-15dd-46c1-9183-932fe02d075f"
+    },
+    "postmaster_started": "2026-10-13 14:02:02.423309+00:00",
+    "server_version_num": 180006,
+    "system_identifier": "7696152419419877414"
+  },
+  "archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+  "baseline_sha256": "e30b3ec8c8ac21d527b757f2c224755f3681a9c93ecb70ef783ecd5fd9a41268",
+  "cost": {
+    "actual_billing_receipt_obtained": false,
+    "combined_documented_postgres_compute_minutes_upper_envelope": 74,
+    "combined_documented_postgres_cpu_ram_envelope_usd": 0.051356,
+    "full_1gb_volume_per_day_usd": 0.005,
+    "note": "Resource/time envelope, not an invoice. Excludes earlier unmeasured bootstrap/transport effects; persistent retention remains billable. No new service/volume or paid plan was added.",
+    "owner_total_cap_usd": 1,
+    "permanent_archive_deletion_authorized": false,
+    "this_resume_compute_minutes_upper_envelope": 7,
+    "this_resume_cpu_ram_envelope_usd": 0.004858
+  },
+  "final_checkpoint": {
+    "archive_mode": "0o400",
+    "archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+    "archive_unchanged": true,
+    "at_utc": "2026-10-13T14:08:10.697159Z",
+    "deployment_id": "36a2d33d-ab11-4666-b91c-a1a5ca7a1590",
+    "heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "kind": "clone_final_checkpoint",
+    "next_action": "stop_compute",
+    "other_client_sessions": 0,
+    "public_listener_absent": true,
+    "rehearsal_report_sha256": "a6d8c7faabe523f91cf17ff6832859c9029f18f634377cc1e889c7a0da4719ba",
+    "rehearsal_status": "PASS",
+    "source_access_absent": true,
+    "target_service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f",
+    "volume_retained": true
+  },
+  "harness": {
+    "alembic_environment_path": "clone-alembic-env.py",
+    "alembic_environment_sha256": "afc7cfeedf0140d05e5052435bb396621e414e2171b65ecf0de83a2287c97069",
+    "historical_filename_note": "This exact byte-identical file was prepared before the earlier pause and executed successfully in this approved continuation. The historical filename is retained.",
+    "path": "clone_rehearsal.prepared-not-run.py",
+    "sha256": "0167efff6c69535fd50bd933dea324f7fbdcea268ef1b461020f17334b15bf39"
+  },
+  "non_interference": {
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "MODEL_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO"
+  },
+  "operator_sha256": {
+    "sanitized_clone_execute_rehearsal.sh": "6abf6caa78327f5c68d72363489d3ed10a6076e2b741a47994735546c4fa7e79",
+    "sanitized_clone_install_runtime.sh": "87672651ad850541ef4dd02ad5b4af8880de489b983b33cae2573a97c6b09c94",
+    "sanitized_clone_persist_stop.sh": "c6606700b3f1090c3873d035be0243ba2b52ccecd0f8486ec04cb6a97326040f",
+    "sanitized_clone_restore_retained_archive.sh": "e5d17b5a89ac203e47afde9c7d69f61deca0bc61890e39f01ef8c12b7e9e46ed"
+  },
+  "original_archive_directory": "/recovery/shopify-logical-20261013",
+  "private_evidence_directory": "/recovery/clone-rehearsal-20261013",
+  "proof_scope": {
+    "alembic_version_checked_separately": true,
+    "all_original_table_definitions_and_relation_oids_checked": 128,
+    "all_six_commands_actually_executed": true,
+    "customer_rows_exported": false,
+    "data_hash_method": "Sort row_to_json text with C collation and SHA256 length-prefixed UTF-8 records for each original table; compare counts/digests and sequence last_value/is_called at each step on the same clone.",
+    "data_tables_hashed": 127,
+    "only_eight_exact_reviewed_retained_representations_allowed": true,
+    "original_archive_unchanged": true,
+    "production_ddl": false,
+    "production_gate_pass": false,
+    "production_guard_or_expectations_changed": false,
+    "same_clone_identity_checked_each_step": true,
+    "sequences_compared": 117,
+    "shopify_activation": false,
+    "stock_retained_comparator_expected_result": "FAIL retained_definition_drift"
+  },
+  "rehearsal_report_path": "clone-rehearsal-result.json",
+  "rehearsal_report_sha256": "a6d8c7faabe523f91cf17ff6832859c9029f18f634377cc1e889c7a0da4719ba",
+  "remaining_production_s3": "Independent review of this completed clone evidence, followed by separate fresh time-bound production S3 authorization with target, source/inventory, backup/recovery, exclusion window and rollback bindings. Production migration and activation remain unauthorized.",
+  "restore": {
+    "archive_unchanged": true,
+    "heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "kind": "clone_retained_archive_restore",
+    "repository_inventory_files": 146,
+    "reviewed_harness_hash_verified": true,
+    "source_connection": false,
+    "status": "PASS",
+    "tables": 128
+  },
+  "runtime": {
+    "ephemeral_toolchain": true,
+    "kind": "clone_runtime_install",
+    "pins": {
+      "alembic": "1.13.1",
+      "psycopg2-binary": "2.9.9",
+      "sqlalchemy": "2.0.30"
+    },
+    "python": "3.11.17",
+    "status": "PASS"
+  },
+  "runtime_install_documentation": [
+    "https://docs.astral.sh/uv/getting-started/installation/",
+    "https://docs.astral.sh/uv/guides/install-python/"
+  ],
+  "shutdown": {
+    "crashed_replicas": 0,
+    "deployment_id": "36a2d33d-ab11-4666-b91c-a1a5ca7a1590",
+    "pending_work": false,
+    "persistent_volume_retained": true,
+    "postgres_shutdown_at_utc": "2026-10-13T14:08:10.813Z",
+    "postgres_started_at_utc": "2026-10-13T14:02:02.423309Z",
+    "provider_checked_at_utc": "2026-10-13T14:08:31Z",
+    "restart_policy": "NEVER",
+    "running_replicas": 0,
+    "ssh_exit_after_successful_shutdown": 137
+  },
+  "source_bundle": {
+    "bundle_bytes": 229930,
+    "bundle_sha256": "c003333fe802eec020b6576dd7e3f3bd3e0c12e56f3b00446fa453e28118041b",
+    "count": 22,
+    "env_sha256": "afc7cfeedf0140d05e5052435bb396621e414e2171b65ecf0de83a2287c97069",
+    "harness_sha256": "0167efff6c69535fd50bd933dea324f7fbdcea268ef1b461020f17334b15bf39",
+    "inventory_count": 146,
+    "inventory_digest": "31ef4cd7effa7906ad376341f501f47bd71293eb61b794362462b6dad2205174"
+  },
+  "source_r": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "status": "PASS_CLONE_REHEARSAL_ONLY",
+  "upload_authorization": {
+    "owner_approved_at_utc": "2026-10-13T13:55:00Z",
+    "previously_denied_call_retried_once": true,
+    "retry_accepted": true,
+    "same_call": "py upload_clone_bundle.py",
+    "scope": "146 reviewed release files to the named private Railway service, within the existing USD1 total, without changing the original database"
+  }
+}
