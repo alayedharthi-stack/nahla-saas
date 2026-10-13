@@ -1,0 +1,166 @@
+{
+  "backup": {
+    "actual_bytes": 26077103,
+    "artifact_path": "/recovery/shopify-logical-20261013/nahla.dump",
+    "capture_started_at_utc": "2026-10-13T08:18:50Z",
+    "completed_at_utc": "2026-10-13T08:18:55Z",
+    "kind": "postgresql_custom_archive",
+    "original_647mb_card_restored": false,
+    "sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+    "snapshot_at_utc": "2026-10-13T08:18:50Z",
+    "source_service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+    "source_volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
+    "storage_service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f",
+    "storage_volume_id": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9"
+  },
+  "cost_and_retention": {
+    "archive_retention": "Preserve unchanged through the migration/S3 verification and recovery window.",
+    "automatic_archive_deletion": false,
+    "billing_receipt_obtained": false,
+    "capped_pg_compute_envelope_usd": 0.032618,
+    "cost_note": "Resource-envelope estimate, excluding unmeasured initialization/transport effects; not an actual invoice. Compute is stopped. Retention remains billable and requires tracking against the USD1 total cap.",
+    "cpu_cap": 1,
+    "full_capacity_volume_30_day_scenario_usd": 0.15,
+    "full_capacity_volume_per_day_usd": 0.005,
+    "memory_cap_gb": 1,
+    "owner_total_cap_usd": 1,
+    "permanent_cleanup_requires_separate_owner_approval": true,
+    "pg_compute_minutes_approx": 47,
+    "pricing_source": "https://docs.railway.com/pricing/plans#resource-usage-pricing",
+    "volume_capacity_mb": 1000
+  },
+  "environment_id": "ede962ce-3042-4dae-94de-623837e83ed9",
+  "non_interference": {
+    "CUSTOMER_REGEX_CHANGED": "NO",
+    "KEYWORD_ROUTER_CHANGED": "NO",
+    "MODEL_CHANGED": "NO",
+    "PERSONA_CHANGED": "NO",
+    "PHRASE_MAP_CHANGED": "NO",
+    "PROMPT_CHANGED": "NO"
+  },
+  "operator_code": {
+    "private_recovery_capture.sh": {
+      "purpose": "Executed operator code; no credentials or dump contents included.",
+      "sha256": "c6c3f1e65d59c49d5d4255023df54c0a25733acaeef953bafa2a8b53227be93d"
+    },
+    "private_recovery_complete_verification.sh": {
+      "purpose": "Executed operator code; no credentials or dump contents included.",
+      "sha256": "5840dde6793cc67c73a9761a3e77d9a95446a81a8cf7710ff852cb148de32304"
+    },
+    "private_recovery_persist_and_stop.sh": {
+      "purpose": "Executed operator code; no credentials or dump contents included.",
+      "sha256": "4a183112780d70dc0b3f304cc4b9c72d50ae71b4d53ff8a7af11f86542c78a4d"
+    }
+  },
+  "production_release_sha": "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec",
+  "project_id": "f0090862-0a40-4293-bd5d-e94df58762b5",
+  "readiness": {
+    "independent_gate_compatibility_review_required": true,
+    "logical_data_restore": "PASS",
+    "migration_rehearsal_run": false,
+    "production_ddl_run": false,
+    "release_gate_executed_on_clone": false,
+    "s3_approval_granted": false,
+    "shopify_activated": false,
+    "static_gate_simulation": {
+      "affected_expected_constraint_counts": {
+        "commerce_runtime_deferred_inbound": 4,
+        "commerce_runtime_handover_barrier": 2,
+        "commerce_runtime_handover_workers": 1,
+        "commerce_runtime_navigation_snapshots": 1
+      },
+      "detail": {
+        "drift": [
+          "commerce_runtime_deferred_inbound",
+          "commerce_runtime_handover_barrier",
+          "commerce_runtime_handover_workers",
+          "commerce_runtime_navigation_snapshots"
+        ],
+        "identity": [],
+        "missing": []
+      },
+      "guard_modified": false,
+      "method": "Seed observations from pinned retained expectations and apply only the exact varchar-literal-array coercion rewrite observed in the actual restore. This is a static prediction, not a live execution of the release gate on the clone.",
+      "reason": "retained_definition_drift",
+      "status": "FAIL"
+    }
+  },
+  "record_version": 1,
+  "retained_checkpoint": {
+    "archive_bytes": 26077103,
+    "archive_outside_ephemeral_pgdata": true,
+    "archive_sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+    "artifact_path": "/recovery/shopify-logical-20261013/nahla.dump",
+    "checkpoint_at_utc": "2026-10-13T08:38:17Z",
+    "client_processes": 0,
+    "kind": "retained_recovery_checkpoint",
+    "manifest_sha256": "4a818d9cee54d6cf8511d0b4bb0099ef4a144a55161988129f545816d2ea7e5e",
+    "permanent_cleanup_authorized": false,
+    "shutdown_requested": true,
+    "storage_volume_id": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9",
+    "target_service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f",
+    "verification_sha256": "2b9611337d0916dca5d60a0606327f4081fccc9c9bd54a959097da2ffc0c41be"
+  },
+  "scope": "Private logical backup and restore rehearsal only",
+  "shutdown": {
+    "crashed_replicas": 0,
+    "deployment_id": "2cdf5052-665c-4731-9e89-bbf4a117cf7c",
+    "postgres_shutdown_at_utc": "2026-10-13T08:38:17.224Z",
+    "provider_checked_at_utc": "2026-10-13T08:38:35Z",
+    "provider_summary_label": "Online/SUCCESS despite zero running replicas; runtime shutdown log is authoritative",
+    "restart_policy": "NEVER",
+    "running_replicas": 0,
+    "source_reference_action": "Replaced with empty values using skipDeploys; stopped the container to discard old runtime values.",
+    "source_reference_keys": [
+      "SRC_PGDATABASE",
+      "SRC_PGHOST",
+      "SRC_PGPASSWORD",
+      "SRC_PGPORT",
+      "SRC_PGUSER"
+    ],
+    "source_references_cleared_observed_at_utc": "2026-10-13T08:21:49Z",
+    "ssh_exit_code_after_shutdown": 137,
+    "volume_retained": true
+  },
+  "verification": {
+    "actual_bytes": 26077103,
+    "archive_permission": "0400",
+    "archive_sequences_compared": 117,
+    "archive_unchanged": true,
+    "array_cast_equivalence_checks": 33,
+    "artifact_kind": "postgresql_custom_archive",
+    "completed_at_utc": "2026-10-13T08:18:55Z",
+    "cross_database_oid_comparison": false,
+    "dump_contents_exported": false,
+    "kind": "restore_rehearsal",
+    "locale_parity": true,
+    "migrations_run": false,
+    "original_647mb_card_restored": false,
+    "restore_verified_at_utc": "2026-10-13T08:35:27Z",
+    "restored_heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "row_manifest_sha256": "d09126e18cce6c16c1d4c7cb8a91aea7c66f5746a1d1ee0dfffa82cb4f852a16",
+    "schema_comparison": "byte_equal_after_33_verified_varchar_array_coercions",
+    "schema_sha256": "dc66030596eaf5dc0709682a34a02bb94aa89095c209877430ae43477248fde8",
+    "sequence_parity": true,
+    "sha256": "5d677073e9a55d6d44c1d65a808f07d7b085802d8a241091919d66f1ec2fe63c",
+    "snapshot_at_utc": "2026-10-13T08:18:50Z",
+    "source_config_references_cleared": true,
+    "source_connection_closed": true,
+    "source_ddl": false,
+    "source_heads": [
+      "0111",
+      "0113",
+      "0120"
+    ],
+    "source_service_id": "b77b3d27-47b0-4a3a-83fd-44def66a3a84",
+    "source_volume_id": "009bd0d5-85ed-4de4-99fc-94ea963c9d65",
+    "status": "PASS",
+    "storage_volume_id": "2f25c7cf-f0b1-467b-bb98-e203ec40e6d9",
+    "tables_compared": 128,
+    "target_service_id": "6afcbd3e-15dd-46c1-9183-932fe02d075f"
+  }
+}
