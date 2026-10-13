@@ -64,6 +64,9 @@ async def start(request: Request, db: Session = Depends(get_db)):
         # Top-level form navigation sets a first-party cookie even with separate dashboard/API sites.
         response.set_cookie(COOKIE, browser, max_age=install.FLOW_SECONDS, secure=True, httponly=True, samesite="lax", path="/")
         return response
+    except install.InstallRejected as exc:
+        db.rollback()
+        return _error(exc.code, 429 if exc.code in {"install_busy", "install_rate_limited"} else 400)
     except Exception:
         db.rollback()
         return _error()
@@ -74,6 +77,7 @@ async def callback(request: Request, db: Session = Depends(get_db)):
     config, error = _config(db)
     if error:
         return error
+    kind = None
     try:
         verified = verify_callback(request.url.query, secret=config.client_secret)
         kind, value = await install.callback(db, verified=verified, browser=request.cookies.get(COOKIE), config=config, api=_api(config))
@@ -81,7 +85,10 @@ async def callback(request: Request, db: Session = Depends(get_db)):
     except Exception:
         db.rollback()
         url = config.dashboard_complete_url + "#install_error=refused"
-    return RedirectResponse(url, status_code=303, headers=HEADERS)
+    response = RedirectResponse(url, status_code=303, headers=HEADERS)
+    if kind == "ready":
+        response.delete_cookie(COOKIE, path="/", secure=True, httponly=True, samesite="lax")
+    return response
 
 
 @router.post(PREFIX + "/redeem")

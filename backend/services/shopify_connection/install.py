@@ -14,19 +14,25 @@ from dataclasses import dataclass
 from datetime import timedelta
 from urllib.parse import urlencode
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from models import Tenant, User, UserTotp
 from services.shopify_connection import lifecycle as lc
 from services.shopify_connection.crypto import TokenCipher
 from services.shopify_connection.install_models import ShopifyInstallFlow as Flow, ShopifyOwnerIdentity as Owner
 from services.shopify_connection.models import ShopifyConnection, STATUS_ACTIVE
-from services.shopify_connection.oauth import numeric_shop_id
+from services.shopify_connection.oauth import OwnerGrantRejected, numeric_shop_id
 from services.shopify_connection.shop_domain import canonical_shop_domain
 
 BROWSER_RE = re.compile(r"[a-f0-9]{64}")
 SESSION_SECONDS = 300
 FLOW_SECONDS = 900
+MAX_BROWSER_STARTS = 5
+MAX_SHOP_STARTS = 10
+MAX_GLOBAL_STARTS_PER_MINUTE = 100
+MAX_RETAINED_FLOWS = 1000
+ADMISSION_LOCK = (0x4E41484C, 0x53484946)
 
 
 class InstallRejected(Exception):
@@ -61,37 +67,90 @@ def _new_state(flow):
     return state
 
 
-def sweep_expired(db, *, now=None, limit=100):
+def sweep_expired(db, *, now=None, limit=100, commit=True):
     """Bounded cleanup, also callable by an operator. Never creates tables.
 
     Uncertain offline exchanges quarantine incumbent credentials rather than
     deleting ownership. Expired authorization cannot be resumed.
     """
     now = now or lc.utcnow()
-    rows = db.execute(select(Flow).where(Flow.expires_at <= now, Flow.phase != "failed")
+    retention = now - timedelta(seconds=FLOW_SECONDS)
+    rows = db.execute(select(Flow).where(Flow.expires_at <= now,
+                      or_(Flow.phase != "failed", Flow.created_at <= retention))
                       .order_by(Flow.expires_at).limit(limit).with_for_update(skip_locked=True)).scalars().all()
     for row in rows:
-        if row.phase == "exchanging_offline":
+        if row.phase in {"exchanging_online", "exchanging_offline"}:
             lc._flag_possible_retirement(db, row.shop_domain, now)
         row.phase = "failed"
         row.online_token_enc = None
         row.handoff_hash = None
-    db.commit()
+        # Keep admission history for the 15-minute quota, never a live session.
+        if row.created_at <= retention:
+            db.delete(row)
+    db.flush()
+    if commit:
+        db.commit()
     return len(rows)
 
 
 def begin(db, *, shop, browser, config):
     if canonical_shop_domain(shop) != shop or not BROWSER_RE.fullmatch(browser):
         raise InstallRejected()
-    sweep_expired(db)
     now = lc.utcnow()
-    row = Flow(id=secrets.token_hex(24), browser_hash=digest("browser", browser), shop_domain=shop,
+    # A single short, nonblocking transaction makes quotas work across workers.
+    # No address headers (including X-Real-IP) are trusted or stored here.
+    if not db.scalar(select(func.pg_try_advisory_xact_lock(*ADMISSION_LOCK))):
+        db.rollback()
+        raise InstallRejected("install_busy")
+    db.execute(select(func.set_config("lock_timeout", "250ms", True)))
+    sweep_expired(db, now=now, commit=False)
+    recent = Flow.created_at > now - timedelta(seconds=FLOW_SECONDS)
+    def count(*conditions):
+        return db.scalar(select(func.count()).select_from(Flow).where(*conditions))
+    browser_hash = digest("browser", browser)
+    if (count() >= MAX_RETAINED_FLOWS
+            or count(Flow.created_at > now - timedelta(seconds=60)) >= MAX_GLOBAL_STARTS_PER_MINUTE
+            or count(recent, Flow.shop_domain == shop) >= MAX_SHOP_STARTS
+            or count(recent, Flow.browser_hash == browser_hash) >= MAX_BROWSER_STARTS):
+        db.commit()  # Preserve bounded expiry cleanup even when admission is refused.
+        raise InstallRejected("install_rate_limited")
+    row = Flow(id=secrets.token_hex(24), browser_hash=browser_hash, shop_domain=shop,
                redirect_hash=digest("redirect", config.redirect_uri), phase="online", generation=0,
                created_at=now, expires_at=now + timedelta(seconds=FLOW_SECONDS))
     state = _new_state(row)
     db.add(row)
     db.commit()
     return _authorize(config, row, state)
+
+
+def _internal_subject(shop_gid, owner_id):
+    return f"shopify-{numeric_shop_id(shop_gid)}-{owner_id}-{secrets.token_hex(16)}@identity.invalid"
+
+
+def _new_principal(db, shop, shop_gid, owner_id, now):
+    # Canonical commerce identity lives in ShopifyConnection/Owner, not in the
+    # legacy unique tenant name/domain columns used by other providers.
+    from core.trial_lifecycle import init_new_tenant_trial_state
+    for attempt in range(3):
+        name = shop if attempt == 0 else f"{shop} ({secrets.token_hex(16)})"
+        try:
+            with db.begin_nested():
+                tenant = Tenant(name=name, domain=None, is_active=True, created_at=now)
+                init_new_tenant_trial_state(tenant)
+                db.add(tenant)
+                db.flush()
+                subject = _internal_subject(shop_gid, owner_id)
+                user = User(username=subject, email=subject, password_hash=None, role="merchant",
+                            is_active=True, email_verified=False, tenant_id=tenant.id, created_at=now)
+                db.add(user)
+                db.flush()
+            return tenant, user
+        except IntegrityError as exc:
+            constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+            if (getattr(exc.orig, "pgcode", None) != "23505"
+                    or constraint not in {"tenants_name_key", "users_username_key", "users_email_key"}):
+                raise
+    raise InstallRejected("identity_conflict")
 
 
 def _current(db, flow, *, lock=False):
@@ -134,16 +193,20 @@ def _fail(db, flow_id, shop, lease=None, *, uncertain=False):
 
 
 async def callback(db, *, verified, browser, config, api):
-    if not isinstance(browser, str) or not BROWSER_RE.fullmatch(browser):
-        raise InstallRejected()
     now = lc.utcnow()
     flow = db.execute(select(Flow).where(Flow.state_hash == digest("state", verified.state))
                       .with_for_update()).scalar_one_or_none()
     if (not flow or flow.phase not in {"online", "offline"} or flow.expires_at <= now
-            or not secrets.compare_digest(flow.browser_hash, digest("browser", browser))
             or flow.shop_domain != verified.shop_domain
             or flow.redirect_hash != digest("redirect", config.redirect_uri)):
         db.rollback()
+        raise InstallRejected()
+    if (not isinstance(browser, str) or not BROWSER_RE.fullmatch(browser)
+            or not secrets.compare_digest(flow.browser_hash, digest("browser", browser))):
+        # Only a verified callback matching THIS still-pending flow can burn it.
+        # Never touch its connection, leases, or an exchange already in flight.
+        flow.phase, flow.online_token_enc, flow.handoff_hash = "failed", None, None
+        db.commit()
         raise InstallRejected()
     phase, flow_id, shop = flow.phase, flow.id, flow.shop_domain
     proof_started_at = now
@@ -175,7 +238,17 @@ async def callback(db, *, verified, browser, config, api):
     uncertain = False
     try:
         if phase == "online":
-            grant = await lc._guarded_call(db, held, lambda: api.exchange_owner_code(shop_domain=shop, code=verified.code))
+            async def owner_exchange():
+                nonlocal uncertain
+                uncertain = True  # Only after lease preflight permits dispatch.
+                try:
+                    result = await api.exchange_owner_code(shop_domain=shop, code=verified.code)
+                except OwnerGrantRejected:
+                    uncertain = False  # Definitive rejection / verified online response.
+                    raise
+                uncertain = False
+                return result
+            grant = await lc._guarded_call(db, held, owner_exchange)
         else:
             # Recheck the retained user-scoped token before acquiring background authority.
             flow = db.get(Flow, flow_id)
@@ -184,8 +257,11 @@ async def callback(db, *, verified, browser, config, api):
             identity = await lc._guarded_call(db, held, lambda: api.shop_identity(shop_domain=shop, access_token=online))
             if identity.shop_gid != expected_gid or identity.shop_domain != shop:
                 raise InstallRejected()
-            uncertain = True
-            grant = await lc._guarded_call(db, held, lambda: api.exchange_code(shop_domain=shop, code=verified.code))
+            async def offline_exchange():
+                nonlocal uncertain
+                uncertain = True
+                return await api.exchange_code(shop_domain=shop, code=verified.code)
+            grant = await lc._guarded_call(db, held, offline_exchange)
         identity = await lc._guarded_call(db, held, lambda: api.shop_identity(shop_domain=shop, access_token=grant.access_token))
         now = lc.utcnow()
         # Same lock order as callback: transaction first, shop lease next.
@@ -216,16 +292,7 @@ async def callback(db, *, verified, browser, config, api):
                 raise InstallRejected("install_superseded")
             if conn is None:
                 # Subject is internal, non-deliverable and unique. Shopify email is never a lookup key.
-                subject = f"shopify-{numeric_shop_id(flow.shop_gid)}-{flow.owner_id}@identity.invalid"
-                tenant = Tenant(name=shop, domain=shop, is_active=True, created_at=now)
-                from core.trial_lifecycle import init_new_tenant_trial_state
-                init_new_tenant_trial_state(tenant)
-                db.add(tenant)
-                db.flush()
-                user = User(username=subject, email=subject, password_hash=None, role="merchant",
-                            is_active=True, email_verified=False, tenant_id=tenant.id, created_at=now)
-                db.add(user)
-                db.flush()
+                tenant, user = _new_principal(db, shop, flow.shop_gid, flow.owner_id, now)
                 conn = ShopifyConnection(tenant_id=tenant.id, shop_domain=shop, shop_gid=flow.shop_gid,
                                          generation=1, credential_version=1, reconcile_attempts=0,
                                          created_at=now, connected_by_user_id=user.id)

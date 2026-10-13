@@ -47,6 +47,9 @@ def upgrade():
                            name="ck_shopify_install_terminal_secrets"),
     )
     op.create_index("ix_shopify_install_flows_expires_at", "shopify_install_flows", ["expires_at"])
+    op.create_index("ix_shopify_install_created", "shopify_install_flows", ["created_at"])
+    op.create_index("ix_shopify_install_shop_created", "shopify_install_flows", ["shop_domain", "created_at"])
+    op.create_index("ix_shopify_install_browser_created", "shopify_install_flows", ["browser_hash", "created_at"])
 
 
 def downgrade():

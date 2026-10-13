@@ -165,6 +165,10 @@ class ShopifyApiError(Exception):
         self.code = code
 
 
+class OwnerGrantRejected(ShopifyApiError):
+    """Definitive non-issuance or a recognizable online response, never offline."""
+
+
 @dataclass(frozen=True)
 class TokenGrant:
     access_token: str = field(repr=False)
@@ -321,8 +325,22 @@ class ShopifyApi:
             {"client_id": self._client_id, "client_secret": self.__client_secret, "code": code}, {},
         )
         if status != 200:
+            if status in (400, 401, 403):
+                raise OwnerGrantRejected("permanent", "grant_rejected")
             raise self._classify_token_failure(status)
-        return parse_owner_grant(body)
+        # The browser can edit grant_options[] before Shopify issues its code.
+        # Reject ambiguous/offline responses without exposing their credentials.
+        user = body.get("associated_user")
+        recognizable_online = (isinstance(user, dict) and type(user.get("id")) is int
+                               and 0 < user["id"] < 2**63
+                               and isinstance(body.get("associated_user_scope"), str)
+                               and not any(k in body for k in ("refresh_token", "refresh_token_expires_in")))
+        if not recognizable_online:
+            raise ShopifyApiError("invalid_response", "owner_grant_ambiguous")
+        try:
+            return parse_owner_grant(body)
+        except ShopifyApiError as exc:
+            raise OwnerGrantRejected(exc.kind, exc.code) from None
 
     async def refresh(self, *, shop_domain: str, refresh_token: str) -> TokenGrant:
         status, body = await self._post(

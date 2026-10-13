@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getApiBase, getSessionBindingKey, persistShopifySession } from '../auth'
+import { getApiBase, getSessionBindingKey, getToken, persistShopifySession } from '../auth'
 import { isShopifyConnectionUiEnabled } from '../lib/platformFeatureFlags'
 import { installReturn } from '../lib/shopifyInstallBoot'
 
@@ -9,23 +9,28 @@ const shopRE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/
 const base = () => `${getApiBase()}/merchant/integrations/shopify/install`
 let boot: Promise<string> | undefined
 let redeeming: Promise<string> | undefined
+let confirmationBinding: string | undefined
+let confirmationShop = ''
 
-async function sessionDigest() {
-  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(getSessionBindingKey()))
+async function sessionDigest(binding = getSessionBindingKey()) {
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(binding))
   return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('')
 }
 
 function pending() {
   const raw = JSON.parse(sessionStorage.getItem(KEY) || 'null')
   if (!raw || typeof raw.browser !== 'string' || !/^[a-f0-9]{64}$/.test(raw.browser)
-      || typeof raw.binding !== 'string' || typeof raw.expires !== 'number' || raw.expires <= Date.now()) throw new Error('expired')
-  return raw as { browser: string; binding: string; expires: number }
+      || typeof raw.binding !== 'string' || typeof raw.shop !== 'string' || !shopRE.test(raw.shop)
+      || typeof raw.expires !== 'number' || raw.expires <= Date.now()) throw new Error('expired')
+  return raw as { browser: string; binding: string; shop: string; switchConfirmed: boolean; expires: number }
 }
 
 async function redeem(totp?: string): Promise<string> {
   try {
     const p = pending()
-    if (p.binding !== await sessionDigest()) return 'session_changed'
+    const binding = getSessionBindingKey()
+    if (p.binding !== await sessionDigest(binding) || binding !== getSessionBindingKey()) return 'session_changed'
+    if (getToken() && p.switchConfirmed !== true) return 'session_changed'
     const res = await fetch(`${base()}/redeem`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'omit', cache: 'no-store',
       body: JSON.stringify({ browser: p.browser, handle: installReturn.handle, totp }),
@@ -33,8 +38,8 @@ async function redeem(totp?: string): Promise<string> {
     })
     const data = await res.json()
     if (!res.ok) return ['totp_required', 'totp_invalid', 'totp_locked'].includes(data.error) ? data.error : 'refused'
-    if (p.binding !== await sessionDigest()) return 'session_changed'
-    persistShopifySession(data.access_token)
+    if (binding !== getSessionBindingKey() || data.shop !== p.shop) return 'session_changed'
+    persistShopifySession(data.access_token, binding)
     sessionStorage.removeItem(KEY)
     window.location.replace('/overview')
     return 'working'
@@ -46,14 +51,31 @@ function singleRedeem(totp?: string) {
   return redeeming
 }
 
-async function begin(): Promise<string> {
+async function begin(confirmedBinding?: string): Promise<string> {
   if (!enabled) return 'disabled'
   if (installReturn.error) return 'refused'
-  if (/^[A-Za-z0-9_-]{43}$/.test(installReturn.handle)) return singleRedeem()
-  if (!shopRE.test(installReturn.shop)) return 'refused'
   try {
+    const isReturn = /^[A-Za-z0-9_-]{43}$/.test(installReturn.handle)
+    if (!isReturn && !shopRE.test(installReturn.shop)) return 'refused'
+    const binding = getSessionBindingKey()
+    if (confirmedBinding !== undefined && confirmedBinding !== binding) return 'session_changed'
+    const hashed = await sessionDigest(binding)
+    if (binding !== getSessionBindingKey()) return 'session_changed'
+    const p = isReturn ? pending() : undefined
+    if (p && p.binding !== hashed) return 'session_changed'
+    if (getToken() && p?.switchConfirmed !== true && confirmedBinding === undefined) {
+      confirmationBinding = binding
+      confirmationShop = p?.shop || installReturn.shop
+      return 'confirm_switch'
+    }
+    if (p) {
+      p.switchConfirmed = true
+      sessionStorage.setItem(KEY, JSON.stringify(p))
+      return singleRedeem()
+    }
     const browser = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('')
-    sessionStorage.setItem(KEY, JSON.stringify({ browser, binding: await sessionDigest(), expires: Date.now() + 900_000 }))
+    sessionStorage.setItem(KEY, JSON.stringify({ browser, binding: hashed, shop: installReturn.shop,
+      switchConfirmed: !getToken() || confirmedBinding === binding, expires: Date.now() + 900_000 }))
     // Top-level POST establishes the HttpOnly API cookie; no third-party cookie dependency.
     const form = document.createElement('form')
     form.method = 'POST'
@@ -84,9 +106,23 @@ export default function ShopifyInstall() {
     return () => { live = false }
   }, [])
   const mfa = state === 'totp_required' || state === 'totp_invalid'
-  return <main dir="rtl" className="max-w-lg mx-auto my-20 p-6 space-y-4">
+  return <main dir="rtl" data-install-state={state} className="max-w-lg mx-auto my-20 p-6 space-y-4">
+    {state === 'confirm_switch' && <section role="dialog" aria-label="تأكيد تبديل الجلسة" className="space-y-3">
+      <p>لديك جلسة حالية في نحلة. المتابعة ستستبدلها بجلسة مالك متجر Shopify بعد التحقق من هويته، ولن تربط المتجر بحسابك الحالي.</p>
+      <p dir="ltr">{confirmationShop}</p>
+      <button className="btn-primary" onClick={() => {
+        const expected = confirmationBinding
+        if (expected === undefined || expected !== getSessionBindingKey()) { setState('session_changed'); return }
+        setState('working')
+        void begin(expected).then(setState)
+      }}>متابعة وتبديل الجلسة</button>
+      <button className="btn-secondary" onClick={() => {
+        sessionStorage.removeItem(KEY)
+        window.location.replace('/overview')
+      }}>إلغاء والاحتفاظ بالجلسة الحالية</button>
+    </section>}
     <h1 className="text-xl font-bold">ربط متجر Shopify بنحلة</h1>
-    <p role="status">{state === 'working' ? 'جارٍ التحقق من المتجر وفتح حسابه في نحلة…'
+    <p role="status" hidden={state === 'confirm_switch'}>{state === 'working' ? 'جارٍ التحقق من المتجر وفتح حسابه في نحلة…'
       : state === 'disabled' ? 'الربط مع Shopify غير متاح حاليًا.'
       : mfa ? 'أدخل رمز التحقق الثنائي لحساب نحلة.'
       : state === 'session_changed' ? 'تغيّر الحساب في هذا المتصفح. افتح التطبيق مجددًا من Shopify.'

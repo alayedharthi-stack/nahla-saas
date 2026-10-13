@@ -91,6 +91,7 @@ def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch)
     kind, state = online(store, fake, browser)
     with store.Session() as db:
         assert db.query(Tenant).count() == db.query(User).count() == 0
+
         flow = db.query(Flow).one()
         assert browser not in flow.browser_hash and flow.online_token_enc.startswith("sgcm1:")
     kind, handle = callback(store, fake, browser, state)
@@ -117,21 +118,25 @@ def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch)
 def test_browser_state_replay_expiry_and_wrong_shop_create_nothing(store):
     fake, browser = Fake(), secrets.token_hex(32)
     state = begin(store, browser)
-    for wrong_browser, wrong_shop in ((secrets.token_hex(32), SHOP), (browser, foundation.SHOP_SHIRTS)):
+    for wrong_browser, wrong_shop in ((browser, foundation.SHOP_SHIRTS), (secrets.token_hex(32), SHOP)):
         with pytest.raises(install.InstallRejected):
             callback(store, fake, wrong_browser, state, wrong_shop)
+    with pytest.raises(install.InstallRejected):
+        callback(store, fake, browser, state)
+    assert fake.count("owner") == 0
+    state = begin(store, browser)
     kind, value = callback(store, fake, browser, state)
     with pytest.raises(install.InstallRejected):
         callback(store, fake, browser, state)
     with store.Session() as db:
-        db.query(Flow).one().expires_at = lifecycle.utcnow() - timedelta(seconds=1); db.commit()
+        db.query(Flow).filter(Flow.phase == "offline").one().expires_at = lifecycle.utcnow() - timedelta(seconds=1); db.commit()
     offline = parse_qs(urlsplit(value).query)["state"][0]
     with pytest.raises(install.InstallRejected):
         callback(store, fake, browser, offline)
     with store.Session() as db:
         assert db.query(Tenant).count() == 0
         assert install.sweep_expired(db) == 1
-        assert db.query(Flow).one().online_token_enc is None
+        assert all(flow.online_token_enc is None for flow in db.query(Flow).all())
 
 
 def test_repeated_login_reuses_tenant_without_offline_rotation(store):
@@ -305,3 +310,211 @@ def test_actual_asgi_start_cookie_cancelled_and_copied_callback(store, monkeypat
     asyncio.run(proof())
     with store.Session() as db:
         assert db.query(Tenant).count() == db.query(User).count() == 0
+
+
+def test_sixty_unauthenticated_starts_are_bounded_despite_forwarded_headers(store, monkeypatch):
+    import httpx
+    from routers import shopify_install as routes
+    monkeypatch.setattr(routes, "enabled", lambda: True)
+    monkeypatch.setattr(routes, "configuration", lambda: CFG)
+    app = make_app(store.Session)
+    async def proof():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://api.example.test") as client:
+            statuses = []
+            for index in range(60):
+                response = await client.post(routes.PREFIX + "/start",
+                    data={"shop": SHOP, "browser": secrets.token_hex(32)},
+                    headers={"Origin": "https://app.example.test", "X-Real-IP": f"192.0.2.{index}",
+                             "X-Forwarded-For": f"198.51.100.{index}"})
+                statuses.append(response.status_code)
+            assert statuses.count(303) == install.MAX_SHOP_STARTS
+            assert statuses.count(429) == 60 - install.MAX_SHOP_STARTS
+    asyncio.run(proof())
+    with store.Session() as db:
+        assert db.query(Flow).count() == install.MAX_SHOP_STARTS
+        # Expiry must remove retained rows, not turn them into permanent tombstones.
+        future = lifecycle.utcnow() + timedelta(seconds=install.FLOW_SECONDS + 1)
+        assert install.sweep_expired(db, now=future) == install.MAX_SHOP_STARTS
+        assert install.sweep_expired(db, now=future) == 0
+        assert db.query(Flow).count() == 0
+
+
+def test_browser_and_global_quotas_cannot_be_refunded_by_failed_callbacks(store, monkeypatch):
+    fake, browser = Fake(), secrets.token_hex(32)
+    for index in range(install.MAX_BROWSER_STARTS):
+        shop = f"neutral-{index}.myshopify.com"
+        state = begin(store, browser, shop)
+        with pytest.raises(install.InstallRejected):
+            callback(store, fake, secrets.token_hex(32), state, shop)
+    with pytest.raises(install.InstallRejected, match="install_rate_limited"):
+        begin(store, browser, "another.myshopify.com")
+    monkeypatch.setattr(install, "MAX_GLOBAL_STARTS_PER_MINUTE", install.MAX_BROWSER_STARTS)
+    with pytest.raises(install.InstallRejected, match="install_rate_limited"):
+        begin(store, secrets.token_hex(32), "other.myshopify.com")
+    with store.Session() as db:
+        assert db.query(Flow).count() == install.MAX_BROWSER_STARTS
+
+
+def test_admission_lock_is_nonblocking_and_concurrent_global_cap_is_atomic(store, monkeypatch):
+    from sqlalchemy import func
+    with store.Session() as db:
+        assert db.scalar(select(func.pg_try_advisory_xact_lock(*install.ADMISSION_LOCK)))
+        with pytest.raises(install.InstallRejected, match="install_busy"):
+            begin(store, secrets.token_hex(32))
+        db.rollback()
+    monkeypatch.setattr(install, "MAX_GLOBAL_STARTS_PER_MINUTE", 3)
+    def attempt(index):
+        try:
+            begin(store, secrets.token_hex(32), f"concurrent-{index}.myshopify.com")
+            return "ok"
+        except install.InstallRejected as exc:
+            return exc.code
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(attempt, range(24)))
+    assert set(results) <= {"ok", "install_busy", "install_rate_limited"}
+    for index in range(24, 28):
+        attempt(index)
+    with store.Session() as db:
+        assert db.query(Flow).count() == 3
+
+
+def test_retention_cap_and_cleanup_never_evict_live_flow_or_identity(store, monkeypatch):
+    fake, browser = Fake(), secrets.token_hex(32)
+    session = redeem(store, fake, browser, installed(store, fake, browser))
+    begin(store, secrets.token_hex(32), foundation.SHOP_SHIRTS)
+    monkeypatch.setattr(install, "MAX_RETAINED_FLOWS", 2)
+    with pytest.raises(install.InstallRejected, match="install_rate_limited"):
+        begin(store, secrets.token_hex(32), foundation.SHOP_PERFUME)
+    now = lifecycle.utcnow()
+    with store.Session() as db:
+        # Cleanup removes only expired records, leaving ownership tombstones intact.
+        assert install.sweep_expired(db, now=now) == 0
+        assert db.query(Flow).filter(Flow.phase == "redeemed").count() == 1
+        assert install.sweep_expired(db, now=now + timedelta(seconds=901), limit=1) == 1
+        assert db.query(Flow).count() == 1
+        assert install.sweep_expired(db, now=now + timedelta(seconds=901), limit=1) == 1
+        assert db.query(Flow).count() == 0
+        assert db.query(Owner).one().tenant_id == session["tenant_id"]
+        assert db.query(lifecycle.ShopifyConnection).count() == 1
+
+
+@pytest.mark.parametrize("column", ["name", "domain"])
+def test_legacy_tenant_name_or_domain_collision_never_adopts_other_tenant(store, column):
+    legacy = foundation.Merchant(store, "legacy-tenant")
+    with store.Session() as db:
+        tenant = db.get(Tenant, legacy.tenant_id)
+        setattr(tenant, column, SHOP)
+        db.commit()
+    fake, browser = Fake(), secrets.token_hex(32)
+    result = redeem(store, fake, browser, installed(store, fake, browser))
+    assert result["tenant_id"] != legacy.tenant_id
+    with store.Session() as db:
+        assert getattr(db.get(Tenant, legacy.tenant_id), column) == SHOP
+        assert db.get(Tenant, result["tenant_id"]).domain is None
+        assert db.query(Owner).one().tenant_id == result["tenant_id"]
+        assert db.query(Tenant).count() == 2
+
+
+@pytest.mark.parametrize("column", ["username", "email"])
+def test_internal_principal_collision_retries_without_adoption(store, monkeypatch, column):
+    legacy = foundation.Merchant(store, "legacy-user")
+    subject = "shopify-collision@identity.invalid"
+    with store.Session() as db:
+        user = db.get(User, legacy.user_id)
+        setattr(user, column, subject)
+        db.commit()
+    candidates = iter([subject, "shopify-new-random-subject@identity.invalid"])
+    monkeypatch.setattr(install, "_internal_subject", lambda *args: next(candidates))
+    fake, browser = Fake(), secrets.token_hex(32)
+    result = redeem(store, fake, browser, installed(store, fake, browser))
+    assert result["tenant_id"] != legacy.tenant_id and result["user_id"] != legacy.user_id
+    with store.Session() as db:
+        assert getattr(db.get(User, legacy.user_id), column) == subject
+        assert db.query(Tenant).count() == db.query(User).count() == 2
+
+
+def test_wrong_browser_replay_cannot_burn_ready_or_redeemed_flow(store):
+    fake, browser = Fake(), secrets.token_hex(32)
+    state = online(store, fake, browser)[1]
+    _, handle = callback(store, fake, browser, state)
+    for phase in ("ready", "redeemed"):
+        with pytest.raises(install.InstallRejected):
+            callback(store, fake, secrets.token_hex(32), state)
+        with store.Session() as db:
+            assert db.query(Flow).one().phase == phase
+            assert db.query(lifecycle.ShopifyConnection).one().status == "active"
+        if phase == "ready":
+            redeem(store, fake, browser, handle)
+
+
+@pytest.mark.parametrize("response_kind", ["offline", "timeout", "staff", "rejected"])
+def test_online_exchange_ambiguity_is_quarantined_but_definitive_rejection_is_not(store, response_kind):
+    import httpx
+    from backend.tests.test_shopify_install_first import owner_body
+    from services.shopify_connection.oauth import ShopifyApi
+    fake, browser = Fake(), secrets.token_hex(32)
+    redeem(store, fake, browser, installed(store, fake, browser))
+    body = owner_body()
+    if response_kind == "offline":
+        body.pop("associated_user"); body.pop("associated_user_scope")
+        body["refresh_token"] = "synthetic-offline-refresh"
+    elif response_kind == "staff":
+        body["associated_user"]["account_owner"] = False
+    def transport(request):
+        if response_kind == "timeout":
+            raise httpx.ReadTimeout("synthetic response lost")
+        return httpx.Response(400 if response_kind == "rejected" else 200, json=body)
+    api = ShopifyApi(client_id="synthetic", client_secret="synthetic", api_version="2026-07", transport=httpx.MockTransport(transport))
+    fake.exchange_owner_code = api.exchange_owner_code
+    with pytest.raises(install.InstallRejected):
+        callback(store, fake, browser, begin(store, browser))
+    with store.Session() as db:
+        conn = db.query(lifecycle.ShopifyConnection).one()
+        assert conn.status == ("quarantined" if response_kind in {"offline", "timeout"} else "active")
+        assert db.query(Tenant).count() == db.query(Owner).count() == 1
+
+
+def test_pre_dispatch_lease_refusal_does_not_quarantine_and_crash_cleanup_does(store, monkeypatch):
+    fake, browser = Fake(), secrets.token_hex(32)
+    redeem(store, fake, browser, installed(store, fake, browser))
+    owner_calls = fake.count("owner")
+    async def refuse_before_dispatch(*args):
+        raise lifecycle._LeaseLost()
+    monkeypatch.setattr(lifecycle, "_guarded_call", refuse_before_dispatch)
+    with pytest.raises(install.InstallRejected):
+        callback(store, fake, browser, begin(store, browser))
+    assert fake.count("owner") == owner_calls
+    with store.Session() as db:
+        assert db.query(lifecycle.ShopifyConnection).one().status == "active"
+        flow = db.query(Flow).filter(Flow.phase == "failed").one()
+        flow.phase = "exchanging_online"  # Process died with an unknown exchange outcome.
+        flow.expires_at = lifecycle.utcnow() - timedelta(seconds=1)
+        db.commit()
+        install.sweep_expired(db)
+        assert db.query(lifecycle.ShopifyConnection).one().status == "quarantined"
+
+
+def test_offline_pre_dispatch_refusal_does_not_quarantine_recovered_connection(store, monkeypatch):
+    fake, browser = Fake(), secrets.token_hex(32)
+    redeem(store, fake, browser, installed(store, fake, browser))
+    with store.Session() as db:
+        db.query(lifecycle.ShopifyConnection).one().status = "quarantined"
+        db.commit()
+    state = online(store, fake, browser)[1]
+    with store.Session() as db:
+        db.query(lifecycle.ShopifyConnection).one().status = "active"
+        db.commit()
+    original = lifecycle._guarded_call
+    calls = 0
+    async def lose_before_exchange(db, held, call):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise lifecycle._LeaseLost()
+        return await original(db, held, call)
+    monkeypatch.setattr(lifecycle, "_guarded_call", lose_before_exchange)
+    with pytest.raises(install.InstallRejected):
+        callback(store, fake, browser, state)
+    assert fake.count("exchange") == 1 and calls == 2
+    with store.Session() as db:
+        assert db.query(lifecycle.ShopifyConnection).one().status == "active"

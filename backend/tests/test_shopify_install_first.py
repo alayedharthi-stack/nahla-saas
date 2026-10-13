@@ -82,6 +82,30 @@ def test_owner_exchange_uses_online_mode_not_expiring_offline():
     assert set(seen[0][1]) == {"client_id", "client_secret", "code"}
 
 
+@pytest.mark.parametrize("kind", ["staff", "offline", "mixed", "empty", "rejected", "server_error"])
+def test_owner_exchange_distinguishes_definitive_online_rejection_from_ambiguity(kind):
+    from services.shopify_connection.oauth import OwnerGrantRejected
+    body = owner_body()
+    marker = body["access_token"]
+    status = 200
+    if kind == "staff":
+        body["associated_user"]["account_owner"] = False
+    elif kind == "offline":
+        body.pop("associated_user"); body.pop("associated_user_scope")
+    elif kind == "mixed":
+        body["refresh_token"] = "synthetic-refresh"
+    elif kind == "empty":
+        body = {}
+    elif kind in {"rejected", "server_error"}:
+        status = 400 if kind == "rejected" else 503
+    api = ShopifyApi(client_id="synthetic", client_secret="synthetic", api_version="2026-07",
+                     transport=httpx.MockTransport(lambda request: httpx.Response(status, json=body)))
+    with pytest.raises(ShopifyApiError) as result:
+        asyncio.run(api.exchange_owner_code(shop_domain="demo.myshopify.com", code="synthetic-code"))
+    assert isinstance(result.value, OwnerGrantRejected) is (kind in {"staff", "rejected"})
+    assert marker not in str(result.value)
+
+
 def test_missing_secret_and_malformed_callback_refuse():
     for query in ("", "shop=evil.test&state=x&code=x", "shop=demo.myshopify.com&shop=other.myshopify.com", "state=%FF"):
         with pytest.raises(OAuthQueryError):

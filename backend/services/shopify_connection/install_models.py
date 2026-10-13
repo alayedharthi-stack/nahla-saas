@@ -1,5 +1,5 @@
 """Install-first identity/transactions; explicit migration only, never Base.create_all."""
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, Text
 from services.shopify_connection.models import ShopifyBase
 
 
@@ -33,6 +33,9 @@ class ShopifyInstallFlow(ShopifyBase):
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False)
     __table_args__ = (
+        Index("ix_shopify_install_created", "created_at"),
+        Index("ix_shopify_install_shop_created", "shop_domain", "created_at"),
+        Index("ix_shopify_install_browser_created", "browser_hash", "created_at"),
         CheckConstraint("phase IN ('online','offline','exchanging_online','exchanging_offline','ready','redeeming','redeemed','failed')",
                         name="ck_shopify_install_phase"),
         CheckConstraint("phase NOT IN ('redeemed','failed') OR online_token_enc IS NULL",

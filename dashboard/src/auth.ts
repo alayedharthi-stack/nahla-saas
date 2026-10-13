@@ -224,7 +224,8 @@ export interface LoginResult {
 }
 
 /** Only the owner-verified Shopify handoff may install this short session. */
-export function persistShopifySession(token: string): void {
+export function persistShopifySession(token: string, expectedBinding: string): void {
+  if (getSessionBindingKey() !== expectedBinding) throw new Error('session_changed')
   const c = _decodeJwtPayload(token)
   if (c.auth_source !== 'shopify' || c.role !== 'merchant' || c.impersonation || !c.shopify_session
       || typeof c.exp !== 'number' || c.exp * 1000 <= Date.now()) throw new Error('invalid_shopify_session')
