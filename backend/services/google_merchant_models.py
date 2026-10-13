@@ -6,7 +6,7 @@ Dormant Google Merchant tables on their own ``GoogleMerchantBase`` metadata.
 Deliberately outside ``models.Base``: production startup materialises
 ``models.Base`` through ``create_all`` and normal bootstrap is pinned to
 ``alembic upgrade 0093``, so nothing here reaches a database until revision
-``0124`` is applied on purpose. Nothing in the application imports this
+``0125`` is applied on purpose. Nothing in the application imports this
 module; there is no router, worker, scheduler, flag, transport, OAuth or
 crypto here. The revision and this module declare the same schema;
 ``backend/tests/test_google_merchant_schema_pg.py`` proves their equivalence

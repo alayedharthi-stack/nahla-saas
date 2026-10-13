@@ -6,7 +6,7 @@ Pure (no database) checks of the dormant Google Merchant schema slice:
   application's ``models.Base`` (startup ``create_all`` cannot build them);
 * nothing in the application imports the module; the migration is
   self-contained;
-* revision 0124 declares exactly the model's DDL (compiled for PostgreSQL)
+* revision 0125 declares exactly the model's DDL (compiled for PostgreSQL)
   and byte-identical guard functions, chained on 0123;
 * no transport, credential or live identifier appears in either file.
 
@@ -32,11 +32,11 @@ for _p in (REPO_ROOT, REPO_ROOT / "backend", REPO_ROOT / "database"):
 from services import google_merchant_models as gm  # noqa: E402
 
 MODEL_PATH = REPO_ROOT / "backend/services/google_merchant_models.py"
-MIGRATION_PATH = REPO_ROOT / "database/migrations/versions/0124_google_merchant_ledger.py"
+MIGRATION_PATH = REPO_ROOT / "database/migrations/versions/0125_google_merchant_ledger.py"
 
 
 def _migration():
-    spec = importlib.util.spec_from_file_location("google_merchant_migration_0124", MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("google_merchant_migration_0125", MIGRATION_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -128,7 +128,8 @@ def test_no_application_code_imports_the_module_and_the_migration_is_self_contai
 
 def test_migration_is_chained_on_0123():
     module = _migration()
-    assert (module.revision, module.down_revision) == ("0124", "0123")
+    assert not MIGRATION_PATH.with_name("0124_google_merchant_ledger.py").exists()
+    assert (module.revision, module.down_revision) == ("0125", "0123")
     assert module.branch_labels is None and module.depends_on is None
     assert module.TABLES == gm.GOOGLE_MERCHANT_TABLE_NAMES
     assert module.FUNCTIONS == gm.GOOGLE_MERCHANT_GUARD_FUNCTIONS

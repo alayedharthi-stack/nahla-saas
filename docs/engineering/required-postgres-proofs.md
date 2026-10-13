@@ -8,6 +8,22 @@ its manifest, its allowances or its acceptance.
 
 ## 1. Scope
 
+### Google draft revision correction (2026-10-13)
+
+The unmerged Google Merchant migration is now **0125, parent 0123**.
+Revision 0124 is reserved for the separate Shopify install-first draft; Google
+does not depend on it. The current executable inventory and Google migration
+tests use 0125. Normal bootstrap remains pinned to 0093, and this correction
+does not authorize applying either migration or activating Google writes.
+
+The Google schema/adapter rows below retain their earlier 0124 descriptions
+and proof counts as historical evidence. Those results do not establish a
+pass for the renumbered 0125 source. The current schema proof targets
+`0123 -> 0125 -> 0123`, including both `0125@-1` and `0123` downgrade forms,
+with exact heads `{0111, 0113, 0125}` before downgrade. New source-specific
+PostgreSQL results must be recorded separately; a skipped or unrun proof is
+not a pass. No historical run, commit or approval record is rewritten.
+
 The inventoried PostgreSQL suites must execute against a real PostgreSQL on
 every pull request and must be **merge-blocking**. Owner-provided screenshots
 of the `main` protection rule show the required checks `Scan repository for
