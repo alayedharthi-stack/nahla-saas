@@ -327,3 +327,28 @@ def test_cleanup_registered_outside_activation_conditions():
     calls = [node.value for node in startup.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)]
     assert any(isinstance(call.func, ast.Name) and call.func.id == "_start" and call.args
                and isinstance(call.args[0], ast.Constant) and call.args[0].value == "shopify_install_cleanup" for call in calls)
+
+
+def test_cleanup_waiting_for_database_keeps_request_loop_responsive():
+    import threading
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from services.shopify_connection import install_cleanup
+    engine = create_engine("sqlite://")
+    entered, release = threading.Event(), threading.Event()
+    caller = threading.get_ident()
+    def slow_checkout():
+        assert threading.get_ident() != caller
+        entered.set()
+        assert release.wait(3), "request loop failed to release simulated checkout"
+        return Session(engine)
+    async def proof():
+        task = asyncio.create_task(install_cleanup.run_cleanup_tick(session_factory=slow_checkout))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            await asyncio.sleep(0)  # Requests can continue before DB checkout finishes.
+            assert not task.done()
+        finally:
+            release.set()
+        assert await task == {"skipped": "storage_unavailable"}
+    asyncio.run(proof())

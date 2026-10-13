@@ -39,7 +39,7 @@ def erase_expired(db, *, now=None, limit=BATCH_LIMIT):
     return len(rows)
 
 
-async def run_cleanup_tick(*, session_factory=None, now=None, limit=BATCH_LIMIT):
+def _cleanup_tick(*, session_factory=None, now=None, limit=BATCH_LIMIT):
     if session_factory is None:
         from core.database import SessionLocal as session_factory  # noqa: PLC0415,N813
     with session_factory() as db:
@@ -51,6 +51,13 @@ async def run_cleanup_tick(*, session_factory=None, now=None, limit=BATCH_LIMIT)
         if not inspect(db.connection()).has_table(Flow.__tablename__):
             return {"skipped": "storage_unavailable"}
         return {"erased": erase_expired(db, now=now, limit=limit)}
+
+
+async def run_cleanup_tick(*, session_factory=None, now=None, limit=BATCH_LIMIT):
+    # Pool checkout and connection can wait before SQL timeouts take effect.
+    # Keep the entire session lifetime off the request-serving event loop.
+    # The scheduler awaits this worker, so its ticks never overlap.
+    return await asyncio.to_thread(_cleanup_tick, session_factory=session_factory, now=now, limit=limit)
 
 
 async def run_cleanup_scheduler():
