@@ -1274,6 +1274,57 @@
         "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_refuses_anything_but_loopback[env_service]",
         "backend/tests/test_google_merchant_schema_pg.py::test_disposable_target_guard_accepts_loopback_and_holds_for_this_run"
       ]
+    },
+    {
+      "id": "google_merchant_ledger_repository",
+      "kind": "proof",
+      "module": "backend/tests/test_google_merchant_ledger_repository_pg.py",
+      "origin": "Dormant caller-transaction ledger adapter over frozen revision 0125; synthetic observations only",
+      "required_env": {
+        "NAHLA_RELIABILITY_REQUIRE_PG": "1",
+        "NAHLA_RELIABILITY_PG_ADMIN_DSN": null
+      },
+      "nodeids": [
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_admission_replay_and_generation_are_retained",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_concurrent_admissions_serialize_identity[same]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_concurrent_admissions_serialize_identity[different]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_concurrent_admissions_serialize_identity[casefold]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_two_claimers_have_exactly_one_dispatch",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_write_success_or_uncertainty_requires_readback[200]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_write_success_or_uncertainty_requires_readback[408]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_write_success_or_uncertainty_requires_readback[500]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_write_success_or_uncertainty_requires_readback[None]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_definitive_rejection_releases_only_claim[401]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_definitive_rejection_releases_only_claim[403]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_definitive_rejection_releases_only_claim[400]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_definitive_rejection_releases_only_claim[404]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_429_due_time_and_stale_attempt_fence",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_expired_attempt_never_grants_resend[429]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_expired_attempt_never_grants_resend[401]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_expired_attempt_never_grants_resend[200]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_crash_reconciliation_preserves_fence",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override0]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override1]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override2]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override3]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override4]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_unconfirmed_readback_never_creates_ownership[override5]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_tenant_version_and_disabled_connection_fences",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_patch_confirmation_and_delete_tombstone",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_action_mutation_and_old_evidence_refused",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_readback_wrong_request_and_cross_tenant_completion_refused",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_owned_patch_rejection_keeps_prior_evidence",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_caller_rollback_and_planner_records_are_scoped",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_autocommit_and_missing_transaction_refused",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_completed_key_cannot_transfer_to_other_identity[offer]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_completed_key_cannot_transfer_to_other_identity[account]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_historical_key_cannot_replay_at_old_or_new_generation",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[429]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[400]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[401]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[403]",
+        "backend/tests/test_google_merchant_ledger_repository_pg.py::test_error_bearing_write_status_never_grants_retry_or_rejection[404]"
+      ]
     }
   ]
 }
