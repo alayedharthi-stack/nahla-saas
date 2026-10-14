@@ -15,6 +15,14 @@
       "sha256": "af5efddc8ba52f7f27ac8c5255a3add10bc7ea6e82b3321d83bcd2854a798b88"
     },
     {
+      "path": "backend/routers/shopify_connection.py",
+      "sha256": "8fe2b7e9fac4573542d603e672e0a457e07d063d4fcff34a8ef439a9d150c6b7"
+    },
+    {
+      "path": "backend/routers/shopify_install.py",
+      "sha256": "8c753e462e206865b46b6d0218692df4549285ef09e9d9ac1f93cea155680d78"
+    },
+    {
       "path": "backend/services/shopify_catalog/config.py",
       "sha256": "6d7554df2bdcec919ce59d0e35d90f75e0aeff02ae663480823411e2721e05ed"
     },
@@ -23,8 +31,28 @@
       "sha256": "c8861a55e6e391a98b7f898d4ac8decd12d9737c72a46cd7e3deebb523db2911"
     },
     {
+      "path": "backend/services/shopify_connection/install.py",
+      "sha256": "b44797fcf05f8b2fc71eb72b0d86d06ecc32deaa380e5bdc77cb474470021b60"
+    },
+    {
+      "path": "backend/services/shopify_connection/install_admission.py",
+      "sha256": "0135134932b3856020f8893fa3a264553163f55c024aae8ada57c4285fc22d39"
+    },
+    {
+      "path": "backend/services/shopify_connection/install_cleanup.py",
+      "sha256": "01745bc79440f618f2fa696d507e887cbc23d91cbe2d502f54a4ac929a650a07"
+    },
+    {
       "path": "backend/services/shopify_connection/install_config.py",
-      "sha256": "5334026a6a4d2ba5a2ed049d21b3a8798a3331f5c63fb72cda59f8e65fda3986"
+      "sha256": "d93d5a01bf53a6e37938b20d272f7fd6b181c2708caadfa3c6661ac545702a22"
+    },
+    {
+      "path": "backend/services/shopify_connection/install_models.py",
+      "sha256": "4ca2023bc45b46574fa9dc3757f57e3fb78ab5b52d726296f8e28307f70a7122"
+    },
+    {
+      "path": "backend/services/shopify_connection/shop_domain.py",
+      "sha256": "b070dc96f715f369f90be124141412b0b90fc84addf8cea0485b0ca4a8043482"
     },
     {
       "path": "backend/services/shopify_privacy/config.py",
@@ -583,21 +611,25 @@
       "sha256": "c27a79dd7900e978558cb6ab46a9dd6a8465228e5309f9d33b51561d5585f21b"
     },
     {
+      "path": "scripts/operators/shopify_install_schema_expectations.json",
+      "sha256": "2c3b1ef7d82b301cfcc8438121e30559c0ce993b4666661e2e0cb9a48d7e4adb"
+    },
+    {
       "path": "scripts/operators/shopify_release_gate.py",
-      "sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157"
+      "sha256": "3596e0b0b49bf10857bbc16179f6226c71ee0614e5b3a0e7deba4de2113b828c"
     },
     {
       "path": "scripts/operators/shopify_release_gate_contract.py",
-      "sha256": "ba1745865683b1a2f55679cf13e14d7ebf63304539d11057c92599d25c8c2345"
+      "sha256": "9f77476b65ef13bf18dad93e072500dca9a4bbb0946d36d8aaacc57d409833e2"
     },
     {
       "path": "scripts/operators/shopify_release_schema_expectations.json",
       "sha256": "13e2d23e44cd10017a0a2fddfe3317ea9609a14ef147e6cc5c0bf634bc3a0988"
     }
   ],
-  "gate_sha256": "206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157",
+  "gate_sha256": "3596e0b0b49bf10857bbc16179f6226c71ee0614e5b3a0e7deba4de2113b828c",
   "gate_version": 2,
-  "inventory_count": 148,
-  "inventory_digest": "cedaee7f2045a43a6e7a368147db376f7e3918087113195af95e9117e9741b7f",
+  "inventory_count": 156,
+  "inventory_digest": "69de3d4e26d02a8e7fefea6b9207a50c0d0ee93b2ad7cd1cfa061d7f6d0c0fff",
   "unexpected_initializers": []
 }

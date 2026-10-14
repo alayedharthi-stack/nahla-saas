@@ -360,7 +360,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         for name, owner, column in footprint["sequences"])
     if (missing_retained or retained["nonce"] is None or set(retained["pk_types"]) != set(k.PK_TYPE_PINS)
             or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]
-            or not sequences_ok or set(rows) != phase_def["rows"]):
+            or not sequences_ok or rows is None or set(rows) != phase_def["rows"] or len(rows) != len(phase_def["rows"])):
         raise RenderRefusal("database_is_not_a_complete_s3_build")
     return k.normalize({
         "expectations_version": k.EXPECTATIONS_VERSION,
