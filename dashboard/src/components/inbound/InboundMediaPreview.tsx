@@ -36,6 +36,7 @@
  *     on long conversation views (1000+ messages).
  */
 import { useCallback, useEffect, useState } from 'react'
+import { ExternalLink, ImageOff } from 'lucide-react'
 
 import { getApiBase, getToken, getTenantId } from '../../auth'
 import { featureRealityApi } from '../../api/featureReality'
@@ -95,6 +96,7 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
     }
     let cancelled = false
     let createdUrl: string | null = null
+    const controller = new AbortController()
 
     const load = async () => {
       setState({ url: null, loading: true, httpStatus: null, networkError: null })
@@ -104,6 +106,7 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
         const base     = getApiBase()
         const res = await fetch(`${base}${storage_url}`, {
           mode: 'cors',
+          signal: controller.signal,
           headers: {
             ...(token    ? { Authorization: `Bearer ${token}` } : {}),
             ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
@@ -136,6 +139,9 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
           return
         }
         const blob = await res.blob()
+        // Unmounted (or URL changed) while the body was downloading: the
+        // cleanup below already ran, so an object URL created now would leak.
+        if (cancelled) return
         createdUrl = URL.createObjectURL(blob)
         if (!cancelled) {
           setState({ url: createdUrl, loading: false, httpStatus: null, networkError: null })
@@ -155,6 +161,7 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
 
     return () => {
       cancelled = true
+      controller.abort()
       if (createdUrl) URL.revokeObjectURL(createdUrl)
     }
   }, [storage_url, reloadKey])
@@ -435,6 +442,7 @@ function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlS
     }
     let cancelled = false
     let createdUrl: string | null = null
+    const controller = new AbortController()
 
     const load = async () => {
       setState({ url: null, loading: true, httpStatus: null, networkError: null })
@@ -444,6 +452,7 @@ function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlS
         const base     = getApiBase()
         const res = await fetch(`${base}${storage_url}`, {
           mode: 'cors',
+          signal: controller.signal,
           headers: {
             ...(token    ? { Authorization: `Bearer ${token}` } : {}),
             ...(tenantId ? { 'X-Tenant-ID': String(tenantId) } : {}),
@@ -468,6 +477,7 @@ function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlS
           return
         }
         const blob = await res.blob()
+        if (cancelled) return
         createdUrl = URL.createObjectURL(blob)
         if (!cancelled) {
           setState({ url: createdUrl, loading: false, httpStatus: null, networkError: null })
@@ -487,6 +497,7 @@ function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlS
 
     return () => {
       cancelled = true
+      controller.abort()
       if (createdUrl) URL.revokeObjectURL(createdUrl)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- reloadKey triggers refetch
@@ -656,6 +667,117 @@ function VideoPreview({ media }: { media: DashboardMessageMediaVideo }) {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Protected inbound media path that reached the conversation through the
+ * presentation contract without a matching legacy media block (so there is
+ * no transcript / description / reprocess context to show). Same transport
+ * as the previews above: API origin, Bearer + X-Tenant-ID, MIME-checked,
+ * blob URL revoked on unmount.
+ */
+export function ProtectedInboundMedia({
+  kind,
+  storageUrl,
+  filename,
+  alt,
+  unavailableLabel,
+  openLabel,
+  onLoad,
+}: {
+  kind: DashboardMessageMedia['kind']
+  storageUrl: string
+  filename?: string | null
+  alt: string
+  unavailableLabel: string
+  openLabel: string
+  onLoad?: () => void
+}) {
+  const isDocument = kind === 'document'
+  // Both hooks always run (rules of hooks); the inactive one gets no URL and never fetches.
+  const mediaBlob = useAuthedMediaBlob(isDocument ? null : storageUrl)
+  const documentBlob = useAuthedDocumentBlob(isDocument ? storageUrl : null)
+  const { url, loading, httpStatus, networkError } = isDocument ? documentBlob : mediaBlob
+  const [undecodableUrl, setUndecodableUrl] = useState<string | null>(null)
+
+  if (loading) {
+    return (
+      <div
+        className="min-h-20 animate-pulse rounded-xl bg-slate-100"
+        aria-busy="true"
+        data-inbound-media-state="loading"
+      />
+    )
+  }
+  if (!url || url === undecodableUrl) {
+    return (
+      <div
+        className="flex min-h-20 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-500"
+        data-inbound-media-state="error"
+        data-http-status={httpStatus ?? undefined}
+        title={networkError ?? undefined}
+      >
+        <ImageOff className="h-4 w-4" aria-hidden />
+        {unavailableLabel}
+        {httpStatus ? ` (HTTP ${httpStatus})` : ''}
+      </div>
+    )
+  }
+  const onDecodeError = () => {
+    setUndecodableUrl(url)
+    onLoad?.()
+  }
+  if (kind === 'image') {
+    return (
+      <div className="min-h-24 overflow-hidden rounded-xl bg-slate-100" data-inbound-media-state="ready">
+        <img
+          src={url}
+          alt={alt}
+          className="block h-full max-h-72 w-full object-contain bg-white"
+          onLoad={onLoad}
+          onError={onDecodeError}
+        />
+      </div>
+    )
+  }
+  if (kind === 'audio') {
+    return (
+      <audio
+        controls
+        preload="metadata"
+        className="w-full"
+        src={url}
+        onLoadedMetadata={onLoad}
+        onError={onDecodeError}
+        data-inbound-media-state="ready"
+      />
+    )
+  }
+  if (kind === 'video') {
+    return (
+      <video
+        controls
+        preload="metadata"
+        className="aspect-video max-h-72 w-full rounded-xl bg-black"
+        src={url}
+        onLoadedMetadata={onLoad}
+        onError={onDecodeError}
+        data-inbound-media-state="ready"
+      />
+    )
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-3 text-xs font-medium text-slate-700 hover:bg-slate-200"
+      data-inbound-media-state="ready"
+    >
+      <ExternalLink className="h-4 w-4" aria-hidden />
+      <span className="truncate">{filename || openLabel}</span>
+    </a>
   )
 }
 

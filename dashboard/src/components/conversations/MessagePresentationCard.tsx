@@ -5,7 +5,8 @@ import type {
   MessagePresentation,
   MessagePresentationAction,
 } from '../../api/featureReality'
-import InboundMediaPreview from '../inbound/InboundMediaPreview'
+import { resolvePresentationMediaSource } from '../../lib/inboundMediaSource'
+import InboundMediaPreview, { ProtectedInboundMedia } from '../inbound/InboundMediaPreview'
 
 export interface MessagePresentationLabels {
   template: string
@@ -180,6 +181,14 @@ export default function MessagePresentationCard({
     ? (isOutbound ? 'rounded-2xl rounded-ee-sm' : 'rounded-2xl rounded-es-sm')
     : 'rounded-2xl'
   const productImage = product?.image_url || media?.url
+  // Protected inbound paths (/media/inbound/...) are only loadable through the
+  // authenticated blob fetch; never bind them to a bare <img>/<audio>/<a> src.
+  const mediaSource = media ? resolvePresentationMediaSource(media, legacyMedia) : null
+  const inboundPreviewMedia = mediaSource === 'inbound_preview' ? legacyMedia ?? null : null
+  // InboundMediaPreview already renders the caption under the media.
+  const bodyRepeatsInboundCaption = Boolean(
+    inboundPreviewMedia?.caption && inboundPreviewMedia.caption.trim() === presentation.body.trim(),
+  )
 
   return (
     <div
@@ -203,6 +212,18 @@ export default function MessagePresentationCard({
             src={productImage}
             alt={product?.name || labels.product}
             fallback={labels.mediaUnavailable}
+            onLoad={onMediaLoad}
+          />
+        ) : inboundPreviewMedia ? (
+          <InboundMediaPreview media={inboundPreviewMedia} />
+        ) : media && mediaSource === 'protected_fetch' && media.url ? (
+          <ProtectedInboundMedia
+            kind={media.kind}
+            storageUrl={media.url}
+            filename={media.filename}
+            alt={media.caption || labels.template}
+            unavailableLabel={labels.mediaUnavailable}
+            openLabel={labels.openMedia}
             onLoad={onMediaLoad}
           />
         ) : media ? (
@@ -229,7 +250,7 @@ export default function MessagePresentationCard({
           </div>
         )}
 
-        {presentation.body && (
+        {presentation.body && !bodyRepeatsInboundCaption && (
           <div className="whitespace-pre-wrap break-words px-1 text-sm leading-relaxed">
             {presentation.body}
           </div>
