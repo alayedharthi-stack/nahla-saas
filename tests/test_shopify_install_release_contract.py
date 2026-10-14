@@ -8,6 +8,7 @@ import pytest
 from scripts.operators import shopify_release_gate as gate
 from scripts.operators import shopify_release_gate_contract as k
 from scripts.operators import bootstrap_migration_contract as bootstrap
+from scripts.operators import shopify_release_gate_render as render
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,3 +79,24 @@ def test_post_0124_expectations_cannot_fall_back_to_15_table_s3(tmp_path):
     (tmp_path / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).write_text(
         (ROOT / k.EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"), encoding="utf-8")
     assert gate.check_expectations(tmp_path, "S4_DORMANT")[0].status == k.FAIL
+
+
+def test_snapshot_refuses_duplicate_revision_rows_even_with_complete_definitions(monkeypatch):
+    from unittest.mock import MagicMock
+    for name in k.LIBPQ_TARGET_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    pinned = json.loads((ROOT / k.EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
+    connection = MagicMock()
+    connection.execution_options.return_value = connection
+    connection.__enter__.return_value = connection
+    engine = MagicMock()
+    engine.connect.return_value = connection
+    monkeypatch.setattr(gate, "_engine", lambda url: engine)
+    monkeypatch.setattr(gate, "observe_retained", lambda conn: pinned["retained"])
+    monkeypatch.setattr(gate, "observe_footprint", lambda conn, phase: {
+        "definitions": pinned["shopify_s3"]["tables"], "sequences": pinned["shopify_s3"]["sequences"], "stray_count": 0})
+    monkeypatch.setattr(gate, "read_version_rows", lambda conn: ["0111", "0113", "0123", "0123"])
+    monkeypatch.setattr(gate, "_scalar", lambda conn, query: "16.0")
+    with pytest.raises(render.RenderRefusal) as error:
+        render.snapshot("postgresql://fixture:synthetic@disposable.internal:5432/fixture", source_sha="a" * 40)
+    assert error.value.token == "database_is_not_a_complete_s3_build"

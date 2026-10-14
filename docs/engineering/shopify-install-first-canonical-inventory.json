@@ -612,7 +612,7 @@
     },
     {
       "path": "scripts/operators/shopify_install_schema_expectations.json",
-      "sha256": "2c3b1ef7d82b301cfcc8438121e30559c0ce993b4666661e2e0cb9a48d7e4adb"
+      "sha256": "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
     },
     {
       "path": "scripts/operators/shopify_release_gate.py",
@@ -630,6 +630,6 @@
   "gate_sha256": "3596e0b0b49bf10857bbc16179f6226c71ee0614e5b3a0e7deba4de2113b828c",
   "gate_version": 2,
   "inventory_count": 156,
-  "inventory_digest": "69de3d4e26d02a8e7fefea6b9207a50c0d0ee93b2ad7cd1cfa061d7f6d0c0fff",
+  "inventory_digest": "d906cc373267cce64cbf7774956ec46edc90e17a2c1a93d1e0d42a056bfe466f",
   "unexpected_initializers": []
 }

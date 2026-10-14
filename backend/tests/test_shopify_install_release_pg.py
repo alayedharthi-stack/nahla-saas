@@ -27,6 +27,10 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
         root = harness.build_root(tmp_path / "root")
         source = os.environ.get("SOURCE_SHA", harness.SYNTHETIC_RELEASE_SHA)
         candidate = render.snapshot(h._alias_url(db), source_sha=source, root=root, phase_name="S4_DORMANT")
+        committed = json.loads((root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
+        assert gate.check_expectations(root, "S4_DORMANT")[0].status == k.PASS
+        for key in ("retained", "shopify_s4", "expectations_version", "database_py_digest"):
+            assert candidate[key] == committed[key], key
         assert len(candidate["shopify_s4"]["tables"]) == 17
         assert candidate["retained"] == h.EXPECTATIONS["retained"]
         for name, definition in h.EXPECTATIONS["shopify_s3"]["tables"].items():
@@ -36,7 +40,6 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
             path = Path(capture_dir) / "shopify-install-schema-expectations.candidate.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(candidate, sort_keys=True, indent=1) + "\n", encoding="utf-8")
-        (root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).write_text(json.dumps(candidate), encoding="utf-8")
         baseline = topo.schema_snapshot(h._loopback_url(db))
         h._sql(db, "INSERT INTO tenants(id,name) VALUES (99001,'rollback-fixture')",
                "INSERT INTO users(id,username,email,tenant_id) VALUES (99001,'rollback-fixture','rollback@example.test',99001)",

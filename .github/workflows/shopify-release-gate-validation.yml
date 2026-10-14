@@ -365,13 +365,19 @@ jobs:
           import json, os
           from pathlib import Path
           root = Path('evidence')
-          candidates, inventories = [], []
+          candidates, inventories, install_candidates = [], [], []
           for major in (16, 18):
               directory = root / f'shopify-gate-pg{major}-source-{os.environ["SOURCE_SHA"]}'
               candidates.append(json.loads((directory / 'shopify-release-schema-expectations.candidate.json').read_text()))
               inventories.append(json.loads((directory / 'source-inventory.json').read_text()))
+              install_candidates.append(json.loads((directory / 'shopify-install-schema-expectations.candidate.json').read_text()))
           for key in ('retained', 'shopify_s3', 'expectations_version', 'database_py_digest', 'generated_from_source_sha'):
               assert candidates[0][key] == candidates[1][key], key
+          for key in ('retained', 'shopify_s4', 'expectations_version', 'database_py_digest', 'generated_from_source_sha'):
+              assert install_candidates[0][key] == install_candidates[1][key], key
+          assert install_candidates[0]['generated_from_source_sha'] == os.environ['SOURCE_SHA']
+          assert len(install_candidates[0]['shopify_s4']['tables']) == 17
+          assert install_candidates[0]['retained'] == candidates[0]['retained']
           assert candidates[0]['generated_from_source_sha'] == os.environ['SOURCE_SHA']
           assert inventories[0] == inventories[1]
           assert inventories[0]['source_sha'] == os.environ['SOURCE_SHA']
