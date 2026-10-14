@@ -244,7 +244,8 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
     status, reason, detail = k.evaluate_approval(
         loaded["record"], phase_name=phase, release_sha=release_sha, runtime_digest=digest, runtime_count=count,
         target=bound_target, backup_service=backup_service, backup_volume=backup_volume,
-        now=now or _dt.datetime.now(_dt.timezone.utc))
+        now=now or _dt.datetime.now(_dt.timezone.utc),
+        rollback_bindings=gate.schema_rollback_bindings(root) if phase in k.POST_INSTALL_PHASES else None)
     return {"phase": phase, "status": status, "reason": reason, "inventory_count": count, "inventory_digest": digest,
             "approval_sha256": loaded["sha256"], "approval_b64": loaded["b64"], "detail": detail}
 

@@ -611,25 +611,29 @@
       "sha256": "c27a79dd7900e978558cb6ab46a9dd6a8465228e5309f9d33b51561d5585f21b"
     },
     {
+      "path": "scripts/operators/shopify_install_rollback.draft.json",
+      "sha256": "4cffdba3e21067e0f43dbcb52c083a056dde97b76c34acff224d169968efe9e0"
+    },
+    {
       "path": "scripts/operators/shopify_install_schema_expectations.json",
       "sha256": "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
     },
     {
       "path": "scripts/operators/shopify_release_gate.py",
-      "sha256": "3596e0b0b49bf10857bbc16179f6226c71ee0614e5b3a0e7deba4de2113b828c"
+      "sha256": "c7e61a5433c43c6503043e13eb010bec3fe243e57ec4aff268584bc9f8ec966b"
     },
     {
       "path": "scripts/operators/shopify_release_gate_contract.py",
-      "sha256": "9f77476b65ef13bf18dad93e072500dca9a4bbb0946d36d8aaacc57d409833e2"
+      "sha256": "b21c268d8f07ef1056656d6ebf2680c1cd7df547de55c8444609de1b3f9d6e8f"
     },
     {
       "path": "scripts/operators/shopify_release_schema_expectations.json",
       "sha256": "13e2d23e44cd10017a0a2fddfe3317ea9609a14ef147e6cc5c0bf634bc3a0988"
     }
   ],
-  "gate_sha256": "3596e0b0b49bf10857bbc16179f6226c71ee0614e5b3a0e7deba4de2113b828c",
+  "gate_sha256": "c7e61a5433c43c6503043e13eb010bec3fe243e57ec4aff268584bc9f8ec966b",
   "gate_version": 2,
-  "inventory_count": 156,
-  "inventory_digest": "d906cc373267cce64cbf7774956ec46edc90e17a2c1a93d1e0d42a056bfe466f",
+  "inventory_count": 157,
+  "inventory_digest": "f6cc722de7c20383060ba2ff478247e729f46d28ea7793560d47b0cbec1e1c92",
   "unexpected_initializers": []
 }

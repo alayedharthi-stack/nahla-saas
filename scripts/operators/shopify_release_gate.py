@@ -404,7 +404,8 @@ def check_approval(environ: Mapping[str, str], args: argparse.Namespace, runtime
               "db": k.target_label(expected_db)}
     status, reason, detail = k.evaluate_approval(
         record, phase_name=args.phase, release_sha=args.release_sha, runtime_digest=runtime[1], runtime_count=runtime[0],
-        target=target, backup_service=args.expect_backup_service, backup_volume=args.expect_backup_volume, now=now)
+        target=target, backup_service=args.expect_backup_service, backup_volume=args.expect_backup_volume, now=now,
+        rollback_bindings=schema_rollback_bindings(Path(args.root)) if args.phase in k.POST_INSTALL_PHASES else None)
     return Check("approval", status, reason, detail)
 
 
@@ -413,6 +414,21 @@ def read_json(path: Path) -> Optional[Any]:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, ValueError):
+        return None
+
+
+def schema_rollback_bindings(root: Path) -> Optional[Dict[str, Any]]:
+    """Source-pinned artifact/definition bindings used by renderer and runtime."""
+    check, _expectations = check_expectations(root, "S4_DORMANT")
+    if check.status != k.PASS:
+        return None
+    artifact = read_json(root / k.INSTALL_ROLLBACK_RELATIVE_PATH)
+    if not isinstance(artifact, dict):
+        return None
+    try:
+        return {"artifact": artifact, "artifact_sha256": file_sha256(root / k.INSTALL_ROLLBACK_RELATIVE_PATH),
+                "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
+    except OSError:
         return None
 
 

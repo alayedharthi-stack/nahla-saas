@@ -1,4 +1,7 @@
 {
+  "record_version": 1,
+  "rollback_mode": "same_source_flags_off",
+  "expectations_path": "scripts/operators/shopify_install_schema_expectations.json",
   "status": "DRAFT_ONLY_REQUIRES_EXACT_SOURCE_AND_INVENTORY_PINS",
   "phase": "S4_DORMANT",
   "database_heads": ["0111", "0113", "0124"],

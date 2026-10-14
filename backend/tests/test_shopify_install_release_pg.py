@@ -5,6 +5,7 @@ The initial capture is a candidate, never automatic approval. The candidate's
 S3 pins before either additional phase is exercised.
 """
 import json
+import copy
 import os
 from datetime import datetime, timedelta, timezone
 from datetime import datetime, timedelta, timezone
@@ -61,6 +62,20 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
         h._assert_fail(root, "S4_DORMANT", db, "rollback refuses active flags", extra_env=env,
                        check="shopify_flags", reason=k.R_FLAG_ENABLED)
         h._assert_pass(root, "S4_DORMANT", db, "schema-retaining flags-OFF rollback")
+        valid_path = harness.approval_for(root, "S4_DORMANT", h._target(db))
+        valid_record = json.loads(valid_path.read_text(encoding="utf-8"))
+        for field, value in (("source_sha", "a8fb88e32bca9a08ae14bef9c27eb39fbfee97ec"),
+                             ("database_heads", ["0111", "0113", "0123"]),
+                             ("schema_expectations_sha256", "b" * 64),
+                             ("runtime_inventory_digest", "b" * 64), ("phase", "S3")):
+            invalid = copy.deepcopy(valid_record)
+            invalid["schema_rollback"][field] = value
+            if field == "source_sha":
+                invalid["deployment_rollback_snapshot"]["source_sha"] = value
+            path = harness.approval_file(root.parent / "invalid", invalid, field + ".json")
+            out = h._assert_fail(root, "S4_DORMANT", db, "unbound rollback refused before DB", approval=path,
+                                 check="approval", reason=k.R_SCHEMA_ROLLBACK_INVALID)
+            assert "connect" not in harness.checks(out)
         assert h._sql(db, "SELECT id FROM shopify_install_flows") == [("retained-proof",)]
         assert h._sql(db, "SELECT shop_gid,shopify_user_id,tenant_id,user_id FROM shopify_owner_identities") == [
             ("gid://shopify/Shop/99001", 99001, 99001, 99001)]

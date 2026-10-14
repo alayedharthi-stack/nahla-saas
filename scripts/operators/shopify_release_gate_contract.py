@@ -108,6 +108,7 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "backend/routers/shopify_connection.py",
     "backend/routers/shopify_install.py",
     "scripts/operators/shopify_install_schema_expectations.json",
+    "scripts/operators/shopify_install_rollback.draft.json",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
@@ -178,6 +179,8 @@ POST_INSTALL_PHASES: Mapping[str, Dict[str, Any]] = {
     for name in ("S4_DORMANT", "S4_PILOT")
 }
 INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
+INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.draft.json"
+ROLLBACK_MAX_AGE_HOURS = 24
 PILOT_SHOP = "nahlah-dev.myshopify.com"
 # Intermediate states of the manual migration window. Never a deployment
 # phase: the gate refuses them as an argument and refuses a database in them
@@ -316,6 +319,8 @@ R_APPROVAL_EXPIRED = "approval_expired"
 R_APPROVAL_TIMESTAMP_INVALID = "approval_timestamp_invalid"
 R_APPROVAL_TIMESTAMP_ORDER = "approval_timestamp_order"
 R_ROLLBACK_SNAPSHOT_MISSING = "deployment_rollback_snapshot_missing"
+R_SCHEMA_ROLLBACK_INVALID = "schema_rollback_not_bound"
+R_SCHEMA_ROLLBACK_STALE = "schema_rollback_evidence_stale"
 R_BACKUP_EVIDENCE_MISSING = "backup_evidence_missing"
 R_BACKUP_IDENTITY_MISMATCH = "backup_identity_mismatch"
 R_BACKUP_SIZE_INVALID = "backup_size_invalid"
@@ -571,9 +576,54 @@ def _present(mapping: Any, fields: Tuple[str, ...]) -> bool:
     return True
 
 
+def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Optional[Mapping[str, Any]], *,
+                             release_sha: str, runtime_digest: str, runtime_count: int,
+                             target: Mapping[str, str], approved_at: _dt.datetime, now: _dt.datetime) -> Optional[str]:
+    """First-pilot rollback is the exact reviewed source with all flags OFF.
+
+    Bind the external evidence to the source-pinned manifest and full canonical
+    seventeen-table definitions. A generic S3 redeployable UUID cannot satisfy
+    this contract. This is validation only; it never creates an approval.
+    """
+    if not isinstance(evidence, dict) or not isinstance(bindings, dict):
+        return R_SCHEMA_ROLLBACK_INVALID
+    artifact = bindings.get("artifact")
+    if (not isinstance(artifact, dict) or artifact.get("record_version") != 1
+            or artifact.get("rollback_mode") != "same_source_flags_off"
+            or artifact.get("phase") != "S4_DORMANT" or artifact.get("database_heads") != ["0111", "0113", "0124"]
+            or artifact.get("shopify_table_count") != 17 or artifact.get("bootstrap_target") != "0093"
+            or artifact.get("schema_action") != "retain_0124_no_downgrade"
+            or artifact.get("expectations_path") != INSTALL_EXPECTATIONS_RELATIVE_PATH
+            or not isinstance(artifact.get("flags"), dict) or set(artifact["flags"]) != set(SHOPIFY_FLAG_ENVS)
+            or any(value != "false" for value in artifact["flags"].values())):
+        return R_SCHEMA_ROLLBACK_INVALID
+    if (evidence.get("record_version") != 1 or evidence.get("phase") != "S4_DORMANT"
+            or evidence.get("source_sha") != release_sha or snapshot.get("source_sha") != release_sha
+            or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
+            or evidence.get("target") != dict(target)
+            or evidence.get("database_heads") != ["0111", "0113", "0124"]
+            or evidence.get("table_names") != sorted(INSTALL_TABLES)
+            or evidence.get("runtime_inventory_digest") != runtime_digest
+            or type(evidence.get("runtime_inventory_count")) is not int or evidence.get("runtime_inventory_count") != runtime_count
+            or not _present(evidence, ("independent_review_ref",))):
+        return R_SCHEMA_ROLLBACK_INVALID
+    for name in ("artifact_sha256", "schema_expectations_sha256"):
+        expected = bindings.get(name)
+        if not isinstance(expected, str) or not DIGEST_RE.fullmatch(expected) or evidence.get(name) != expected:
+            return R_SCHEMA_ROLLBACK_INVALID
+    verified = parse_utc(evidence.get("verified_at_utc"))
+    expires = parse_utc(evidence.get("valid_until_utc"))
+    if verified is None or expires is None or verified != parse_utc(snapshot.get("verified_redeployable_at_utc")):
+        return R_SCHEMA_ROLLBACK_INVALID
+    max_age = _dt.timedelta(hours=ROLLBACK_MAX_AGE_HOURS)
+    if not verified <= approved_at <= now < expires or now - verified > max_age or expires > verified + max_age:
+        return R_SCHEMA_ROLLBACK_STALE
+    return None
+
+
 def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime_digest: str, runtime_count: int,
                       target: Mapping[str, str], backup_service: str, backup_volume: str,
-                      now: _dt.datetime) -> Tuple[str, Optional[str], Dict[str, Any]]:
+                     now: _dt.datetime, rollback_bindings: Optional[Mapping[str, Any]] = None) -> Tuple[str, Optional[str], Dict[str, Any]]:
     """The owner's external approval for exactly this release, source, target, phase and backup.
 
     Fail-closed on: an unreadable or wrong-version record; a different release
@@ -623,6 +673,12 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
         return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
     if not (verified_at <= approved_at <= now):
         return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
+    if phase_name in POST_INSTALL_PHASES:
+        reason = evaluate_schema_rollback(record.get("schema_rollback"), snapshot, rollback_bindings,
+                                          release_sha=release_sha, runtime_digest=runtime_digest,
+                                          runtime_count=runtime_count, target=target, approved_at=approved_at, now=now)
+        if reason:
+            return FAIL, reason, detail
     recovery = record.get("db_recovery_evidence")
     backup = recovery.get("backup") if isinstance(recovery, dict) else None
     if not _present(backup, BACKUP_FIELDS):
