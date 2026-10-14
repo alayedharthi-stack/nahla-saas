@@ -40,6 +40,7 @@ and they are never a deployment phase.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
@@ -99,6 +100,14 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "backend/payments/models.py",
     "backend/services/shopify_connection/config.py",
     "backend/services/shopify_connection/install_config.py",
+    "backend/services/shopify_connection/install_admission.py",
+    "backend/services/shopify_connection/shop_domain.py",
+    "backend/services/shopify_connection/install.py",
+    "backend/services/shopify_connection/install_models.py",
+    "backend/services/shopify_connection/install_cleanup.py",
+    "backend/routers/shopify_connection.py",
+    "backend/routers/shopify_install.py",
+    "scripts/operators/shopify_install_schema_expectations.json",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
@@ -158,6 +167,18 @@ DEPLOY_PHASES: Mapping[str, Dict[str, Any]] = {
     "S3": {"rows": frozenset({"0111", "0113", "0123"}), "shopify_row": "0123",
            "tables": SHOPIFY_TABLES, "branch_delta": ("0118", "0120", "0121", "0122", "0123")},
 }
+# Explicit post-0124 contracts. S0/S3 and their legacy footprint stay closed.
+# The dormant phase is also the application rollback: retain all 0124 evidence
+# and turn flags OFF, never downgrade the ownership/flow tables to 0123.
+INSTALL_TABLES: Tuple[str, ...] = SHOPIFY_TABLES + ("shopify_owner_identities", "shopify_install_flows")
+POST_INSTALL_PHASES: Mapping[str, Dict[str, Any]] = {
+    name: {"rows": frozenset({"0111", "0113", "0124"}), "shopify_row": "0124",
+           "tables": INSTALL_TABLES, "branch_delta": ("0118", "0120", "0121", "0122", "0123", "0124"),
+           "expectations_key": "shopify_s4"}
+    for name in ("S4_DORMANT", "S4_PILOT")
+}
+INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
+PILOT_SHOP = "nahlah-dev.myshopify.com"
 # Intermediate states of the manual migration window. Never a deployment
 # phase: the gate refuses them as an argument and refuses a database in them
 # under either deployment phase.
@@ -165,7 +186,7 @@ INTERMEDIATE_STATES: Mapping[str, FrozenSet[str]] = {
     "S1": frozenset({"0111", "0113", "0121"}),
     "S2": frozenset({"0111", "0113", "0122"}),
 }
-SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3"})
+SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILOT"})
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
@@ -303,6 +324,7 @@ R_BACKUP_NOT_RESTORABLE = "backup_not_restorable"
 R_BACKUP_TOO_OLD = "backup_too_old"
 R_RESTORE_NOT_VERIFIED = "restore_not_verified"
 R_FLAG_ENABLED = "shopify_flag_enabled"
+R_PILOT_ADMISSION_INVALID = "pilot_admission_invalid"
 R_CONNECT_FAILED = "connect_failed"
 R_TIMEOUT = "statement_or_lock_timeout"
 R_WALL_TIMEOUT = "wall_timeout"
@@ -331,7 +353,7 @@ R_INTERNAL_ERROR = "internal_error"
 
 def phase(name: str) -> Optional[Dict[str, Any]]:
     """The deployment phase definition, or None for anything that is not one (S1/S2 included)."""
-    return DEPLOY_PHASES.get(str(name or ""))
+    return DEPLOY_PHASES.get(str(name or "")) or POST_INSTALL_PHASES.get(str(name or ""))
 
 
 def truthy(value: object) -> bool:
@@ -486,8 +508,42 @@ def evaluate_relation_identity(before: Mapping[str, Any], after: Mapping[str, An
     return PASS, None, {"relations": len(before)}
 
 
-def evaluate_flags(environ: Mapping[str, str]) -> Tuple[str, Optional[str], Dict[str, Any]]:
+def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[str, Optional[str], Dict[str, Any]]:
     enabled = sorted(name for name in SHOPIFY_FLAG_ENVS if truthy(environ.get(name)))
+    if phase_name == "S4_PILOT":
+        required = {"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"}
+        if set(enabled) != required:
+            return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
+        # The live server still requires a valid private code and verifies the
+        # Shopify online owner. This source-bound contract restricts configured
+        # admission to the one development shop; malformed peers also refuse.
+        try:
+            raw = str(environ.get("SHOPIFY_INSTALL_PILOT_ADMISSION") or "")
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate")
+                    result[key] = value
+                return result
+            entries = json.loads(raw, object_pairs_hook=unique) if len(raw) <= 4096 else None
+            if not isinstance(entries, dict) or set(entries) != {PILOT_SHOP}:
+                raise ValueError("shops")
+            admission = entries[PILOT_SHOP]
+            if not isinstance(admission, dict) or set(admission) != {"sha256", "expires_at"}:
+                raise ValueError("fields")
+            if not isinstance(admission["sha256"], str) or not DIGEST_RE.fullmatch(admission["sha256"]):
+                raise ValueError("hash")
+            expires = admission["expires_at"]
+            if not isinstance(expires, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", expires):
+                raise ValueError("deadline_format")
+            deadline = parse_utc(expires)
+            now = _dt.datetime.now(_dt.timezone.utc)
+            if deadline is None or not now < deadline <= now + _dt.timedelta(days=7):
+                raise ValueError("deadline")
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            return FAIL, R_PILOT_ADMISSION_INVALID, {"enabled": enabled}
+        return PASS, None, {"enabled": enabled, "pilot_shops": 1}
     if enabled:
         return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
     return PASS, None, {"enabled": []}

@@ -1,0 +1,5 @@
+{
+ "draft_status": "AWAITING_DISPOSABLE_POSTGRESQL_CAPTURE_AND_INDEPENDENT_REVIEW",
+ "required_heads": ["0111", "0113", "0124"],
+ "required_shopify_table_count": 17
+}

@@ -164,7 +164,7 @@ jobs:
         if: ${{ !cancelled() && matrix.pg == '16' && steps.provenance.outcome == 'success' }}
         run: |
           set -euo pipefail
-          python -B -m pytest tests/test_shopify_release_gate.py tests/test_normal_bootstrap_migration_target.py -q -ra --tb=short \
+          python -B -m pytest tests/test_shopify_release_gate.py tests/test_shopify_install_release_contract.py tests/test_normal_bootstrap_migration_target.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-db-free.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-db-free.xml"
           python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-evidence/shopify-gate-db-free.xml"); print(result); assert result["ok"] and result["tests"] >= 177'
@@ -178,6 +178,16 @@ jobs:
             --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-pg.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-pg.xml"
           python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-evidence/shopify-gate-pg.xml"); print(result); assert result["ok"] and result["tests"] >= 14'
+
+      - name: Named 0124 and schema-retaining rollback rehearsal (zero skips)
+        if: ${{ !cancelled() && steps.provenance.outcome == 'success' }}
+        env:
+          NAHLA_INSTALL_RELEASE_CAPTURE_DIR: ${{ runner.temp }}/shopify-gate-evidence
+        run: |
+          set -euo pipefail
+          python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
 
       - name: Strict sibling migration order and downgrade proofs (zero skips)
         if: ${{ !cancelled() && steps.provenance.outcome == 'success' }}

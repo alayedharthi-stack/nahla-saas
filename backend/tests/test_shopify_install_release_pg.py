@@ -1,0 +1,77 @@
+"""Named 0124 and schema-retaining rollback on disposable PostgreSQL only.
+
+The initial capture is a candidate, never automatic approval. The candidate's
+15 existing Shopify definitions and retained definitions must equal committed
+S3 pins before either additional phase is exercised.
+"""
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from backend.tests import test_shopify_release_gate_pg as h
+from backend.tests import _shopify_release_gate_harness as harness
+from backend.tests import _alembic_topology_probe as topo
+from scripts.operators import shopify_release_gate as gate
+from scripts.operators import shopify_release_gate_contract as k
+from scripts.operators import shopify_release_gate_render as render
+
+pytestmark = h.pytestmark
+
+
+def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
+    db = h._fresh_db("install_release")
+    try:
+        h._build(db, "0124")
+        root = harness.build_root(tmp_path / "root")
+        source = os.environ.get("SOURCE_SHA", harness.SYNTHETIC_RELEASE_SHA)
+        candidate = render.snapshot(h._alias_url(db), source_sha=source, root=root, phase_name="S4_DORMANT")
+        assert len(candidate["shopify_s4"]["tables"]) == 17
+        assert candidate["retained"] == h.EXPECTATIONS["retained"]
+        for name, definition in h.EXPECTATIONS["shopify_s3"]["tables"].items():
+            assert candidate["shopify_s4"]["tables"][name] == definition
+        capture_dir = os.environ.get("NAHLA_INSTALL_RELEASE_CAPTURE_DIR")
+        if capture_dir:
+            path = Path(capture_dir) / "shopify-install-schema-expectations.candidate.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(candidate, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+        (root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).write_text(json.dumps(candidate), encoding="utf-8")
+        baseline = topo.schema_snapshot(h._loopback_url(db))
+        h._sql(db, "INSERT INTO tenants(id,name) VALUES (99001,'rollback-fixture')",
+               "INSERT INTO users(id,username,email,tenant_id) VALUES (99001,'rollback-fixture','rollback@example.test',99001)",
+               """INSERT INTO shopify_connections(id,tenant_id,shop_domain,shop_gid,status,generation,credential_version)
+                  VALUES (99001,99001,'nahlah-dev.myshopify.com','gid://shopify/Shop/99001','disconnected',1,1)""",
+               """INSERT INTO shopify_owner_identities(connection_id,shop_gid,shopify_user_id,tenant_id,user_id,created_at)
+                  VALUES (99001,'gid://shopify/Shop/99001',99001,99001,99001,now())""")
+        # Evidence-bearing rows survive rollback; no SQL downgrade is issued.
+        h._sql(db, """INSERT INTO shopify_install_flows
+                   (id,state_hash,browser_hash,shop_domain,redirect_hash,phase,generation,expires_at,created_at)
+                   VALUES ('retained-proof','state-proof','browser-proof','nahlah-dev.myshopify.com',
+                           'redirect-proof','failed',1,now(),now())""")
+        h._assert_pass(root, "S4_DORMANT", db, "post0124 dormant")
+        deadline = datetime.now(timezone.utc) + timedelta(days=1)
+        env = {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "true",
+               "SHOPIFY_INSTALL_PILOT_ADMISSION": json.dumps({k.PILOT_SHOP: {
+                   "sha256": "a" * 64, "expires_at": deadline.strftime("%Y-%m-%dT%H:%M:%SZ")}})}
+        h._assert_pass(root, "S4_PILOT", db, "restricted owner pilot", extra_env=env)
+        h._assert_fail(root, "S4_DORMANT", db, "rollback refuses active flags", extra_env=env,
+                       check="shopify_flags", reason=k.R_FLAG_ENABLED)
+        h._assert_pass(root, "S4_DORMANT", db, "schema-retaining flags-OFF rollback")
+        assert h._sql(db, "SELECT id FROM shopify_install_flows") == [("retained-proof",)]
+        assert h._sql(db, "SELECT shop_gid,shopify_user_id,tenant_id,user_id FROM shopify_owner_identities") == [
+            ("gid://shopify/Shop/99001", 99001, 99001, 99001)]
+        assert topo.schema_diff(topo.schema_snapshot(h._loopback_url(db)), baseline) == []
+        h._assert_fail(root, "S3", db, "old 15-table contract cannot roll back 0124",
+                       check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
+        h._sql(db, "ALTER TABLE shopify_owner_identities DROP CONSTRAINT ck_shopify_owner_positive")
+        h._assert_fail(root, "S4_DORMANT", db, "owner definition drift refused",
+                       check="shopify_footprint", reason=k.R_SHOPIFY_DEFINITION_DRIFT)
+        for rows in (("0111", "0113", "0125"), ("0111", "0113", "0124", "0125")):
+            h._sql(db, "DELETE FROM alembic_version")
+            for revision in rows:
+                h._sql(db, "INSERT INTO alembic_version(version_num) VALUES ('" + revision + "')")
+            h._assert_fail(root, "S4_DORMANT", db, "Google/combined states refused",
+                           check="version_rows", reason=k.R_VERSION_ROWS_UNKNOWN)
+    finally:
+        h._drop(db)

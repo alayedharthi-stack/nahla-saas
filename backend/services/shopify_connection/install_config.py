@@ -14,7 +14,7 @@ PUBLIC_REQUESTS = frozenset({("POST", PREFIX + "/start"), ("GET", CALLBACK), ("P
 
 def enabled(env=None):
     env = os.environ if env is None else env
-    return flag_enabled(env) and str(env.get("NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", "")).lower() in {"1", "true", "yes", "on"}
+    return flag_enabled(env) and str(env.get("NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def configuration(env=None):

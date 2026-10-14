@@ -71,6 +71,40 @@ def test_owner_email_is_not_identity_and_repr_withholds_token():
     assert body["access_token"] not in repr(grant)
 
 
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " true ", "\tON\n"])
+def test_pilot_closes_all_legacy_acquisition_before_config_or_storage(monkeypatch, value):
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    from routers import shopify_connection as legacy
+    from services.shopify_connection.install_config import enabled
+    assert enabled({"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": value})
+    monkeypatch.setenv("NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", value)
+    # Missing keys/admission must not reopen the legacy acquisition fallback.
+    monkeypatch.delenv("SHOPIFY_INSTALL_PILOT_ADMISSION", raising=False)
+    touched = MagicMock(side_effect=AssertionError("legacy acquisition reached storage/config"))
+    monkeypatch.setattr(legacy, "_require_config", touched)
+    monkeypatch.setattr(legacy, "_require_flag", touched)
+    monkeypatch.setattr(legacy, "_actor", touched)
+    monkeypatch.setattr(legacy, "_require_tables", touched)
+    request, db = MagicMock(), MagicMock()
+    calls = [legacy.shopify_start(legacy.ShopBody(shop="unadmitted.myshopify.com"), request, db),
+             legacy.shopify_callback(request, db),
+             legacy.shopify_complete(legacy.CompleteBody(handle="h" * 64), request, db)]
+    for call in calls:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(call)
+        assert error.value.status_code == 404
+    touched.assert_not_called()
+    assert db.mock_calls == []
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "off"])
+def test_legacy_acquisition_guard_does_not_change_dormant_connection(monkeypatch, value):
+    from routers import shopify_connection as legacy
+    monkeypatch.setenv("NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", value)
+    legacy._require_legacy_acquisition()
+
+
 @pytest.mark.parametrize("change", [{"NAHLA_SHOPIFY_CONNECTION_ENABLED": "0"}, {"NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "0"},
                                    {"SHOPIFY_CLIENT_SECRET": ""}, {"SHOPIFY_INSTALL_REDIRECT_URI": "https://evil.test/callback"},
                                    {"SHOPIFY_INSTALL_REDIRECT_URI": "https://api.example.test" + CALLBACK + "?next=evil"}])

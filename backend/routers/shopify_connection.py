@@ -33,6 +33,7 @@ handles, tokens and secrets are never logged, reflected or returned.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -81,6 +82,18 @@ def _not_found() -> HTTPException:
 
 def _require_flag() -> None:
     if not flag_enabled():
+        raise _not_found()
+
+
+def _require_legacy_acquisition() -> None:
+    """Pilot activation must never open the JWT-only acquisition flow.
+
+    Check the raw install-first switch, even when its configuration is invalid:
+    invalid pilot configuration must fail closed rather than fall back to the
+    unadmitted legacy flow. Status, credential erasure and uninstall remain
+    available through their existing connection gate.
+    """
+    if str(os.environ.get("NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}:
         raise _not_found()
 
 
@@ -156,6 +169,7 @@ async def shopify_status(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/start")
 async def shopify_start(body: ShopBody, request: Request, db: Session = Depends(get_db)):
+    _require_legacy_acquisition()
     config = _require_config()
     actor = _actor(request, db)
     shop = _canonical_shop_or_400(body.shop)
@@ -181,6 +195,7 @@ def _finish_redirect(complete_url: Optional[str], *, code: Optional[str] = None,
 
 @router.get("/callback")
 async def shopify_callback(request: Request, db: Session = Depends(get_db)):
+    _require_legacy_acquisition()
     _require_flag()
     availability = evaluate_availability()
     complete_url = availability.config.dashboard_complete_url if availability.config else dashboard_complete_url()
@@ -214,6 +229,7 @@ async def shopify_callback(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/complete")
 async def shopify_complete(body: CompleteBody, request: Request, db: Session = Depends(get_db)):
+    _require_legacy_acquisition()
     config = _require_config()
     actor = _actor(request, db)
     _require_tables(db)

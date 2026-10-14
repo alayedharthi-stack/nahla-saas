@@ -416,11 +416,14 @@ def read_json(path: Path) -> Optional[Any]:
         return None
 
 
-def check_expectations(root: Path) -> Tuple[Check, Optional[Dict[str, Any]]]:
-    expectations = read_json(root / k.EXPECTATIONS_RELATIVE_PATH)
+def check_expectations(root: Path, phase_name: str = "S3") -> Tuple[Check, Optional[Dict[str, Any]]]:
+    post_install = phase_name in k.POST_INSTALL_PHASES
+    path = k.INSTALL_EXPECTATIONS_RELATIVE_PATH if post_install else k.EXPECTATIONS_RELATIVE_PATH
+    key = "shopify_s4" if post_install else "shopify_s3"
+    expectations = read_json(root / path)
     if (not isinstance(expectations, dict) or expectations.get("expectations_version") != k.EXPECTATIONS_VERSION
-            or not isinstance(expectations.get("retained"), dict) or not isinstance(expectations.get("shopify_s3"), dict)
-            or not isinstance(expectations["shopify_s3"].get("sequences"), list) or not isinstance(expectations["shopify_s3"].get("tables"), dict)):
+            or not isinstance(expectations.get("retained"), dict) or not isinstance(expectations.get(key), dict)
+            or not isinstance(expectations[key].get("sequences"), list) or not isinstance(expectations[key].get("tables"), dict)):
         return Check("expectations", k.FAIL, k.R_EXPECTATIONS_UNREADABLE), None
     try:
         current = database_py_digest(root)
@@ -428,6 +431,13 @@ def check_expectations(root: Path) -> Tuple[Check, Optional[Dict[str, Any]]]:
         return Check("expectations", k.FAIL, k.R_EXPECTATIONS_UNREADABLE), None
     if expectations.get("database_py_digest") != current:
         return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
+    if post_install:
+        baseline = read_json(root / k.EXPECTATIONS_RELATIVE_PATH)
+        if (set(expectations[key]["tables"]) != set(k.INSTALL_TABLES)
+                or not isinstance(baseline, dict) or expectations["retained"] != baseline.get("retained")
+                or any(expectations[key]["tables"].get(name) != definition
+                       for name, definition in baseline.get("shopify_s3", {}).get("tables", {}).items())):
+            return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
     return Check("expectations", k.PASS, detail={"generated_from_source_sha": str(expectations.get("generated_from_source_sha") or "")[:12]}), expectations
 
 
@@ -646,7 +656,8 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
         status, reason, detail = k.evaluate_rows(read_version_rows(conn), phase_def["rows"], known)
         checks.append(Check("version_rows", status, reason, detail))
 
-        status, reason, detail = k.evaluate_footprint(observe_footprint(conn, phase_def), phase_def, expectations.get("shopify_s3") or {})
+        status, reason, detail = k.evaluate_footprint(observe_footprint(conn, phase_def), phase_def,
+                                                   expectations.get(phase_def.get("expectations_key", "shopify_s3")) or {})
         checks.append(Check("shopify_footprint", status, reason, detail))
 
         status, reason, detail = k.evaluate_retained(observe_retained(conn), expectations.get("retained") or {})
@@ -791,10 +802,10 @@ def main(argv: Optional[Sequence[str]] = None, environ: Optional[Mapping[str, st
             target_check, bound_url = check_database_target(env, expected_db)
             if stop(target_check) or stop(check_approval(env, args, runtime, expected_db, now or _dt.datetime.now(_dt.timezone.utc))):
                 break
-            status, reason, detail = k.evaluate_flags(env)
+            status, reason, detail = k.evaluate_flags(env, args.phase)
             if stop(Check("shopify_flags", status, reason, detail)):
                 break
-            expectations_check, expectations = check_expectations(root)
+            expectations_check, expectations = check_expectations(root, args.phase)
             if stop(expectations_check):
                 break
             if environ is None:

@@ -69,7 +69,7 @@ def test_only_s0_and_s3_are_deployment_phases():
     assert k.INTERMEDIATE_STATES["S1"] == {"0111", "0113", "0121"} and k.INTERMEDIATE_STATES["S2"] == {"0111", "0113", "0122"}
     for name in ("S1", "S2", "LEGACY_462_S0", "head", "heads", "", "S4", "s0", "ANY"):
         assert k.phase(name) is None
-    assert k.SCHEMA_CHANGING_PHASES == {"S3"}
+    assert k.SCHEMA_CHANGING_PHASES == {"S3", "S4_DORMANT", "S4_PILOT"}
     for phase in k.DEPLOY_PHASES.values():
         assert k.RETAINED_ROWS <= phase["rows"] and len(phase["rows"]) == 3
 
