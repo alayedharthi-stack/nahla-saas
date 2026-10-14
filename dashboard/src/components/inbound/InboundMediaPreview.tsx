@@ -106,6 +106,11 @@ function useAuthedMediaBlob(storage_url: string | null | undefined): BlobUrlStat
         const base     = getApiBase()
         const res = await fetch(`${base}${storage_url}`, {
           mode: 'cors',
+          // The API answers `Cache-Control: public, max-age=31536000, immutable`
+          // with no Vary on Authorization / tenant, so a cached copy would be
+          // reused for any later session in this browser. Never read or write
+          // the HTTP cache: every load is re-authorised by the server.
+          cache: 'no-store',
           signal: controller.signal,
           headers: {
             ...(token    ? { Authorization: `Bearer ${token}` } : {}),
@@ -452,6 +457,8 @@ function useAuthedDocumentBlob(storage_url: string | null | undefined): BlobUrlS
         const base     = getApiBase()
         const res = await fetch(`${base}${storage_url}`, {
           mode: 'cors',
+          // Same cross-session cache isolation as useAuthedMediaBlob.
+          cache: 'no-store',
           signal: controller.signal,
           headers: {
             ...(token    ? { Authorization: `Bearer ${token}` } : {}),
