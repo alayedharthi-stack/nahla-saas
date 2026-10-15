@@ -2170,9 +2170,11 @@ export default function Conversations() {
                           )
                         })()}
 
-                        {/* Time + send-status icon */}
+                        {/* Time + send-status icon. The message list keeps its light
+                            gradient in both themes, so the time uses dark ink that the
+                            dark-mode retrofit does not remap (>= 4.5:1). */}
                         <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>
-                          <span className="text-xs text-slate-400">
+                          <span className="text-xs text-slate-950/60">
                             {formatRiyadhTime(m.time)}
                           </span>
                           {isOut && selected.synthetic ? (

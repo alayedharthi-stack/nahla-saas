@@ -9,21 +9,29 @@
  *     bubble width, sit at the inline-start edge (RTL and LTR), and leave the
  *     caption / description blocks at full bubble width;
  *   * outbound template and order-lifecycle bubbles use the same surface,
- *     border and text colour as an ordinary outbound text bubble; no
- *     template text is less legible than that ordinary bubble text, and
- *     template buttons reach WCAG AA (4.5:1) in light and dark mode;
+ *     border and text colour as an ordinary outbound text bubble, and EVERY
+ *     visible text in those bubbles (body, template label and name, footer,
+ *     order reference/status, media placeholder, buttons) and every message
+ *     timestamp reaches WCAG AA 4.5:1 — in light and dark mode, desktop,
+ *     mobile and 320px, RTL and LTR. Contrast is computed from computed
+ *     colours with alpha, CSS opacity and the list's background gradient
+ *     (worst stop);
  *   * inbound bubbles, other outbound kinds, event badges and the failed /
- *     not-sent styling are unchanged from the base commit.
+ *     not-sent styling are unchanged from the base commit; their contrast is
+ *     measured and reported (pre-existing values are listed, not enforced).
  *
- * "before" renders the base commit's two components (served from git by
- * the dev server only) as a positive control and for screenshots; it must
- * reproduce the reported blank frame. Synthetic images and text only; any
- * request that is not to the two local servers is aborted.
+ * Positive controls (components and the timestamp class served from git by
+ * the dev server only): "before" (BUBBLE_LAYOUT_BASE) must reproduce the
+ * reported blank image frame; "previous" (BUBBLE_LAYOUT_PREVIOUS) must fail
+ * the 4.5:1 text check, proving the check detects the low-contrast bubble.
+ * Synthetic images and text only; any request that is not to the two local
+ * servers is aborted.
  *
  * Run: node scripts/check-conversation-bubble-layout.mts
  * Env: PW_CHROMIUM (Chromium executable), BUBBLE_LAYOUT_EVIDENCE_DIR
  *      (screenshots + measurements.json; default: OS temp dir),
- *      BUBBLE_LAYOUT_BASE (git revision for "before"; default 3a3867c).
+ *      BUBBLE_LAYOUT_BASE (default 3a3867c), BUBBLE_LAYOUT_PREVIOUS
+ *      (default a8b3573).
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -40,6 +48,8 @@ import { createServer as createViteServer, type Plugin } from 'vite'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BASE = process.env.BUBBLE_LAYOUT_BASE || '3a3867cf5cec2d2315f9b7d9ecc6bc5ad83fcecb'
+const PREVIOUS = process.env.BUBBLE_LAYOUT_PREVIOUS || 'a8b3573f677bc2f3de99085477c02e3164dbe507'
+const AA = 4.5
 const EVIDENCE = process.env.BUBBLE_LAYOUT_EVIDENCE_DIR || join(tmpdir(), 'nahla-bubble-layout-evidence')
 const TOKEN = 'synthetic-layout-token'
 const IMAGE_CAP = 280
@@ -62,9 +72,20 @@ const step = (m: string) => console.log(`[${((Date.now() - startedAt) / 1000).to
     'inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm',
     "cls: 'bg-blue-50 text-blue-600 border-blue-200'",
     "cls: 'bg-amber-50 text-amber-600 border-amber-200'",
+    "`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`",
   ]) {
     assert.ok(page.includes(fragment), `harness markup drifted from Conversations.tsx: ${fragment}`)
   }
+}
+
+/** The timestamp span class of Conversations.tsx at a revision (null = working tree). */
+function timestampClassAt(rev: string | null): string {
+  const source = rev
+    ? execFileSync('git', ['show', `${rev}:dashboard/src/pages/Conversations.tsx`], { cwd: ROOT, encoding: 'utf8' })
+    : readFileSync(join(ROOT, 'src/pages/Conversations.tsx'), 'utf8')
+  const match = /<span className="([^"]+)">\s*\{formatRiyadhTime\(m\.time\)\}/.exec(source)
+  assert.ok(match, `timestamp markup not found in Conversations.tsx at ${rev ?? 'working tree'}`)
+  return match[1]
 }
 
 // ── 2. Synthetic images: coloured edge band + diagonal, so cropping shows ──
@@ -140,28 +161,51 @@ const api = createServer((req, res) => {
 await new Promise<void>(r => api.listen(API_PORT, '127.0.0.1', r))
 
 // ── 4. Measurement ────────────────────────────────────────────────────
-type Mode = 'before' | 'after'
+type Mode = 'before' | 'previous' | 'after'
 interface Config { name: string; viewport: { width: number; height: number }; mobile: boolean; dir: 'rtl' | 'ltr'; theme: 'light' | 'dark' }
+const DESKTOP = { width: 1280, height: 900 }
+const MOBILE = { width: 390, height: 844 }
 const CONFIGS: Config[] = [
-  { name: 'desktop-rtl', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'rtl', theme: 'light' },
-  { name: 'mobile-rtl', viewport: { width: 390, height: 844 }, mobile: true, dir: 'rtl', theme: 'light' },
+  { name: 'desktop-rtl', viewport: DESKTOP, mobile: false, dir: 'rtl', theme: 'light' },
+  { name: 'desktop-rtl-dark', viewport: DESKTOP, mobile: false, dir: 'rtl', theme: 'dark' },
+  { name: 'desktop-ltr', viewport: DESKTOP, mobile: false, dir: 'ltr', theme: 'light' },
+  { name: 'desktop-ltr-dark', viewport: DESKTOP, mobile: false, dir: 'ltr', theme: 'dark' },
+  { name: 'mobile-rtl', viewport: MOBILE, mobile: true, dir: 'rtl', theme: 'light' },
+  { name: 'mobile-rtl-dark', viewport: MOBILE, mobile: true, dir: 'rtl', theme: 'dark' },
+  { name: 'mobile-ltr', viewport: MOBILE, mobile: true, dir: 'ltr', theme: 'light' },
+  { name: 'mobile-ltr-dark', viewport: MOBILE, mobile: true, dir: 'ltr', theme: 'dark' },
   { name: 'narrow-rtl', viewport: { width: 320, height: 720 }, mobile: true, dir: 'rtl', theme: 'light' },
-  { name: 'desktop-ltr', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'ltr', theme: 'light' },
-  { name: 'desktop-rtl-dark', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'rtl', theme: 'dark' },
 ]
+const CONTROL_CONFIGS = ['desktop-rtl', 'desktop-rtl-dark', 'mobile-rtl']
+const MODE_REVISION: Record<Mode, string | null> = { before: BASE, previous: PREVIOUS, after: null }
 const INBOUND_IMAGE_CASES = ['in-portrait-long', 'in-landscape', 'in-square', 'in-wide', 'in-tall', 'in-portrait-protected']
-const TEMPLATE_CASES = ['out-template', 'out-lifecycle', 'out-template-failed']
-const UNCHANGED_CASES = ['in-text', 'in-portrait-long', 'in-landscape', 'out-plain', 'out-interactive', 'out-media']
+const TEMPLATE_CASES = ['out-template', 'out-lifecycle', 'out-template-failed', 'out-template-broken-image']
+/** Ordinary outbound + template bubbles: every visible text must reach AA. */
+const ENFORCED_CASES = ['out-plain', ...TEMPLATE_CASES]
+const UNCHANGED_CASES = ['in-text', 'in-portrait-long', 'in-landscape', 'out-interactive', 'out-media']
+const SCREENSHOT_CASES = ['in-portrait-long', 'out-plain', 'out-template', 'out-lifecycle', 'out-template-failed', 'out-template-broken-image']
+
+function partOf(text: string, role: string): string {
+  if (role !== 'text') return role
+  if (text === 'قالب واتساب' || text === 'تحديث طلب') return 'template-label'
+  if (text.startsWith('·')) return 'template-name'
+  if (text === 'متجر تجريبي عام') return 'footer'
+  if (text === '#RRRD1234' || text === 'shipped') return 'order-details'
+  if (text === 'تعذر عرض الوسائط') return 'media-placeholder'
+  return 'body'
+}
 
 interface ImageMeasure {
   natural: [number, number]; rendered: [number, number]; frame: [number, number]; frameInner: [number, number]
   parentContentWidth: number; startGap: number; blankWidth: number; textBlockWidths: number[]; wrapperWidth: number
 }
 interface TextMeasure { text: string; role: 'button' | 'text'; color: string; background: string; ratio: number }
+interface ExtraMeasure { role: 'timestamp' | 'not-sent-badge' | 'event-badge'; text: string; color: string; background: string; ratio: number }
 interface CaseMeasure {
   card: { bg: string; color: string; border: string; width: number; scrollOverflow: number }
   image?: ImageMeasure
   texts: TextMeasure[]
+  extras: ExtraMeasure[]
   stackShadow: string; badgeBg: string | null; eventBadgeBg: string | null
 }
 
@@ -178,16 +222,36 @@ async function measure(page: import('playwright').Page): Promise<{ cases: Record
       return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
     }
     const over = (top: number[], under: number[]) => [0, 1, 2].map(i => top[3] * top[i] + (1 - top[3]) * under[i])
-    const effectiveBg = (el: Element) => {
+    /** Contrast of an element's text against what is painted behind it: translucent
+     *  background layers composited over the first opaque layer, or over every stop
+     *  of an ancestor background gradient (the worst stop is reported). */
+    const contrastOf = (el: Element) => {
       const layers: number[][] = []
+      let bases: number[][] | null = null
       for (let n: Element | null = el; n; n = n.parentElement) {
-        const c = parse(getComputedStyle(n).backgroundColor)
+        const st = getComputedStyle(n)
+        const c = parse(st.backgroundColor)
         if (c[3] > 0) layers.push(c)
-        if (c[3] >= 1) break
+        if (c[3] >= 1) { bases = [[0, 0, 0]]; break }
+        const stops = (st.backgroundImage.match(/rgba?\([^)]+\)/g) || []).map(parse)
+        if (stops.length) { bases = stops.map(stop => stop.slice(0, 3)); break }
       }
-      let base = [255, 255, 255]
-      for (const layer of layers.reverse()) base = over(layer, base)
-      return base
+      const fg = parse(getComputedStyle(el).color)
+      // CSS opacity on the element or an ancestor fades the glyphs too.
+      for (let n: Element | null = el; n; n = n.parentElement) fg[3] *= parseFloat(getComputedStyle(n).opacity)
+      let worst = { ratio: Infinity, bg: [255, 255, 255] }
+      for (const base of bases ?? [[255, 255, 255]]) {
+        let bg = base
+        for (const layer of [...layers].reverse()) bg = over(layer, bg)
+        const [l1, l2] = [lum(over(fg, bg)), lum(bg)].sort((a, b) => b - a)
+        const ratio = (l1 + 0.05) / (l2 + 0.05)
+        if (ratio < worst.ratio) worst = { ratio, bg }
+      }
+      return {
+        color: getComputedStyle(el).color,
+        background: `rgb(${worst.bg.map(v => Math.round(v)).join(', ')})`,
+        ratio: Math.floor(worst.ratio * 100) / 100,
+      }
     }
     const out: Record<string, unknown> = {}
     document.querySelectorAll('[data-case]').forEach(row => {
@@ -230,61 +294,72 @@ async function measure(page: import('playwright').Page): Promise<{ cases: Record
           wrapperWidth: contentRight - contentLeft,
         }
       }
+      /** Painted = has boxes and is not clipped away by an overflow ancestor. */
+      const painted = (el: Element) => {
+        const r = el.getBoundingClientRect()
+        if (!el.getClientRects().length || r.width < 1 || r.height < 1) return false
+        for (let n = el.parentElement; n; n = n.parentElement) {
+          if (getComputedStyle(n).overflow === 'visible') continue
+          const c = n.getBoundingClientRect()
+          if (r.bottom <= c.top || r.top >= c.bottom || r.right <= c.left || r.left >= c.right) return false
+        }
+        return true
+      }
+      const ownText = (el: Element) =>
+        Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent || '').join('').trim()
       const texts: unknown[] = []
       card.querySelectorAll('*').forEach(el => {
-        const own = Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent || '').join('').trim()
-        if (!own || el.getClientRects().length === 0) return
-        const fg = parse(getComputedStyle(el).color)
-        // CSS opacity on the element or an ancestor fades the glyphs too.
-        for (let n: Element | null = el; n; n = n.parentElement) fg[3] *= parseFloat(getComputedStyle(n).opacity)
-        const bg = effectiveBg(el)
-        const fgOnBg = over(fg, bg)
-        const [l1, l2] = [lum(fgOnBg), lum(bg)].sort((a, b) => b - a)
-        texts.push({
-          text: own.slice(0, 40),
-          role: el.closest('[data-presentation-action]') ? 'button' : 'text',
-          color: getComputedStyle(el).color,
-          background: `rgb(${bg.map(v => Math.round(v)).join(', ')})`,
-          ratio: Math.round(((l1 + 0.05) / (l2 + 0.05)) * 100) / 100,
-        })
+        const own = ownText(el)
+        if (!own || !painted(el)) return
+        texts.push({ text: own.slice(0, 40), role: el.closest('[data-presentation-action]') ? 'button' : 'text', ...contrastOf(el) })
       })
       m.texts = texts
+      const extras: unknown[] = []
+      for (const [selector, role] of [['[data-timestamp]', 'timestamp'], ['[data-not-sent-badge]', 'not-sent-badge'], ['[data-event-badge]', 'event-badge']]) {
+        row.querySelectorAll(selector).forEach(el => {
+          if (painted(el)) extras.push({ role, text: (el.textContent || '').trim(), ...contrastOf(el) })
+        })
+      }
+      m.extras = extras
       out[id] = m
     })
     return { cases: out as never, pageOverflow: document.documentElement.scrollWidth - window.innerWidth }
   })
 }
 
-function baseSourcePlugin(): Plugin {
+function revisionSourcePlugin(rev: string): Plugin {
   const files = ['src/components/conversations/MessagePresentationCard.tsx', 'src/components/inbound/InboundMediaPreview.tsx']
-  const byPath = new Map(files.map(rel => [join(ROOT, rel), execFileSync('git', ['show', `${BASE}:dashboard/${rel}`], { cwd: ROOT, encoding: 'utf8' })]))
-  return { name: 'bubble-layout-base-sources', enforce: 'pre', load: id => byPath.get(id.split('?')[0]) ?? null }
+  const byPath = new Map(files.map(rel => [join(ROOT, rel), execFileSync('git', ['show', `${rev}:dashboard/${rel}`], { cwd: ROOT, encoding: 'utf8' })]))
+  return { name: 'bubble-layout-revision-sources', enforce: 'pre', load: id => byPath.get(id.split('?')[0]) ?? null }
 }
 
 const failures: string[] = []
 const check = (ok: unknown, msg: string) => { if (!ok) failures.push(msg) }
-const results: Record<string, Record<string, Awaited<ReturnType<typeof measure>>>> = { before: {}, after: {} }
+const results: Record<string, Record<string, Awaited<ReturnType<typeof measure>>>> = { before: {}, previous: {}, after: {} }
 
 const browser = await chromium.launch(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {})
 try {
-  for (const mode of ['before', 'after'] as Mode[]) {
+  for (const mode of ['before', 'previous', 'after'] as Mode[]) {
+    const revision = MODE_REVISION[mode]
     const port = await freePort()
     const vite = await createViteServer({
       configFile: join(ROOT, 'vite.config.ts'), root: ROOT, logLevel: 'warn', clearScreen: false,
       server: { host: '127.0.0.1', port, strictPort: true },
-      plugins: mode === 'before' ? [baseSourcePlugin()] : [],
+      plugins: revision ? [revisionSourcePlugin(revision)] : [],
     })
     await vite.listen()
     const app = `http://127.0.0.1:${port}`
     try {
       for (const config of CONFIGS) {
-        if (mode === 'before' && !['desktop-rtl', 'mobile-rtl', 'desktop-rtl-dark'].includes(config.name)) continue
+        if (mode !== 'after' && !CONTROL_CONFIGS.includes(config.name)) continue
         const context = await browser.newContext({
           viewport: config.viewport, isMobile: config.mobile, hasTouch: config.mobile, deviceScaleFactor: config.mobile ? 2 : 1,
         })
         await context.route(url => url.hostname !== '127.0.0.1', route => route.abort())
         const page = await context.newPage()
-        const q = new URLSearchParams({ api: API, token: TOKEN, tenant: '77', dir: config.dir, theme: config.theme })
+        const q = new URLSearchParams({
+          api: API, token: TOKEN, tenant: '77', dir: config.dir, theme: config.theme, ts: timestampClassAt(revision),
+        })
         await page.goto(`${app}/scripts/fixtures/conversation-bubble-layout/harness.html?${q}`)
         await page.waitForFunction(() => document.documentElement.dataset.harnessReady === '1')
         // Images are loading="lazy": scroll the conversation like a reader so every one loads.
@@ -296,7 +371,7 @@ try {
         await page.waitForFunction(ids => ids.every(id => {
           const img = document.querySelector(`[data-case="${id}"] img[src^="blob:"]`) as HTMLImageElement | null
           return img && img.complete && img.naturalWidth > 0
-        }) && Array.from(document.querySelectorAll('img')).every(i => i.complete), INBOUND_IMAGE_CASES, { timeout: 30_000 })
+        }) && Array.from(document.querySelectorAll('img')).every(i => i.complete || i.hidden), INBOUND_IMAGE_CASES, { timeout: 30_000 })
           .catch(async err => {
             const state = await page.evaluate(() => Array.from(document.querySelectorAll('[data-case]')).map(row => ({
               id: row.getAttribute('data-case'),
@@ -309,7 +384,7 @@ try {
         const measured = await measure(page)
         results[mode][config.name] = measured
         await page.screenshot({ path: join(EVIDENCE, `${mode}-${config.name}-full.png`), fullPage: true })
-        for (const id of ['in-portrait-long', 'out-template', 'out-lifecycle', 'out-template-failed']) {
+        for (const id of SCREENSHOT_CASES) {
           await page.locator(`[data-case="${id}"]`).screenshot({ path: join(EVIDENCE, `${mode}-${config.name}-${id}.png`) })
         }
         await context.close()
@@ -369,47 +444,99 @@ for (const config of CONFIGS) {
 
   // Template bubbles use the ordinary outbound bubble colours.
   const plain = cases['out-plain']
-  const plainBody = plain.texts.find(t => t.role === 'text')!
   for (const id of TEMPLATE_CASES) {
     const c = cases[id]
     check(c.card.bg === plain.card.bg && c.card.color === plain.card.color && c.card.border === plain.card.border,
       `${config.name}/${id}: bubble ${c.card.bg}/${c.card.color}/${c.card.border} differs from ordinary outbound ${plain.card.bg}/${plain.card.color}/${plain.card.border}`)
-    for (const t of c.texts) {
-      if (t.role === 'button') {
-        check(t.ratio >= 4.5, `${config.name}/${id}: button "${t.text}" contrast ${t.ratio} < 4.5`)
-      } else {
-        check(t.ratio >= plainBody.ratio - 0.01,
-          `${config.name}/${id}: "${t.text}" contrast ${t.ratio} below ordinary outbound text ${plainBody.ratio}`)
-      }
+  }
+  // Every visible text in ordinary outbound and template bubbles: WCAG AA.
+  for (const id of ENFORCED_CASES) {
+    const parts = new Set(cases[id].texts.map(t => partOf(t.text, t.role)))
+    check(parts.has('body') || id === 'out-template-broken-image', `${config.name}/${id}: no body text measured`)
+    for (const t of cases[id].texts) {
+      check(t.ratio >= AA, `${config.name}/${id}: ${partOf(t.text, t.role)} "${t.text}" ${t.ratio}:1 < ${AA}:1 (${t.color} on ${t.background})`)
     }
   }
-  if (config.name === 'desktop-rtl' || config.name === 'desktop-rtl-dark') {
-    report.push(`after  ${config.name}: ordinary outbound text ${plainBody.color} on ${plainBody.background} = ${plainBody.ratio}:1`)
-    for (const id of TEMPLATE_CASES.slice(0, 2)) {
-      for (const t of results.after[config.name].cases[id].texts) {
-        report.push(`after  ${config.name}: ${id} ${t.role.padEnd(6)} ${t.ratio.toFixed(2).padStart(5)}:1  ${t.color} on ${t.background}  "${t.text}"`)
-      }
-    }
+  for (const [id, part] of [['out-template', 'template-label'], ['out-template', 'template-name'], ['out-template', 'footer'],
+    ['out-template', 'button'], ['out-lifecycle', 'order-details'], ['out-template-broken-image', 'media-placeholder']]) {
+    check(cases[id].texts.some(t => partOf(t.text, t.role) === part), `${config.name}/${id}: ${part} was not measured`)
+  }
+  // Message timestamps (every row; the class is shared by inbound and outbound).
+  for (const [id, c] of Object.entries(cases)) {
+    const stamps = c.extras.filter(e => e.role === 'timestamp')
+    check(stamps.length === 1, `${config.name}/${id}: timestamp not measured`)
+    for (const e of stamps) check(e.ratio >= AA, `${config.name}/${id}: timestamp ${e.ratio}:1 < ${AA}:1 (${e.color} on ${e.background})`)
   }
   const failed = cases['out-template-failed']
   check(/rgb\(254, 202, 202\)/.test(failed.stackShadow), `${config.name}: failed ring (ring-red-200) missing`)
   check(failed.badgeBg === 'rgb(239, 68, 68)', `${config.name}: not-sent badge colour changed (${failed.badgeBg})`)
 }
 
+// Positive control: the previous commit's bubbles must fail the AA text check.
+for (const config of CONTROL_CONFIGS) {
+  const { cases } = results.previous[config]
+  const low = ENFORCED_CASES.flatMap(id => cases[id].texts.map(t => ({ id, ...t }))).filter(t => t.ratio < AA)
+  const lowStamps = Object.values(cases).flatMap(c => c.extras).filter(e => e.role === 'timestamp' && e.ratio < AA)
+  check(low.length > 0 && lowStamps.length > 0,
+    `positive control: ${PREVIOUS.slice(0, 7)} should fail the ${AA}:1 check on ${config} (low texts ${low.length}, low timestamps ${lowStamps.length})`)
+}
+
 // Inbound bubbles, other outbound kinds and status badges: unchanged vs the base commit.
-for (const config of ['desktop-rtl', 'mobile-rtl', 'desktop-rtl-dark']) {
+for (const config of CONTROL_CONFIGS) {
   const before = results.before[config].cases
   const after = results.after[config].cases
   for (const id of UNCHANGED_CASES) {
     check(JSON.stringify([before[id].card.bg, before[id].card.color, before[id].card.border]) === JSON.stringify([after[id].card.bg, after[id].card.color, after[id].card.border]),
       `${config}/${id}: bubble colours changed (${before[id].card.bg} -> ${after[id].card.bg})`)
+    check(JSON.stringify(before[id].texts.map(t => [t.text, t.color])) === JSON.stringify(after[id].texts.map(t => [t.text, t.color])),
+      `${config}/${id}: text colours changed`)
   }
-  for (const id of ['out-template', 'out-lifecycle']) {
-    check(before[id].eventBadgeBg === after[id].eventBadgeBg, `${config}/${id}: event badge colour changed`)
+  for (const id of ['out-template', 'out-lifecycle', 'out-template-failed']) {
+    const pick = (c: CaseMeasure) => JSON.stringify(c.extras.filter(e => e.role !== 'timestamp').map(e => [e.role, e.color, e.background]))
+    check(pick(before[id]) === pick(after[id]), `${config}/${id}: status/event badge colours changed`)
+    check(before[id].eventBadgeBg === after[id].eventBadgeBg && before[id].badgeBg === after[id].badgeBg, `${config}/${id}: badge background changed`)
   }
-  const bt = before['out-template']
-  report.push(`before ${config}: template bubble ${bt.card.bg} / text ${bt.card.color}; buttons ${bt.texts.filter(t => t.role === 'button').map(t => `${t.ratio}:1`).join(', ')}`)
 }
+
+// ── 6. Contrast tables ────────────────────────────────────────────────
+const minBy = (items: Array<{ ratio: number }>) => (items.length ? Math.min(...items.map(i => i.ratio)) : NaN)
+const COLUMNS: Array<[string, (c: Record<string, CaseMeasure>) => number]> = [
+  ['plain body', c => minBy(c['out-plain'].texts)],
+  ['tpl body', c => minBy(c['out-template'].texts.filter(t => partOf(t.text, t.role) === 'body'))],
+  ['tpl label', c => minBy(c['out-template'].texts.filter(t => partOf(t.text, t.role) === 'template-label'))],
+  ['tpl name', c => minBy(c['out-template'].texts.filter(t => partOf(t.text, t.role) === 'template-name'))],
+  ['footer', c => minBy(c['out-template'].texts.filter(t => partOf(t.text, t.role) === 'footer'))],
+  ['order', c => minBy(c['out-lifecycle'].texts.filter(t => partOf(t.text, t.role) === 'order-details'))],
+  ['lifecycle', c => minBy(c['out-lifecycle'].texts.filter(t => t.role === 'text'))],
+  ['placeholder', c => minBy(c['out-template-broken-image'].texts.filter(t => partOf(t.text, t.role) === 'media-placeholder'))],
+  ['buttons', c => minBy(TEMPLATE_CASES.flatMap(id => c[id].texts.filter(t => t.role === 'button')))],
+  ['timestamp', c => minBy(Object.values(c).flatMap(x => x.extras.filter(e => e.role === 'timestamp')))],
+]
+const tableLines: string[] = []
+tableLines.push(`${'mode/config'.padEnd(26)}${COLUMNS.map(([h]) => h.padStart(12)).join('')}`)
+for (const mode of ['previous', 'after'] as Mode[]) {
+  for (const config of Object.keys(results[mode])) {
+    const c = results[mode][config].cases
+    tableLines.push(`${`${mode}/${config}`.padEnd(26)}${COLUMNS.map(([, f]) => f(c).toFixed(2).padStart(12)).join('')}`)
+  }
+}
+const statusLines: string[] = []
+for (const config of ['desktop-rtl', 'desktop-rtl-dark']) {
+  const c = results.after[config].cases
+  for (const id of ['out-template', 'out-lifecycle', 'out-template-failed']) {
+    for (const e of c[id].extras.filter(x => x.role !== 'timestamp')) {
+      statusLines.push(`${config.padEnd(17)} ${id.padEnd(20)} ${e.role.padEnd(15)} ${e.ratio.toFixed(2).padStart(5)}:1  "${e.text}" ${e.color} on ${e.background}${e.ratio < AA ? '  << pre-existing, below AA (unchanged)' : ''}`)
+    }
+  }
+  for (const id of [...UNCHANGED_CASES, 'in-square']) {
+    for (const t of c[id].texts.filter(x => x.ratio < AA)) {
+      statusLines.push(`${config.padEnd(17)} ${id.padEnd(20)} ${t.role.padEnd(15)} ${t.ratio.toFixed(2).padStart(5)}:1  "${t.text}" ${t.color} on ${t.background}  << pre-existing, below AA (unchanged)`)
+    }
+  }
+}
+writeFileSync(join(EVIDENCE, 'contrast-table.txt'), `${tableLines.join('\n')}\n\nnot enforced (status badges / unchanged bubbles):\n${statusLines.join('\n')}\n`)
+report.push('', 'minimum contrast per element (WCAG ratio, enforced >= 4.5 in "after"):', ...tableLines,
+  '', 'status badges and unchanged bubbles (reported, not enforced):', ...statusLines)
 
 console.log('\nmeasurements:')
 for (const line of report) console.log(`  ${line}`)

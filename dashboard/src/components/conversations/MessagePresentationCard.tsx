@@ -84,7 +84,7 @@ function SafeImage({
 }) {
   if (!src) {
     return (
-      <div className="flex min-h-24 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-500">
+      <div className="flex min-h-24 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-600">
         <ImageOff className="h-4 w-4" aria-hidden />
         {fallback}
       </div>
@@ -99,13 +99,14 @@ function SafeImage({
         loading="lazy"
         onLoad={onLoad}
         onError={(event) => {
-          event.currentTarget.hidden = true
+          // `hidden` loses to the `block` utility, so hide via inline style.
+          event.currentTarget.style.display = 'none'
           const fallbackElement = event.currentTarget.nextElementSibling as HTMLElement | null
           if (fallbackElement) fallbackElement.style.display = 'flex'
           onLoad?.()
         }}
       />
-      <div style={{ display: 'none' }} className="h-full min-h-24 items-center justify-center gap-2 px-4 text-xs text-slate-500">
+      <div style={{ display: 'none' }} className="h-full min-h-24 items-center justify-center gap-2 px-4 text-xs text-slate-600">
         <ImageOff className="h-4 w-4" aria-hidden />
         {fallback}
       </div>
@@ -134,7 +135,7 @@ function PresentationMedia({
   }
   if (!media.url) {
     return (
-      <div className="flex min-h-20 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-500">
+      <div className="flex min-h-20 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-600">
         <ImageOff className="h-4 w-4" aria-hidden />
         {labels.mediaUnavailable}
       </div>
@@ -181,9 +182,11 @@ export default function MessagePresentationCard({
   const plainText = presentation.kind === 'text' && !presentation.media && presentation.actions.length === 0
   // Outbound WhatsApp templates (order-lifecycle templates included) are
   // ordinary outbound messages, so they share the outbound text bubble.
+  // Dark ink on the amber bubble: white on brand-500 is only ~2.1:1, while
+  // slate-950 is ~9.5:1 and is not remapped by the dark-mode retrofit.
   const outboundBubble = isOutbound && (plainText || isTemplate)
   const cardTheme = outboundBubble
-    ? 'border-brand-500 bg-brand-500 text-white'
+    ? 'border-brand-500 bg-brand-500 text-slate-950'
     : isOutbound
       ? 'border-amber-100 bg-amber-50 text-slate-800'
       : 'border-slate-100 bg-white text-slate-800'
@@ -191,8 +194,8 @@ export default function MessagePresentationCard({
     ? 'rounded-2xl rounded-ee-sm'
     : plainText ? 'rounded-2xl rounded-es-sm' : 'rounded-2xl'
   // Template label / footer / order meta and dividers on the outbound bubble.
-  const metaText = outboundBubble ? 'text-white' : 'text-slate-500'
-  const divider = outboundBubble ? 'border-white/30' : 'border-black/5'
+  const metaText = outboundBubble ? 'text-slate-950' : 'text-slate-500'
+  const divider = outboundBubble ? 'border-black/10' : 'border-black/5'
   const productImage = product?.image_url || media?.url
   // Protected inbound paths (/media/inbound/...) are only loadable through the
   // authenticated blob fetch; never bind them to a bare <img>/<audio>/<a> src.

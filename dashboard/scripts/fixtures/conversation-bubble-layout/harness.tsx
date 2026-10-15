@@ -24,6 +24,9 @@ setApiBaseOverride(api)
 localStorage.setItem('nahla_token', params.get('token') || '')
 localStorage.setItem('nahla_tenant_id', params.get('tenant') || '')
 if (params.get('theme') === 'dark') document.documentElement.classList.add('dark')
+// Timestamp class of the Conversations.tsx revision under test (the driver
+// reads it from that revision's source).
+const timestampClass = params.get('ts') || ''
 if (params.get('dir') === 'ltr') {
   document.documentElement.dir = 'ltr'
   document.documentElement.lang = 'en'
@@ -147,6 +150,10 @@ const rows: Row[] = [
     },
   },
   template('out-template-failed', { failed: true }),
+  // Header image that fails to load: the media-unavailable placeholder shows.
+  template('out-template-broken-image', {
+    presentation: { ...template('x').presentation, media: { kind: 'image', url: `${api}/public/missing.png`, caption: null } },
+  }),
   {
     id: 'out-interactive',
     isOut: true,
@@ -191,6 +198,11 @@ function Bubble({ row }: { row: Row }) {
               لم تُرسل
             </span>
           )}
+        </div>
+        <div className={`flex items-center gap-1 mt-0.5 px-1 ${isOut ? 'flex-row-reverse' : ''}`}>
+          <span className={timestampClass} data-timestamp>
+            {isOut ? '10:42 م' : '10:41 م'}
+          </span>
         </div>
       </div>
     </div>
