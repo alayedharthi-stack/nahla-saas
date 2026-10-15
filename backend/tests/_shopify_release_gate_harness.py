@@ -124,6 +124,26 @@ def approval_for(root: Path, phase: str, db: str, *, release_sha: str = SYNTHETI
     return approval_file(root.parent / "approval", record, f"{root.name}_{phase}.json")
 
 
+def prior_rollback_record(root: Path, record: Mapping[str, Any]) -> Dict[str, Any]:
+    """``record`` with its rollback switched to the prior source pinned in ``root``'s manifest:
+    snapshot and evidence name that full SHA, the evidence its pinned inventory and every
+    flag ``"false"``. Everything else (target, deployment id, times, review) is unchanged."""
+    changed = json.loads(json.dumps(record))
+    prior = gate.schema_rollback_bindings(root)["artifact"]["dormant_prior_rollback"]
+    changed["deployment_rollback_snapshot"]["source_sha"] = prior["source_sha"]
+    rollback = changed["schema_rollback"]
+    rollback.update(source_sha=prior["source_sha"], runtime_inventory_digest=prior["runtime_inventory_digest"],
+                    runtime_inventory_count=prior["runtime_inventory_count"],
+                    flags={name: "false" for name in k.SHOPIFY_FLAG_ENVS})
+    return changed
+
+
+def prior_rollback_approval_for(root: Path, phase: str, db: str, **kwargs: Any) -> Path:
+    """A filled payload like ``approval_for`` whose rollback is the manifest-pinned prior source."""
+    base = json.loads(approval_for(root, phase, db, **kwargs).read_text(encoding="utf-8"))
+    return approval_file(root.parent / "approval", prior_rollback_record(root, base), f"{root.name}_{phase}_prior.json")
+
+
 def rendered(root: Path, phase: str, db: str, approval: Path, *, release_sha: str = SYNTHETIC_RELEASE_SHA,
              identity: Mapping[str, str] = SYNTHETIC_IDENTITY, backup: Mapping[str, str] = SYNTHETIC_BACKUP) -> str:
     return render.render_command(root, python=sys.executable, release_sha=release_sha, phase=phase, approval_sha256=payload_sha(approval),

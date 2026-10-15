@@ -17,7 +17,11 @@ expiring offline tokens, read-only catalog scope). Off by default: while
   POST /merchant/integrations/shopify/complete    JWT merchant actor; body {handle}; same
                                                   tenant, user and session as /start;
                                                   exchanges the code, verifies the shop
-                                                  identity, claims the shop
+                                                  identity, claims the shop; "connected"
+                                                  only once the shop's app/uninstalled
+                                                  subscription is read back, otherwise
+                                                  503 uninstall_webhook_pending (grant kept,
+                                                  not ready; the recovery runner retries)
   POST /merchant/integrations/shopify/disconnect  JWT merchant actor; body {shop}; erases
                                                   credentials, keeps the ownership tombstone
   POST /webhooks/shopify/app-uninstalled          public; bounded raw-body HMAC; persists,

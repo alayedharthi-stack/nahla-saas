@@ -68,6 +68,7 @@ from services.shopify_connection.oauth import (  # noqa: E402
 )
 from services.shopify_connection.webhooks import SignedShopIdentity  # noqa: E402
 from backend.tests import _alembic_topology_probe as topo  # noqa: E402
+from backend.tests._shopify_webhook_fake import FakeWebhookSubscriptions  # noqa: E402
 
 _MIGRATION_PATH = _REPO / "database" / "migrations" / "versions" / "0121_shopify_connection_foundation.py"
 
@@ -201,7 +202,7 @@ class Merchant:
 
 # ── Fake Shopify ──────────────────────────────────────────────────────────────
 
-class FakeShopify:
+class FakeShopify(FakeWebhookSubscriptions):
     """Thread-safe model of Shopify's documented token behaviour.
 
     * A new OAuth acquisition (code exchange) retires every other refresh
@@ -230,6 +231,7 @@ class FakeShopify:
         self.refresh_error = None
         self.lose_refresh_response = False
         self.exchange_delay = 0.0
+        self._webhook_state()
 
     def count(self, kind):
         with self.lock:
@@ -275,6 +277,7 @@ class FakeShopify:
                     table.pop(token)
                     self.successor.pop(token, None)
             self.current.pop(shop, None)
+        self.uninstall_webhooks(shop)   # uninstalling deletes the shop's subscriptions
 
     async def exchange_code(self, *, shop_domain, code):
         with self.lock:
