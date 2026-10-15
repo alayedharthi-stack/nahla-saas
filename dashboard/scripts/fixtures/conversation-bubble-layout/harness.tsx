@@ -116,6 +116,15 @@ function template(id: string, extra: Partial<Row> = {}): Row {
   }
 }
 
+const LONG_TEMPLATE_BODY =
+  'أهلاً نورة، يسعدنا إبلاغك بأن مجموعة الصيف الجديدة وصلت: قمصان قطنية بألوان متعددة، أحذية رياضية خفيفة، '
+  + 'وعطور ورد بأحجام مختلفة. الخصم متاح حتى نهاية الأسبوع على جميع المقاسات، ويمكنك الاستفادة من التوصيل المجاني للطلبات فوق 200 ريال.'
+
+function templateWithHeader(id: string, file: string): Row {
+  const base = template(id)
+  return { ...base, presentation: { ...base.presentation, media: { kind: 'image', url: `${api}/public/${file}`, caption: null } } }
+}
+
 const rows: Row[] = [
   // The observed defect: portrait inbound image with long description + caption.
   inboundImage('in-portrait-long', 'portrait-1200x1600.png', { caption: LONG_CAPTION, description: LONG_DESCRIPTION }),
@@ -154,6 +163,52 @@ const rows: Row[] = [
   template('out-template-broken-image', {
     presentation: { ...template('x').presentation, media: { kind: 'image', url: `${api}/public/missing.png`, caption: null } },
   }),
+  // ── Template header images (TemplateHeaderImage) ──
+  // Actual observed header ratio: 1600x900 with edge markers and intentional
+  // white artwork margins that must reach the screen untouched.
+  template('tpl-16x9', {
+    presentation: {
+      ...template('x').presentation,
+      body: `${LONG_TEMPLATE_BODY}`,
+      media: { kind: 'image', url: `${api}/public/header-1600x900-margins.png`, caption: null },
+    },
+  }),
+  templateWithHeader('tpl-portrait', 'header-900x1600.png'),
+  templateWithHeader('tpl-square', 'square-1200x1200.png'),
+  templateWithHeader('tpl-wide', 'header-1600x200.png'),
+  templateWithHeader('tpl-tall', 'header-200x1600.png'),
+  templateWithHeader('tpl-small', 'header-300x150.png'),
+  // Served after a delay: the loading placeholder is measured first.
+  templateWithHeader('tpl-delayed', 'delayed-header-1600x900.png'),
+  // Starts on a missing source; the driver then switches it to a valid one.
+  templateWithHeader('tpl-recovery', 'missing-header.png'),
+  {
+    id: 'lifecycle-image',
+    isOut: true,
+    presentation: {
+      version: 'message_presentation_v1',
+      kind: 'order_lifecycle',
+      body: 'تم تأكيد طلبك RRRD1234 وسيتم تجهيزه قريباً.',
+      text_direction: 'rtl',
+      media: { kind: 'image', url: `${api}/public/header-1600x900-margins.png`, caption: null },
+      template: { name: 'order_confirmed', category: 'UTILITY', language: 'ar', footer: 'متجر تجريبي عام' },
+      order: { id: '502', reference: 'RRRD1234', status: 'confirmed', lifecycle: 'order_confirmed' },
+      actions: [{ kind: 'tracking', label: 'تفاصيل الطلب', url: 'https://track.example.test/RRRD1234' }],
+    },
+  },
+  // Product card keeps SafeImage's 4:3 frame (unchanged consumer).
+  {
+    id: 'out-product',
+    isOut: true,
+    presentation: {
+      version: 'message_presentation_v1', kind: 'product', body: '', text_direction: 'rtl',
+      product: {
+        id: 'p-1', retailer_id: 'SKU-1', name: 'حذاء رياضي أبيض', image_url: `${api}/public/header-1600x900-margins.png`,
+        price: '199', currency: 'SAR', availability: true, url: 'https://shop.example.test/p/1',
+      },
+      actions: [{ kind: 'open_product', label: 'عرض', url: 'https://shop.example.test/p/1' }],
+    },
+  },
   {
     id: 'out-interactive',
     isOut: true,
@@ -209,13 +264,29 @@ function Bubble({ row }: { row: Row }) {
   )
 }
 
+declare global {
+  interface Window { __recoverTemplateHeader?: () => void }
+}
+
+/** Same bubble, but its header source can be switched by the driver (source recovery). */
+function RecoverableBubble({ row }: { row: Row }) {
+  const [current, setCurrent] = React.useState(row)
+  React.useEffect(() => {
+    window.__recoverTemplateHeader = () => setCurrent(r => ({
+      ...r,
+      presentation: { ...r.presentation, media: { ...r.presentation.media!, url: `${api}/public/header-1600x900-margins.png?recovered=1` } },
+    }))
+  }, [])
+  return <Bubble row={current} />
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <div style={{ maxWidth: 760, margin: '0 auto' }} data-chat-pane>
     <div
       className="flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1"
       style={{ background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)' }}
     >
-      {rows.map(row => <Bubble key={row.id} row={row} />)}
+      {rows.map(row => (row.id === 'tpl-recovery' ? <RecoverableBubble key={row.id} row={row} /> : <Bubble key={row.id} row={row} />))}
     </div>
   </div>,
 )

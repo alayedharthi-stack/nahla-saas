@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ExternalLink, ImageOff, PackageCheck } from 'lucide-react'
 
 import type {
@@ -114,18 +115,80 @@ function SafeImage({
   )
 }
 
+/**
+ * Template header image. SafeImage's fixed 4:3 frame + object-contain letterboxes
+ * any other ratio (a 16:9 header at 426px wide renders 239.6px of image in a
+ * 426x319.5 frame). Here the frame hugs the loaded image at its natural aspect
+ * ratio, scaled down to the bubble width and a 288px height cap, never cropped
+ * or trimmed — no corner rounding / overflow clip on the loaded image, since the
+ * frame now meets the artwork's own edges. While loading, a 16:9 placeholder
+ * (the common header ratio) holds the space; a failed source shows the
+ * media-unavailable state, and a new source starts loading again.
+ */
+function TemplateHeaderImage({
+  src,
+  alt,
+  fallback,
+  onLoad,
+}: {
+  src?: string | null
+  alt: string
+  fallback: string
+  onLoad?: () => void
+}) {
+  const [settled, setSettled] = useState<{ src: string; status: 'loaded' | 'error' } | null>(null)
+  if (!src) return <SafeImage src={src} alt={alt} fallback={fallback} onLoad={onLoad} />
+  const status = settled?.src === src ? settled.status : 'loading'
+  if (status === 'error') {
+    return (
+      <div
+        className="flex min-h-24 items-center justify-center gap-2 rounded-xl bg-slate-100 px-4 text-xs text-slate-600"
+        data-template-header-image="error"
+      >
+        <ImageOff className="h-4 w-4" aria-hidden />
+        {fallback}
+      </div>
+    )
+  }
+  return (
+    <div
+      className={status === 'loaded' ? 'w-fit max-w-full' : 'aspect-video w-full overflow-hidden rounded-xl bg-slate-100'}
+      data-template-header-image={status}
+    >
+      <img
+        key={src}
+        src={src}
+        alt={alt}
+        className="block h-auto w-auto max-h-72 max-w-full bg-white"
+        loading="lazy"
+        onLoad={() => {
+          setSettled({ src, status: 'loaded' })
+          onLoad?.()
+        }}
+        onError={() => {
+          setSettled({ src, status: 'error' })
+          onLoad?.()
+        }}
+      />
+    </div>
+  )
+}
+
 function PresentationMedia({
   media,
   labels,
   onLoad,
+  templateHeader = false,
 }: {
   media: NonNullable<MessagePresentation['media']>
   labels: MessagePresentationLabels
   onLoad?: () => void
+  templateHeader?: boolean
 }) {
   if (media.kind === 'image') {
+    const Image = templateHeader ? TemplateHeaderImage : SafeImage
     return (
-      <SafeImage
+      <Image
         src={media.url}
         alt={media.caption || labels.template}
         fallback={labels.mediaUnavailable}
@@ -243,7 +306,7 @@ export default function MessagePresentationCard({
             onLoad={onMediaLoad}
           />
         ) : media ? (
-          <PresentationMedia media={media} labels={labels} onLoad={onMediaLoad} />
+          <PresentationMedia media={media} labels={labels} onLoad={onMediaLoad} templateHeader={isTemplate} />
         ) : legacyMedia ? (
           <InboundMediaPreview media={legacyMedia} />
         ) : null}
