@@ -25,6 +25,7 @@
     "check:conversation-parity": "node scripts/check-conversation-parity-ux.mts",
     "check:inbound-media-presentation": "node scripts/check-inbound-media-presentation.mts",
     "check:inbound-media-cache-isolation": "node scripts/check-inbound-media-cache-isolation.mts",
+    "check:conversation-bubble-layout": "node scripts/check-conversation-bubble-layout.mts",
     "check:internal-e2e-admin-ui": "npx --yes tsx@4 scripts/check-internal-e2e-admin-ui.mts",
     "check:support-access-tenant-path": "npx --yes tsx@4 scripts/check-support-access-tenant-path.mts",
     "render:order-updates-preview-evidence": "npx --yes tsx@4 scripts/render-order-updates-preview-evidence.mts",

@@ -1,0 +1,422 @@
+/**
+ * Layout/colour regression for conversation bubbles (Chromium, real CSS).
+ *
+ * Checks, on the real MessagePresentationCard / InboundMediaPreview inside a
+ * copy of the Conversations.tsx bubble markup (verified against the page
+ * source below):
+ *   * inbound image frames hug the displayed image (no blank band), keep the
+ *     natural aspect ratio without cropping, stay within 280x280 and the
+ *     bubble width, sit at the inline-start edge (RTL and LTR), and leave the
+ *     caption / description blocks at full bubble width;
+ *   * outbound template and order-lifecycle bubbles use the same surface,
+ *     border and text colour as an ordinary outbound text bubble; no
+ *     template text is less legible than that ordinary bubble text, and
+ *     template buttons reach WCAG AA (4.5:1) in light and dark mode;
+ *   * inbound bubbles, other outbound kinds, event badges and the failed /
+ *     not-sent styling are unchanged from the base commit.
+ *
+ * "before" renders the base commit's two components (served from git by
+ * the dev server only) as a positive control and for screenshots; it must
+ * reproduce the reported blank frame. Synthetic images and text only; any
+ * request that is not to the two local servers is aborted.
+ *
+ * Run: node scripts/check-conversation-bubble-layout.mts
+ * Env: PW_CHROMIUM (Chromium executable), BUBBLE_LAYOUT_EVIDENCE_DIR
+ *      (screenshots + measurements.json; default: OS temp dir),
+ *      BUBBLE_LAYOUT_BASE (git revision for "before"; default 3a3867c).
+ */
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { crc32, deflateSync } from 'node:zlib'
+
+import { chromium } from 'playwright'
+import { createServer as createViteServer, type Plugin } from 'vite'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+const BASE = process.env.BUBBLE_LAYOUT_BASE || '3a3867cf5cec2d2315f9b7d9ecc6bc5ad83fcecb'
+const EVIDENCE = process.env.BUBBLE_LAYOUT_EVIDENCE_DIR || join(tmpdir(), 'nahla-bubble-layout-evidence')
+const TOKEN = 'synthetic-layout-token'
+const IMAGE_CAP = 280
+mkdirSync(EVIDENCE, { recursive: true })
+
+const startedAt = Date.now()
+const step = (m: string) => console.log(`[${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${m}`)
+
+// ── 1. The harness markup is a faithful copy of Conversations.tsx ──────
+{
+  const page = readFileSync(join(ROOT, 'src/pages/Conversations.tsx'), 'utf8')
+  for (const fragment of [
+    'flex-1 overflow-y-auto py-4 px-3 md:px-5 space-y-1',
+    "background: 'linear-gradient(180deg, #f8f9fb 0%, #f1f3f6 100%)'",
+    "`flex ${isOut ? 'justify-end' : 'justify-start'} mb-1`",
+    "`flex flex-col ${isOut ? 'items-end' : 'items-start'} max-w-[78%] md:max-w-md`",
+    'inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border mb-0.5',
+    'w-full space-y-1',
+    "'ring-1 ring-red-200 rounded-2xl'",
+    'inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold tracking-wider bg-red-500 text-white shadow-sm',
+    "cls: 'bg-blue-50 text-blue-600 border-blue-200'",
+    "cls: 'bg-amber-50 text-amber-600 border-amber-200'",
+  ]) {
+    assert.ok(page.includes(fragment), `harness markup drifted from Conversations.tsx: ${fragment}`)
+  }
+}
+
+// ── 2. Synthetic images: coloured edge band + diagonal, so cropping shows ──
+function pngChunk(type: string, data: Buffer): Buffer {
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(data.length)
+  const td = Buffer.concat([Buffer.from(type, 'latin1'), data])
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(td) >>> 0)
+  return Buffer.concat([len, td, crc])
+}
+function makePng(w: number, h: number): Buffer {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0)
+  ihdr.writeUInt32BE(h, 4)
+  ihdr[8] = 8
+  ihdr[9] = 2
+  const edge = Math.max(4, Math.round(Math.min(w, h) * 0.04))
+  const raw = Buffer.alloc((w * 3 + 1) * h)
+  for (let y = 0; y < h; y += 1) {
+    const row = y * (w * 3 + 1)
+    for (let x = 0; x < w; x += 1) {
+      const p = row + 1 + x * 3
+      const onEdge = x < edge || y < edge || x >= w - edge || y >= h - edge
+      const onDiagonal = Math.abs(x / w - y / h) < 0.01
+      if (onEdge) { raw[p] = 0xe1; raw[p + 1] = 0x1d; raw[p + 2] = 0x48 } else if (onDiagonal) {
+        raw[p] = 0x1e; raw[p + 1] = 0x29; raw[p + 2] = 0x3b
+      } else { raw[p] = 0x60 + Math.round((y / h) * 0x60); raw[p + 1] = 0xa5; raw[p + 2] = 0xfa - Math.round((x / w) * 0x60) }
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr), pngChunk('IDAT', deflateSync(raw)), pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+const IMAGES: Record<string, [number, number]> = {
+  'portrait-1200x1600.png': [1200, 1600],
+  'landscape-1600x1200.png': [1600, 1200],
+  'square-1200x1200.png': [1200, 1200],
+  'wide-1600x300.png': [1600, 300],
+  'tall-300x1600.png': [300, 1600],
+  'summer-offer-1600x1200.png': [1600, 1200],
+}
+const pngs = new Map(Object.entries(IMAGES).map(([name, [w, h]]) => [name, makePng(w, h)]))
+
+// ── 3. Local API: authenticated inbound media + a public template image ──
+async function freePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const s = createNetServer()
+    s.listen(0, '127.0.0.1', () => {
+      const a = s.address()
+      if (!a || typeof a === 'string') return reject(new Error('no port'))
+      s.close(() => resolve(a.port))
+    })
+  })
+}
+const API_PORT = await freePort()
+const API = `http://127.0.0.1:${API_PORT}`
+const api = createServer((req, res) => {
+  const origin = req.headers.origin || '*'
+  const cors = { 'access-control-allow-origin': origin, 'access-control-allow-headers': 'authorization, x-tenant-id', vary: 'Origin' }
+  if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return }
+  const url = new URL(req.url || '/', API)
+  const inbound = /^\/media\/inbound\/77\/([\w.-]+)$/.exec(url.pathname)
+  const pub = /^\/public\/([\w.-]+)$/.exec(url.pathname)
+  const name = inbound?.[1] ?? pub?.[1]
+  if (inbound && req.headers.authorization !== `Bearer ${TOKEN}`) { res.writeHead(401, cors); res.end(); return }
+  const body = name ? pngs.get(name) : undefined
+  if (!body) { res.writeHead(404, cors); res.end(); return }
+  res.writeHead(200, { ...cors, 'content-type': 'image/png', 'content-length': String(body.length) })
+  res.end(body)
+})
+await new Promise<void>(r => api.listen(API_PORT, '127.0.0.1', r))
+
+// ── 4. Measurement ────────────────────────────────────────────────────
+type Mode = 'before' | 'after'
+interface Config { name: string; viewport: { width: number; height: number }; mobile: boolean; dir: 'rtl' | 'ltr'; theme: 'light' | 'dark' }
+const CONFIGS: Config[] = [
+  { name: 'desktop-rtl', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'rtl', theme: 'light' },
+  { name: 'mobile-rtl', viewport: { width: 390, height: 844 }, mobile: true, dir: 'rtl', theme: 'light' },
+  { name: 'narrow-rtl', viewport: { width: 320, height: 720 }, mobile: true, dir: 'rtl', theme: 'light' },
+  { name: 'desktop-ltr', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'ltr', theme: 'light' },
+  { name: 'desktop-rtl-dark', viewport: { width: 1280, height: 900 }, mobile: false, dir: 'rtl', theme: 'dark' },
+]
+const INBOUND_IMAGE_CASES = ['in-portrait-long', 'in-landscape', 'in-square', 'in-wide', 'in-tall', 'in-portrait-protected']
+const TEMPLATE_CASES = ['out-template', 'out-lifecycle', 'out-template-failed']
+const UNCHANGED_CASES = ['in-text', 'in-portrait-long', 'in-landscape', 'out-plain', 'out-interactive', 'out-media']
+
+interface ImageMeasure {
+  natural: [number, number]; rendered: [number, number]; frame: [number, number]; frameInner: [number, number]
+  parentContentWidth: number; startGap: number; blankWidth: number; textBlockWidths: number[]; wrapperWidth: number
+}
+interface TextMeasure { text: string; role: 'button' | 'text'; color: string; background: string; ratio: number }
+interface CaseMeasure {
+  card: { bg: string; color: string; border: string; width: number; scrollOverflow: number }
+  image?: ImageMeasure
+  texts: TextMeasure[]
+  stackShadow: string; badgeBg: string | null; eventBadgeBg: string | null
+}
+
+async function measure(page: import('playwright').Page): Promise<{ cases: Record<string, CaseMeasure>; pageOverflow: number }> {
+  return await page.evaluate(() => {
+    const parse = (c: string): [number, number, number, number] => {
+      const m = c.match(/rgba?\(([^)]+)\)/)
+      if (!m) return [0, 0, 0, 0]
+      const parts = m[1].split(/[ ,/]+/).filter(Boolean).map(Number)
+      return [parts[0], parts[1], parts[2], parts.length > 3 ? parts[3] : 1]
+    }
+    const lum = ([r, g, b]: number[]) => {
+      const f = (v: number) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4 }
+      return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    }
+    const over = (top: number[], under: number[]) => [0, 1, 2].map(i => top[3] * top[i] + (1 - top[3]) * under[i])
+    const effectiveBg = (el: Element) => {
+      const layers: number[][] = []
+      for (let n: Element | null = el; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor)
+        if (c[3] > 0) layers.push(c)
+        if (c[3] >= 1) break
+      }
+      let base = [255, 255, 255]
+      for (const layer of layers.reverse()) base = over(layer, base)
+      return base
+    }
+    const out: Record<string, unknown> = {}
+    document.querySelectorAll('[data-case]').forEach(row => {
+      const id = row.getAttribute('data-case')!
+      const card = row.querySelector('[data-presentation-kind]') as HTMLElement
+      const cs = getComputedStyle(card)
+      const m: Record<string, unknown> = {
+        card: {
+          bg: cs.backgroundColor, color: cs.color, border: cs.borderTopColor,
+          width: card.getBoundingClientRect().width, scrollOverflow: card.scrollWidth - card.clientWidth,
+        },
+        stackShadow: getComputedStyle(row.querySelector('[data-presentation-stack]')!).boxShadow,
+        badgeBg: (() => { const b = row.querySelector('[data-not-sent-badge]'); return b ? getComputedStyle(b).backgroundColor : null })(),
+        eventBadgeBg: (() => { const b = row.querySelector('[data-event-badge]'); return b ? getComputedStyle(b).backgroundColor : null })(),
+      }
+      const img = card.querySelector('img[src^="blob:"]') as HTMLImageElement | null
+      if (img) {
+        const frame = img.parentElement as HTMLElement
+        const parent = frame.parentElement as HTMLElement
+        const fr = frame.getBoundingClientRect()
+        const fcs = getComputedStyle(frame)
+        const bx = parseFloat(fcs.borderLeftWidth) + parseFloat(fcs.borderRightWidth)
+        const by = parseFloat(fcs.borderTopWidth) + parseFloat(fcs.borderBottomWidth)
+        const ir = img.getBoundingClientRect()
+        const pr = parent.getBoundingClientRect()
+        const pcs = getComputedStyle(parent)
+        const contentLeft = pr.left + parseFloat(pcs.paddingLeft) + parseFloat(pcs.borderLeftWidth)
+        const contentRight = pr.right - parseFloat(pcs.paddingRight) - parseFloat(pcs.borderRightWidth)
+        const rtl = getComputedStyle(parent).direction === 'rtl'
+        const siblings = Array.from(parent.children).filter(c => c !== frame && (c.textContent || '').trim()) as HTMLElement[]
+        m.image = {
+          natural: [img.naturalWidth, img.naturalHeight],
+          rendered: [ir.width, ir.height],
+          frame: [fr.width, fr.height],
+          frameInner: [fr.width - bx, fr.height - by],
+          parentContentWidth: contentRight - contentLeft,
+          startGap: rtl ? contentRight - fr.right : fr.left - contentLeft,
+          blankWidth: fr.width - bx - ir.width,
+          textBlockWidths: siblings.map(s => s.getBoundingClientRect().width),
+          wrapperWidth: contentRight - contentLeft,
+        }
+      }
+      const texts: unknown[] = []
+      card.querySelectorAll('*').forEach(el => {
+        const own = Array.from(el.childNodes).filter(n => n.nodeType === 3).map(n => n.textContent || '').join('').trim()
+        if (!own || el.getClientRects().length === 0) return
+        const fg = parse(getComputedStyle(el).color)
+        // CSS opacity on the element or an ancestor fades the glyphs too.
+        for (let n: Element | null = el; n; n = n.parentElement) fg[3] *= parseFloat(getComputedStyle(n).opacity)
+        const bg = effectiveBg(el)
+        const fgOnBg = over(fg, bg)
+        const [l1, l2] = [lum(fgOnBg), lum(bg)].sort((a, b) => b - a)
+        texts.push({
+          text: own.slice(0, 40),
+          role: el.closest('[data-presentation-action]') ? 'button' : 'text',
+          color: getComputedStyle(el).color,
+          background: `rgb(${bg.map(v => Math.round(v)).join(', ')})`,
+          ratio: Math.round(((l1 + 0.05) / (l2 + 0.05)) * 100) / 100,
+        })
+      })
+      m.texts = texts
+      out[id] = m
+    })
+    return { cases: out as never, pageOverflow: document.documentElement.scrollWidth - window.innerWidth }
+  })
+}
+
+function baseSourcePlugin(): Plugin {
+  const files = ['src/components/conversations/MessagePresentationCard.tsx', 'src/components/inbound/InboundMediaPreview.tsx']
+  const byPath = new Map(files.map(rel => [join(ROOT, rel), execFileSync('git', ['show', `${BASE}:dashboard/${rel}`], { cwd: ROOT, encoding: 'utf8' })]))
+  return { name: 'bubble-layout-base-sources', enforce: 'pre', load: id => byPath.get(id.split('?')[0]) ?? null }
+}
+
+const failures: string[] = []
+const check = (ok: unknown, msg: string) => { if (!ok) failures.push(msg) }
+const results: Record<string, Record<string, Awaited<ReturnType<typeof measure>>>> = { before: {}, after: {} }
+
+const browser = await chromium.launch(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {})
+try {
+  for (const mode of ['before', 'after'] as Mode[]) {
+    const port = await freePort()
+    const vite = await createViteServer({
+      configFile: join(ROOT, 'vite.config.ts'), root: ROOT, logLevel: 'warn', clearScreen: false,
+      server: { host: '127.0.0.1', port, strictPort: true },
+      plugins: mode === 'before' ? [baseSourcePlugin()] : [],
+    })
+    await vite.listen()
+    const app = `http://127.0.0.1:${port}`
+    try {
+      for (const config of CONFIGS) {
+        if (mode === 'before' && !['desktop-rtl', 'mobile-rtl', 'desktop-rtl-dark'].includes(config.name)) continue
+        const context = await browser.newContext({
+          viewport: config.viewport, isMobile: config.mobile, hasTouch: config.mobile, deviceScaleFactor: config.mobile ? 2 : 1,
+        })
+        await context.route(url => url.hostname !== '127.0.0.1', route => route.abort())
+        const page = await context.newPage()
+        const q = new URLSearchParams({ api: API, token: TOKEN, tenant: '77', dir: config.dir, theme: config.theme })
+        await page.goto(`${app}/scripts/fixtures/conversation-bubble-layout/harness.html?${q}`)
+        await page.waitForFunction(() => document.documentElement.dataset.harnessReady === '1')
+        // Images are loading="lazy": scroll the conversation like a reader so every one loads.
+        for (const row of await page.locator('[data-case]').all()) {
+          await row.scrollIntoViewIfNeeded()
+          await page.waitForTimeout(80)
+        }
+        await page.evaluate(() => window.scrollTo(0, 0))
+        await page.waitForFunction(ids => ids.every(id => {
+          const img = document.querySelector(`[data-case="${id}"] img[src^="blob:"]`) as HTMLImageElement | null
+          return img && img.complete && img.naturalWidth > 0
+        }) && Array.from(document.querySelectorAll('img')).every(i => i.complete), INBOUND_IMAGE_CASES, { timeout: 30_000 })
+          .catch(async err => {
+            const state = await page.evaluate(() => Array.from(document.querySelectorAll('[data-case]')).map(row => ({
+              id: row.getAttribute('data-case'),
+              imgs: Array.from(row.querySelectorAll('img')).map(i => ({ src: i.src.slice(0, 40), complete: i.complete, w: i.naturalWidth })),
+              text: (row.textContent || '').slice(0, 80),
+            })))
+            throw new Error(`${mode}/${config.name}: media did not load: ${JSON.stringify(state, null, 1)}\n${err}`)
+          })
+        await page.waitForTimeout(300)
+        const measured = await measure(page)
+        results[mode][config.name] = measured
+        await page.screenshot({ path: join(EVIDENCE, `${mode}-${config.name}-full.png`), fullPage: true })
+        for (const id of ['in-portrait-long', 'out-template', 'out-lifecycle', 'out-template-failed']) {
+          await page.locator(`[data-case="${id}"]`).screenshot({ path: join(EVIDENCE, `${mode}-${config.name}-${id}.png`) })
+        }
+        await context.close()
+        step(`${mode}/${config.name}: measured ${Object.keys(measured.cases).length} bubbles`)
+      }
+    } finally {
+      await vite.close()
+    }
+  }
+} finally {
+  await browser.close()
+  api.close()
+}
+writeFileSync(join(EVIDENCE, 'measurements.json'), JSON.stringify(results, null, 2))
+
+// ── 5. Assertions ─────────────────────────────────────────────────────
+const fmt = (n: number) => Math.round(n * 10) / 10
+const report: string[] = []
+
+// Positive control: the base commit reproduces the reported blank frame.
+{
+  const before = results.before['desktop-rtl'].cases['in-portrait-long'].image!
+  report.push(`before desktop-rtl in-portrait-long: natural ${before.natural.join('x')}, image ${before.rendered.map(fmt).join('x')}, frame ${before.frame.map(fmt).join('x')}, blank ${fmt(before.blankWidth)}px`)
+  check(before.blankWidth > 150, `positive control: base commit should reproduce the blank frame (blank ${before.blankWidth}px)`)
+}
+
+for (const config of CONFIGS) {
+  const { cases, pageOverflow } = results.after[config.name]
+  check(pageOverflow <= 1, `${config.name}: horizontal page overflow ${pageOverflow}px`)
+  for (const id of INBOUND_IMAGE_CASES) {
+    const c = cases[id]
+    const im = c.image
+    if (!im) { failures.push(`${config.name}/${id}: no decoded image`); continue }
+    const [nw, nh] = im.natural
+    const [rw, rh] = im.rendered
+    const aspectError = Math.abs(rw / rh - nw / nh) / (nw / nh)
+    const maxW = Math.min(IMAGE_CAP, im.parentContentWidth - (im.frame[0] - im.frameInner[0]))
+    const expectedScale = Math.min(1, IMAGE_CAP / nh, maxW / nw)
+    report.push(`after  ${config.name.padEnd(16)} ${id.padEnd(22)} natural ${nw}x${nh} -> image ${fmt(rw)}x${fmt(rh)} frame ${fmt(im.frame[0])}x${fmt(im.frame[1])} blank ${fmt(im.blankWidth)}px start-gap ${fmt(im.startGap)}px bubble-content ${fmt(im.wrapperWidth)}px`)
+    check(aspectError < 0.01, `${config.name}/${id}: aspect ratio changed (${fmt(rw)}x${fmt(rh)} vs ${nw}x${nh})`)
+    check(Math.abs(rw - nw * expectedScale) <= 1 && Math.abs(rh - nh * expectedScale) <= 1,
+      `${config.name}/${id}: expected ${fmt(nw * expectedScale)}x${fmt(nh * expectedScale)}, got ${fmt(rw)}x${fmt(rh)}`)
+    check(Math.abs(im.frameInner[0] - rw) <= 1 && Math.abs(im.frameInner[1] - rh) <= 1,
+      `${config.name}/${id}: frame ${fmt(im.frameInner[0])}x${fmt(im.frameInner[1])} does not hug image ${fmt(rw)}x${fmt(rh)}`)
+    check(Math.abs(im.startGap) <= 1, `${config.name}/${id}: frame not at the inline-start edge (gap ${fmt(im.startGap)}px)`)
+    check(im.frame[0] <= im.parentContentWidth + 0.5, `${config.name}/${id}: frame wider than the bubble`)
+    for (const w of im.textBlockWidths) {
+      check(Math.abs(w - im.wrapperWidth) <= 1, `${config.name}/${id}: caption/description block ${fmt(w)}px is not full bubble width ${fmt(im.wrapperWidth)}px`)
+    }
+    check(c.card.scrollOverflow <= 0, `${config.name}/${id}: card content overflows horizontally`)
+  }
+  if (config.name === 'desktop-rtl' || config.name === 'mobile-rtl') {
+    const long = cases['in-portrait-long'].image!
+    check(long.textBlockWidths.length >= 2 && Math.min(...long.textBlockWidths) > long.frame[0],
+      `${config.name}: long caption/description should stay wider than the portrait frame`)
+  }
+
+  // Template bubbles use the ordinary outbound bubble colours.
+  const plain = cases['out-plain']
+  const plainBody = plain.texts.find(t => t.role === 'text')!
+  for (const id of TEMPLATE_CASES) {
+    const c = cases[id]
+    check(c.card.bg === plain.card.bg && c.card.color === plain.card.color && c.card.border === plain.card.border,
+      `${config.name}/${id}: bubble ${c.card.bg}/${c.card.color}/${c.card.border} differs from ordinary outbound ${plain.card.bg}/${plain.card.color}/${plain.card.border}`)
+    for (const t of c.texts) {
+      if (t.role === 'button') {
+        check(t.ratio >= 4.5, `${config.name}/${id}: button "${t.text}" contrast ${t.ratio} < 4.5`)
+      } else {
+        check(t.ratio >= plainBody.ratio - 0.01,
+          `${config.name}/${id}: "${t.text}" contrast ${t.ratio} below ordinary outbound text ${plainBody.ratio}`)
+      }
+    }
+  }
+  if (config.name === 'desktop-rtl' || config.name === 'desktop-rtl-dark') {
+    report.push(`after  ${config.name}: ordinary outbound text ${plainBody.color} on ${plainBody.background} = ${plainBody.ratio}:1`)
+    for (const id of TEMPLATE_CASES.slice(0, 2)) {
+      for (const t of results.after[config.name].cases[id].texts) {
+        report.push(`after  ${config.name}: ${id} ${t.role.padEnd(6)} ${t.ratio.toFixed(2).padStart(5)}:1  ${t.color} on ${t.background}  "${t.text}"`)
+      }
+    }
+  }
+  const failed = cases['out-template-failed']
+  check(/rgb\(254, 202, 202\)/.test(failed.stackShadow), `${config.name}: failed ring (ring-red-200) missing`)
+  check(failed.badgeBg === 'rgb(239, 68, 68)', `${config.name}: not-sent badge colour changed (${failed.badgeBg})`)
+}
+
+// Inbound bubbles, other outbound kinds and status badges: unchanged vs the base commit.
+for (const config of ['desktop-rtl', 'mobile-rtl', 'desktop-rtl-dark']) {
+  const before = results.before[config].cases
+  const after = results.after[config].cases
+  for (const id of UNCHANGED_CASES) {
+    check(JSON.stringify([before[id].card.bg, before[id].card.color, before[id].card.border]) === JSON.stringify([after[id].card.bg, after[id].card.color, after[id].card.border]),
+      `${config}/${id}: bubble colours changed (${before[id].card.bg} -> ${after[id].card.bg})`)
+  }
+  for (const id of ['out-template', 'out-lifecycle']) {
+    check(before[id].eventBadgeBg === after[id].eventBadgeBg, `${config}/${id}: event badge colour changed`)
+  }
+  const bt = before['out-template']
+  report.push(`before ${config}: template bubble ${bt.card.bg} / text ${bt.card.color}; buttons ${bt.texts.filter(t => t.role === 'button').map(t => `${t.ratio}:1`).join(', ')}`)
+}
+
+console.log('\nmeasurements:')
+for (const line of report) console.log(`  ${line}`)
+console.log(`\nevidence written to ${EVIDENCE}`)
+if (failures.length) {
+  console.error(`\nconversation bubble layout check: ${failures.length} failure(s)`)
+  for (const f of failures) console.error(`  ✗ ${f}`)
+  process.exit(1)
+}
+console.log('\nconversation bubble layout check: ok')

@@ -29,10 +29,17 @@ function actionLabel(action: MessagePresentationAction, labels: MessagePresentat
 function PresentationAction({
   action,
   labels,
+  onOutboundBubble,
 }: {
   action: MessagePresentationAction
   labels: MessagePresentationLabels
+  onOutboundBubble: boolean
 }) {
+  // White buttons on the brand bubble use a dark brand label (AA on white);
+  // every other bubble keeps the existing WhatsApp-green label.
+  const tone = onOutboundBubble
+    ? 'text-brand-800 dark:text-brand-300 hover:bg-brand-50 dark:hover:bg-slate-700'
+    : 'text-[#00a884] hover:bg-emerald-50'
   const content = (
     <>
       {(action.kind === 'url' || action.kind === 'open_product' || action.kind === 'tracking') && (
@@ -47,7 +54,7 @@ function PresentationAction({
         href={action.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="flex items-center justify-center gap-2 rounded-lg border border-slate-100 bg-white px-3 py-2 text-[13px] font-medium text-[#00a884] shadow-sm hover:bg-emerald-50"
+        className={`flex items-center justify-center gap-2 rounded-lg border border-slate-100 bg-white px-3 py-2 text-[13px] font-medium shadow-sm ${tone}`}
         data-presentation-action={action.kind}
       >
         {content}
@@ -56,7 +63,7 @@ function PresentationAction({
   }
   return (
     <div
-      className="flex cursor-default select-none items-center justify-center gap-2 rounded-lg border border-slate-100 bg-white px-3 py-2 text-[13px] font-medium text-[#00a884] shadow-sm"
+      className={`flex cursor-default select-none items-center justify-center gap-2 rounded-lg border border-slate-100 bg-white px-3 py-2 text-[13px] font-medium shadow-sm ${onOutboundBubble ? 'text-brand-800 dark:text-brand-300' : 'text-[#00a884]'}`}
       data-presentation-action={action.kind}
     >
       {content}
@@ -172,14 +179,20 @@ export default function MessagePresentationCard({
   const lifecycle = presentation.kind === 'order_lifecycle'
   const isTemplate = lifecycle || presentation.kind === 'template'
   const plainText = presentation.kind === 'text' && !presentation.media && presentation.actions.length === 0
-  const cardTheme = isOutbound && plainText
+  // Outbound WhatsApp templates (order-lifecycle templates included) are
+  // ordinary outbound messages, so they share the outbound text bubble.
+  const outboundBubble = isOutbound && (plainText || isTemplate)
+  const cardTheme = outboundBubble
     ? 'border-brand-500 bg-brand-500 text-white'
     : isOutbound
       ? 'border-amber-100 bg-amber-50 text-slate-800'
       : 'border-slate-100 bg-white text-slate-800'
-  const radius = plainText
-    ? (isOutbound ? 'rounded-2xl rounded-ee-sm' : 'rounded-2xl rounded-es-sm')
-    : 'rounded-2xl'
+  const radius = outboundBubble
+    ? 'rounded-2xl rounded-ee-sm'
+    : plainText ? 'rounded-2xl rounded-es-sm' : 'rounded-2xl'
+  // Template label / footer / order meta and dividers on the outbound bubble.
+  const metaText = outboundBubble ? 'text-white' : 'text-slate-500'
+  const divider = outboundBubble ? 'border-white/30' : 'border-black/5'
   const productImage = product?.image_url || media?.url
   // Protected inbound paths (/media/inbound/...) are only loadable through the
   // authenticated blob fetch; never bind them to a bare <img>/<audio>/<a> src.
@@ -197,11 +210,11 @@ export default function MessagePresentationCard({
       data-presentation-kind={presentation.kind}
     >
       {(isTemplate || presentation.kind === 'product') && (
-        <div className="flex items-center gap-1.5 border-b border-black/5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+        <div className={`flex items-center gap-1.5 border-b px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide ${divider} ${metaText}`}>
           {lifecycle ? <PackageCheck className="h-3 w-3" aria-hidden /> : null}
           <span>{lifecycle ? labels.lifecycle : presentation.kind === 'product' ? labels.product : labels.template}</span>
           {presentation.template?.name && (
-            <span className="truncate font-mono font-normal normal-case opacity-70">· {presentation.template.name}</span>
+            <span className={`truncate font-mono font-normal normal-case ${outboundBubble ? '' : 'opacity-70'}`}>· {presentation.template.name}</span>
           )}
         </div>
       )}
@@ -256,12 +269,12 @@ export default function MessagePresentationCard({
           </div>
         )}
         {presentation.template?.footer && (
-          <div className="border-t border-black/5 px-1 pt-2 text-[11px] text-slate-500">
+          <div className={`border-t px-1 pt-2 text-[11px] ${divider} ${metaText}`}>
             {presentation.template.footer}
           </div>
         )}
         {presentation.order && (presentation.order.reference || presentation.order.status) && (
-          <div className="flex flex-wrap gap-2 border-t border-black/5 px-1 pt-2 text-[10px] font-medium text-slate-500">
+          <div className={`flex flex-wrap gap-2 border-t px-1 pt-2 text-[10px] font-medium ${divider} ${metaText}`}>
             {presentation.order.reference && (
               <span>{presentation.order.reference.startsWith('#') ? presentation.order.reference : `#${presentation.order.reference}`}</span>
             )}
@@ -271,9 +284,14 @@ export default function MessagePresentationCard({
       </div>
 
       {presentation.actions.length > 0 && (
-        <div className="space-y-[3px] border-t border-black/5 bg-slate-50/70 p-[3px]">
+        <div className={`space-y-[3px] border-t p-[3px] ${divider} ${outboundBubble ? 'bg-black/10' : 'bg-slate-50/70'}`}>
           {presentation.actions.map((action, index) => (
-            <PresentationAction key={`${action.kind}-${action.label}-${index}`} action={action} labels={labels} />
+            <PresentationAction
+              key={`${action.kind}-${action.label}-${index}`}
+              action={action}
+              labels={labels}
+              onOutboundBubble={outboundBubble}
+            />
           ))}
         </div>
       )}

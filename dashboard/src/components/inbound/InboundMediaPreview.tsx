@@ -329,12 +329,17 @@ function ImagePreview({ media }: { media: DashboardMessageMediaImage }) {
 
   return (
     <div className="flex flex-col gap-1.5 max-w-full">
-      <div className="rounded-xl overflow-hidden bg-slate-50 border border-slate-100">
+      {/* While an image is shown the frame hugs it (self-start) instead of
+          stretching to the bubble width; the description / caption blocks
+          below keep the full bubble width. The 280px cap sits on the frame
+          (282px incl. its 1px border) as a fixed length so it also bounds the
+          frame's intrinsic width; the image only shrinks to fit (max-w-full). */}
+      <div className={`rounded-xl overflow-hidden bg-slate-50 border border-slate-100 ${url ? 'self-start max-w-[282px]' : ''}`}>
         {url ? (
           <img
             src={url}
             alt="صورة من العميل"
-            className="block max-w-[280px] max-h-[280px] object-contain bg-white"
+            className="block h-auto w-auto max-h-[280px] max-w-full object-contain bg-white"
             loading="lazy"
           />
         ) : loading ? (
@@ -737,11 +742,11 @@ export function ProtectedInboundMedia({
   }
   if (kind === 'image') {
     return (
-      <div className="min-h-24 overflow-hidden rounded-xl bg-slate-100" data-inbound-media-state="ready">
+      <div className="w-fit max-w-[280px] overflow-hidden rounded-xl bg-slate-100" data-inbound-media-state="ready">
         <img
           src={url}
           alt={alt}
-          className="block h-full max-h-72 w-full object-contain bg-white"
+          className="block h-auto w-auto max-h-[280px] max-w-full object-contain bg-white"
           onLoad={onLoad}
           onError={onDecodeError}
         />
