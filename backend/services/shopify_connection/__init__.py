@@ -21,6 +21,9 @@ Module map:
   oauth.py       callback query HMAC, authorize URL, token exchange / refresh,
                  authenticated GraphQL shop identity check
   webhooks.py    raw-body webhook HMAC and signed uninstall payload identity
+  uninstall_webhook.py
+                 per-shop app/uninstalled subscription: list, create once,
+                 read back — the readiness evidence
   models.py      Shopify-owned tables (not part of ``models.Base``)
   actor.py       DB revalidation of the tenant actor behind a JWT
   lifecycle.py   state, claim, shop lease, refresh, disconnect, uninstall,

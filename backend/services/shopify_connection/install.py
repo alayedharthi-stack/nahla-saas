@@ -3,6 +3,11 @@
 OAuth online proof and offline credentials are separate. Browser transactions
 are opaque DB rows, never Nahlah JWTs. The existing per-shop lease serializes
 all credential acquisition with connection refresh/reinstall.
+
+A flow becomes ``ready`` only after the connection is ready
+(``lifecycle.is_ready``): the offline grant is stored not ready, the shop's
+``app/uninstalled`` subscription is proven under the same lease, and only
+then are the connection promoted and the hand-off issued.
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from services.shopify_connection import lifecycle as lc
 from services.shopify_connection.crypto import TokenCipher
 from services.shopify_connection.install_admission import admitted
 from services.shopify_connection.install_models import ShopifyInstallFlow as Flow, ShopifyOwnerIdentity as Owner
-from services.shopify_connection.models import ShopifyConnection, STATUS_ACTIVE
+from services.shopify_connection.models import ShopifyConnection, STATUS_ACTIVE, STATUS_QUARANTINED
 from services.shopify_connection.oauth import OwnerGrantRejected, numeric_shop_id
 from services.shopify_connection.shop_domain import canonical_shop_domain
 
@@ -81,7 +86,9 @@ def sweep_expired(db, *, now=None, limit=100, commit=True):
                       or_(Flow.phase != "failed", Flow.created_at <= retention))
                       .order_by(Flow.expires_at).limit(limit).with_for_update(skip_locked=True)).scalars().all()
     for row in rows:
-        if row.phase in {"exchanging_online", "exchanging_offline"}:
+        # connection_id on an exchanging flow: its grant was already stored
+        # (not ready), so the exchange outcome is known, not uncertain.
+        if row.phase in {"exchanging_online", "exchanging_offline"} and row.connection_id is None:
             lc._flag_possible_retirement(db, row.shop_domain, now)
         row.phase = "failed"
         row.online_token_enc = None
@@ -230,7 +237,7 @@ async def callback(db, *, verified, browser, config, api):
             conn, _, _ = _current(db, flow, lock=True)
             if flow.owner_expires_at is None or flow.owner_expires_at <= now:
                 raise InstallRejected()
-            if conn and conn.status == STATUS_ACTIVE and flow.generation == 0:
+            if conn and lc.is_ready(db, conn) and flow.generation == 0:
                 handle = _ready(flow, conn, now)
                 lc._drop_lease(db, shop, lease)
                 db.commit()
@@ -287,12 +294,28 @@ async def callback(db, *, verified, browser, config, api):
             flow.expires_at = min(flow.expires_at, flow.owner_expires_at)
             flow.online_token_enc = cipher.encrypt(grant.access_token, _OnlineContext(flow_id, shop))
             conn, _, _ = _current(db, flow, lock=True)
-            if conn and conn.status == STATUS_ACTIVE:
+            if conn and lc.is_ready(db, conn):
                 result = ("ready", _ready(flow, conn, now))
+            elif conn and _awaits_webhook(db, conn):
+                # The verified offline grant is already stored; only its
+                # uninstall subscription is unproven. Never authorize (and so
+                # exchange) again for that: make the stored grant's
+                # registration due now and refuse this login for the moment.
+                if conn.status == STATUS_ACTIVE:
+                    lc._hold_for_webhook(conn, now, retry_after=0)
+                else:
+                    lc._request_reconcile(conn, now)
+                    conn.updated_at = now
+                lc._audit(db, tenant_id=conn.tenant_id, shop_domain=shop, action="install_first_webhook_pending",
+                          connection=conn)
+                flow.phase, flow.online_token_enc, flow.handoff_hash = "failed", None, None
+                result = ("pending", None)
             else:
                 flow.generation = conn.generation if conn else 0
                 flow.phase = "offline"
                 result = ("authorize", _authorize(config, flow, _new_state(flow)))
+            lc._drop_lease(db, shop, lease)
+            db.commit()
         else:
             if flow.shop_gid != identity.shop_gid or flow.owner_expires_at <= now:
                 raise InstallRejected()
@@ -312,24 +335,74 @@ async def callback(db, *, verified, browser, config, api):
             for key, value in lc._credential_values(grant, cipher=cipher, tenant_id=conn.tenant_id,
                                                     shop_domain=shop, generation=conn.generation, now=now).items():
                 setattr(conn, key, value)
-            conn.status = STATUS_ACTIVE
             conn.connected_at = conn.last_verified_at = conn.updated_at = now
             conn.disconnected_at = conn.disconnect_reason = None
             lc._clear_reconcile(conn)
+            # Stored, not ready: no ``active`` before the uninstall subscription is proven.
+            lc._hold_for_webhook(conn, now, retry_after=lc.EXCHANGE_LEASE_SECONDS)
             db.flush()
             if flow.generation == 0:
                 db.add(Owner(connection_id=conn.id, shop_gid=flow.shop_gid, shopify_user_id=flow.owner_id,
                              tenant_id=conn.tenant_id, user_id=user.id, created_at=now))
             lc._resolve_events(db, conn.id, "superseded", now)
             lc._audit(db, tenant_id=conn.tenant_id, shop_domain=shop, action="install_first_connected",
-                      connection=conn, actor_user_id=user.id)
-            result = ("ready", _ready(flow, conn, now))
-        lc._drop_lease(db, shop, lease)
-        db.commit()  # Tenant, user, identity, encrypted tokens and completion are atomic.
-        return result
+                      connection=conn, actor_user_id=user.id, detail={"readiness": lc.WEBHOOK_PENDING})
+            # The exchange outcome is now durable: this flow no longer marks an uncertain exchange.
+            flow.connection_id = conn.id
+            stored = (conn.id, int(conn.generation), int(conn.reconcile_request_version))
+            db.commit()  # Tenant, user, identity and encrypted tokens are atomic; the shop lease stays held.
+            uncertain = False
+            result = await _prove_and_ready(db, flow_id=flow_id, shop=shop, lease=lease, held=held,
+                                            stored=stored, access_token=grant.access_token, config=config, api=api)
     except Exception:
         _fail(db, flow_id, shop, lease, uncertain=uncertain)
         raise InstallRejected() from None
+    if result[0] == "pending":
+        raise InstallRejected("install_pending")
+    return result
+
+
+def _awaits_webhook(db, conn):
+    """Credentials stored for this generation; only the uninstall subscription is unproven."""
+    return ((conn.status == STATUS_QUARANTINED and conn.quarantine_reason == lc.WEBHOOK_PENDING)
+            or (conn.status == STATUS_ACTIVE and not lc.webhook_proven(db, conn)))
+
+
+async def _prove_and_ready(db, *, flow_id, shop, lease, held, stored, access_token, config, api):
+    """Same shop lease as the exchange: register the stored grant's
+    ``app/uninstalled`` subscription, then (one transaction, lease released)
+    record the proof, promote the connection, and only then hand out ``ready``.
+    A miss keeps the grant stored and not ready; the recovery runner retries.
+    """
+    connection_id, generation, request_version = stored
+    target = lc.webhook_target(config)
+    proof, failure = await lc.register_uninstall_webhook(db, held, api, shop_domain=shop, access_token=access_token,
+                                                         target=target)
+    now = lc.utcnow()
+    # Same lock order as the exchange: flow, shop lease, connection, identity rows.
+    flow = db.get(Flow, flow_id, with_for_update=True, populate_existing=True)
+    held_still = lc._lease_held(db, shop, lease)
+    conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
+    ready = False
+    if held_still and conn is not None and int(conn.generation) == generation:
+        lc._record_webhook_outcome(db, conn, proof, failure, target)
+        ready = proof is not None and lc._promote_if_held(db, conn, request_version=request_version, now=now)
+    current = None
+    if (ready and flow is not None and flow.phase == "exchanging_offline" and flow.expires_at > now
+            and flow.owner_expires_at is not None and flow.owner_expires_at > now):
+        try:
+            current, _, _ = _current(db, flow, lock=True)  # owner, user and tenant still valid
+        except InstallRejected:
+            current = None
+    if current is not None and current.id == connection_id:
+        result = ("ready", _ready(flow, conn, now))
+    else:
+        if flow is not None and flow.phase not in {"redeemed", "failed"}:
+            flow.phase, flow.online_token_enc, flow.handoff_hash = "failed", None, None
+        result = ("pending", None)
+    lc._drop_lease(db, shop, lease)
+    db.commit()
+    return result
 
 
 def _mfa_binding(row):
@@ -373,7 +446,7 @@ async def redeem(db, *, handle, browser, config, api, totp=None):
         db.rollback()
         raise InstallRejected()
     conn, owner, user = _current(db, flow, lock=True)
-    if not conn or conn.status != STATUS_ACTIVE or conn.generation != flow.generation:
+    if not lc.is_ready(db, conn) or conn.generation != flow.generation:
         raise InstallRejected()
     mfa_binding = _check_totp(db, user, totp, now)
     flow_id, shop, expected_gid = flow.id, flow.shop_domain, flow.shop_gid
@@ -390,7 +463,7 @@ async def redeem(db, *, handle, browser, config, api, totp=None):
             raise InstallRejected("totp_changed")
         if (flow.phase != "redeeming" or flow.expires_at <= now or flow.owner_expires_at <= now
                 or identity.shop_gid != expected_gid or identity.shop_domain != shop
-                or not conn or conn.status != STATUS_ACTIVE or conn.generation != flow.generation):
+                or not lc.is_ready(db, conn) or conn.generation != flow.generation):
             raise InstallRejected()
         flow.phase, flow.online_token_enc, flow.handoff_hash = "redeemed", None, None
         flow.expires_at = min(flow.owner_expires_at, now + timedelta(seconds=SESSION_SECONDS))
@@ -424,7 +497,7 @@ def validate_session(payload):
             if not flow or flow.phase != "redeemed" or flow.expires_at <= lc.utcnow():
                 return False
             conn, owner, user = _current(db, flow)
-            return bool(conn and conn.status == STATUS_ACTIVE and conn.generation == flow.generation
+            return bool(lc.is_ready(db, conn) and conn.generation == flow.generation
                         and payload.get("user_id") == user.id and payload.get("tenant_id") == user.tenant_id
                         and payload.get("sub") == user.email and payload.get("exp") <= int(flow.expires_at.timestamp()))
     except Exception:
