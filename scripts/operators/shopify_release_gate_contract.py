@@ -576,14 +576,47 @@ def _present(mapping: Any, fields: Tuple[str, ...]) -> bool:
     return True
 
 
+DORMANT_PRIOR_FIELDS: Tuple[str, ...] = ("rollback_mode", "source_sha", "runtime_inventory_digest",
+                                          "runtime_inventory_count", "schema_expectations_sha256")
+
+
+def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """The one earlier source the reviewed manifest names as a dormant rollback, or None.
+
+    Exact fields only: a full commit SHA, that source's runtime inventory, and
+    its S4 schema-expectations hash, which must equal this source's (the same
+    canonical seventeen-table definitions, so the earlier release accepts the
+    0124 state this release leaves)."""
+    prior = artifact.get("dormant_prior_rollback")
+    if (not isinstance(prior, dict) or set(prior) != set(DORMANT_PRIOR_FIELDS)
+            or prior.get("rollback_mode") != "pinned_prior_flags_off"
+            or not isinstance(prior.get("source_sha"), str) or not RELEASE_SHA_RE.fullmatch(prior["source_sha"])
+            or not isinstance(prior.get("runtime_inventory_digest"), str)
+            or not DIGEST_RE.fullmatch(prior["runtime_inventory_digest"])
+            or type(prior.get("runtime_inventory_count")) is not int or prior["runtime_inventory_count"] <= 0
+            or not isinstance(prior.get("schema_expectations_sha256"), str)
+            or not DIGEST_RE.fullmatch(prior["schema_expectations_sha256"])
+            or prior.get("schema_expectations_sha256") != bindings.get("schema_expectations_sha256")):
+        return None
+    return prior
+
+
 def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Optional[Mapping[str, Any]], *,
-                             release_sha: str, runtime_digest: str, runtime_count: int,
+                             phase_name: str, release_sha: str, runtime_digest: str, runtime_count: int,
                              target: Mapping[str, str], approved_at: _dt.datetime, now: _dt.datetime) -> Optional[str]:
-    """First-pilot rollback is the exact reviewed source with all flags OFF.
+    """S4 rollback is a flags-OFF S4_DORMANT deployment of a 0124-compatible source.
 
     Bind the external evidence to the source-pinned manifest and full canonical
     seventeen-table definitions. A generic S3 redeployable UUID cannot satisfy
     this contract. This is validation only; it never creates an approval.
+
+    * S4_PILOT: only the exact reviewed source of this release, with flags OFF.
+    * S4_DORMANT: that, or — so a schema-preserving release can be deployed
+      before any deployment of it exists — the single earlier source this
+      release's manifest pins (``dormant_prior_rollback``): the evidence must
+      name that full SHA (the deployment snapshot too), its pinned inventory,
+      this release's identical S4 definitions and every flag ``"false"``. An
+      older source is never accepted merely because it is redeployable.
     """
     if not isinstance(evidence, dict) or not isinstance(bindings, dict):
         return R_SCHEMA_ROLLBACK_INVALID
@@ -597,14 +630,24 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
             or not isinstance(artifact.get("flags"), dict) or set(artifact["flags"]) != set(SHOPIFY_FLAG_ENVS)
             or any(value != "false" for value in artifact["flags"].values())):
         return R_SCHEMA_ROLLBACK_INVALID
+    rollback_source = evidence.get("source_sha")
+    if rollback_source == release_sha:
+        inventory_digest, inventory_count = runtime_digest, runtime_count
+    else:
+        prior = _pinned_dormant_prior(artifact, bindings) if phase_name == "S4_DORMANT" else None
+        if (prior is None or rollback_source != prior["source_sha"]
+                or evidence.get("flags") != {name: "false" for name in SHOPIFY_FLAG_ENVS}):
+            return R_SCHEMA_ROLLBACK_INVALID
+        inventory_digest, inventory_count = prior["runtime_inventory_digest"], prior["runtime_inventory_count"]
     if (evidence.get("record_version") != 1 or evidence.get("phase") != "S4_DORMANT"
-            or evidence.get("source_sha") != release_sha or snapshot.get("source_sha") != release_sha
+            or snapshot.get("source_sha") != rollback_source
             or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
             or evidence.get("target") != dict(target)
             or evidence.get("database_heads") != ["0111", "0113", "0124"]
             or evidence.get("table_names") != sorted(INSTALL_TABLES)
-            or evidence.get("runtime_inventory_digest") != runtime_digest
-            or type(evidence.get("runtime_inventory_count")) is not int or evidence.get("runtime_inventory_count") != runtime_count
+            or evidence.get("runtime_inventory_digest") != inventory_digest
+            or type(evidence.get("runtime_inventory_count")) is not int
+            or evidence.get("runtime_inventory_count") != inventory_count
             or not _present(evidence, ("independent_review_ref",))):
         return R_SCHEMA_ROLLBACK_INVALID
     for name in ("artifact_sha256", "schema_expectations_sha256"):
@@ -675,7 +718,7 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
         return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
     if phase_name in POST_INSTALL_PHASES:
         reason = evaluate_schema_rollback(record.get("schema_rollback"), snapshot, rollback_bindings,
-                                          release_sha=release_sha, runtime_digest=runtime_digest,
+                                          phase_name=phase_name, release_sha=release_sha, runtime_digest=runtime_digest,
                                           runtime_count=runtime_count, target=target, approved_at=approved_at, now=now)
         if reason:
             return FAIL, reason, detail

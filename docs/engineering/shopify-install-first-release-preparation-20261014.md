@@ -52,6 +52,18 @@ consumed by both runtime approval validation and the offline renderer. For the
 first pilot, rollback uses this exact reviewed source with flags OFF; an older
 source is not accepted merely because its deployment is redeployable.
 
+One exception, S4_DORMANT only: a schema-preserving release cannot name a
+deployment of itself before its first deployment exists, so its manifest may
+pin exactly one earlier source (`dormant_prior_rollback`: full commit SHA, that
+source's runtime inventory digest/count, and an S4 schema-expectations hash
+that must equal this source's). Evidence for that rollback must name the same
+full SHA in the deployment snapshot, its pinned inventory, every Shopify flag
+`"false"`, and otherwise meet every S4 requirement below. S4_PILOT still
+requires a dormant rollback of the same source as the candidate, so a pilot is
+possible only after the candidate's own dormant deployment. This source pins
+the deployed baseline `59216725836bdb0d104e5b8f5107369999efad63` (157 files,
+inventory `f6cc722d…`, identical S4 definitions `68082c65…`).
+
 S4 external evidence must name S4_DORMANT, the exact source and inventory,
 0111/0113/0124, all seventeen table names, the full canonical schema file hash,
 the pinned manifest hash, the same target and deployment ID, and independent

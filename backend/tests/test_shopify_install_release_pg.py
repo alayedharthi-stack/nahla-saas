@@ -93,3 +93,37 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
                            check="version_rows", reason=k.R_VERSION_ROWS_UNKNOWN)
     finally:
         h._drop(db)
+
+
+def test_first_dormant_deploy_runs_with_the_pinned_prior_rollback_and_pilot_still_refuses_it(tmp_path):
+    db = h._fresh_db("install_prior")
+    try:
+        h._build(db, "0124")
+        root = harness.build_root(tmp_path / "root")
+        baseline = topo.schema_snapshot(h._loopback_url(db))
+        prior = harness.prior_rollback_approval_for(root, "S4_DORMANT", h._target(db))
+        record = json.loads(prior.read_text(encoding="utf-8"))
+        assert record["schema_rollback"]["source_sha"] == record["deployment_rollback_snapshot"]["source_sha"] \
+            == "59216725836bdb0d104e5b8f5107369999efad63" != record["release_sha"]
+        h._assert_pass(root, "S4_DORMANT", db, "first dormant deploy, pinned prior dormant rollback", approval=prior)
+        deadline = datetime.now(timezone.utc) + timedelta(days=1)
+        env = {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "true",
+               "SHOPIFY_INSTALL_PILOT_ADMISSION": json.dumps({k.PILOT_SHOP: {
+                   "sha256": "a" * 64, "expires_at": deadline.strftime("%Y-%m-%dT%H:%M:%SZ")}})}
+        pilot = harness.prior_rollback_approval_for(root, "S4_PILOT", h._target(db))
+        out = h._assert_fail(root, "S4_PILOT", db, "pilot never rolls back to another source", approval=pilot,
+                             extra_env=env, check="approval", reason=k.R_SCHEMA_ROLLBACK_INVALID)
+        assert "connect" not in harness.checks(out)
+        flags_on = harness.prior_rollback_record(root, json.loads(harness.approval_for(
+            root, "S4_DORMANT", h._target(db)).read_text(encoding="utf-8")))
+        flags_on["schema_rollback"]["flags"]["NAHLA_SHOPIFY_CONNECTION_ENABLED"] = "true"
+        path = harness.approval_file(root.parent / "invalid", flags_on, "prior_flags_on.json")
+        out = h._assert_fail(root, "S4_DORMANT", db, "prior rollback with a flag ON refused before DB", approval=path,
+                             check="approval", reason=k.R_SCHEMA_ROLLBACK_INVALID)
+        assert "connect" not in harness.checks(out)
+        h._assert_fail(root, "S4_DORMANT", db, "runtime flags stay OFF for the dormant release", approval=prior,
+                       extra_env={"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true"},
+                       check="shopify_flags", reason=k.R_FLAG_ENABLED)
+        assert topo.schema_diff(topo.schema_snapshot(h._loopback_url(db)), baseline) == []
+    finally:
+        h._drop(db)
