@@ -2294,9 +2294,11 @@ export default function Conversations() {
               )}
             </div>
 
-            {/* Composer — pinned bottom on mobile */}
+            {/* Composer — pinned bottom on mobile. In the mobile fullscreen chat the
+                root above already pads the bottom safe-area inset; padding it here
+                too left a second inset of blank space under the composer. */}
             {!selected.synthetic && (
-            <div className="shrink-0 bg-white border-t border-slate-100 pb-safe-bottom">
+            <div className={`shrink-0 bg-white border-t border-slate-100 ${isMobileChatOpen ? '' : 'pb-safe-bottom'}`}>
             {/* Reply bar — mobile: زر الذكاء الأساسي فقط (باقي الإجراءات في ⋮) */}
             <div className="sm:hidden flex items-center gap-2 px-3 py-2">
               {!_isBlocked(selected) &&
