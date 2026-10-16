@@ -1,0 +1,43 @@
+name: Shopify install-first frontend
+# Dashboard-only proof of the dormant install-first UI: the deployed build
+# (flags OFF), its source regressions, and a flags-ON build driven by real
+# Chromium against a synthetic local server. No backend, secrets or deploy.
+on:
+  pull_request:
+    paths:
+      - dashboard/**
+      - .github/workflows/shopify-install-first-frontend.yml
+permissions:
+  contents: read
+jobs:
+  install-first-frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build as deployed (install-first flags OFF)
+        run: npm run build
+      - name: Install-first source regressions
+        run: |
+          npm run check:shopify-connection-ui
+          npm run check:shopify-install-first
+          npm run check:shopify-install-sentry
+      - name: Build with connection and install-first UI flags ON
+        env:
+          VITE_SHOPIFY_CONNECTION_UI: 'true'
+          VITE_SHOPIFY_INSTALL_FIRST_ENABLED: 'true'
+        run: npm run build
+      - name: Real Chromium install navigation and cross-tab session loop
+        run: |
+          npx playwright install --with-deps chromium
+          npm run check:shopify-install-browser

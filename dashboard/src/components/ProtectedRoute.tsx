@@ -12,6 +12,7 @@ import {
   isImpersonatingSupport,
   isPlatformStaffRole,
   logout,
+  shopifyReauthPath,
 } from '../auth'
 import type { ReactNode } from 'react'
 
@@ -78,6 +79,11 @@ export default function ProtectedRoute({ children }: { children: ReactNode }) {
   }
 
   if (bootState === 'denied') {
+    const reauth = shopifyReauthPath()
+    if (reauth) {
+      window.location.replace(reauth)
+      return null
+    }
     logout()
     return <Navigate to="/landing" replace />
   }
