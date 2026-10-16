@@ -63,6 +63,7 @@ from services.shopify_connection.webhooks import SignedShopIdentity  # noqa: E40
 from services.shopify_privacy import audit, cleanup, store, worker  # noqa: E402
 from services.shopify_privacy.config import AUDIT_VERSION, TOPIC_PATHS  # noqa: E402
 from backend.tests import _alembic_topology_probe as topo  # noqa: E402
+from backend.tests._shopify_webhook_fake import FakeWebhookSubscriptions  # noqa: E402
 from services.shopify_privacy.models import (  # noqa: E402
     MAX_DELIVERY_ROWS_PER_REQUEST,
     MAX_EVENTS_PER_REQUEST,
@@ -221,13 +222,14 @@ class Merchant:
 
 # ── Fake Shopify (documented token behaviour; no network) ─────────────────────
 
-class FakeShopify:
+class FakeShopify(FakeWebhookSubscriptions):
     def __init__(self):
         self.lock = threading.Lock()
         self.codes = {}
         self.valid_access = {}
         self.valid_refresh = {}
         self.calls = []
+        self._webhook_state()
 
     def issue_code(self, shop):
         code = secrets.token_hex(16)
@@ -248,6 +250,7 @@ class FakeShopify:
             for table in (self.valid_access, self.valid_refresh):
                 for token in [t for t, s in table.items() if s == shop]:
                     table.pop(token)
+        self.uninstall_webhooks(shop)
 
     async def exchange_code(self, *, shop_domain, code):
         with self.lock:

@@ -219,11 +219,13 @@ def _encrypt(purpose, value, *, tenant_id, shop, generation):
 
 def connect(pg, merchant: Merchant, fake: FakeCatalogShop, *, scopes="read_products", generation=1) -> int:
     """A synthetic active connection as the foundation would have stored it
-    (claim is proven by the foundation's own suite; here only the state)."""
+    (claim is proven by the foundation's own suite; here only the state),
+    including the readiness evidence ``active`` requires: the generation's
+    verified ``app/uninstalled`` subscription."""
     now = datetime.now(timezone.utc)
     access, refresh = fake.issue_token(), f"shprt_{secrets.token_hex(16)}"
     fake.refresh_tokens = getattr(fake, "refresh_tokens", set()) | {refresh}
-    return _sql(pg, (
+    connection_id = _sql(pg, (
         "INSERT INTO shopify_connections (tenant_id, shop_domain, shop_gid, status, generation, credential_version,"
         " access_token_enc, access_token_expires_at, refresh_token_enc, refresh_token_expires_at, granted_scopes,"
         " connected_at) VALUES (:t, :d, :g, 'active', :gen, 1, :a, :ae, :r, :re, :s, :now) RETURNING id"),
@@ -232,6 +234,10 @@ def connect(pg, merchant: Merchant, fake: FakeCatalogShop, *, scopes="read_produ
                    generation=generation), ae=now + timedelta(hours=1),
         r=_encrypt(crypto.PURPOSE_REFRESH_TOKEN, refresh, tenant_id=merchant.tenant_id, shop=fake.shop_domain,
                    generation=generation), re=now + timedelta(days=30), s=scopes, now=now)[0]["id"]
+    _sql(pg, "INSERT INTO shopify_connection_audit (tenant_id, connection_id, shop_domain, action, generation)"
+             " VALUES (:t, :c, :d, :a, :gen)", t=merchant.tenant_id, c=connection_id, d=fake.shop_domain,
+         a=lifecycle.WEBHOOK_VERIFIED, gen=generation)
+    return connection_id
 
 
 def rotate_credential(pg, connection_id: int, fake: FakeCatalogShop, *, retire_old: bool = False) -> str:
@@ -1153,6 +1159,10 @@ def test_reinstall_mid_import_fences_the_old_generation(pg, monkeypatch):
                         generation=2),
              r=_encrypt(crypto.PURPOSE_REFRESH_TOKEN, "shprt_" + secrets.token_hex(8), tenant_id=merchant.tenant_id,
                         shop=fake.shop_domain, generation=2), i=cid)
+        # A reinstall is active only with its own generation's uninstall-subscription proof.
+        _sql(pg, "INSERT INTO shopify_connection_audit (tenant_id, connection_id, shop_domain, action, generation)"
+                 " VALUES (:t, :c, :d, :a, 2)", t=merchant.tenant_id, c=cid, d=fake.shop_domain,
+             a=lifecycle.WEBHOOK_VERIFIED)
 
     fake.calls.clear()
     fake.hooks["NahlaCatalogProducts"] = _on_second_page(reinstall)

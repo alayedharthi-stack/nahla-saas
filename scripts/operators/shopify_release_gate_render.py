@@ -244,7 +244,8 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
     status, reason, detail = k.evaluate_approval(
         loaded["record"], phase_name=phase, release_sha=release_sha, runtime_digest=digest, runtime_count=count,
         target=bound_target, backup_service=backup_service, backup_volume=backup_volume,
-        now=now or _dt.datetime.now(_dt.timezone.utc))
+        now=now or _dt.datetime.now(_dt.timezone.utc),
+        rollback_bindings=gate.schema_rollback_bindings(root) if phase in k.POST_INSTALL_PHASES else None)
     return {"phase": phase, "status": status, "reason": reason, "inventory_count": count, "inventory_digest": digest,
             "approval_sha256": loaded["sha256"], "approval_b64": loaded["b64"], "detail": detail}
 
@@ -308,12 +309,19 @@ def decode_command(command: str) -> str:
     return base64.b64decode(command[start:end]).decode("utf-8")
 
 
-def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] = None, root: Optional[Path] = None) -> Dict[str, Any]:
+def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] = None, root: Optional[Path] = None,
+             phase_name: str = "S3") -> Dict[str, Any]:
     """Canonical schema expectations read from a disposable S3 database built at ``source_sha`` (read-only)."""
     # The authority alone is not the driver's target. Refuse inherited libpq
     # indirection before parsing, then use the existing strict driver-aware
     # validator and a fully explicit URL. Neither step opens a connection.
     import os
+
+    phase_def = k.phase(phase_name)
+    if phase_def is None or phase_name not in {"S3", "S4_DORMANT"}:
+        raise RenderRefusal("snapshot_phase_invalid")
+    table_names = phase_def["tables"]
+    expectations_key = phase_def.get("expectations_key", "shopify_s3")
 
     environment = dict(os.environ)
     if any(str(environment.get(name) or "").strip() for name in k.LIBPQ_TARGET_ENV_VARS):
@@ -336,7 +344,8 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         try:
             with engine.connect().execution_options(postgresql_readonly=True) as conn:
                 retained = gate.observe_retained(conn)
-                footprint = gate.observe_footprint(conn, k.DEPLOY_PHASES["S3"])
+                footprint = gate.observe_footprint(conn, phase_def)
+                rows = gate.read_version_rows(conn)
                 server_version = str(gate._scalar(conn, "SHOW server_version"))
                 conn.rollback()
         finally:
@@ -344,15 +353,15 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
     except Exception as exc:  # noqa: BLE001 - the exception type only, never its body
         raise RenderRefusal("snapshot_" + "".join(c for c in type(exc).__name__.lower() if c.isalnum() or c == "_")) from exc
     missing_retained = sorted(set(k.RETAINED_FULL_DEFINITION_TABLES) - set(retained["tables"]))
-    missing_shopify = sorted(set(k.SHOPIFY_TABLES) - set(footprint["definitions"]))
+    missing_shopify = sorted(set(table_names) - set(footprint["definitions"]))
     # every sequence observed must be a public sequence owned by an expected public table (the tables that
     # carry a serial key; a table keyed otherwise owns none)
     sequences_ok = bool(footprint["sequences"]) and all(
-        name.startswith("public.") and owner and owner.startswith("public.") and owner.split(".", 1)[1] in k.SHOPIFY_TABLES and column
+        name.startswith("public.") and owner and owner.startswith("public.") and owner.split(".", 1)[1] in table_names and column
         for name, owner, column in footprint["sequences"])
     if (missing_retained or retained["nonce"] is None or set(retained["pk_types"]) != set(k.PK_TYPE_PINS)
             or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]
-            or not sequences_ok):
+            or not sequences_ok or rows is None or set(rows) != phase_def["rows"] or len(rows) != len(phase_def["rows"])):
         raise RenderRefusal("database_is_not_a_complete_s3_build")
     return k.normalize({
         "expectations_version": k.EXPECTATIONS_VERSION,
@@ -362,7 +371,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
         "server_version": server_version,
         "retained": retained,
-        "shopify_s3": {"tables": footprint["definitions"], "sequences": footprint["sequences"]},
+        expectations_key: {"tables": footprint["definitions"], "sequences": footprint["sequences"]},
     })
 
 
@@ -399,6 +408,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     snap.add_argument("--database-url", required=True)
     snap.add_argument("--out", required=True)
     snap.add_argument("--source-sha", required=True)
+    snap.add_argument("--phase", default="S3")
     snap.add_argument("--root", default=str(_REPO_ROOT))
     chk = sub.add_parser("approval-check", add_help=False)
     chk.add_argument("--root", default=str(_REPO_ROOT))
@@ -434,7 +444,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "snapshot":
             if not k.RELEASE_SHA_RE.match(args.source_sha):
                 raise RenderRefusal("source_sha_malformed")
-            payload = snapshot(args.database_url, source_sha=args.source_sha, root=Path(args.root))
+            payload = snapshot(args.database_url, source_sha=args.source_sha, root=Path(args.root), phase_name=args.phase)
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=1, sort_keys=True)
                 handle.write("\n")

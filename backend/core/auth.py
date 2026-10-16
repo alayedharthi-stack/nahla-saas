@@ -232,6 +232,10 @@ def decode_token_for_refresh(token: str) -> Optional[Dict[str, Any]]:
         return None
 
     token_type = payload.get("type")
+    # Shopify sessions must reauthenticate with Shopify. Never strip their
+    # provenance or extend them through the generic email-based refresh path.
+    if payload.get("auth_source") == "shopify" or "shopify_session" in payload:
+        return None
     if token_type in ("password_reset", "verify_email", "invite"):
         return None
 
@@ -273,6 +277,10 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
         return payload
     if is_jti_revoked(payload.get("jti")):
         return None
+    if payload.get("auth_source") == "shopify" or "shopify_session" in payload:
+        from services.shopify_connection.install import validate_session
+        if payload.get("auth_source") != "shopify" or not validate_session(payload):
+            return None
     return payload
 
 
@@ -285,7 +293,7 @@ def get_current_user(
     if not creds:
         raise HTTPException(status_code=401, detail="Authentication required")
     payload = decode_token(creds.credentials)
-    if not payload:
+    if not payload or payload.get("type") is not None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return payload
 

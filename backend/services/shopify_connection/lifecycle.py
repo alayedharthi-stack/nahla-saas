@@ -32,6 +32,21 @@ Ownership
   reinstall; another tenant is refused (a transfer is a future, separately
   audited operation and does not exist here).
 
+Readiness (``app/uninstalled`` subscription)
+────────────────────────────────────────────
+The legacy install flow cannot use app-scoped (TOML) webhook subscriptions,
+so every claim — legacy completion, install-first, reinstall — first stores
+the verified grant encrypted but **not ready** (``quarantined`` /
+``WEBHOOK_PENDING``: kept, never used), then, under the same shop lease,
+lists / creates once / reads back the shop's exact subscription
+(``uninstall_webhook``), and only in the lease's final transaction records
+the proof (audit ``WEBHOOK_VERIFIED`` for that connection generation) and
+sets ``active``. ``is_ready`` (``active`` **and** proven for the current
+generation) is the single predicate for credential use, install-first
+hand-offs and sessions; a quarantine is lifted only with that proof. Every
+miss is retried by the recovery runner with the stored grant (never a new
+code exchange); an ``active`` row without proof is held and registered.
+
 Uninstall
 ─────────
 The webhook signature covers the raw body only. ``record_uninstall``
@@ -59,7 +74,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from services.shopify_connection import crypto
+from services.shopify_connection import crypto, uninstall_webhook
 from services.shopify_connection.actor import VerifiedActor, actor_still_valid, recheck_actor_locked
 from services.shopify_connection.config import DASHBOARD_COMPLETE_PATH, ShopifyConfig
 from services.shopify_connection.models import (
@@ -111,6 +126,14 @@ WEBHOOK_LOCK_TIMEOUT = "2000ms"
 # not stored: Shopify may have retired the stored pair. Only a successful
 # forced refresh clears it.
 POSSIBLE_RETIRED = "possible_retired_credential"
+# Readiness gate. A verified grant is stored first in this non-ready state
+# (credentials kept, never used), and becomes ``active`` only together with
+# the evidence that this shop's exact ``app/uninstalled`` subscription was
+# read back for the same connection generation (an audit row with
+# ``WEBHOOK_VERIFIED``; a reinstall's new generation needs its own).
+WEBHOOK_PENDING = "uninstall_webhook_pending"
+WEBHOOK_VERIFIED = "uninstall_webhook_verified"
+WEBHOOK_FAILED = "uninstall_webhook_unverified"
 
 _STATE_DOMAIN = b"nahla.shopify.oauth_state:v1:"
 _HANDLE_DOMAIN = b"nahla.shopify.completion_handle:v1:"
@@ -139,12 +162,16 @@ C_IDENTITY_CONFLICT = "identity_conflict"
 C_NOT_FOUND = "not_found"
 C_UNAVAILABLE = "unavailable"
 C_ERROR = "error"
+# The grant is stored (not ready); the uninstall subscription is retried by
+# the recovery runner. Never "connected".
+C_WEBHOOK_PENDING = "uninstall_webhook_pending"
 
 RESULT_CODES = frozenset({
     C_CONNECTED, C_SHOP_UNAVAILABLE, C_TOO_MANY_PENDING, C_INVALID_STATE, C_REPLAYED, C_EXPIRED,
     C_SHOP_MISMATCH, C_CALLBACK_MISMATCH, C_ACTOR_REVOKED, C_SUPERSEDED, C_INVALID_COMPLETION,
     C_SESSION_MISMATCH, C_STATE_UNREADABLE, C_EXCHANGE_IN_PROGRESS, C_EXCHANGE_FAILED, C_SCOPE_INVALID,
     C_IDENTITY_UNVERIFIED, C_IDENTITY_MISMATCH, C_IDENTITY_CONFLICT, C_NOT_FOUND, C_UNAVAILABLE, C_ERROR,
+    C_WEBHOOK_PENDING,
 })
 
 _HTTP_STATUS = {
@@ -153,6 +180,7 @@ _HTTP_STATUS = {
     C_SUPERSEDED: 409, C_INVALID_COMPLETION: 400, C_SESSION_MISMATCH: 403, C_STATE_UNREADABLE: 400,
     C_EXCHANGE_IN_PROGRESS: 409, C_EXCHANGE_FAILED: 502, C_SCOPE_INVALID: 422, C_IDENTITY_UNVERIFIED: 502,
     C_IDENTITY_MISMATCH: 422, C_IDENTITY_CONFLICT: 409, C_NOT_FOUND: 404, C_UNAVAILABLE: 503, C_ERROR: 500,
+    C_WEBHOOK_PENDING: 503,
 }
 
 
@@ -339,6 +367,104 @@ def _flag_possible_retirement(db: Session, shop_domain: str, now: datetime) -> N
     conn.updated_at = now
     _audit(db, tenant_id=conn.tenant_id, shop_domain=shop_domain, action="possible_credential_retirement",
            connection=conn)
+
+
+# ── Readiness gate: the shop's app/uninstalled subscription ──────────────────
+
+def webhook_proven(db: Session, conn: ShopifyConnection) -> bool:
+    """Evidence that *this* connection generation has an exact, read-back
+    ``app/uninstalled`` subscription. Proof of an earlier generation (before a
+    reinstall or tombstone) never counts."""
+    return db.scalar(
+        select(func.count()).select_from(ShopifyConnectionAudit).where(
+            ShopifyConnectionAudit.tenant_id == conn.tenant_id,
+            ShopifyConnectionAudit.connection_id == conn.id,
+            ShopifyConnectionAudit.shop_domain == conn.shop_domain,
+            ShopifyConnectionAudit.action == WEBHOOK_VERIFIED,
+            ShopifyConnectionAudit.generation == conn.generation,
+        )
+    ) > 0
+
+
+def is_ready(db: Session, conn: Optional[ShopifyConnection]) -> bool:
+    """The single readiness predicate: ``active`` **and** proven for its generation."""
+    return conn is not None and conn.status == STATUS_ACTIVE and webhook_proven(db, conn)
+
+
+def webhook_target(config: Optional[ShopifyConfig]) -> Optional[Tuple[str, str]]:
+    """(callback URI, Admin API version) for registration, from the validated configuration."""
+    if config is None:
+        return None
+    return uninstall_webhook.callback_uri(config.redirect_uri), config.api_version
+
+
+def _hold_for_webhook(conn: ShopifyConnection, now: datetime, *, retry_after: int) -> None:
+    """Not ready, credentials kept and never used: quarantined until the
+    subscription is proven. The durable retry becomes due once the in-line
+    attempt's lease could have expired. Caller holds the row lock and commits."""
+    conn.status = STATUS_QUARANTINED
+    conn.quarantined_at = now
+    conn.quarantine_reason = WEBHOOK_PENDING
+    conn.revalidation_requested_at = None
+    _request_reconcile(conn, now)
+    conn.reconcile_next_at = now + timedelta(seconds=retry_after)
+    conn.updated_at = now
+
+
+async def register_uninstall_webhook(
+    db: Session, held: _HeldLease, api: ShopifyApi, *, shop_domain: str, access_token: str,
+    target: Optional[Tuple[str, str]],
+) -> Tuple[Optional[uninstall_webhook.WebhookProof], Optional[str]]:
+    """One bounded attempt under the held shop lease (between transactions):
+    (proof, None) or (None, failure code). Never raises; writes nothing."""
+    if target is None:
+        return None, "configuration_unavailable"
+    try:
+        proof = await uninstall_webhook.ensure(
+            lambda call: _guarded_call(db, held, call), api,
+            shop_domain=shop_domain, access_token=access_token, uri=target[0])
+        return proof, None
+    except _LeaseLost:
+        return None, "lease_lost"
+    except (ShopifyApiError, uninstall_webhook.RegistrationFailed) as exc:
+        logger.warning("[SHOPIFY_CONNECTION] uninstall webhook unverified code=%s", exc.code)
+        return None, exc.code
+    except Exception as exc:  # noqa: BLE001 — logged; the grant stays stored and not ready
+        logger.error("[SHOPIFY_CONNECTION] uninstall webhook attempt failed kind=%s", type(exc).__name__)
+        return None, C_ERROR
+    finally:
+        try:
+            db.rollback()
+        except Exception as exc:  # noqa: BLE001 — logged; the caller's next transaction re-checks everything
+            logger.warning("[SHOPIFY_CONNECTION] rollback after webhook attempt failed kind=%s", type(exc).__name__)
+
+
+def _record_webhook_outcome(db: Session, conn: ShopifyConnection, proof, failure: Optional[str],
+                            target: Optional[Tuple[str, str]]) -> None:
+    """Proof (or the failure) for the connection's *current* generation.
+    Caller has verified that generation under the row lock and commits."""
+    if proof is not None:
+        _audit(db, tenant_id=conn.tenant_id, shop_domain=conn.shop_domain, action=WEBHOOK_VERIFIED,
+               connection=conn, detail=proof.detail(target[1] if target else ""))
+    else:
+        _audit(db, tenant_id=conn.tenant_id, shop_domain=conn.shop_domain, action=WEBHOOK_FAILED,
+               connection=conn, detail={"code": failure or C_ERROR})
+
+
+def _promote_if_held(db: Session, conn: ShopifyConnection, *, request_version: int, now: datetime) -> bool:
+    """``active`` only from this module's own non-ready hold, only with proof
+    for the current generation, and only when no reconciliation was requested
+    meanwhile (an uninstall delivery or a possible retirement needs its own
+    probe). Caller holds the row lock and commits."""
+    if (conn.status != STATUS_QUARANTINED or conn.quarantine_reason != WEBHOOK_PENDING
+            or int(conn.reconcile_request_version or 0) != int(request_version)
+            or not webhook_proven(db, conn)):
+        return False
+    conn.status = STATUS_ACTIVE
+    _clear_reconcile(conn)
+    conn.last_verified_at = now
+    conn.updated_at = now
+    return True
 
 
 # ── Authorization start ───────────────────────────────────────────────────────
@@ -637,8 +763,9 @@ async def complete_authorization(
         raise ConnectionRefused(C_IDENTITY_MISMATCH)
 
     try:
-        return _claim(db, actor=actor, state_id=state_id, shop_domain=shop, lease=lease, identity=identity,
-                      grant=grant, generation_at_start=generation_at_start, cipher=cipher, now=now or utcnow())
+        connection_id, generation, request_version = _claim(
+            db, actor=actor, state_id=state_id, shop_domain=shop, lease=lease, identity=identity, grant=grant,
+            generation_at_start=generation_at_start, cipher=cipher, now=now or utcnow())
     except ConnectionRefused as exc:
         _finish_failed_exchange(db, state_id, shop, lease, exc.code, possible_grant=True)
         raise
@@ -649,6 +776,31 @@ async def complete_authorization(
         out = C_SHOP_UNAVAILABLE if winner is not None and winner.tenant_id != actor.tenant_id else C_SUPERSEDED
         _finish_failed_exchange(db, state_id, shop, lease, out, possible_grant=True)
         raise ConnectionRefused(out) from None
+    # The grant is stored (encrypted, not ready) and the code is spent: from
+    # here nothing is exchanged again. Still under the same shop lease, prove
+    # the shop's uninstall subscription, then promote in the lease's final
+    # transaction. Any miss leaves the durable retry to the recovery runner.
+    target = webhook_target(config)
+    proof, failure = await register_uninstall_webhook(db, held, api, shop_domain=shop,
+                                                      access_token=grant.access_token, target=target)
+    grant = None
+    current = now or utcnow()
+    held_still = _lease_held(db, shop, lease)
+    conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
+    ready = False
+    same_generation = conn is not None and int(conn.generation) == generation
+    if held_still and same_generation:
+        _record_webhook_outcome(db, conn, proof, failure, target)
+        ready = proof is not None and _promote_if_held(db, conn, request_version=request_version, now=current)
+    _drop_lease(db, shop, lease)
+    db.commit()
+    if not ready:
+        logger.warning("[SHOPIFY_CONNECTION] claim not ready tenant=%s code=%s", actor.tenant_id,
+                       failure or ("lease_lost" if not held_still else "superseded"))
+        raise ConnectionRefused(C_WEBHOOK_PENDING if same_generation else C_SUPERSEDED)
+    logger.info("[SHOPIFY_CONNECTION] ready tenant=%s connection=%s generation=%s",
+                actor.tenant_id, conn.id, conn.generation)
+    return summarize(conn)
 
 
 def _claim(
@@ -663,7 +815,10 @@ def _claim(
     generation_at_start: int,
     cipher: crypto.TokenCipher,
     now: datetime,
-) -> Dict[str, Any]:
+) -> Tuple[int, int, int]:
+    """Store the verified grant **not ready** (see ``_hold_for_webhook``) and
+    complete the state; the shop lease stays held. Returns (connection id,
+    generation, reconciliation request version) for the promotion fence."""
     if not _lease_held(db, shop_domain, lease):
         # The lease went stale and another exchange took it over; its result
         # retired ours, so nothing from this exchange may be stored.
@@ -692,10 +847,10 @@ def _claim(
         for key, value in _credential_values(grant, cipher=cipher, tenant_id=actor.tenant_id,
                                              shop_domain=shop_domain, generation=new_generation, now=now).items():
             setattr(conn, key, value)
-        conn.status = STATUS_ACTIVE
         conn.generation = new_generation
         conn.credential_version = int(conn.credential_version) + 1
         _clear_reconcile(conn)
+        _hold_for_webhook(conn, now, retry_after=EXCHANGE_LEASE_SECONDS)
         conn.disconnected_at = None
         conn.disconnect_reason = None
         conn.connected_by_user_id = actor.user_id
@@ -723,6 +878,7 @@ def _claim(
             **_credential_values(grant, cipher=cipher, tenant_id=actor.tenant_id, shop_domain=shop_domain,
                                  generation=1, now=now),
         )
+        _hold_for_webhook(conn, now, retry_after=EXCHANGE_LEASE_SECONDS)
         db.add(conn)
         db.flush()
         action = "connected"
@@ -732,13 +888,13 @@ def _claim(
         raise ConnectionRefused(C_SUPERSEDED)
     state.status = STATE_COMPLETED
     state.completed_at = now
-    _drop_lease(db, shop_domain, lease)
+    # Ownership and the encrypted grant are recorded; readiness is not.
     _audit(db, tenant_id=actor.tenant_id, shop_domain=shop_domain, action=action, connection=conn,
-           actor_user_id=actor.user_id, detail={"scopes": sorted(grant.scopes)})
+           actor_user_id=actor.user_id, detail={"scopes": sorted(grant.scopes), "readiness": WEBHOOK_PENDING})
     db.commit()
-    logger.info("[SHOPIFY_CONNECTION] %s tenant=%s connection=%s generation=%s",
+    logger.info("[SHOPIFY_CONNECTION] %s (not ready) tenant=%s connection=%s generation=%s",
                 action, actor.tenant_id, conn.id, conn.generation)
-    return summarize(conn)
+    return int(conn.id), int(conn.generation), int(conn.reconcile_request_version)
 
 
 # ── Tombstones, events, states, reconcile schedule ────────────────────────────
@@ -1116,11 +1272,19 @@ async def reconcile(
     cipher: crypto.TokenCipher,
     now: Optional[datetime] = None,
     reconcile_lease: Optional[str] = None,
+    config: Optional[ShopifyConfig] = None,
 ) -> str:
     """Resolve a quarantine / revalidation with Shopify's own answer.
 
     retained | uninstalled | reauth_required | identity_mismatch | deferred | superseded | nothing_to_do |
-    not_found
+    not_found | webhook_pending
+
+    Readiness: a credential proven alive becomes ``active`` only with proof
+    of this generation's ``app/uninstalled`` subscription. When it is missing
+    (a hold after install, a reinstall, or an ``active`` row from before this
+    gate, which is first moved back to the hold), one bounded registration
+    attempt runs under the shop lease with the probed token (needs *config*);
+    otherwise the result is ``webhook_pending`` and the runner backs off.
 
     A normally expired access token is refreshed first (a successful refresh
     is itself evidence the install is alive); only a credential Shopify
@@ -1143,10 +1307,19 @@ async def reconcile(
     if conn is None:
         db.rollback()
         return "not_found"
+    unproven_active = conn.status == STATUS_ACTIVE and not webhook_proven(db, conn)
     if not (conn.status == STATUS_QUARANTINED
-            or (conn.status == STATUS_ACTIVE and conn.revalidation_requested_at is not None)):
+            or (conn.status == STATUS_ACTIVE and (conn.revalidation_requested_at is not None or unproven_active))):
         db.rollback()
         return "nothing_to_do"
+    if unproven_active:
+        held_back = _hold_unproven(db, connection_id, int(conn.generation), reconcile_lease, current)
+        if held_back != "held":
+            return held_back
+        conn = db.get(ShopifyConnection, connection_id, populate_existing=True)
+        if conn is None:
+            db.rollback()
+            return "not_found"
     generation, version = int(conn.generation), int(conn.credential_version)
     request_version = int(conn.reconcile_request_version or 0)
     force_refresh = conn.status == STATUS_QUARANTINED and conn.quarantine_reason == POSSIBLE_RETIRED
@@ -1188,11 +1361,75 @@ async def reconcile(
             return _cas_tombstone(db, connection_id, version, STATUS_UNINSTALLED, "uninstalled", **fence)
         logger.warning("[SHOPIFY_CONNECTION] reconcile deferred connection=%s code=%s", connection_id, exc.code)
         return "deferred"
-    token = None
     if identity.shop_gid != shop_gid or identity.shop_domain != shop:
+        token = None
         result = _cas_tombstone(db, connection_id, version, STATUS_REAUTH_REQUIRED, "identity_mismatch", **fence)
         return "identity_mismatch" if result != "superseded" else result
+    conn = db.get(ShopifyConnection, connection_id, populate_existing=True)
+    unproven = conn is not None and int(conn.generation) == generation and not webhook_proven(db, conn)
+    db.rollback()
+    if unproven:
+        # Shopify just accepted this token for this shop: register with it.
+        await _register_in_reconcile(db, connection_id=connection_id, tenant_id=int(tenant_id), shop=shop,
+                                     generation=generation, token=token, api=api, target=webhook_target(config),
+                                     reconcile_lease=reconcile_lease, now=current)
+    token = None
     return _cas_retain(db, connection_id, version, snapshot, **fence)
+
+
+WEBHOOK_LEASE_SECONDS = 60
+
+
+def _hold_unproven(db: Session, connection_id: int, generation: int, lease: Optional[str], now: datetime) -> str:
+    """An ``active`` row without proof for its generation (from before this
+    gate) is moved to the non-ready hold before anything else. Fenced like
+    every reconcile write; the request version is not bumped (this
+    reconciliation is the one serving it)."""
+    conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
+    if (conn is None or int(conn.generation) != generation or not _recovery_lease_holds(conn, lease, now)):
+        db.rollback()
+        return "superseded"
+    if conn.status != STATUS_ACTIVE or webhook_proven(db, conn):
+        db.rollback()
+        return "held" if conn.status == STATUS_QUARANTINED else "nothing_to_do"
+    conn.status = STATUS_QUARANTINED
+    conn.quarantined_at = now
+    conn.quarantine_reason = WEBHOOK_PENDING
+    conn.revalidation_requested_at = None
+    conn.updated_at = now
+    _audit(db, tenant_id=conn.tenant_id, shop_domain=conn.shop_domain, action="uninstall_webhook_hold",
+           connection=conn)
+    db.commit()
+    return "held"
+
+
+async def _register_in_reconcile(db: Session, *, connection_id: int, tenant_id: int, shop: str, generation: int,
+                                 token: str, api: ShopifyApi, target: Optional[Tuple[str, str]],
+                                 reconcile_lease: Optional[str], now: datetime) -> Optional[str]:
+    """One registration attempt under the shop lease (it serialises with any
+    exchange, refresh or other registration for the shop, so two workers never
+    both create). Records proof or failure only for the same generation,
+    under the still-held shop lease and recovery lease. None when proven."""
+    if target is None:
+        return "configuration_unavailable"
+    lease = acquire_shop_lease(db, shop_domain=shop, purpose=LEASE_REFRESH, tenant_id=tenant_id, now=now,
+                               seconds=WEBHOOK_LEASE_SECONDS)
+    if lease is None:
+        db.rollback()
+        return C_EXCHANGE_IN_PROGRESS
+    db.commit()
+    held = _HeldLease(shop, lease, WEBHOOK_LEASE_SECONDS, time.monotonic())
+    proof, failure = await register_uninstall_webhook(db, held, api, shop_domain=shop, access_token=token,
+                                                      target=target)
+    held_still = _lease_held(db, shop, lease)
+    conn = db.get(ShopifyConnection, connection_id, with_for_update=True, populate_existing=True)
+    recorded = (held_still and conn is not None and int(conn.generation) == generation
+                and conn.status in CREDENTIAL_STATUSES and _recovery_lease_holds(conn, reconcile_lease, now))
+    if recorded:
+        _record_webhook_outcome(db, conn, proof, failure, target)
+    _drop_lease(db, shop, lease)
+    db.commit()
+    return None if (recorded and proof is not None) else (failure or "superseded")
 
 
 def _reconcile_lease_valid(db: Session, connection_id: int, lease: str, now: datetime) -> bool:
@@ -1245,6 +1482,20 @@ def _cas_retain(db: Session, connection_id: int, version: int, snapshot: Optiona
                connection=conn)
         db.commit()
         return "deferred"
+    if not webhook_proven(db, conn):
+        # Alive, but not ready: this generation has no verified uninstall
+        # subscription. The credential stays stored and unused (no tombstone,
+        # no re-authorization); the runner retries with backoff.
+        conn.status = STATUS_QUARANTINED
+        conn.quarantined_at = conn.quarantined_at or now
+        conn.quarantine_reason = WEBHOOK_PENDING
+        conn.revalidation_requested_at = None
+        conn.last_verified_at = now
+        conn.updated_at = now
+        _audit(db, tenant_id=conn.tenant_id, shop_domain=conn.shop_domain,
+               action="quarantine_retained_webhook_pending", connection=conn)
+        db.commit()
+        return "webhook_pending"
     conn.status = STATUS_ACTIVE
     conn.quarantined_at = None
     conn.quarantine_reason = None
@@ -1271,7 +1522,7 @@ async def active_access_token(
     """(access token, generation) of this tenant's ``active`` connection,
     refreshing when due. The tenant is mandatory and filtered: another
     tenant's connection id yields ``not_found``. A quarantined or tombstoned
-    connection never yields a credential."""
+    connection — or one not ready (``is_ready``) — never yields a credential."""
     current = now or utcnow()
     conn = db.execute(
         select(ShopifyConnection).where(
@@ -1281,7 +1532,9 @@ async def active_access_token(
     if conn is None:
         db.rollback()
         raise ConnectionRefused(C_NOT_FOUND)
-    if conn.status != STATUS_ACTIVE:
+    if not is_ready(db, conn):
+        # Includes an ``active`` row without uninstall-subscription proof for
+        # its generation: the recovery runner holds and registers it.
         db.rollback()
         raise ConnectionRefused(C_UNAVAILABLE)
     generation = int(conn.generation)

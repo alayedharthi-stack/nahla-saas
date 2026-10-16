@@ -39,7 +39,7 @@ from scripts.operators import shopify_release_gate_render as render  # noqa: E40
 NOW = harness.NOW
 SECRET_ROW = "postgresql://svc:p-not-a-real-secret@db.internal:5432/prod"
 CONTROL_ROW = "\x1b[2J\x1b[31mDROP TABLE tenants; --"
-KNOWN = frozenset({"0093", "0111", "0113", "0114", "0115", "0118", "0120", "0121", "0122", "0123"})
+KNOWN = frozenset({"0093", "0111", "0113", "0114", "0115", "0118", "0120", "0121", "0122", "0123", "0124"})
 EXPECTATIONS = json.loads((REPO / k.EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
 DB = "db.internal:5432/railway"
 UNROUTABLE_DB = "192.0.2.1:5432/railway"
@@ -69,7 +69,7 @@ def test_only_s0_and_s3_are_deployment_phases():
     assert k.INTERMEDIATE_STATES["S1"] == {"0111", "0113", "0121"} and k.INTERMEDIATE_STATES["S2"] == {"0111", "0113", "0122"}
     for name in ("S1", "S2", "LEGACY_462_S0", "head", "heads", "", "S4", "s0", "ANY"):
         assert k.phase(name) is None
-    assert k.SCHEMA_CHANGING_PHASES == {"S3"}
+    assert k.SCHEMA_CHANGING_PHASES == {"S3", "S4_DORMANT", "S4_PILOT"}
     for phase in k.DEPLOY_PHASES.values():
         assert k.RETAINED_ROWS <= phase["rows"] and len(phase["rows"]) == 3
 
@@ -86,6 +86,7 @@ def test_contract_constants_match_the_frozen_sources():
     from services.shopify_privacy import config as privacy_config
     assert set(k.SHOPIFY_FLAG_ENVS) == {connection_config.ENABLED_ENV, catalog_config.IMPORT_ENABLED_ENV, privacy_config.INTAKE_ENABLED_ENV,
                                         privacy_config.WORKER_ENABLED_ENV, privacy_config.DESTRUCTIVE_ENABLED_ENV,
+                                        "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", "VITE_SHOPIFY_INSTALL_FIRST_ENABLED",
                                         "VITE_SHOPIFY_CONNECTION_UI", "VITE_SHOPIFY_CATALOG_IMPORT_UI"}
     flags_ts = (REPO / "dashboard" / "src" / "lib" / "platformFeatureFlags.ts").read_text()
     assert "VITE_SHOPIFY_CONNECTION_UI" in flags_ts and "VITE_SHOPIFY_CATALOG_IMPORT_UI" in flags_ts
@@ -132,6 +133,36 @@ def test_inventory_rule_on_the_repository_is_the_legacy_rule_plus_the_gate_files
     assert gate.unexpected_initializers(REPO) == []
     count, digest = gate.inventory(REPO)
     assert count == len(legacy) + len(k.RUNTIME_EXTRA_FILES) and k.DIGEST_RE.match(digest)
+
+
+def test_dormant_flag_guard_matches_backend_and_dashboard_source_flags():
+    configs = ["shopify_connection/config.py", "shopify_connection/install_config.py",
+               "shopify_catalog/config.py", "shopify_privacy/config.py"]
+    backend_flags = set()
+    for relative in configs:
+        path = REPO / "backend/services" / relative
+        assert path.relative_to(REPO).as_posix() in k.RUNTIME_EXTRA_FILES
+        backend_flags.update(node.value for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                             if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                             and re.fullmatch(r"NAHLA_SHOPIFY_[A-Z_]+_ENABLED", node.value))
+    frontend_flags = set()
+    for path in (REPO / "dashboard/src").rglob("*"):
+        if path.suffix in {".ts", ".tsx"}:
+            frontend_flags.update(re.findall(r"import\.meta\.env\.(VITE_SHOPIFY_[A-Z_]+)", path.read_text(encoding="utf-8")))
+    assert backend_flags | frontend_flags == set(k.SHOPIFY_FLAG_ENVS)
+    assert "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED" in backend_flags
+    assert "VITE_SHOPIFY_INSTALL_FIRST_ENABLED" in frontend_flags
+
+
+def test_install_configuration_change_invalidates_inventory_and_previous_approval(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    before = gate.inventory(root)
+    record = harness.filled_approval(release_sha=harness.SYNTHETIC_RELEASE_SHA, inventory=before,
+                                     target=TARGET, phase="S3", now=NOW)
+    config = root / "backend/services/shopify_connection/install_config.py"
+    config.write_bytes(config.read_bytes() + b"\n# changed configuration\n")
+    assert gate.check_inventory(root, *before)[0].reason == k.R_INVENTORY_DIGEST_MISMATCH
+    assert _verdict(record, phase="S3", runtime=gate.inventory(root)) == k.R_APPROVAL_NOT_BOUND
 
 
 def test_graph_dependency_pins_are_exact_sources_without_backend_wildcard(tmp_path):
@@ -196,6 +227,7 @@ def rendered_root(tmp_path):
 
 
 TAMPER_TARGETS = ("scripts/operators/shopify_release_gate_contract.py", "scripts/operators/commerce_runtime_pilot_migration.py",
+                  "backend/services/shopify_connection/install_config.py",
                   "database/migrations/versions/0121_shopify_connection_foundation.py", "scripts/operators/__init__.py",
                   "scripts/operators/shopify_release_gate.py", "database/migrations/env.py")
 
@@ -621,6 +653,14 @@ def test_rows_exact_multiset_fail_closed_and_unknown_rows_are_never_echoed():
     assert detail["rows"] == ["0111", "0113", "0120", k.UNKNOWN, k.UNKNOWN] and detail["unknown_row_count"] == 2
 
 
+@pytest.mark.parametrize("rows", [("0111", "0113", "0124"), ("0111", "0113", "0125"),
+                                 ("0111", "0113", "0124", "0125")])
+def test_future_shopify_and_google_database_states_never_become_deployment_states(rows):
+    for phase in k.DEPLOY_PHASES.values():
+        # Even if all future revision IDs are known, the exact approved state remains closed.
+        assert k.evaluate_rows(list(rows), phase["rows"], KNOWN | {"0125"})[:2] == (k.FAIL, k.R_VERSION_ROWS_MISMATCH)
+
+
 def _observed_s3(**overrides):
     observed = {"tables": [f"public.{t}" for t in k.SHOPIFY_TABLES], "stray_count": 0,
                 "definitions": copy.deepcopy(EXPECTATIONS["shopify_s3"]["tables"]),
@@ -985,9 +1025,9 @@ def test_migration_preflight_passes_on_the_repository_and_refuses_duplicates_dep
         assert check.status == k.FAIL and check.reason == k.R_GRAPH_UNLOADABLE, name
         assert "p-not" not in json.dumps(check.detail), name
         assert (check.detail["malformed_count"] + check.detail["unknown_parent_count"]) >= 1, (name, check.detail)
-    (versions / "0124_a.py").write_text("revision: str = '0124'\ndown_revision: str = '0123'\n")
+    (versions / "9998_a.py").write_text("revision: str = '9998'\ndown_revision: str = '0123'\n")
     assert gate.preflight_migration_files(root).status == k.PASS
-    (versions / "0124_a.py").unlink()
+    (versions / "9998_a.py").unlink()
 
 
 def test_graph_edges_heads_and_branch_deltas_hold_for_every_phase():
@@ -999,6 +1039,26 @@ def test_graph_edges_heads_and_branch_deltas_hold_for_every_phase():
     assert graph["heads"] == k.EXPECTED_REPOSITORY_HEADS
     assert gate.branch_chain(graph["down"], "0123", "0112") == ("0118", "0120", "0121", "0122", "0123")
     assert gate.branch_chain(graph["down"], "0111", "0112") is None
+    assert graph["down"]["0124"] == ("0123",)
+    assert "0124" not in k.DEPLOY_PHASES["S3"]["branch_delta"]
+
+
+def test_renaming_a_duplicate_0124_file_does_not_repair_its_revision_id(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    path = root / "database/migrations/versions/0125_google_merchant_ledger.py"
+    path.write_text('revision = "0124"\ndown_revision = "0123"\n')
+    check = gate.preflight_migration_files(root)
+    assert (check.status, check.reason, check.detail["duplicate_revisions"]) == (k.FAIL, k.R_GRAPH_UNLOADABLE, ["0124"])
+
+
+def test_stale_schema_expectations_fail_for_new_source(tmp_path):
+    root = harness.build_root(tmp_path / "root")
+    path = root / k.EXPECTATIONS_RELATIVE_PATH
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["database_py_digest"] = "0" * 64
+    path.write_text(json.dumps(record), encoding="utf-8")
+    check, loaded = gate.check_expectations(root)
+    assert (check.status, check.reason, loaded) == (k.FAIL, k.R_EXPECTATIONS_STALE, None)
 
 
 def test_graph_mismatch_is_refused_before_the_database(tmp_path):
@@ -1011,7 +1071,7 @@ def test_graph_mismatch_is_refused_before_the_database(tmp_path):
     check, known = gate.check_graph(root, k.DEPLOY_PHASES["S3"])
     assert (check.status, check.reason, known) == (k.FAIL, k.R_GRAPH_EDGE_MISMATCH, None) and check.detail == {"revisions": ["0121"]}
     path.write_text(path.read_text().replace('down_revision = "0113"', 'down_revision = "0120"'))
-    (versions / "0124_extra.py").write_text('revision = "0124"\ndown_revision = "0113"\nbranch_labels = None\ndepends_on = None\n'
+    (versions / "9998_extra.py").write_text('revision = "9998"\ndown_revision = "0113"\nbranch_labels = None\ndepends_on = None\n'
                                             'def upgrade():\n    pass\ndef downgrade():\n    pass\n')
     _clear_bytecode(root)
     check, _ = gate.check_graph(root, k.DEPLOY_PHASES["S3"])

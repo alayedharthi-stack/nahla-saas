@@ -56,7 +56,7 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -64,7 +64,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from services.shopify_catalog import errors as E
-from services.shopify_catalog.config import CATALOG_API_VERSION, LEASE_SECONDS
+from services.shopify_catalog.config import CATALOG_API_VERSION, LEASE_SECONDS, import_shop_allowed
 from services.shopify_catalog.models import (
     CATALOG_TABLE_NAMES,
     DELETED,
@@ -101,7 +101,10 @@ S_NOT_FOUND = "not_found"
 S_CONNECTION_UNAVAILABLE = "connection_unavailable"
 S_IN_PROGRESS = "import_in_progress"
 S_ACTOR_REVOKED = "actor_revoked"
-START_REFUSALS = frozenset({S_NOT_FOUND, S_CONNECTION_UNAVAILABLE, S_IN_PROGRESS, S_ACTOR_REVOKED})
+# The shop is outside the import's configured shop bound (config.import_shop_allowed).
+S_SHOP_NOT_ADMITTED = "shop_not_admitted"
+START_REFUSALS = frozenset({S_NOT_FOUND, S_CONNECTION_UNAVAILABLE, S_IN_PROGRESS, S_ACTOR_REVOKED,
+                            S_SHOP_NOT_ADMITTED})
 
 # Merchant-facing import states.
 ST_NOT_STARTED = "not_started"
@@ -176,8 +179,11 @@ def reconcile_interrupted(db: Session, *, connection_id: int, now: Optional[date
 
 
 def begin_run(db: Session, *, actor: VerifiedActor, shop_domain: str,
-              now: Optional[datetime] = None) -> RunHandle:
+              now: Optional[datetime] = None, env: Optional[Mapping[str, str]] = None) -> RunHandle:
     """Create the connection's single running import, or refuse.
+
+    0. The shop must be inside the import's shop bound
+       (``config.import_shop_allowed``), checked before any database work.
 
     Lock order (the same as the foundation's claim, then the catalog's
     fence): actor → connection → run.
@@ -193,6 +199,9 @@ def begin_run(db: Session, *, actor: VerifiedActor, shop_domain: str,
        concurrent disconnect / uninstall waits for (or precedes) this commit.
     """
     current = now or utcnow()
+    if not import_shop_allowed(shop_domain, env, current):
+        db.rollback()
+        raise StartRefused(S_SHOP_NOT_ADMITTED)
     tenant_id, user_id = int(actor.tenant_id), int(actor.user_id)
     if recheck_actor_locked(db, actor):
         db.rollback()

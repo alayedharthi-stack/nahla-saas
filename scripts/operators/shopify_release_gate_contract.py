@@ -31,14 +31,16 @@ Bindings (none circular)
 Phases
 ──────
 Normal deployment is allowed in exactly two states: S0 (the deployed
-topology before any Shopify revision) and S3 (every Shopify revision
-applied). S1 and S2 are intermediate states of the separately approved manual
-migration window; they are named here so tests can prove they are refused,
+topology before any Shopify revision) and S3 (the foundation, catalog and
+privacy revisions through 0123 applied). Source-only install-first revision
+0124 is not an authorized database state. S1 and S2 are intermediate states of
+the separately approved manual migration window; they are named here so tests can prove they are refused,
 and they are never a deployment phase.
 """
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
@@ -97,6 +99,16 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "backend/payments/__init__.py",
     "backend/payments/models.py",
     "backend/services/shopify_connection/config.py",
+    "backend/services/shopify_connection/install_config.py",
+    "backend/services/shopify_connection/install_admission.py",
+    "backend/services/shopify_connection/shop_domain.py",
+    "backend/services/shopify_connection/install.py",
+    "backend/services/shopify_connection/install_models.py",
+    "backend/services/shopify_connection/install_cleanup.py",
+    "backend/routers/shopify_connection.py",
+    "backend/routers/shopify_install.py",
+    "scripts/operators/shopify_install_schema_expectations.json",
+    "scripts/operators/shopify_install_rollback.draft.json",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
@@ -125,8 +137,9 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0121": "0120",
     "0122": "0121",
     "0123": "0122",
+    "0124": "0123",
 }
-EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0123"})
+EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0124"})
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
@@ -155,6 +168,20 @@ DEPLOY_PHASES: Mapping[str, Dict[str, Any]] = {
     "S3": {"rows": frozenset({"0111", "0113", "0123"}), "shopify_row": "0123",
            "tables": SHOPIFY_TABLES, "branch_delta": ("0118", "0120", "0121", "0122", "0123")},
 }
+# Explicit post-0124 contracts. S0/S3 and their legacy footprint stay closed.
+# The dormant phase is also the application rollback: retain all 0124 evidence
+# and turn flags OFF, never downgrade the ownership/flow tables to 0123.
+INSTALL_TABLES: Tuple[str, ...] = SHOPIFY_TABLES + ("shopify_owner_identities", "shopify_install_flows")
+POST_INSTALL_PHASES: Mapping[str, Dict[str, Any]] = {
+    name: {"rows": frozenset({"0111", "0113", "0124"}), "shopify_row": "0124",
+           "tables": INSTALL_TABLES, "branch_delta": ("0118", "0120", "0121", "0122", "0123", "0124"),
+           "expectations_key": "shopify_s4"}
+    for name in ("S4_DORMANT", "S4_PILOT")
+}
+INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
+INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.draft.json"
+ROLLBACK_MAX_AGE_HOURS = 24
+PILOT_SHOP = "nahlah-dev.myshopify.com"
 # Intermediate states of the manual migration window. Never a deployment
 # phase: the gate refuses them as an argument and refuses a database in them
 # under either deployment phase.
@@ -162,7 +189,7 @@ INTERMEDIATE_STATES: Mapping[str, FrozenSet[str]] = {
     "S1": frozenset({"0111", "0113", "0121"}),
     "S2": frozenset({"0111", "0113", "0122"}),
 }
-SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3"})
+SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILOT"})
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
@@ -213,14 +240,23 @@ ADVISORY_LOCK_KEY = 8182734029736770447
 # separate owner evidence.
 SHOPIFY_FLAG_ENVS: Tuple[str, ...] = (
     "NAHLA_SHOPIFY_CONNECTION_ENABLED",
+    "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED",
     "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED",
     "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED",
     "VITE_SHOPIFY_CONNECTION_UI",
+    "VITE_SHOPIFY_INSTALL_FIRST_ENABLED",
     "VITE_SHOPIFY_CATALOG_IMPORT_UI",
 )
 TRUTHY = frozenset({"1", "true", "yes", "on"})
+# S4_PILOT may additionally enable the read-only catalog import, and only
+# with the runtime shop bound (backend/services/shopify_catalog/config.py,
+# ``IMPORT_SHOPS_ENV``) naming exactly PILOT_SHOP with a deadline at most
+# seven days ahead. Every other flag keeps its S4_PILOT rule.
+CATALOG_IMPORT_FLAG = "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED"
+CATALOG_IMPORT_SHOPS_ENV = "NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS"
+CATALOG_IMPORT_MAX_DAYS = 7
 
 # ── Retained schema protections (definitions, never names only) ─────────────
 RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
@@ -290,6 +326,8 @@ R_APPROVAL_EXPIRED = "approval_expired"
 R_APPROVAL_TIMESTAMP_INVALID = "approval_timestamp_invalid"
 R_APPROVAL_TIMESTAMP_ORDER = "approval_timestamp_order"
 R_ROLLBACK_SNAPSHOT_MISSING = "deployment_rollback_snapshot_missing"
+R_SCHEMA_ROLLBACK_INVALID = "schema_rollback_not_bound"
+R_SCHEMA_ROLLBACK_STALE = "schema_rollback_evidence_stale"
 R_BACKUP_EVIDENCE_MISSING = "backup_evidence_missing"
 R_BACKUP_IDENTITY_MISMATCH = "backup_identity_mismatch"
 R_BACKUP_SIZE_INVALID = "backup_size_invalid"
@@ -298,6 +336,8 @@ R_BACKUP_NOT_RESTORABLE = "backup_not_restorable"
 R_BACKUP_TOO_OLD = "backup_too_old"
 R_RESTORE_NOT_VERIFIED = "restore_not_verified"
 R_FLAG_ENABLED = "shopify_flag_enabled"
+R_PILOT_ADMISSION_INVALID = "pilot_admission_invalid"
+R_CATALOG_IMPORT_BOUND_INVALID = "catalog_import_bound_invalid"
 R_CONNECT_FAILED = "connect_failed"
 R_TIMEOUT = "statement_or_lock_timeout"
 R_WALL_TIMEOUT = "wall_timeout"
@@ -326,7 +366,7 @@ R_INTERNAL_ERROR = "internal_error"
 
 def phase(name: str) -> Optional[Dict[str, Any]]:
     """The deployment phase definition, or None for anything that is not one (S1/S2 included)."""
-    return DEPLOY_PHASES.get(str(name or ""))
+    return DEPLOY_PHASES.get(str(name or "")) or POST_INSTALL_PHASES.get(str(name or ""))
 
 
 def truthy(value: object) -> bool:
@@ -481,8 +521,75 @@ def evaluate_relation_identity(before: Mapping[str, Any], after: Mapping[str, An
     return PASS, None, {"relations": len(before)}
 
 
-def evaluate_flags(environ: Mapping[str, str]) -> Tuple[str, Optional[str], Dict[str, Any]]:
+def _catalog_import_bound_valid(raw: object) -> bool:
+    """The import's shop bound names exactly PILOT_SHOP, deadline within seven days."""
+    try:
+        if not isinstance(raw, str) or len(raw) > 4096:
+            return False
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate")
+                result[key] = value
+            return result
+        entries = json.loads(raw, object_pairs_hook=unique)
+        if not isinstance(entries, dict) or set(entries) != {PILOT_SHOP}:
+            return False
+        entry = entries[PILOT_SHOP]
+        if not isinstance(entry, dict) or set(entry) != {"expires_at"}:
+            return False
+        expires = entry["expires_at"]
+        if not isinstance(expires, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", expires):
+            return False
+        deadline = parse_utc(expires)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        return deadline is not None and now < deadline <= now + _dt.timedelta(days=CATALOG_IMPORT_MAX_DAYS)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return False
+
+
+def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[str, Optional[str], Dict[str, Any]]:
     enabled = sorted(name for name in SHOPIFY_FLAG_ENVS if truthy(environ.get(name)))
+    if phase_name == "S4_PILOT":
+        required = {"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"}
+        if not required <= set(enabled) <= required | {CATALOG_IMPORT_FLAG}:
+            return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
+        # The live server still requires a valid private code and verifies the
+        # Shopify online owner. This source-bound contract restricts configured
+        # admission to the one development shop; malformed peers also refuse.
+        try:
+            raw = str(environ.get("SHOPIFY_INSTALL_PILOT_ADMISSION") or "")
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate")
+                    result[key] = value
+                return result
+            entries = json.loads(raw, object_pairs_hook=unique) if len(raw) <= 4096 else None
+            if not isinstance(entries, dict) or set(entries) != {PILOT_SHOP}:
+                raise ValueError("shops")
+            admission = entries[PILOT_SHOP]
+            if not isinstance(admission, dict) or set(admission) != {"sha256", "expires_at"}:
+                raise ValueError("fields")
+            if not isinstance(admission["sha256"], str) or not DIGEST_RE.fullmatch(admission["sha256"]):
+                raise ValueError("hash")
+            expires = admission["expires_at"]
+            if not isinstance(expires, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", expires):
+                raise ValueError("deadline_format")
+            deadline = parse_utc(expires)
+            now = _dt.datetime.now(_dt.timezone.utc)
+            if deadline is None or not now < deadline <= now + _dt.timedelta(days=7):
+                raise ValueError("deadline")
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            return FAIL, R_PILOT_ADMISSION_INVALID, {"enabled": enabled}
+        if CATALOG_IMPORT_FLAG in enabled:
+            if not _catalog_import_bound_valid(environ.get(CATALOG_IMPORT_SHOPS_ENV)):
+                return FAIL, R_CATALOG_IMPORT_BOUND_INVALID, {"enabled": enabled}
+            return PASS, None, {"enabled": enabled, "pilot_shops": 1, "catalog_import_shops": 1}
+        return PASS, None, {"enabled": enabled, "pilot_shops": 1}
     if enabled:
         return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
     return PASS, None, {"enabled": []}
@@ -510,9 +617,97 @@ def _present(mapping: Any, fields: Tuple[str, ...]) -> bool:
     return True
 
 
+DORMANT_PRIOR_FIELDS: Tuple[str, ...] = ("rollback_mode", "source_sha", "runtime_inventory_digest",
+                                          "runtime_inventory_count", "schema_expectations_sha256")
+
+
+def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """The one earlier source the reviewed manifest names as a dormant rollback, or None.
+
+    Exact fields only: a full commit SHA, that source's runtime inventory, and
+    its S4 schema-expectations hash, which must equal this source's (the same
+    canonical seventeen-table definitions, so the earlier release accepts the
+    0124 state this release leaves)."""
+    prior = artifact.get("dormant_prior_rollback")
+    if (not isinstance(prior, dict) or set(prior) != set(DORMANT_PRIOR_FIELDS)
+            or prior.get("rollback_mode") != "pinned_prior_flags_off"
+            or not isinstance(prior.get("source_sha"), str) or not RELEASE_SHA_RE.fullmatch(prior["source_sha"])
+            or not isinstance(prior.get("runtime_inventory_digest"), str)
+            or not DIGEST_RE.fullmatch(prior["runtime_inventory_digest"])
+            or type(prior.get("runtime_inventory_count")) is not int or prior["runtime_inventory_count"] <= 0
+            or not isinstance(prior.get("schema_expectations_sha256"), str)
+            or not DIGEST_RE.fullmatch(prior["schema_expectations_sha256"])
+            or prior.get("schema_expectations_sha256") != bindings.get("schema_expectations_sha256")):
+        return None
+    return prior
+
+
+def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Optional[Mapping[str, Any]], *,
+                             phase_name: str, release_sha: str, runtime_digest: str, runtime_count: int,
+                             target: Mapping[str, str], approved_at: _dt.datetime, now: _dt.datetime) -> Optional[str]:
+    """S4 rollback is a flags-OFF S4_DORMANT deployment of a 0124-compatible source.
+
+    Bind the external evidence to the source-pinned manifest and full canonical
+    seventeen-table definitions. A generic S3 redeployable UUID cannot satisfy
+    this contract. This is validation only; it never creates an approval.
+
+    * S4_PILOT: only the exact reviewed source of this release, with flags OFF.
+    * S4_DORMANT: that, or — so a schema-preserving release can be deployed
+      before any deployment of it exists — the single earlier source this
+      release's manifest pins (``dormant_prior_rollback``): the evidence must
+      name that full SHA (the deployment snapshot too), its pinned inventory,
+      this release's identical S4 definitions and every flag ``"false"``. An
+      older source is never accepted merely because it is redeployable.
+    """
+    if not isinstance(evidence, dict) or not isinstance(bindings, dict):
+        return R_SCHEMA_ROLLBACK_INVALID
+    artifact = bindings.get("artifact")
+    if (not isinstance(artifact, dict) or artifact.get("record_version") != 1
+            or artifact.get("rollback_mode") != "same_source_flags_off"
+            or artifact.get("phase") != "S4_DORMANT" or artifact.get("database_heads") != ["0111", "0113", "0124"]
+            or artifact.get("shopify_table_count") != 17 or artifact.get("bootstrap_target") != "0093"
+            or artifact.get("schema_action") != "retain_0124_no_downgrade"
+            or artifact.get("expectations_path") != INSTALL_EXPECTATIONS_RELATIVE_PATH
+            or not isinstance(artifact.get("flags"), dict) or set(artifact["flags"]) != set(SHOPIFY_FLAG_ENVS)
+            or any(value != "false" for value in artifact["flags"].values())):
+        return R_SCHEMA_ROLLBACK_INVALID
+    rollback_source = evidence.get("source_sha")
+    if rollback_source == release_sha:
+        inventory_digest, inventory_count = runtime_digest, runtime_count
+    else:
+        prior = _pinned_dormant_prior(artifact, bindings) if phase_name == "S4_DORMANT" else None
+        if (prior is None or rollback_source != prior["source_sha"]
+                or evidence.get("flags") != {name: "false" for name in SHOPIFY_FLAG_ENVS}):
+            return R_SCHEMA_ROLLBACK_INVALID
+        inventory_digest, inventory_count = prior["runtime_inventory_digest"], prior["runtime_inventory_count"]
+    if (evidence.get("record_version") != 1 or evidence.get("phase") != "S4_DORMANT"
+            or snapshot.get("source_sha") != rollback_source
+            or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
+            or evidence.get("target") != dict(target)
+            or evidence.get("database_heads") != ["0111", "0113", "0124"]
+            or evidence.get("table_names") != sorted(INSTALL_TABLES)
+            or evidence.get("runtime_inventory_digest") != inventory_digest
+            or type(evidence.get("runtime_inventory_count")) is not int
+            or evidence.get("runtime_inventory_count") != inventory_count
+            or not _present(evidence, ("independent_review_ref",))):
+        return R_SCHEMA_ROLLBACK_INVALID
+    for name in ("artifact_sha256", "schema_expectations_sha256"):
+        expected = bindings.get(name)
+        if not isinstance(expected, str) or not DIGEST_RE.fullmatch(expected) or evidence.get(name) != expected:
+            return R_SCHEMA_ROLLBACK_INVALID
+    verified = parse_utc(evidence.get("verified_at_utc"))
+    expires = parse_utc(evidence.get("valid_until_utc"))
+    if verified is None or expires is None or verified != parse_utc(snapshot.get("verified_redeployable_at_utc")):
+        return R_SCHEMA_ROLLBACK_INVALID
+    max_age = _dt.timedelta(hours=ROLLBACK_MAX_AGE_HOURS)
+    if not verified <= approved_at <= now < expires or now - verified > max_age or expires > verified + max_age:
+        return R_SCHEMA_ROLLBACK_STALE
+    return None
+
+
 def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime_digest: str, runtime_count: int,
                       target: Mapping[str, str], backup_service: str, backup_volume: str,
-                      now: _dt.datetime) -> Tuple[str, Optional[str], Dict[str, Any]]:
+                     now: _dt.datetime, rollback_bindings: Optional[Mapping[str, Any]] = None) -> Tuple[str, Optional[str], Dict[str, Any]]:
     """The owner's external approval for exactly this release, source, target, phase and backup.
 
     Fail-closed on: an unreadable or wrong-version record; a different release
@@ -562,6 +757,12 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
         return FAIL, R_APPROVAL_TIMESTAMP_INVALID, detail
     if not (verified_at <= approved_at <= now):
         return FAIL, R_APPROVAL_TIMESTAMP_ORDER, detail
+    if phase_name in POST_INSTALL_PHASES:
+        reason = evaluate_schema_rollback(record.get("schema_rollback"), snapshot, rollback_bindings,
+                                          phase_name=phase_name, release_sha=release_sha, runtime_digest=runtime_digest,
+                                          runtime_count=runtime_count, target=target, approved_at=approved_at, now=now)
+        if reason:
+            return FAIL, reason, detail
     recovery = record.get("db_recovery_evidence")
     backup = recovery.get("backup") if isinstance(recovery, dict) else None
     if not _present(backup, BACKUP_FIELDS):

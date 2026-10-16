@@ -105,7 +105,43 @@ def payload_sha(path: Path) -> str:
 def approval_for(root: Path, phase: str, db: str, *, release_sha: str = SYNTHETIC_RELEASE_SHA, **kwargs: Any) -> Path:
     """A filled payload bound to ``root``'s inventory, written next to (never inside) the root."""
     record = filled_approval(release_sha=release_sha, inventory=gate.inventory(root), target=target_for(db), phase=phase, **kwargs)
+    if phase in k.POST_INSTALL_PHASES:
+        snapshot = record["deployment_rollback_snapshot"]
+        snapshot["source_sha"] = release_sha
+        verified = k.parse_utc(snapshot["verified_redeployable_at_utc"])
+        bindings = gate.schema_rollback_bindings(root)
+        record["schema_rollback"] = {
+            "record_version": 1, "phase": "S4_DORMANT", "source_sha": release_sha,
+            "railway_deployment_id": snapshot["railway_deployment_id"], "target": record["target"],
+            "database_heads": ["0111", "0113", "0124"], "table_names": sorted(k.INSTALL_TABLES),
+            "runtime_inventory_count": record["runtime_inventory_count"],
+            "runtime_inventory_digest": record["runtime_inventory_digest"],
+            "artifact_sha256": bindings["artifact_sha256"],
+            "schema_expectations_sha256": bindings["schema_expectations_sha256"],
+            "verified_at_utc": iso(verified), "valid_until_utc": iso(verified + _dt.timedelta(hours=k.ROLLBACK_MAX_AGE_HOURS)),
+            "independent_review_ref": "synthetic-0124-compatible-source-review",
+        }
     return approval_file(root.parent / "approval", record, f"{root.name}_{phase}.json")
+
+
+def prior_rollback_record(root: Path, record: Mapping[str, Any]) -> Dict[str, Any]:
+    """``record`` with its rollback switched to the prior source pinned in ``root``'s manifest:
+    snapshot and evidence name that full SHA, the evidence its pinned inventory and every
+    flag ``"false"``. Everything else (target, deployment id, times, review) is unchanged."""
+    changed = json.loads(json.dumps(record))
+    prior = gate.schema_rollback_bindings(root)["artifact"]["dormant_prior_rollback"]
+    changed["deployment_rollback_snapshot"]["source_sha"] = prior["source_sha"]
+    rollback = changed["schema_rollback"]
+    rollback.update(source_sha=prior["source_sha"], runtime_inventory_digest=prior["runtime_inventory_digest"],
+                    runtime_inventory_count=prior["runtime_inventory_count"],
+                    flags={name: "false" for name in k.SHOPIFY_FLAG_ENVS})
+    return changed
+
+
+def prior_rollback_approval_for(root: Path, phase: str, db: str, **kwargs: Any) -> Path:
+    """A filled payload like ``approval_for`` whose rollback is the manifest-pinned prior source."""
+    base = json.loads(approval_for(root, phase, db, **kwargs).read_text(encoding="utf-8"))
+    return approval_file(root.parent / "approval", prior_rollback_record(root, base), f"{root.name}_{phase}_prior.json")
 
 
 def rendered(root: Path, phase: str, db: str, approval: Path, *, release_sha: str = SYNTHETIC_RELEASE_SHA,

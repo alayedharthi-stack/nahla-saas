@@ -1088,3 +1088,61 @@ def test_migration_0122_declares_the_model_schema():
         names = lambda t: sorted(c.name for c in t.constraints if c.name)  # noqa: E731
         assert names(migrated) == names(table), table.name
         assert sorted(i.name for i in migrated.indexes) == sorted(i.name for i in table.indexes), table.name
+
+
+# ── Import shop bound (runtime; pinned to one shop by the S4_PILOT contract) ──
+
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _timezone  # noqa: E402
+
+_PILOT = "nahlah-dev.myshopify.com"
+_NOW = _datetime(2026, 10, 16, 12, 0, 0, tzinfo=_timezone.utc)
+
+
+def _bound(entries):
+    return json.dumps({shop: {"expires_at": (_NOW + delta).strftime("%Y-%m-%dT%H:%M:%SZ")}
+                       for shop, delta in entries.items()})
+
+
+def test_import_bound_absent_is_unchanged_outside_the_pilot_and_closed_inside_it():
+    assert C.import_shop_allowed(_PILOT, {}, _NOW)
+    assert C.import_shop_allowed("other-store.myshopify.com", {C.IMPORT_SHOPS_ENV: ""}, _NOW)
+    for pilot in ("true", "1", "yes", "on", " TRUE "):
+        for env in ({C.INSTALL_FIRST_ENV: pilot}, {C.INSTALL_FIRST_ENV: pilot, C.IMPORT_SHOPS_ENV: "  "}):
+            assert not C.import_shop_allowed(_PILOT, env, _NOW)
+
+
+def test_import_bound_admits_only_listed_unexpired_shops():
+    env = {C.INSTALL_FIRST_ENV: "true", C.IMPORT_SHOPS_ENV: _bound({_PILOT: _timedelta(hours=1)})}
+    assert C.import_shop_allowed(_PILOT, env, _NOW)
+    assert not C.import_shop_allowed(_PILOT, env, _NOW + _timedelta(hours=1))      # deadline is exclusive
+    for shop in ("other-store.myshopify.com", _PILOT.upper(), " " + _PILOT, "x." + _PILOT, "nahlah-dev"):
+        assert not C.import_shop_allowed(shop, env, _NOW)
+    # The bound also restricts outside the pilot whenever it is present.
+    assert not C.import_shop_allowed("other-store.myshopify.com", {C.IMPORT_SHOPS_ENV: env[C.IMPORT_SHOPS_ENV]}, _NOW)
+
+
+@pytest.mark.parametrize("raw", [
+    "{", "[]", "null", "{}", '"x"', "x" * 4097,
+    json.dumps({_PILOT: {"expires_at": "2026-10-17T12:00:00.000Z"}}),
+    json.dumps({_PILOT: {"expires_at": "2026-10-17T12:00:00+00:00"}}),
+    json.dumps({_PILOT: {"expires_at": "2026-10-17"}}),
+    json.dumps({_PILOT: {"expires_at": 1}}),
+    json.dumps({_PILOT: {"expires_at": "2026-10-17T12:00:00Z", "extra": 1}}),
+    json.dumps({_PILOT: "2026-10-17T12:00:00Z"}),
+    json.dumps({_PILOT.upper(): {"expires_at": "2026-10-17T12:00:00Z"}}),
+    '{"%s": {"expires_at": "2026-10-17T12:00:00Z"}, "%s": {"expires_at": "2026-10-17T12:00:00Z"}}' % (_PILOT, _PILOT),
+])
+def test_malformed_import_bound_admits_no_shop(raw):
+    for env in ({C.IMPORT_SHOPS_ENV: raw}, {C.IMPORT_SHOPS_ENV: raw, C.INSTALL_FIRST_ENV: "true"}):
+        assert not C.import_shop_allowed(_PILOT, env, _NOW)
+
+
+def test_far_future_or_oversized_bound_admits_no_shop():
+    far = _bound({_PILOT: _timedelta(hours=1), "other-store.myshopify.com": _timedelta(days=8)})
+    assert not C.import_shop_allowed(_PILOT, {C.IMPORT_SHOPS_ENV: far}, _NOW)
+    many = _bound({f"shop-{i}.myshopify.com": _timedelta(hours=1) for i in range(C.MAX_IMPORT_SHOPS + 1)})
+    assert not C.import_shop_allowed("shop-0.myshopify.com", {C.IMPORT_SHOPS_ENV: many}, _NOW)
+    # An expired peer never denies a valid listed shop.
+    mixed = _bound({_PILOT: _timedelta(hours=1), "other-store.myshopify.com": -_timedelta(hours=1)})
+    assert C.import_shop_allowed(_PILOT, {C.IMPORT_SHOPS_ENV: mixed}, _NOW)
+    assert not C.import_shop_allowed("other-store.myshopify.com", {C.IMPORT_SHOPS_ENV: mixed}, _NOW)

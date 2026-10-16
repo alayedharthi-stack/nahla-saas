@@ -1,20 +1,19 @@
-name: Frozen Shopify release gate validation
+name: Draft Shopify release gate validation
 
-# Proposed test-only addition to Draft #1214. Not yet published or triggered.
-# Standard public-repository runner; no cache/artifact storage or live secrets.
+# Draft-only synthetic proofs. No deployment, application startup, live target,
+# secrets, persisted checkout credentials, or mutation of committed expectations.
 on:
   push:
-    branches: [claude/shopify-release-gate-transition-20261011]
-    paths: [.github/workflows/shopify-release-gate-validation.yml]
+    branches: [codex/shopify-install-first-20261013, claude/shopify-pilot-bounded-catalog-import, codex/shopify-rollback-a4-binding-20261016]
 
 permissions:
   contents: read
 
 jobs:
-  frozen-gate:
-    name: Shopify gate / PostgreSQL ${{ matrix.pg }}
+  current-gate:
+    name: Current Shopify gate / PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -38,10 +37,18 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      FROZEN_SOURCE_SHA: 1257e4c10bad28ab189c6d1ff7d4e3c2add15781
-      FROZEN_SOURCE_TREE: c40f954a3a9218b6148230cd5778e8eacb14bedd
+      SOURCE_SHA: ${{ github.sha }}
       LEGACY_SOURCE_SHA: 462ede1aff602cad84e9569be859cca0087b190d
+      # Exact sibling draft fixture; never merge or import its application code.
+      GOOGLE_SOURCE_SHA: 5189989efba7fe1feeb7bf4bd29cd3b747a21ebc
+      NAHLA_GOOGLE_MERCHANT_MIGRATION_SHA256: 1f1a8ac6fd66d3f1d37846d882af3dcde5b1f54215d3e8d52fbb8bd9d672fb9e
+      NAHLA_GOOGLE_MERCHANT_MIGRATION_FIXTURE: ${{ github.workspace }}/google-0125.py
+      NAHLA_SHOPIFY_GOOGLE_SIBLING_REQUIRED: '1'
       NAHLA_LEGACY_462_CHECKOUT: ${{ github.workspace }}/legacy
+      NAHLA_RELIABILITY_REQUIRE_PG: '1'
+      NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+      NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
+      EXPECTED_PG_MAJOR: ${{ matrix.pg }}
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
       PYTHONDONTWRITEBYTECODE: '1'
     defaults:
@@ -51,27 +58,39 @@ jobs:
     steps:
       # Public fetch avoids persisting a checkout token and avoids this repo's
       # dangling gitlink checkout-cleanup issue. Submodules are never populated.
-      - name: Fetch exact public source and legacy checkout
+      - name: Fetch exact trigger source, legacy checkout, and pinned sibling fixture
         id: sources
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GOOGLE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$NAHLA_GOOGLE_MERCHANT_MIGRATION_SHA256" =~ ^[0-9a-f]{64}$ ]]
           git init source
           git -C source config core.autocrlf false
           git -C source remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
-          git -C source fetch --no-tags --depth=1 origin "$FROZEN_SOURCE_SHA"
+          git -C source fetch --no-tags --depth=1 origin "$SOURCE_SHA"
           git -C source checkout --detach FETCH_HEAD
           git init legacy
           git -C legacy config core.autocrlf false
           git -C legacy remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
           git -C legacy fetch --no-tags --depth=1 origin "$LEGACY_SOURCE_SHA"
           git -C legacy checkout --detach FETCH_HEAD
-          test "$(git -C source rev-parse HEAD)" = "$FROZEN_SOURCE_SHA"
-          test "$(git -C source rev-parse 'HEAD^{tree}')" = "$FROZEN_SOURCE_TREE"
+          git init "$RUNNER_TEMP/google-fixture"
+          git -C "$RUNNER_TEMP/google-fixture" remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C "$RUNNER_TEMP/google-fixture" fetch --no-tags --depth=1 origin "$GOOGLE_SOURCE_SHA"
+          test "$(git -C "$RUNNER_TEMP/google-fixture" rev-parse FETCH_HEAD)" = "$GOOGLE_SOURCE_SHA"
+          git -C "$RUNNER_TEMP/google-fixture" show "$GOOGLE_SOURCE_SHA:database/migrations/versions/0125_google_merchant_ledger.py" > "$NAHLA_GOOGLE_MERCHANT_MIGRATION_FIXTURE"
+          test "$(sha256sum "$NAHLA_GOOGLE_MERCHANT_MIGRATION_FIXTURE" | cut -d ' ' -f 1)" = "$NAHLA_GOOGLE_MERCHANT_MIGRATION_SHA256"
+          test "$(git -C source rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git -C legacy rev-parse HEAD)" = "$LEGACY_SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/shopify-gate-evidence"
+          printf '{"source_sha":"%s","migration_sha256":"%s"}\n' "$GOOGLE_SOURCE_SHA" "$NAHLA_GOOGLE_MERCHANT_MIGRATION_SHA256" > "$RUNNER_TEMP/shopify-gate-evidence/google-migration-fixture.json"
           date -u +'%Y-%m-%dT%H:%M:%SZ'
           git -C source show -s --format='source=%H tree=%T'
           git -C legacy show -s --format='legacy=%H tree=%T'
+          printf 'google_fixture_source=%s migration_sha256=%s\n' "$GOOGLE_SOURCE_SHA" "$NAHLA_GOOGLE_MERCHANT_MIGRATION_SHA256"
 
       - name: Setup Unix Python
         uses: actions/setup-python@v5
@@ -96,55 +115,35 @@ jobs:
           python --version
           python -m pip freeze
 
-      - name: Verify frozen runtime bytes and installed library origins
+      - name: Verify current source provenance, libraries, and disposable server
         id: provenance
         run: |
           set -euo pipefail
+          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts > /dev/null
           python - <<'PY'
-          import hashlib, json
+          import json, os
           from pathlib import Path
+          import sqlalchemy as sa
+          from sqlalchemy.pool import NullPool
           from scripts.operators import shopify_release_gate as gate
+          from scripts.operators import shopify_release_gate_contract as contract
+          from scripts.operators import shopify_release_gate_render as render
           root = Path.cwd()
-          actual = gate.inventory(root)
-          assert actual == (143, '1d3a50f171b155b5615b30e020f5400e831bb194ce9c8eaf867a1707bf396ce4'), actual
           assert not gate.unexpected_initializers(root)
-          digest = hashlib.sha256((root / 'scripts/operators/shopify_release_gate.py').read_bytes()).hexdigest()
-          assert digest == '206eb16195a8afe3307f835c047553db6c3f917d9df8f5172a90cab3dee33157'
+          assert 'backend/services/shopify_connection/install_config.py' in gate.inventory_paths(root)
+          assert {'NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED', 'VITE_SHOPIFY_INSTALL_FIRST_ENABLED'} <= set(contract.SHOPIFY_FLAG_ENVS)
           check = gate.check_libraries(root)
           print('library_gate=', check.status, check.reason)
           assert check.status == 'PASS', check.reason
           import alembic, sqlalchemy, psycopg2
           for module in (alembic, sqlalchemy, psycopg2):
               print('library_origin=', module.__name__, module.__version__, module.__file__)
-          print('inventory=', json.dumps({'count': actual[0], 'digest': actual[1], 'gate_sha256': digest}))
-          PY
-
-      - name: Full DB-free suite (once, Unix; zero skips)
-        if: matrix.pg == '16'
-        run: |
-          set -euo pipefail
-          date -u +'%Y-%m-%dT%H:%M:%SZ'
-          python -B -m pytest tests/test_shopify_release_gate.py -q -ra --tb=short \
-            --junitxml="$RUNNER_TEMP/shopify-gate-db-free.xml"
-          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-db-free.xml"
-          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-db-free.xml"); print(result); assert result["ok"] and result["tests"] == 154'
-          date -u +'%Y-%m-%dT%H:%M:%SZ'
-
-      - name: Strict disposable PostgreSQL suite (zero skips)
-        # Still collect the independent PG evidence if the DB-free suite fails.
-        if: ${{ !cancelled() && steps.sources.outcome == 'success' && steps.dependencies.outcome == 'success' && steps.provenance.outcome == 'success' }}
-        env:
-          NAHLA_RELIABILITY_REQUIRE_PG: '1'
-          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
-          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
-          EXPECTED_PG_MAJOR: ${{ matrix.pg }}
-        run: |
-          set -euo pipefail
-          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts > /dev/null
-          python - <<'PY'
-          import os
-          import sqlalchemy as sa
-          from sqlalchemy.pool import NullPool
+          report = render.inventory_report(root)
+          manifest = json.loads((root / 'docs/engineering/shopify-install-first-canonical-inventory.json').read_text())
+          for key, value in report.items():
+              assert manifest[key] == value, key
+          assert manifest['files'] == [{'path': path, 'sha256': gate.file_sha256(root / path)} for path in gate.inventory_paths(root)]
+          print('inventory=', json.dumps(report, sort_keys=True))
           engine = sa.create_engine(os.environ['NAHLA_RELIABILITY_PG_ADMIN_DSN'], poolclass=NullPool)
           try:
               with engine.connect() as connection:
@@ -154,17 +153,237 @@ jobs:
           finally:
               engine.dispose()
           PY
-          date -u +'%Y-%m-%dT%H:%M:%SZ'
-          python -B -m pytest backend/tests/test_shopify_release_gate_pg.py -q -ra --tb=short \
-            --junitxml="$RUNNER_TEMP/shopify-gate-pg.xml"
-          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-pg.xml"
-          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-pg.xml"); print(result); assert result["ok"] and result["tests"] == 10'
-          date -u +'%Y-%m-%dT%H:%M:%SZ'
 
-      - name: Record final source identity
+      - name: Capture a review candidate from unchanged disposable S3
+        id: capture
+        # Writes artifacts only. Never installs this file into the source tree;
+        # stale committed expectations must still fail the normal tests below.
+        run: python -B scripts/ci/capture_shopify_s3_expectations.py
+
+      - name: Full current-source DB-free and bootstrap suites (zero skips)
+        if: ${{ !cancelled() && matrix.pg == '16' && steps.provenance.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -B -m pytest tests/test_shopify_release_gate.py tests/test_shopify_install_release_contract.py tests/test_normal_bootstrap_migration_target.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-db-free.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-db-free.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-evidence/shopify-gate-db-free.xml"); print(result); assert result["ok"] and result["tests"] >= 177'
+
+      - name: Strict current-source disposable PostgreSQL gate suite (zero skips)
+        # Collect independent evidence even when another suite fails.
+        if: ${{ !cancelled() && steps.provenance.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -B -m pytest backend/tests/test_shopify_release_gate_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-gate-pg.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-evidence/shopify-gate-pg.xml"); print(result); assert result["ok"] and result["tests"] >= 14'
+
+      - name: Named 0124 and schema-retaining rollback rehearsal (zero skips)
+        if: ${{ !cancelled() && steps.provenance.outcome == 'success' }}
+        env:
+          NAHLA_INSTALL_RELEASE_CAPTURE_DIR: ${{ runner.temp }}/shopify-gate-evidence
+        run: |
+          set -euo pipefail
+          python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
+
+      - name: Strict sibling migration order and downgrade proofs (zero skips)
+        if: ${{ !cancelled() && steps.provenance.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -B -m pytest backend/tests/test_shopify_google_sibling_migrations_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-google-sibling-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-google-sibling-pg.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/shopify-gate-evidence/shopify-google-sibling-pg.xml"); print(result); assert result["ok"] and result["tests"] >= 8'
+
+      - name: Record final source identity without allowing checkout changes
         if: ${{ always() && steps.sources.outcome == 'success' }}
         run: |
           set -euo pipefail
-          git diff --exit-code
+          git diff --exit-code HEAD --
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git show -s --format='source=%H tree=%T'
           date -u +'%Y-%m-%dT%H:%M:%SZ'
+
+      - name: Upload candidate, canonical inventory, and actual JUnit evidence
+        if: ${{ always() && steps.sources.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopify-gate-pg${{ matrix.pg }}-source-${{ github.sha }}
+          path: ${{ runner.temp }}/shopify-gate-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  google-schema:
+    name: Exact Google draft ${{ matrix.pr }} / PostgreSQL 16
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: '1212'
+            sha: 5189989efba7fe1feeb7bf4bd29cd3b747a21ebc
+            pure_tests: tests/test_google_merchant_models.py tests/test_normal_bootstrap_migration_target.py
+            pure_minimum: 23
+            pg_tests: backend/tests/test_google_merchant_schema_pg.py
+            pg_minimum: 122
+          - pr: '1215'
+            sha: 0f0447dca5b265c62c243515881e74ee0c7709c9
+            pure_tests: tests/test_google_merchant_models.py tests/test_normal_bootstrap_migration_target.py tests/test_google_merchant_ledger_repository.py
+            pure_minimum: 43
+            pg_tests: backend/tests/test_google_merchant_schema_pg.py backend/tests/test_google_merchant_ledger_repository_pg.py
+            pg_minimum: 161
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      GOOGLE_SOURCE_SHA: ${{ matrix.sha }}
+      GOOGLE_PURE_TESTS: ${{ matrix.pure_tests }}
+      GOOGLE_PURE_MINIMUM: ${{ matrix.pure_minimum }}
+      GOOGLE_PG_TESTS: ${{ matrix.pg_tests }}
+      GOOGLE_PG_MINIMUM: ${{ matrix.pg_minimum }}
+      NAHLA_RELIABILITY_REQUIRE_PG: '1'
+      NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: google-source
+    steps:
+      - name: Fetch exact Google schema draft in its own source tree
+        id: google-source
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git init google-source
+          git -C google-source config core.autocrlf false
+          git -C google-source remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C google-source fetch --no-tags --depth=1 origin "$GOOGLE_SOURCE_SHA"
+          git -C google-source checkout --detach FETCH_HEAD
+          test "$(git -C google-source rev-parse HEAD)" = "$GOOGLE_SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/google-schema-evidence"
+          git -C google-source show -s --format='source=%H tree=%T' > "$RUNNER_TEMP/google-schema-evidence/source.txt"
+          cat "$RUNNER_TEMP/google-schema-evidence/source.txt"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Isolate Google interpreter
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/google-schema-venv"
+          echo "$RUNNER_TEMP/google-schema-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install exact draft requirements and focused test dependencies
+        id: dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --no-cache-dir -r requirements.txt
+          python -m pip install --disable-pip-version-check --no-cache-dir pytest==9.1.1 pyotp==2.9.0
+          python -m pip check
+          python --version
+          python -m pip freeze > "$RUNNER_TEMP/google-schema-evidence/dependencies.txt"
+
+      - name: Google models, bootstrap, and applicable adapter contract (zero skips)
+        run: |
+          set -euo pipefail
+          read -r -a test_paths <<< "$GOOGLE_PURE_TESTS"
+          python -B -m pytest "${test_paths[@]}" -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/google-schema-evidence/google-models-bootstrap.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/google-schema-evidence/google-models-bootstrap.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-models-bootstrap.xml"); print(result); assert result["ok"] and result["tests"] >= int(os.environ["GOOGLE_PURE_MINIMUM"])'
+
+      - name: Google actual schema invariants on disposable PostgreSQL (zero skips)
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import sqlalchemy as sa
+          from sqlalchemy.pool import NullPool
+          engine = sa.create_engine(os.environ['NAHLA_RELIABILITY_PG_ADMIN_DSN'], poolclass=NullPool)
+          try:
+              with engine.connect() as connection:
+                  version = int(connection.exec_driver_sql('SHOW server_version_num').scalar())
+                  print('PostgreSQL server_version_num=', version)
+                  assert version // 10000 == 16
+          finally:
+              engine.dispose()
+          PY
+          read -r -a test_paths <<< "$GOOGLE_PG_TESTS"
+          python -B -m pytest "${test_paths[@]}" -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/google-schema-evidence/google-schema-pg.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/google-schema-evidence/google-schema-pg.xml"
+          python -c 'import os; from scripts.check_junit_clean import evaluate_junit_report as check; result=check(os.environ["RUNNER_TEMP"]+"/google-schema-evidence/google-schema-pg.xml"); print(result); assert result["ok"] and result["tests"] >= int(os.environ["GOOGLE_PG_MINIMUM"])'
+
+      - name: Verify Google proof did not alter its source tree
+        if: ${{ always() && steps.google-source.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code HEAD --
+          test "$(git rev-parse HEAD)" = "$GOOGLE_SOURCE_SHA"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && steps.google-source.outcome == 'success' }}
+        with:
+          name: google-schema-${{ env.GOOGLE_SOURCE_SHA }}-trigger-${{ github.sha }}
+          path: ${{ runner.temp }}/google-schema-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  compare-candidates:
+    name: Compare PostgreSQL 16 and 18 S3 candidate definitions
+    needs: current-gate
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shopify-gate-pg*-source-${{ github.sha }}
+          path: evidence
+      - name: Require both captures and identical definitions and canonical inventory
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('evidence')
+          candidates, inventories, install_candidates = [], [], []
+          for major in (16, 18):
+              directory = root / f'shopify-gate-pg{major}-source-{os.environ["SOURCE_SHA"]}'
+              candidates.append(json.loads((directory / 'shopify-release-schema-expectations.candidate.json').read_text()))
+              inventories.append(json.loads((directory / 'source-inventory.json').read_text()))
+              install_candidates.append(json.loads((directory / 'shopify-install-schema-expectations.candidate.json').read_text()))
+          for key in ('retained', 'shopify_s3', 'expectations_version', 'database_py_digest', 'generated_from_source_sha'):
+              assert candidates[0][key] == candidates[1][key], key
+          for key in ('retained', 'shopify_s4', 'expectations_version', 'database_py_digest', 'generated_from_source_sha'):
+              assert install_candidates[0][key] == install_candidates[1][key], key
+          assert install_candidates[0]['generated_from_source_sha'] == os.environ['SOURCE_SHA']
+          assert len(install_candidates[0]['shopify_s4']['tables']) == 17
+          assert install_candidates[0]['retained'] == candidates[0]['retained']
+          assert candidates[0]['generated_from_source_sha'] == os.environ['SOURCE_SHA']
+          assert inventories[0] == inventories[1]
+          assert inventories[0]['source_sha'] == os.environ['SOURCE_SHA']
+          assert len(candidates[0]['shopify_s3']['tables']) == 15
+          print(json.dumps({'candidate_comparison': 'PASS', 'source_sha': os.environ['SOURCE_SHA'],
+                            'database_py_digest': candidates[0]['database_py_digest'],
+                            'inventory_count': inventories[0]['inventory_count'],
+                            'inventory_digest': inventories[0]['inventory_digest']}, sort_keys=True))
+          PY
