@@ -19,8 +19,11 @@ const oldToken = token(oldClaims)
 const otherToken = token({ ...oldClaims, tenant_id: 33, user_id: 33, jti: 'changed' })
 const shopifyToken = token({ ...oldClaims, tenant_id: 22, user_id: 22, jti: 'new', auth_source: 'shopify',
   shopify_session: 'synthetic-flow', shopify_shop: 'demo.myshopify.com', exp: Math.floor(Date.now() / 1000) + 300 })
+// A second account's Shopify session for another shop (cross-tab switch).
+const alphaToken = token({ ...oldClaims, tenant_id: 44, user_id: 44, jti: 'alpha', auth_source: 'shopify',
+  shopify_session: 'synthetic-alpha', shopify_shop: 'alpha.myshopify.com', exp: Math.floor(Date.now() / 1000) + 300 })
 const binding = createHash('sha256').update('11|11|merchant|old|').digest('hex')
-const pending = confirmed => ({ browser: 'b'.repeat(64), binding, shop: 'demo.myshopify.com',
+const pending = (confirmed, key = binding) => ({ browser: 'b'.repeat(64), binding: key, shop: 'demo.myshopify.com',
   switchConfirmed: confirmed, expires: Date.now() + 900000 })
 const server = createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/merchant/integrations/shopify/install/start') {
@@ -56,20 +59,22 @@ const origin = `http://127.0.0.1:${server.address().port}`
 let browser
 try {
   browser = await chromium.launch({ headless: true })
-  async function isolated({ existing = false, flow } = {}) {
+  async function isolated({ existing = false, flow, session = oldToken, clock = false } = {}) {
     const context = await browser.newContext()
+    // One clock for every tab of the context; it keeps running until fast-forwarded.
+    if (clock) await context.clock.install()
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
-    await context.addInitScript(({ origin, existing, oldToken, flow }) => {
+    await context.addInitScript(({ origin, existing, session, flow }) => {
       localStorage.setItem('nahla_api_base_override', origin)
       if (!localStorage.getItem('synthetic_seeded')) {
         localStorage.setItem('synthetic_seeded', '1')
         if (existing) {
-          localStorage.setItem('nahla_auth', '1'); localStorage.setItem('nahla_token', oldToken)
+          localStorage.setItem('nahla_auth', '1'); localStorage.setItem('nahla_token', session)
           localStorage.setItem('nahla_tenant_id', '11'); localStorage.setItem('nahla_role', 'merchant')
         }
         if (flow) sessionStorage.setItem('nahla_shopify_install_browser_v1', JSON.stringify(flow))
       }
-    }, { origin, existing, oldToken, flow })
+    }, { origin, existing, session, flow })
     return { context, page: await context.newPage() }
   }
   const { context, page } = await isolated()
@@ -163,6 +168,84 @@ try {
   assert.equal(await race.page.evaluate(() => localStorage.getItem('nahla_token')), otherToken)
   await race.context.close()
   console.log('PASS real Chromium: explicit session transition, cancel preservation, consent binding, and late-response session race')
+
+  // Cross-tab account switch. Tabs of one profile share localStorage, so the
+  // session-refresh loop of an already open tab (A) must follow the session
+  // another tab (B) leaves behind: re-authenticate the shop of the CURRENT
+  // Shopify session, and never a shop of an account that is gone.
+  holdRedeem = false
+  const shopifyNavigations = page => {
+    const shops = []
+    page.on('request', r => {
+      if (r.isNavigationRequest() && r.frame() === page.mainFrame() && new URL(r.url()).pathname === '/app/shopify')
+        shops.push(new URL(r.url()).searchParams.get('shop'))
+    })
+    return shops
+  }
+  async function openTabA(session) {
+    const tabs = await isolated({ existing: true, session, clock: true })
+    const ready = tabs.page.waitForEvent('console', m => m.text().startsWith('[auth] session bootstrap'))
+    await tabs.page.goto(origin + '/overview')
+    await ready // ProtectedRoute accepted the session and installed its refresh loop
+    return { ...tabs, shops: shopifyNavigations(tabs.page) }
+  }
+  async function installInTabB(context, key) {
+    const tabB = await context.newPage()
+    await tabB.addInitScript(flow => {
+      if (!sessionStorage.getItem('synthetic_tab_b')) {
+        sessionStorage.setItem('synthetic_tab_b', '1')
+        sessionStorage.setItem('nahla_shopify_install_browser_v1', JSON.stringify(flow))
+      }
+    }, pending(false, key))
+    await tabB.goto(origin + '/app/shopify#install_handle=' + 'a'.repeat(43))
+    await tabB.locator('[data-install-state="confirm_switch"]').waitFor()
+    await tabB.getByRole('dialog').getByRole('button').first().click()
+    await tabB.waitForURL('**/overview')
+    return tabB
+  }
+  const expire = tab => tab.context.clock.fastForward('06:00') // beyond the five-minute Shopify sessions
+  const alphaKey = createHash('sha256').update('44|44|merchant|alpha|').digest('hex')
+
+  // 1. A holds shop alpha's session; B completes the real install-first handoff for demo.
+  const switched = await openTabA(alphaToken)
+  const redeemsBefore = redeems
+  await installInTabB(switched.context, alphaKey)
+  assert.equal(redeems, redeemsBefore + 1)
+  assert.equal(await switched.page.evaluate(() => localStorage.getItem('nahla_token')), shopifyToken)
+  await expire(switched)
+  await switched.page.waitForURL('**/app/shopify**')
+  assert.deepEqual(switched.shops, ['demo.myshopify.com'], 'tab A re-authenticates the current shop, not alpha')
+  await switched.context.close()
+
+  // 2. A holds alpha's session; B signs out (the keys logout() removes). A's next
+  //    15 s check must not start alpha's re-auth. Then B installs demo: the same
+  //    loop, still running, now follows demo.
+  const ended = await openTabA(alphaToken)
+  const tabB = await ended.context.newPage()
+  await tabB.goto(origin + '/landing')
+  await tabB.evaluate(() => {
+    for (const k of ['nahla_auth', 'nahla_token', 'nahla_role', 'nahla_email', 'nahla_tenant_id', 'nahla_user_id', 'nahla_store_name'])
+      localStorage.removeItem(k)
+  })
+  await ended.context.clock.fastForward('00:20')
+  await ended.page.waitForTimeout(2000)
+  assert.deepEqual(ended.shops, [], 'no Shopify re-auth for a signed-out account')
+  assert.equal(new URL(ended.page.url()).pathname, '/overview')
+  await tabB.evaluate(value => { localStorage.setItem('nahla_auth', '1'); localStorage.setItem('nahla_token', value) }, oldToken)
+  await installInTabB(ended.context, binding)
+  await expire(ended)
+  await ended.page.waitForURL('**/app/shopify**')
+  assert.deepEqual(ended.shops, ['demo.myshopify.com'])
+  await ended.context.close()
+
+  // 3. A holds a password session (12 h refresh); B installs demo's five-minute session.
+  const password = await openTabA(oldToken)
+  await installInTabB(password.context, binding)
+  await expire(password)
+  await password.page.waitForURL('**/app/shopify**')
+  assert.deepEqual(password.shops, ['demo.myshopify.com'], 'an open password tab follows a Shopify session from another tab')
+  await password.context.close()
+  console.log('PASS real Chromium: two tabs, shared storage and clock; refresh loop follows cross-tab account switch, sign-out and session-kind change')
 } finally {
   if (releaseRedeem) releaseRedeem()
   if (browser) await browser.close()

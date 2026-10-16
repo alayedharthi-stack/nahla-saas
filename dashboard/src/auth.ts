@@ -607,21 +607,30 @@ export async function bootstrapAuthSession(): Promise<boolean> {
   return refreshSession()
 }
 
-/** Refresh on visibility + every 12h while the dashboard stays open. */
+/** Refresh on visibility + every 12h while the dashboard stays open. A
+ *  Shopify session cannot be refreshed: every 15 s it is checked locally and,
+ *  once expired, re-authenticated for its own shop. The session is read at
+ *  each check because another tab may switch or end it. */
 export function installSessionRefreshLoop(): () => void {
-  const shopifyPath = shopifyReauthPath()
+  const reauthExpiredShopify = (): boolean => {
+    const path = shopifyReauthPath()
+    if (!path || (getTokenExpiryMs() || 0) > Date.now()) return false
+    window.location.replace(path)
+    return true
+  }
   const tick = () => {
-    if (shopifyPath && (getTokenExpiryMs() || 0) <= Date.now()) { window.location.replace(shopifyPath); return }
-    void bootstrapAuthSession()
+    if (!reauthExpiredShopify()) void bootstrapAuthSession()
   }
   const onVis = () => {
     if (document.visibilityState === 'visible') tick()
   }
   document.addEventListener('visibilitychange', onVis)
-  const id = window.setInterval(tick, shopifyPath ? 15_000 : 12 * 3600_000)
+  const id = window.setInterval(tick, 12 * 3600_000)
+  const shopifyId = window.setInterval(reauthExpiredShopify, 15_000)
   return () => {
     document.removeEventListener('visibilitychange', onVis)
     window.clearInterval(id)
+    window.clearInterval(shopifyId)
   }
 }
 
