@@ -15,7 +15,10 @@ Off by default: unless both ``NAHLA_SHOPIFY_CONNECTION_ENABLED`` and
        DB-revalidated merchant actor (no support impersonation), re-checked
        under row locks inside the transaction that admits the run. Starts
        the connection's single import run and returns 202; the run executes
-       in the background and records its own outcome.
+       in the background and records its own outcome. A shop outside the
+       import's shop bound (``NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS``; mandatory
+       while the install-first pilot is on) is refused with 403
+       ``shop_not_admitted`` before any database work.
 
 "Imported" is the committed Shopify mirror only: nothing here writes the
 shared catalog, Salla, Meta, WhatsApp or the AI runtime. Tokens, URLs,
@@ -100,7 +103,7 @@ async def catalog_import_start(body: ShopBody, request: Request, background: Bac
     try:
         handle = store.begin_run(db, actor=actor, shop_domain=shop)
     except store.StartRefused as exc:
-        status = {store.S_NOT_FOUND: 404, store.S_ACTOR_REVOKED: 403}.get(exc.code, 409)
+        status = {store.S_NOT_FOUND: 404, store.S_ACTOR_REVOKED: 403, store.S_SHOP_NOT_ADMITTED: 403}.get(exc.code, 409)
         raise HTTPException(status_code=status, detail={"error": exc.code}) from None
     from services.shopify_catalog.importer import run_import_job  # noqa: PLC0415
 

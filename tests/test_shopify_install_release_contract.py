@@ -471,3 +471,130 @@ def test_pinned_prior_keeps_backup_restore_and_release_bindings(prior_approval, 
     else:
         record["phase"] = "S4_PILOT"
     assert k.evaluate_approval(record, **kwargs)[:2] == (k.FAIL, reason)
+
+
+# ── S4_PILOT: read-only catalog import bounded to the one pilot shop ──────────
+
+from services.shopify_catalog import config as catalog_config  # noqa: E402
+
+IMPORT_FLAG = "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED"
+
+
+def _deadline(**delta):
+    return (dt.datetime.now(dt.timezone.utc) + dt.timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def import_bound(shops=None, **delta):
+    return json.dumps({shop: {"expires_at": _deadline(**(delta or {"days": 1}))}
+                       for shop in (shops or [k.PILOT_SHOP])})
+
+
+def pilot_import_env(bound=None):
+    return {**pilot_env(), IMPORT_FLAG: "true", k.CATALOG_IMPORT_SHOPS_ENV: import_bound() if bound is None else bound}
+
+
+def test_contract_names_the_runtime_import_flag_and_bound():
+    assert k.CATALOG_IMPORT_FLAG == IMPORT_FLAG == catalog_config.IMPORT_ENABLED_ENV
+    assert k.CATALOG_IMPORT_FLAG in k.SHOPIFY_FLAG_ENVS
+    assert k.CATALOG_IMPORT_SHOPS_ENV == catalog_config.IMPORT_SHOPS_ENV
+    assert dt.timedelta(days=k.CATALOG_IMPORT_MAX_DAYS) == catalog_config.MAX_IMPORT_SHOP_VALIDITY
+    assert catalog_config.INSTALL_FIRST_ENV in k.SHOPIFY_FLAG_ENVS
+
+
+def test_pilot_may_add_only_the_catalog_import_bounded_to_the_pilot_shop():
+    assert k.evaluate_flags(pilot_env(), "S4_PILOT")[:2] == (k.PASS, None)   # unchanged without the import
+    status, reason, detail = k.evaluate_flags(pilot_import_env(), "S4_PILOT")
+    assert (status, reason) == (k.PASS, None)
+    assert detail == {"enabled": sorted({"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED",
+                                         IMPORT_FLAG}), "pilot_shops": 1, "catalog_import_shops": 1}
+    assert "expires_at" not in json.dumps(detail)
+    # What the contract accepts, the runtime enforces: the pilot shop only.
+    env = pilot_import_env()
+    assert catalog_config.import_shop_allowed(k.PILOT_SHOP, env)
+    for other in ("other-store.myshopify.com", "nahlah-dev2.myshopify.com", "dev.myshopify.com"):
+        assert not catalog_config.import_shop_allowed(other, env)
+
+
+@pytest.mark.parametrize("bound", [
+    None, "", " ", "null", "[]", "{}", "{", '"nahlah-dev.myshopify.com"', "x" * 4097,
+    "other-store", "*",
+])
+def test_pilot_import_without_a_valid_bound_fails_closed(bound):
+    env = {**pilot_env(), IMPORT_FLAG: "true"}
+    if bound is not None:
+        env[k.CATALOG_IMPORT_SHOPS_ENV] = bound
+    assert k.evaluate_flags(env, "S4_PILOT")[:2] == (k.FAIL, k.R_CATALOG_IMPORT_BOUND_INVALID)
+
+
+@pytest.mark.parametrize("mutation", [
+    "other_shop", "pilot_plus_other", "wildcard_key", "uppercase", "trailing_space", "subdomain",
+    "extra_field", "admission_shape", "missing_deadline", "deadline_int", "deadline_bool", "deadline_null",
+    "expired", "now_exact", "beyond_seven_days", "fractional_seconds", "offset_form", "lowercase_z",
+    "date_only", "duplicate_key", "nested_list", "entry_string"])
+def test_pilot_import_bound_rejects_scope_expansion_and_malformed_entries(mutation):
+    later = _deadline(days=1)
+    bound = {
+        "other_shop": json.dumps({"other-store.myshopify.com": {"expires_at": later}}),
+        "pilot_plus_other": import_bound([k.PILOT_SHOP, "other-store.myshopify.com"]),
+        "wildcard_key": json.dumps({"*": {"expires_at": later}}),
+        "uppercase": json.dumps({k.PILOT_SHOP.upper(): {"expires_at": later}}),
+        "trailing_space": json.dumps({k.PILOT_SHOP + " ": {"expires_at": later}}),
+        "subdomain": json.dumps({"x." + k.PILOT_SHOP: {"expires_at": later}}),
+        "extra_field": json.dumps({k.PILOT_SHOP: {"expires_at": later, "max_products": 10}}),
+        "admission_shape": json.dumps({k.PILOT_SHOP: {"sha256": "a" * 64, "expires_at": later}}),
+        "missing_deadline": json.dumps({k.PILOT_SHOP: {}}),
+        "deadline_int": json.dumps({k.PILOT_SHOP: {"expires_at": 1893456000}}),
+        "deadline_bool": json.dumps({k.PILOT_SHOP: {"expires_at": True}}),
+        "deadline_null": json.dumps({k.PILOT_SHOP: {"expires_at": None}}),
+        "expired": json.dumps({k.PILOT_SHOP: {"expires_at": _deadline(seconds=-1)}}),
+        "now_exact": json.dumps({k.PILOT_SHOP: {"expires_at": _deadline()}}),
+        "beyond_seven_days": json.dumps({k.PILOT_SHOP: {"expires_at": _deadline(days=7, minutes=5)}}),
+        "fractional_seconds": json.dumps({k.PILOT_SHOP: {"expires_at": later[:-1] + ".000Z"}}),
+        "offset_form": json.dumps({k.PILOT_SHOP: {"expires_at": later[:-1] + "+00:00"}}),
+        "lowercase_z": json.dumps({k.PILOT_SHOP: {"expires_at": later[:-1] + "z"}}),
+        "date_only": json.dumps({k.PILOT_SHOP: {"expires_at": later[:10]}}),
+        "duplicate_key": '{"%s": {"expires_at": "%s"}, "%s": {"expires_at": "%s"}}' % (
+            k.PILOT_SHOP, later, k.PILOT_SHOP, later),
+        "nested_list": json.dumps([{k.PILOT_SHOP: {"expires_at": later}}]),
+        "entry_string": json.dumps({k.PILOT_SHOP: later}),
+    }[mutation]
+    assert k.evaluate_flags(pilot_import_env(bound), "S4_PILOT")[:2] == (k.FAIL, k.R_CATALOG_IMPORT_BOUND_INVALID)
+
+
+@pytest.mark.parametrize("flag", [name for name in k.SHOPIFY_FLAG_ENVS if name not in {
+    "NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED", IMPORT_FLAG}])
+def test_pilot_import_never_admits_any_other_feature(flag):
+    # Privacy intake/worker/destructive and every dashboard flag stay refused,
+    # even next to a valid import bound.
+    assert k.evaluate_flags({**pilot_import_env(), flag: "true"}, "S4_PILOT")[:2] == (k.FAIL, k.R_FLAG_ENABLED)
+
+
+@pytest.mark.parametrize("missing", ["NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"])
+def test_import_cannot_replace_the_required_pilot_flags(missing):
+    env = pilot_import_env()
+    env[missing] = "false"
+    assert k.evaluate_flags(env, "S4_PILOT")[:2] == (k.FAIL, k.R_FLAG_ENABLED)
+
+
+def test_pilot_import_still_requires_the_install_admission():
+    env = pilot_import_env()
+    env["SHOPIFY_INSTALL_PILOT_ADMISSION"] = json.dumps({"other-store.myshopify.com": {
+        "sha256": "a" * 64, "expires_at": _deadline(days=1)}})
+    assert k.evaluate_flags(env, "S4_PILOT")[:2] == (k.FAIL, k.R_PILOT_ADMISSION_INVALID)
+
+
+@pytest.mark.parametrize("phase", ["S0", "S3", "S4_DORMANT"])
+def test_every_other_phase_keeps_the_import_off_even_with_a_bound(phase):
+    # S4_DORMANT is also the pilot's rollback: still every flag OFF.
+    assert k.evaluate_flags({IMPORT_FLAG: "true", k.CATALOG_IMPORT_SHOPS_ENV: import_bound()}, phase)[:2] == (
+        k.FAIL, k.R_FLAG_ENABLED)
+    assert k.evaluate_flags({k.CATALOG_IMPORT_SHOPS_ENV: import_bound()}, phase)[:2] == (k.PASS, None)
+
+
+def test_pilot_import_keeps_the_same_source_dormant_rollback_and_approval_checks(schema_approval):
+    # The flag rule is independent of the approval: S4_PILOT still needs its
+    # same-source dormant rollback, and the pinned prior is still refused.
+    root, _path, record, kwargs = schema_approval
+    assert k.evaluate_approval(record, **kwargs)[:2] == (k.PASS, None)
+    prior = harness.prior_rollback_record(root, record)
+    assert k.evaluate_approval(prior, **kwargs)[:2] == (k.FAIL, k.R_SCHEMA_ROLLBACK_INVALID)

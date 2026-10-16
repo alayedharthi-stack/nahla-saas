@@ -24,8 +24,10 @@ the release before connecting to a database.
 
 ## Pilot and legacy acquisition
 
-S4_PILOT requires only the connection and install-first server flags ON. Every
-catalog, privacy and dashboard build flag checked by the API gate stays OFF.
+S4_PILOT requires the connection and install-first server flags ON. The only
+other flag it may add is the read-only catalog import, bounded to the pilot
+shop (see "Pilot catalog import" below). Every privacy and dashboard build
+flag checked by the API gate stays OFF.
 Admission contains only `nahlah-dev.myshopify.com`, a shop-bound private-code
 hash and a whole-second UTC deadline within seven days. Hashes/codes are not
 printed. Owner identity still comes from Shopify's verified online grant.
@@ -40,6 +42,41 @@ configuration, authentication and storage work. Missing admission/configuration
 does not reopen them. Whitespace flag parsing is consistent across the release
 gate, install-first runtime and legacy guard. Status, disconnect and uninstall
 retain their existing connection-gated behavior.
+
+## Pilot catalog import (bounded)
+
+S4_PILOT may set `NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED` only together with
+`NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS` =
+`{"nahlah-dev.myshopify.com": {"expires_at": "YYYY-MM-DDTHH:MM:SSZ"}}`: exactly
+that shop, one field, a whole-second UTC deadline in the future and at most
+seven days ahead. Anything else (another or second shop, missing/extra
+fields, a malformed or far deadline, any other Shopify flag) refuses the
+release with `catalog_import_bound_invalid` or `shopify_flag_enabled` before
+a database connection. S0, S3 and S4_DORMANT (the pilot's rollback) keep the
+import OFF.
+
+The runtime enforces the same bound (`services/shopify_catalog/config.py`,
+`import_shop_allowed`). While the install-first switch is ON the bound is
+mandatory: absent, empty or malformed, it admits no shop. A start for a shop
+outside it answers 403 `shop_not_admitted` before any database statement.
+
+Import limits under the pilot:
+
+* shop: `nahlah-dev.myshopify.com` only, and only while its connection is
+  ready (active with this generation's uninstall-subscription proof);
+* time: runs start only before the bound's deadline (≤ 7 days); a run
+  already started may finish within its existing 6-hour run deadline;
+* data: read-only Admin GraphQL at the pinned `2026-10`, scope
+  `read_products` only (inventory levels are not read without
+  `read_inventory`); it writes only the provider-scoped `shopify_catalog_*`
+  mirror — never the shared catalog, Salla, Meta, WhatsApp or the AI runtime;
+* size: the existing caps — ≤ 25,000 products, ≤ 2,048 variants per product,
+  ≤ 200,000 variants, ≤ 5,000 locations, ≤ 1,000,000 inventory levels,
+  8 MiB per response, bounded retries — beyond them the run fails closed;
+* concurrency: one running import per connection.
+
+The dashboard's `VITE_SHOPIFY_CATALOG_IMPORT_UI` is not enabled by this
+contract and stays an owner build decision for the separate frontend service.
 
 ## Schema-retaining rollback
 

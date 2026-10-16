@@ -250,6 +250,13 @@ SHOPIFY_FLAG_ENVS: Tuple[str, ...] = (
     "VITE_SHOPIFY_CATALOG_IMPORT_UI",
 )
 TRUTHY = frozenset({"1", "true", "yes", "on"})
+# S4_PILOT may additionally enable the read-only catalog import, and only
+# with the runtime shop bound (backend/services/shopify_catalog/config.py,
+# ``IMPORT_SHOPS_ENV``) naming exactly PILOT_SHOP with a deadline at most
+# seven days ahead. Every other flag keeps its S4_PILOT rule.
+CATALOG_IMPORT_FLAG = "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED"
+CATALOG_IMPORT_SHOPS_ENV = "NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS"
+CATALOG_IMPORT_MAX_DAYS = 7
 
 # ── Retained schema protections (definitions, never names only) ─────────────
 RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
@@ -330,6 +337,7 @@ R_BACKUP_TOO_OLD = "backup_too_old"
 R_RESTORE_NOT_VERIFIED = "restore_not_verified"
 R_FLAG_ENABLED = "shopify_flag_enabled"
 R_PILOT_ADMISSION_INVALID = "pilot_admission_invalid"
+R_CATALOG_IMPORT_BOUND_INVALID = "catalog_import_bound_invalid"
 R_CONNECT_FAILED = "connect_failed"
 R_TIMEOUT = "statement_or_lock_timeout"
 R_WALL_TIMEOUT = "wall_timeout"
@@ -513,11 +521,40 @@ def evaluate_relation_identity(before: Mapping[str, Any], after: Mapping[str, An
     return PASS, None, {"relations": len(before)}
 
 
+def _catalog_import_bound_valid(raw: object) -> bool:
+    """The import's shop bound names exactly PILOT_SHOP, deadline within seven days."""
+    try:
+        if not isinstance(raw, str) or len(raw) > 4096:
+            return False
+
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate")
+                result[key] = value
+            return result
+        entries = json.loads(raw, object_pairs_hook=unique)
+        if not isinstance(entries, dict) or set(entries) != {PILOT_SHOP}:
+            return False
+        entry = entries[PILOT_SHOP]
+        if not isinstance(entry, dict) or set(entry) != {"expires_at"}:
+            return False
+        expires = entry["expires_at"]
+        if not isinstance(expires, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", expires):
+            return False
+        deadline = parse_utc(expires)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        return deadline is not None and now < deadline <= now + _dt.timedelta(days=CATALOG_IMPORT_MAX_DAYS)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return False
+
+
 def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[str, Optional[str], Dict[str, Any]]:
     enabled = sorted(name for name in SHOPIFY_FLAG_ENVS if truthy(environ.get(name)))
     if phase_name == "S4_PILOT":
         required = {"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"}
-        if set(enabled) != required:
+        if not required <= set(enabled) <= required | {CATALOG_IMPORT_FLAG}:
             return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
         # The live server still requires a valid private code and verifies the
         # Shopify online owner. This source-bound contract restricts configured
@@ -548,6 +585,10 @@ def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[
                 raise ValueError("deadline")
         except (ValueError, TypeError, RecursionError, OverflowError):
             return FAIL, R_PILOT_ADMISSION_INVALID, {"enabled": enabled}
+        if CATALOG_IMPORT_FLAG in enabled:
+            if not _catalog_import_bound_valid(environ.get(CATALOG_IMPORT_SHOPS_ENV)):
+                return FAIL, R_CATALOG_IMPORT_BOUND_INVALID, {"enabled": enabled}
+            return PASS, None, {"enabled": enabled, "pilot_shops": 1, "catalog_import_shops": 1}
         return PASS, None, {"enabled": enabled, "pilot_shops": 1}
     if enabled:
         return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
