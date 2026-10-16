@@ -58,7 +58,11 @@ import OFF.
 The runtime enforces the same bound (`services/shopify_catalog/config.py`,
 `import_shop_allowed`). While the install-first switch is ON the bound is
 mandatory: absent, empty or malformed, it admits no shop. A start for a shop
-outside it answers 403 `shop_not_admitted` before any database statement.
+outside it answers 403 `shop_not_admitted`. Inside `store.begin_run` the bound
+is checked first, before any import-admission SQL (the locked actor re-check,
+the connection and run rows); the refusal only rolls back the request's open
+transaction. The request as a whole still reads the database earlier: the
+route's actor revalidation and schema-presence check run before `begin_run`.
 
 Import limits under the pilot:
 

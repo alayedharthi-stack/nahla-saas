@@ -4,7 +4,7 @@ name: Draft Shopify release gate validation
 # secrets, persisted checkout credentials, or mutation of committed expectations.
 on:
   push:
-    branches: [codex/shopify-install-first-20261013]
+    branches: [codex/shopify-install-first-20261013, claude/shopify-pilot-bounded-catalog-import]
 
 permissions:
   contents: read
