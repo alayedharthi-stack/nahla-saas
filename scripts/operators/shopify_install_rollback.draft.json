@@ -22,9 +22,9 @@
   "incompatible_rollback": "a8fb88e3_S3_refuses_0124",
   "dormant_prior_rollback": {
     "rollback_mode": "pinned_prior_flags_off",
-    "source_sha": "59216725836bdb0d104e5b8f5107369999efad63",
+    "source_sha": "a4e96891bda691b1ee0f7cb105c5810e727c39bd",
     "runtime_inventory_count": 157,
-    "runtime_inventory_digest": "f6cc722de7c20383060ba2ff478247e729f46d28ea7793560d47b0cbec1e1c92",
+    "runtime_inventory_digest": "6f8d254235e23b6a8ae0473747e6b645ad0492001f6d0c14abae68a4375fa2cf",
     "schema_expectations_sha256": "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
   },
   "approval": "none"
