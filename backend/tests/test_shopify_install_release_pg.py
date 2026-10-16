@@ -127,3 +127,32 @@ def test_first_dormant_deploy_runs_with_the_pinned_prior_rollback_and_pilot_stil
         assert topo.schema_diff(topo.schema_snapshot(h._loopback_url(db)), baseline) == []
     finally:
         h._drop(db)
+
+
+def test_pilot_runs_with_the_bounded_catalog_import_and_refuses_any_wider_one(tmp_path):
+    db = h._fresh_db("install_import")
+    try:
+        h._build(db, "0124")
+        root = harness.build_root(tmp_path / "root")
+        deadline = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        pilot = {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "true",
+                 "SHOPIFY_INSTALL_PILOT_ADMISSION": json.dumps({k.PILOT_SHOP: {"sha256": "a" * 64, "expires_at": deadline}})}
+        bounded = {**pilot, k.CATALOG_IMPORT_FLAG: "true",
+                   k.CATALOG_IMPORT_SHOPS_ENV: json.dumps({k.PILOT_SHOP: {"expires_at": deadline}})}
+        baseline = topo.schema_snapshot(h._loopback_url(db))
+        h._assert_pass(root, "S4_PILOT", db, "pilot with the import bounded to the pilot shop", extra_env=bounded)
+        wider = {**bounded, k.CATALOG_IMPORT_SHOPS_ENV: json.dumps({
+            k.PILOT_SHOP: {"expires_at": deadline}, "other-store.myshopify.com": {"expires_at": deadline}})}
+        for env, reason, step in ((wider, k.R_CATALOG_IMPORT_BOUND_INVALID, "a second shop in the import bound"),
+                                  ({**bounded, k.CATALOG_IMPORT_SHOPS_ENV: ""}, k.R_CATALOG_IMPORT_BOUND_INVALID,
+                                   "import without a bound"),
+                                  ({**bounded, "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": "true"}, k.R_FLAG_ENABLED,
+                                   "import next to another write feature")):
+            out = h._assert_fail(root, "S4_PILOT", db, step, extra_env=env, check="shopify_flags", reason=reason)
+            assert "connect" not in harness.checks(out)
+        h._assert_fail(root, "S4_DORMANT", db, "dormant rollback keeps the import OFF", extra_env=bounded,
+                       check="shopify_flags", reason=k.R_FLAG_ENABLED)
+        h._assert_pass(root, "S4_DORMANT", db, "dormant rollback with every flag OFF")
+        assert topo.schema_diff(topo.schema_snapshot(h._loopback_url(db)), baseline) == []
+    finally:
+        h._drop(db)

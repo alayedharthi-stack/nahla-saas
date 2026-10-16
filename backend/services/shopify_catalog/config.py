@@ -13,10 +13,26 @@ served by ``2026-10`` — a version fall-forward fails the run.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Mapping, Optional
 
 IMPORT_ENABLED_ENV = "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED"
+
+# Shop bound of the import. A run may start only for a shop listed here with
+# a future deadline: ``{"<shop>.myshopify.com": {"expires_at": "YYYY-MM-DDTHH:MM:SSZ"}}``.
+# While the install-first pilot switch is on the bound is mandatory (absent
+# means no shop); otherwise an absent bound leaves the import unrestricted
+# (unchanged behaviour; the import flag itself is off by default). Present
+# but malformed, or any deadline beyond ``MAX_IMPORT_SHOP_VALIDITY``, admits
+# no shop at all. The release gate pins the pilot to exactly one shop.
+IMPORT_SHOPS_ENV = "NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS"
+INSTALL_FIRST_ENV = "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"
+MAX_IMPORT_SHOPS = 5
+MAX_IMPORT_SHOP_VALIDITY = timedelta(days=7)
+_DEADLINE_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 CATALOG_API_VERSION = "2026-10"
 
@@ -83,3 +99,44 @@ def import_routes_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
 
     e = _env(env)
     return flag_enabled(e) and import_flag_enabled(e)
+
+
+def _unique_object(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate_import_shop")
+        out[key] = value
+    return out
+
+
+def import_shop_allowed(shop: str, env: Optional[Mapping[str, str]] = None,
+                        now: Optional[datetime] = None) -> bool:
+    """Whether an import run may start for *shop* (canonical domain). Fails closed."""
+    from services.shopify_connection.shop_domain import canonical_shop_domain  # noqa: PLC0415
+
+    e = _env(env)
+    current = now or datetime.now(timezone.utc)
+    raw = e.get(IMPORT_SHOPS_ENV)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        pilot = str(e.get(INSTALL_FIRST_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+        return not pilot
+    if not isinstance(raw, str) or len(raw) > 4096 or canonical_shop_domain(shop) != shop:
+        return False
+    try:
+        entries = json.loads(raw, object_pairs_hook=_unique_object)
+        if not isinstance(entries, dict) or not 0 < len(entries) <= MAX_IMPORT_SHOPS:
+            return False
+        deadlines = {}
+        for domain, entry in entries.items():
+            if (canonical_shop_domain(domain) != domain or not isinstance(entry, dict)
+                    or set(entry) != {"expires_at"} or not isinstance(entry["expires_at"], str)
+                    or not _DEADLINE_RE.fullmatch(entry["expires_at"])):
+                return False
+            deadline = datetime.fromisoformat(entry["expires_at"][:-1]).replace(tzinfo=timezone.utc)
+            if deadline > current + MAX_IMPORT_SHOP_VALIDITY:
+                return False
+            deadlines[domain] = deadline
+        return shop in deadlines and current < deadlines[shop]
+    except (ValueError, TypeError, UnicodeError, OverflowError, RecursionError):
+        return False

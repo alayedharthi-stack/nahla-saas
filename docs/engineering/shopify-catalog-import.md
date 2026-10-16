@@ -40,6 +40,7 @@ needs explicit end-to-end approval and testing.
 | `NAHLA_SHOPIFY_CONNECTION_ENABLED` (foundation) | every Shopify route 404 |
 | `NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED` (new) | both import routes 404; no run is ever started |
 | `VITE_SHOPIFY_CATALOG_IMPORT_UI` (new, dashboard) | the card keeps its static "not started" import step |
+| `NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS` (shop bound) | absent: no shop restriction, unless the install-first switch is ON, then no shop may start; present: only listed shops before their deadline (≤ 7 days); malformed: no shop. S4_PILOT pins it to `nahlah-dev.myshopify.com` |
 
 `start` additionally requires the foundation's availability gate (client
 credentials, encryption key, …) because tokens are obtained and refreshed
