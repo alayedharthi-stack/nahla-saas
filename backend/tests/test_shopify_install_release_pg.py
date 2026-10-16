@@ -104,7 +104,7 @@ def test_first_dormant_deploy_runs_with_the_pinned_prior_rollback_and_pilot_stil
         prior = harness.prior_rollback_approval_for(root, "S4_DORMANT", h._target(db))
         record = json.loads(prior.read_text(encoding="utf-8"))
         assert record["schema_rollback"]["source_sha"] == record["deployment_rollback_snapshot"]["source_sha"] \
-            == "59216725836bdb0d104e5b8f5107369999efad63" != record["release_sha"]
+            == "a4e96891bda691b1ee0f7cb105c5810e727c39bd" != record["release_sha"]
         h._assert_pass(root, "S4_DORMANT", db, "first dormant deploy, pinned prior dormant rollback", approval=prior)
         deadline = datetime.now(timezone.utc) + timedelta(days=1)
         env = {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "true",
