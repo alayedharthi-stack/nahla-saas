@@ -26,6 +26,8 @@ SHOP = foundation.SHOP_SHOES
 
 @pytest.fixture
 def store(pg, monkeypatch):
+    # Match production for every install, expiry, isolation and concurrency proof.
+    pg.Session.configure(autoflush=False)
     from alembic.operations import Operations
     from alembic.migration import MigrationContext
     path = foundation._REPO / "database/migrations/versions/0124_shopify_install_first.py"

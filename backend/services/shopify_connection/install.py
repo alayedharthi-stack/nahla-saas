@@ -393,6 +393,8 @@ async def _prove_and_ready(db, *, flow_id, shop, lease, held, stored, access_tok
     current = None
     if (ready and flow is not None and flow.phase == "exchanging_offline" and flow.expires_at > now
             and flow.owner_expires_at is not None and flow.owner_expires_at > now):
+        # _current refreshes locked rows; preserve the promotion before that read.
+        db.flush()
         try:
             current, _, _ = _current(db, flow, lock=True)  # owner, user and tenant still valid
         except InstallRejected:
