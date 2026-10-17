@@ -24,11 +24,20 @@ permissions:
   contents: read
 jobs:
   install-first:
+    name: install-first / PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: '16'
+            image: docker.io/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          - pg: '18'
+            image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        image: ${{ matrix.image }}
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: synthetic-proof-only
@@ -89,5 +98,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: shopify-install-first-pg
+          name: shopify-install-first-pg${{ matrix.pg }}
           path: install-first-pg.xml
