@@ -32,7 +32,7 @@
     },
     {
       "path": "backend/services/shopify_connection/install.py",
-      "sha256": "3d416d6677f34b1d00cd13ee513cff750b38ce014e57f2251a1088de35871b1e"
+      "sha256": "209f00a13ec8fcc1b1f4945cc1fdbd1151c90a843e4ad031be963fd939e5c278"
     },
     {
       "path": "backend/services/shopify_connection/install_admission.py",
@@ -634,6 +634,6 @@
   "gate_sha256": "c7e61a5433c43c6503043e13eb010bec3fe243e57ec4aff268584bc9f8ec966b",
   "gate_version": 2,
   "inventory_count": 157,
-  "inventory_digest": "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88",
+  "inventory_digest": "f433b733bc51e980db02b7d321249b684b91fd0c41e9d7fa8bdfb6de62f79075",
   "unexpected_initializers": []
 }

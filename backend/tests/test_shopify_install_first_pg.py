@@ -89,7 +89,9 @@ def redeem(pg, fake, browser, handle, **kwargs):
         return asyncio.run(install.redeem(db, browser=browser, handle=handle, config=CFG, api=fake, **kwargs))
 
 
-def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch):
+@pytest.mark.parametrize("autoflush", [True, False], ids=["autoflush", "production-no-autoflush"])
+def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch, autoflush):
+    store.Session.configure(autoflush=autoflush)
     fake, browser = Fake(), secrets.token_hex(32)
     kind, state = online(store, fake, browser)
     with store.Session() as db:
@@ -98,6 +100,14 @@ def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch)
         flow = db.query(Flow).one()
         assert browser not in flow.browser_hash and flow.online_token_enc.startswith("sgcm1:")
     kind, handle = callback(store, fake, browser, state)
+    assert kind == "ready"
+    assert fake.calls.count(("owner", SHOP)) == fake.calls.count(("exchange", SHOP)) == 1
+    with store.Session() as db:
+        from services.shopify_connection.models import ShopifyConnection
+        connection = db.query(ShopifyConnection).one()
+        assert lifecycle.is_ready(db, connection)
+        assert db.query(Flow).one().phase == "ready"
+        assert db.query(Tenant).count() == db.query(User).count() == 1
     session = redeem(store, fake, browser, handle)
     with store.Session() as db:
         user = db.query(User).one(); owner = db.query(Owner).one()

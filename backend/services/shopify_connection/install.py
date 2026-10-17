@@ -386,6 +386,9 @@ async def _prove_and_ready(db, *, flow_id, shop, lease, held, stored, access_tok
     ready = False
     if held_still and conn is not None and int(conn.generation) == generation:
         lc._record_webhook_outcome(db, conn, proof, failure, target)
+        # Production sessions disable autoflush. Make this transaction's proof
+        # visible to the readiness query before promoting or issuing a handoff.
+        db.flush()
         ready = proof is not None and lc._promote_if_held(db, conn, request_version=request_version, now=now)
     current = None
     if (ready and flow is not None and flow.phase == "exchanging_offline" and flow.expires_at > now
