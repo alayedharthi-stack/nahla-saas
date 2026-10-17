@@ -358,6 +358,8 @@ def is_pushable_manual_coupon(coupon: Coupon) -> bool:
     if coupon.source_type == "imported":
         return False
     meta = coupon.extra_metadata or {}
+    if meta.get("active_sync_pending"):
+        return False
     if str(meta.get("source") or "").lower() == "salla":
         return False
     return coupon.source_type in (None, "", "manual") or str(meta.get("source") or "").lower() in (

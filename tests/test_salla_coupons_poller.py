@@ -332,7 +332,8 @@ def test_coupons_poller_uses_fetch_coupons_paginated_once(monkeypatch):
     fake_adapter.get_coupons = AsyncMock(side_effect=AssertionError("get_coupons must not be called"))
     captured = {}
 
-    async def _fake_sync_coupons(self, *, triggered_by="store_sync", raw_list=None, fetch_result=None, duration_ms=None):
+    async def _fake_sync_coupons(self, *, triggered_by="store_sync", raw_list=None, fetch_result=None, duration_ms=None, observed_at=None):
+        assert observed_at is not None
         captured["triggered_by"] = triggered_by
         captured["raw_list"] = raw_list
         captured["fetch_result"] = fetch_result

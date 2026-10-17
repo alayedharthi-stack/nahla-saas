@@ -17,6 +17,7 @@ SOURCE_LABEL_AR: Dict[str, str] = {
 }
 
 SYNC_BADGE_AR: Dict[str, str] = {
+    "pending": "بانتظار المزامنة",
     "synced": "متزامن مع سلة",
     "not_pushed": "لم يُرسل إلى سلة",
     "failed": "فشل الإرسال",
@@ -81,6 +82,8 @@ def build_salla_import_metadata(
         "sync_direction": "salla_to_nahla",
         "last_synced_at": synced_at.isoformat(),
     }
+    if isinstance(normalised.get("active"), bool):
+        meta["active"] = normalised["active"]
     coupon_name = normalised.get("name") or extract_salla_coupon_name(raw)
     if coupon_name:
         meta["salla_coupon_name"] = coupon_name
@@ -139,6 +142,12 @@ def merge_salla_import_metadata(
     merged = dict(existing or {})
     origin_source = merged.get("source") if preserve_origin else None
     merged.update(import_meta)
+    if (existing or {}).get("active_sync_pending"):
+        for key in ("active", "sync_status", "sync_error", "salla_synced", "last_synced_at"):
+            if key in existing:
+                merged[key] = existing[key]
+            else:
+                merged.pop(key, None)
     if preserve_origin and origin_source is not None:
         merged["source"] = origin_source
     return merged
@@ -273,6 +282,8 @@ def derive_sync_badge(source_type: str, meta: Dict[str, Any]) -> str:
     sync_status = str(meta.get("sync_status") or "").lower()
     if sync_status == "failed":
         return "failed"
+    if meta.get("active_sync_pending") or sync_status == "pending":
+        return "pending"
 
     if source_type == "imported":
         return "imported"

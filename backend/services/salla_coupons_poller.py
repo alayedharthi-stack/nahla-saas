@@ -206,6 +206,8 @@ async def _run_one_tick() -> Dict[str, Any]:
                 continue
 
             try:
+                from services.coupon_active_sync import retry_active_changes
+                await retry_active_changes(db, intg)
                 recent_stats = None
                 if recent_due:
                     recent_stats = await _poll_recent_integration(db, intg)
@@ -306,6 +308,7 @@ async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:
     if adapter is None or not hasattr(adapter, "fetch_coupons_paginated"):
         raise RuntimeError("missing_fetch_coupons_paginated")
 
+    observed_at = datetime.now(timezone.utc)
     fetch_result = await adapter.fetch_coupons_paginated(per_page=60)
     svc = StoreSyncService(
         db,
@@ -315,6 +318,7 @@ async def _poll_integration(db: Session, intg: Any) -> Dict[str, Any]:
     )
     upserted = await svc.sync_coupons(
         triggered_by="salla_coupons_poller",
+        observed_at=observed_at,
         raw_list=list(fetch_result.get("items") or []),
         fetch_result=fetch_result,
         duration_ms=int((time.monotonic() - started) * 1000),
@@ -357,6 +361,7 @@ async def _poll_recent_integration(db: Session, intg: Any) -> Dict[str, Any]:
     if adapter is None or not hasattr(adapter, "fetch_recent_coupons_paginated"):
         raise RuntimeError("missing_fetch_recent_coupons_paginated")
 
+    observed_at = datetime.now(timezone.utc)
     fetch_result = await adapter.fetch_recent_coupons_paginated(per_page=60)
     upserted = 0
     if fetch_result.get("ok"):
@@ -366,6 +371,7 @@ async def _poll_recent_integration(db: Session, intg: Any) -> Dict[str, Any]:
         )
         upserted = await svc.sync_coupons(
             triggered_by="salla_coupons_recent_poller",
+            observed_at=observed_at,
             raw_list=list(fetch_result.get("items") or []),
             fetch_result=fetch_result,
             record_sync_meta=False,
