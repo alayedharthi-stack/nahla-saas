@@ -185,7 +185,13 @@ def test_two_shops_isolate_sessions_handoffs_and_owner_mapping(store):
 def test_existing_unmapped_tenant_never_adopted(store):
     fake = Fake()
     merchant = foundation.Merchant(store, "existing")
-    foundation.connect(store, merchant, SHOP, fake)
+    # Build the legacy fixture with its original session policy; the install
+    # rejection below still runs with production's disabled autoflush.
+    store.Session.configure(autoflush=True)
+    try:
+        foundation.connect(store, merchant, SHOP, fake)
+    finally:
+        store.Session.configure(autoflush=False)
     with pytest.raises(install.InstallRejected):
         installed(store, fake, secrets.token_hex(32))
     with store.Session() as db:
