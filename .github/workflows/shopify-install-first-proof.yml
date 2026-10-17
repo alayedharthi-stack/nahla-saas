@@ -1,0 +1,102 @@
+name: Shopify dormant install-first proof
+on:
+  push:
+    branches: [codex/shopify-install-first-20261013]
+  pull_request:
+    paths:
+      - backend/services/shopify_connection/install*.py
+      - backend/services/shopify_connection/lifecycle.py
+      - backend/services/shopify_connection/oauth.py
+      - backend/services/shopify_connection/recovery.py
+      - backend/services/shopify_connection/uninstall_webhook.py
+      - backend/routers/shopify_install.py
+      - backend/tests/test_shopify_install_first*.py
+      - backend/tests/test_shopify_uninstall_webhook*.py
+      - backend/tests/_shopify_webhook_fake.py
+      - backend/services/shopify_catalog/config.py
+      - backend/services/shopify_catalog/store.py
+      - backend/routers/shopify_catalog_import.py
+      - scripts/operators/shopify_release_gate_contract.py
+      - backend/tests/test_shopify_catalog_import*.py
+      - tests/test_shopify_catalog_import.py
+      - tests/test_shopify_install_release_contract.py
+permissions:
+  contents: read
+jobs:
+  install-first:
+    name: install-first / PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pg: '16'
+            image: docker.io/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          - pg: '18'
+            image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    services:
+      postgres:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: proof
+          POSTGRES_PASSWORD: synthetic-proof-only
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U proof -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install repository runtime and tests
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pyotp
+      - name: Protocol and actual router boundaries
+        run: >-
+          python -m pytest backend/tests/test_shopify_install_first.py
+          backend/tests/test_shopify_uninstall_webhook.py tests/test_shopify_catalog_import.py
+          tests/test_shopify_install_release_contract.py -q --tb=short
+      - name: Required actual PostgreSQL proofs (no skip accepted)
+        env:
+          NAHLA_RELIABILITY_REQUIRE_PG: '1'
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://proof:synthetic-proof-only@127.0.0.1:5432/postgres
+        run: >-
+          python -m pytest backend/tests/test_shopify_install_first_pg.py
+          backend/tests/test_shopify_connection_pg.py
+          backend/tests/test_shopify_uninstall_webhook_pg.py
+          backend/tests/test_shopify_catalog_import_pg.py
+          backend/tests/test_shopify_catalog_import_bound_pg.py
+          backend/tests/test_shopify_privacy_webhooks_pg.py -q --tb=short
+          --junitxml=install-first-pg.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Dashboard build and return handling regressions
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+          npm run check:shopify-connection-ui
+          node scripts/check-shopify-install-first.mjs
+          npx --yes tsx@4 scripts/check-shopify-install-sentry.mts
+      - name: Real browser install navigation with synthetic local endpoint
+        working-directory: dashboard
+        env:
+          VITE_SHOPIFY_CONNECTION_UI: 'true'
+          VITE_SHOPIFY_INSTALL_FIRST_ENABLED: 'true'
+        run: |
+          npm run build
+          npx playwright install --with-deps chromium
+          node scripts/browser-shopify-install-first.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shopify-install-first-pg${{ matrix.pg }}
+          path: install-first-pg.xml

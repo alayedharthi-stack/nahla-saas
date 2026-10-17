@@ -272,6 +272,11 @@ async def api_key_middleware(request: Request, call_next):
             or path.startswith("/webhook")
             or path.startswith("/auth")
             or path.startswith("/api/salla/diag/")  # public diagnostic
+            or (request.method, path) in {
+                ("POST", "/merchant/integrations/shopify/install/start"),
+                ("GET", "/merchant/integrations/shopify/install/callback"),
+                ("POST", "/merchant/integrations/shopify/install/redeem"),
+            }
             # Shopify authenticates this browser redirect with HMAC and single-use state.
             or (
                 request.method == "GET"
@@ -599,7 +604,11 @@ async def jwt_enforcement_middleware(request: Request, call_next):
     if _is_bypass_path(path):
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
-    if is_jwt_public_path(path):
+    if is_jwt_public_path(path) or (request.method, path) in {
+        ("POST", "/merchant/integrations/shopify/install/start"),
+        ("GET", "/merchant/integrations/shopify/install/callback"),
+        ("POST", "/merchant/integrations/shopify/install/redeem"),
+    }:
         return await _safe_call_next(request, call_next, name="jwt_enforcement")
 
     # The lifecycle-operations M2M credential is validated by the endpoint's

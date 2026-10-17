@@ -8,6 +8,40 @@
          the Shopify completion page, which gets no-referrer. -->
     <meta name="referrer" content="strict-origin" />
     <script>
+      // Capture only the canonical shop hint / opaque handoff, before telemetry.
+      (function () {
+        var loc = window.location;
+        var n = loc.pathname;
+        try { n = decodeURIComponent(n); } catch (e) { /* compare raw */ }
+        n = n.toLowerCase().replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+        var onPath = n === '/app/shopify';
+        var stray = /install(?:_|%5f|%255f)(?:handle|error)/i.test(loc.search + loc.hash);
+        if (!onPath && !stray) return;
+        window.__nahlaShopifyInstallPage = true;
+        var held = { shop: '', handle: '', error: false };
+        if (onPath) {
+          var query = new URLSearchParams(loc.search);
+          var fragment = new URLSearchParams(loc.hash.slice(1));
+          var shop = query.get('shop') || '';
+          var handle = fragment.get('install_handle') || '';
+          if (query.getAll('shop').length === 1 && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/.test(shop)) held.shop = shop;
+          if (fragment.getAll('install_handle').length === 1 && /^[A-Za-z0-9_-]{43}$/.test(handle)) held.handle = handle;
+          held.error = fragment.has('install_error') || (loc.hash !== '' && !held.handle);
+        }
+        var target = onPath ? '/app/shopify' : loc.origin + loc.pathname;
+        try { window.history.replaceState(null, '', target); } catch (e) { /* fail closed below */ }
+        if (loc.search || loc.hash || (onPath && loc.pathname !== '/app/shopify')) {
+          held = { shop: '', handle: '', error: true };
+          window.__nahlaShopifyInstallBlocked = true;
+          try { loc.replace(target); } catch (e) { /* boot stops */ }
+        }
+        window.__nahlaShopifyInstallReturn = function () {
+          var result = held;
+          held = { shop: '', handle: '', error: true };
+          delete window.__nahlaShopifyInstallReturn;
+          return result;
+        };
+      })();
       /* Shopify connection return — runs before any other script or
          subresource. Mirrors src/lib/shopifyConnection/returnCapture.ts
          (normalizeRoutePath, RETURN_MARKER_RE); keep them in sync.
@@ -36,7 +70,7 @@
           m.name = 'referrer';
           // Route policy: none from the completion page or a URL carrying a
           // return marker; the browser default everywhere else.
-          m.content = onPath || stray ? 'no-referrer' : 'strict-origin-when-cross-origin';
+          m.content = onPath || stray || window.__nahlaShopifyInstallPage ? 'no-referrer' : 'strict-origin-when-cross-origin';
           document.head.appendChild(m);
           if (!onPath && !stray) return;
           // Foreign paths: an explicit same-origin URL. A bare pathname that

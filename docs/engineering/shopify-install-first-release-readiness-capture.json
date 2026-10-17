@@ -1,0 +1,61 @@
+{
+  "candidate_comparison": "PASS; retained and S3 schema definitions unchanged from historical expectations and equal across PostgreSQL 16/18",
+  "candidate_files": [
+    {
+      "postgres_major": 16,
+      "sha256": "13e2d23e44cd10017a0a2fddfe3317ea9609a14ef147e6cc5c0bf634bc3a0988"
+    },
+    {
+      "postgres_major": 18,
+      "sha256": "11e02a51c0e1ce9d8f107cbd807aa9ea4ed6dd057b13491e59c10ebb0f613743"
+    }
+  ],
+  "changed_expectation_fields": [
+    "database_py_digest",
+    "generated_at_utc",
+    "generated_from_source_sha",
+    "server_version"
+  ],
+  "combined_source_heads": [
+    "0092",
+    "0111",
+    "0114",
+    "0115",
+    "0124",
+    "0125"
+  ],
+  "database_py_digest": "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09",
+  "database_rows_captured": [
+    "0111",
+    "0113",
+    "0123"
+  ],
+  "deployment_phases": [
+    "S0",
+    "S3"
+  ],
+  "final_validation": "Must pass on a new commit with this reviewed candidate and canonical inventory; see exact-source CI artifacts and Draft PR validation records",
+  "first_run_conclusion": "FAIL as expected: old committed expectations rejected by 2/177 DB-free cases and 12/14 PostgreSQL gate cases on each server; candidates were not substituted during testing",
+  "first_run_passed": {
+    "google_models_bootstrap": 23,
+    "google_schema_pg16": 122,
+    "sibling_tests_pg16": 8,
+    "sibling_tests_pg18": 8
+  },
+  "google_adapter_sha": "0f0447dca5b265c62c243515881e74ee0c7709c9",
+  "google_observer_pr1213_unchanged_sha": "b15a40b889097b8098cdcc63e55d82b402c771cd",
+  "google_schema_sha": "5189989efba7fe1feeb7bf4bd29cd3b747a21ebc",
+  "google_validation_base_sha": "0f9882c13bd9b79ac44dd744e7873d227ed67f5e",
+  "historical_approval_reuse": "Not valid for this source; any future deployment requires new exact source and inventory binding",
+  "installed_candidate": "PostgreSQL 16 artifact, unchanged bytes",
+  "migration_edges": {
+    "0124": "0123",
+    "0125": "0123"
+  },
+  "normal_bootstrap_target": "0093",
+  "production_changes": "NONE; no DDL, deploy, settings, credentials, or capability activation",
+  "run_url": "https://github.com/alayedharthi-stack/nahla-saas/actions/runs/38478455989",
+  "s3_table_count": 15,
+  "scope": "Draft-only disposable S3 capture, not deployment or migration authorization",
+  "source_sha": "e1f734d1c57a4f672bab2ac7df10f9e152f230b0"
+}

@@ -109,7 +109,7 @@ def _scrub_request(request: Dict[str, Any]) -> Dict[str, Any]:
     path = (request.get("url") or "")
     if isinstance(path, str) and ("/auth/login" in path or "/auth/reset-password" in path):
         request["data"] = "[scrubbed]"
-    elif isinstance(path, str) and "/webhooks/shopify/" in path:
+    elif isinstance(path, str) and ("/webhooks/shopify/" in path or "/merchant/integrations/shopify/install/" in path):
         # Shopify webhook bodies carry shop and customer personal data
         # (privacy compliance requests: email, phone, order ids).
         request["data"] = "[scrubbed]"
@@ -137,6 +137,7 @@ _WITHHELD_FRAME_MODULES = (
     "services.whatsapp_platform.token_manager",
     "services.shopify_connection",
     "routers.shopify_connection",
+    "routers.shopify_install",
     "services.shopify_catalog",
     "routers.shopify_catalog_import",
     "services.shopify_privacy",

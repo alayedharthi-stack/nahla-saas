@@ -1,6 +1,7 @@
 // MUST stay first: takes and scrubs a Shopify connection return fragment
 // before Sentry, SEO, the runtime boot log, auth or the router read the URL.
 import './lib/shopifyConnection/bootCapture'
+import './lib/shopifyInstallBoot'
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'

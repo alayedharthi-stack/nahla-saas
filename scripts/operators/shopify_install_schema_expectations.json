@@ -1,0 +1,5207 @@
+{
+ "database_py_digest": "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09",
+ "expectations_version": 3,
+ "generated_at_utc": "2026-10-14T04:58:45Z",
+ "generated_from_source_sha": "e3693e4283b64af5812dec8e855d5e76a4f27b11",
+ "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
+ "retained": {
+  "nonce": {
+   "columns": [
+    [
+     "id",
+     "integer",
+     true,
+     "nextval('whatsapp_oauth_nonces_id_seq'::regclass)",
+     "",
+     ""
+    ],
+    [
+     "nonce_hash",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "connection_mode",
+     "character varying(32)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "redirect_uri_fingerprint",
+     "character varying(64)",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "expires_at",
+     "timestamp with time zone",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "consumed_at",
+     "timestamp with time zone",
+     false,
+     null,
+     "",
+     ""
+    ],
+    [
+     "created_at",
+     "timestamp with time zone",
+     true,
+     null,
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "f",
+     "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+     false,
+     false,
+     true
+    ],
+    [
+     "p",
+     "PRIMARY KEY (id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "u",
+     "UNIQUE (nonce_hash)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     false,
+     "USING btree (expires_at)",
+     true,
+     true,
+     true
+    ],
+    [
+     false,
+     "USING btree (tenant_id)",
+     true,
+     true,
+     true
+    ],
+    [
+     true,
+     "USING btree (id)",
+     true,
+     true,
+     true
+    ],
+    [
+     true,
+     "USING btree (nonce_hash)",
+     true,
+     true,
+     true
+    ]
+   ]
+  },
+  "pk_types": {
+   "tenants": "integer",
+   "users": "integer"
+  },
+  "sequences": [
+   [
+    "catalog_channel_retirements_id_seq",
+    "catalog_channel_retirements",
+    "id"
+   ],
+   [
+    "commerce_runtime_deferred_inbound_id_seq",
+    "commerce_runtime_deferred_inbound",
+    "id"
+   ],
+   [
+    "commerce_runtime_handover_workers_id_seq",
+    "commerce_runtime_handover_workers",
+    "id"
+   ],
+   [
+    "commerce_runtime_navigation_snapshots_id_seq",
+    "commerce_runtime_navigation_snapshots",
+    "id"
+   ],
+   [
+    "meta_catalog_authorizations_id_seq",
+    "meta_catalog_authorizations",
+    "id"
+   ]
+  ],
+  "tables": {
+   "catalog_channel_retirements": {
+    "columns": [
+     [
+      "id",
+      "integer",
+      true,
+      "nextval('catalog_channel_retirements_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "catalog_id",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "retailer_id",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "meta_item_id",
+      "character varying(128)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "product_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reason",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(32)",
+      true,
+      "'pending'::character varying",
+      "",
+      ""
+     ],
+     [
+      "attempts",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "next_attempt_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_error",
+      "character varying(255)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "done_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "catalog_channel_retirements_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "catalog_channel_retirements_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_catalog_channel_retirements_tenant_catalog_retailer",
+      "u",
+      "UNIQUE (tenant_id, catalog_id, retailer_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "catalog_channel_retirements_pkey",
+      "CREATE UNIQUE INDEX catalog_channel_retirements_pkey ON public.catalog_channel_retirements USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_catalog_channel_retirements_tenant_status",
+      "CREATE INDEX ix_catalog_channel_retirements_tenant_status ON public.catalog_channel_retirements USING btree (tenant_id, status)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_catalog_channel_retirements_tenant_catalog_retailer",
+      "CREATE UNIQUE INDEX uq_catalog_channel_retirements_tenant_catalog_retailer ON public.catalog_channel_retirements USING btree (tenant_id, catalog_id, retailer_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "commerce_runtime_deferred_inbound": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('commerce_runtime_deferred_inbound_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "namespace",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "channel_connection_ref",
+      "character varying(128)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "phone_number_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "recipient",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "provider_message_id",
+      "character varying(200)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "payload",
+      "jsonb",
+      true,
+      "'{}'::jsonb",
+      "",
+      ""
+     ],
+     [
+      "reason",
+      "character varying(32)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "state",
+      "character varying(16)",
+      true,
+      "'pending'::character varying",
+      "",
+      ""
+     ],
+     [
+      "barrier_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "disposition",
+      "character varying(32)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "disposition_evidence",
+      "jsonb",
+      true,
+      "'{}'::jsonb",
+      "",
+      ""
+     ],
+     [
+      "disposed_by",
+      "character varying(200)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "disposed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "resolved_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_commerce_runtime_deferred_inbound_disposition",
+      "c",
+      "CHECK (((((state)::text = 'disposed'::text) = (disposition IS NOT NULL)) AND ((disposition IS NULL) OR ((disposition)::text = ANY ((ARRAY['replayed'::character varying, 'answered'::character varying, 'superseded'::character varying, 'not_required'::character varying, 'unanswered'::character varying])::text[])))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_deferred_inbound_namespace",
+      "c",
+      "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_deferred_inbound_reason",
+      "c",
+      "CHECK (((reason)::text = ANY ((ARRAY['accepted'::character varying, 'drain_buffered'::character varying, 'process_draining'::character varying, 'admission_refused'::character varying, 'settled_window'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_deferred_inbound_state",
+      "c",
+      "CHECK (((state)::text = ANY ((ARRAY['pending'::character varying, 'resolved'::character varying, 'disposed'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "commerce_runtime_deferred_inbound_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_commerce_runtime_deferred_inbound_identity",
+      "u",
+      "UNIQUE (tenant_id, namespace, channel_connection_ref, provider_message_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "commerce_runtime_deferred_inbound_pkey",
+      "CREATE UNIQUE INDEX commerce_runtime_deferred_inbound_pkey ON public.commerce_runtime_deferred_inbound USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_commerce_runtime_deferred_inbound_created",
+      "CREATE INDEX ix_commerce_runtime_deferred_inbound_created ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, created_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_commerce_runtime_deferred_inbound_pending",
+      "CREATE INDEX ix_commerce_runtime_deferred_inbound_pending ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, namespace) WHERE ((state)::text = 'pending'::text)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_commerce_runtime_deferred_inbound_identity",
+      "CREATE UNIQUE INDEX uq_commerce_runtime_deferred_inbound_identity ON public.commerce_runtime_deferred_inbound USING btree (tenant_id, namespace, channel_connection_ref, provider_message_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "commerce_runtime_handover_barrier": {
+    "columns": [
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "namespace",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "state",
+      "character varying(16)",
+      true,
+      "'open'::character varying",
+      "",
+      ""
+     ],
+     [
+      "generation",
+      "bigint",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "opened_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "settled_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "released_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "evidence",
+      "jsonb",
+      true,
+      "'{}'::jsonb",
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_commerce_runtime_handover_barrier_generation",
+      "c",
+      "CHECK ((generation >= 0))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_handover_barrier_namespace",
+      "c",
+      "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_handover_barrier_state",
+      "c",
+      "CHECK (((state)::text = ANY ((ARRAY['open'::character varying, 'draining'::character varying, 'settled'::character varying, 'released'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "commerce_runtime_handover_barrier_pkey",
+      "p",
+      "PRIMARY KEY (tenant_id, namespace)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "commerce_runtime_handover_barrier_pkey",
+      "CREATE UNIQUE INDEX commerce_runtime_handover_barrier_pkey ON public.commerce_runtime_handover_barrier USING btree (tenant_id, namespace)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "commerce_runtime_handover_workers": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('commerce_runtime_handover_workers_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "namespace",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "worker_id",
+      "character varying(200)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "observed_generation",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "observed_state",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "seen_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "retired_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "retired_by",
+      "character varying(200)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "retired_reason",
+      "text",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "retirement_evidence",
+      "jsonb",
+      true,
+      "'{}'::jsonb",
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_commerce_runtime_handover_workers_generation",
+      "c",
+      "CHECK ((observed_generation >= 0))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_handover_workers_namespace",
+      "c",
+      "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_handover_workers_retirement",
+      "c",
+      "CHECK (((retired_at IS NOT NULL) = (retired_by IS NOT NULL)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "commerce_runtime_handover_workers_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_commerce_runtime_handover_workers_identity",
+      "u",
+      "UNIQUE (tenant_id, namespace, worker_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "commerce_runtime_handover_workers_pkey",
+      "CREATE UNIQUE INDEX commerce_runtime_handover_workers_pkey ON public.commerce_runtime_handover_workers USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_commerce_runtime_handover_workers_active",
+      "CREATE INDEX ix_commerce_runtime_handover_workers_active ON public.commerce_runtime_handover_workers USING btree (tenant_id, namespace) WHERE (retired_at IS NULL)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_commerce_runtime_handover_workers_identity",
+      "CREATE UNIQUE INDEX uq_commerce_runtime_handover_workers_identity ON public.commerce_runtime_handover_workers USING btree (tenant_id, namespace, worker_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "commerce_runtime_navigation_snapshots": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('commerce_runtime_navigation_snapshots_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "token",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "series",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "namespace",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "conversation_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "minted_by_turn_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "origin_turn_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "origin_call_id",
+      "character varying(128)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "search_method",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "query_digest",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "product_ids",
+      "jsonb",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "complete",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "page_offset",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "page_size",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "more_label",
+      "character varying(24)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "button_label",
+      "character varying(20)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "expires_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "consumed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "consumed_by_turn_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_commerce_runtime_navigation_consumed",
+      "c",
+      "CHECK (((consumed_at IS NULL) = (consumed_by_turn_id IS NULL)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_navigation_namespace",
+      "c",
+      "CHECK (((namespace)::text = ANY ((ARRAY['live'::character varying, 'shadow'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_navigation_offset",
+      "c",
+      "CHECK (((page_offset >= 1) AND (page_offset < jsonb_array_length(product_ids))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_navigation_page_size",
+      "c",
+      "CHECK (((page_size >= 1) AND (page_size < 10)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_navigation_products",
+      "c",
+      "CHECK (((jsonb_typeof(product_ids) = 'array'::text) AND (jsonb_array_length(product_ids) >= 1) AND (jsonb_array_length(product_ids) <= 50)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_commerce_runtime_navigation_words",
+      "c",
+      "CHECK (((char_length((more_label)::text) >= 1) AND (char_length((button_label)::text) >= 1)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "commerce_runtime_navigation_snapshots_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_commerce_runtime_navigation_conversation_scope",
+      "f",
+      "FOREIGN KEY (conversation_id, tenant_id, namespace) REFERENCES commerce_runtime_conversations(id, tenant_id, namespace)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_commerce_runtime_navigation_tenant",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_commerce_runtime_navigation_page",
+      "u",
+      "UNIQUE (series, page_offset)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_commerce_runtime_navigation_token",
+      "u",
+      "UNIQUE (token)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "commerce_runtime_navigation_snapshots_pkey",
+      "CREATE UNIQUE INDEX commerce_runtime_navigation_snapshots_pkey ON public.commerce_runtime_navigation_snapshots USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_commerce_runtime_navigation_expiry",
+      "CREATE INDEX ix_commerce_runtime_navigation_expiry ON public.commerce_runtime_navigation_snapshots USING btree (expires_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_commerce_runtime_navigation_page",
+      "CREATE UNIQUE INDEX uq_commerce_runtime_navigation_page ON public.commerce_runtime_navigation_snapshots USING btree (series, page_offset)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_commerce_runtime_navigation_token",
+      "CREATE UNIQUE INDEX uq_commerce_runtime_navigation_token ON public.commerce_runtime_navigation_snapshots USING btree (token)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "meta_catalog_authorizations": {
+    "columns": [
+     [
+      "id",
+      "integer",
+      true,
+      "nextval('meta_catalog_authorizations_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "catalog_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "business_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "meta_app_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "meta_user_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "access_token_enc",
+      "text",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "granted_scopes",
+      "json",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "token_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "data_access_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "verified_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "meta_catalog_authorizations_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "meta_catalog_authorizations_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_meta_catalog_authorizations_catalog",
+      "u",
+      "UNIQUE (catalog_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_meta_catalog_authorizations_tenant",
+      "u",
+      "UNIQUE (tenant_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "meta_catalog_authorizations_pkey",
+      "CREATE UNIQUE INDEX meta_catalog_authorizations_pkey ON public.meta_catalog_authorizations USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_meta_catalog_authorizations_catalog",
+      "CREATE UNIQUE INDEX uq_meta_catalog_authorizations_catalog ON public.meta_catalog_authorizations USING btree (catalog_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_meta_catalog_authorizations_tenant",
+      "CREATE UNIQUE INDEX uq_meta_catalog_authorizations_tenant ON public.meta_catalog_authorizations USING btree (tenant_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   }
+  },
+  "unique_definitions": [
+   [
+    "commerce_runtime_conversations",
+    "UNIQUE (id, tenant_id, namespace)"
+   ]
+  ]
+ },
+ "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
+ "shopify_s4": {
+  "sequences": [
+   [
+    "public.shopify_catalog_import_runs_id_seq",
+    "public.shopify_catalog_import_runs",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_inventory_items_id_seq",
+    "public.shopify_catalog_inventory_items",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_inventory_levels_id_seq",
+    "public.shopify_catalog_inventory_levels",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_locations_id_seq",
+    "public.shopify_catalog_locations",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_products_id_seq",
+    "public.shopify_catalog_products",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_staged_records_id_seq",
+    "public.shopify_catalog_staged_records",
+    "id"
+   ],
+   [
+    "public.shopify_catalog_variants_id_seq",
+    "public.shopify_catalog_variants",
+    "id"
+   ],
+   [
+    "public.shopify_connection_audit_id_seq",
+    "public.shopify_connection_audit",
+    "id"
+   ],
+   [
+    "public.shopify_connections_id_seq",
+    "public.shopify_connections",
+    "id"
+   ],
+   [
+    "public.shopify_oauth_states_id_seq",
+    "public.shopify_oauth_states",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_deliveries_id_seq",
+    "public.shopify_privacy_deliveries",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_request_events_id_seq",
+    "public.shopify_privacy_request_events",
+    "id"
+   ],
+   [
+    "public.shopify_privacy_requests_id_seq",
+    "public.shopify_privacy_requests",
+    "id"
+   ],
+   [
+    "public.shopify_webhook_events_id_seq",
+    "public.shopify_webhook_events",
+    "id"
+   ]
+  ],
+  "tables": {
+   "shopify_catalog_import_runs": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_import_runs_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "run_seq",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "generation",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "api_version",
+      "character varying(7)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "failure_reason",
+      "character varying(48)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_mode",
+      "character varying(24)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lease_id",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lease_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "requested_by_user_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_currency",
+      "character varying(3)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "expected_products",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "traversal_complete",
+      "boolean",
+      true,
+      "false",
+      "",
+      ""
+     ],
+     [
+      "pages_fetched",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "products_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "variants_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_items_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "locations_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_levels_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "products_removed",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "variants_removed",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "stale_skipped",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "started_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "heartbeat_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "finished_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "committed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_runs_api_version",
+      "c",
+      "CHECK (((api_version)::text ~ '^20[2-9][0-9]-(01|04|07|10)$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_commit_evidence",
+      "c",
+      "CHECK ((((status)::text <> 'committed'::text) OR ((committed_at IS NOT NULL) AND (failure_reason IS NULL) AND traversal_complete AND (shop_currency IS NOT NULL) AND (inventory_mode IS NOT NULL) AND (products_count IS NOT NULL) AND (variants_count IS NOT NULL) AND (inventory_items_count IS NOT NULL) AND ((((inventory_mode)::text = 'per_location'::text) AND (locations_count IS NOT NULL) AND (inventory_levels_count IS NOT NULL)) OR (((inventory_mode)::text = 'scope_missing'::text) AND (locations_count IS NULL) AND (inventory_levels_count IS NULL))))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_counts",
+      "c",
+      "CHECK (((COALESCE(products_count, 0) >= 0) AND (COALESCE(variants_count, 0) >= 0) AND (COALESCE(inventory_items_count, 0) >= 0) AND (COALESCE(locations_count, 0) >= 0) AND (COALESCE(inventory_levels_count, 0) >= 0) AND (pages_fetched >= 0) AND (products_removed >= 0) AND (variants_removed >= 0) AND (stale_skipped >= 0)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_failure",
+      "c",
+      "CHECK (((((status)::text = ANY ((ARRAY['failed'::character varying, 'cancelled'::character varying])::text[])) AND (failure_reason IS NOT NULL) AND (committed_at IS NULL)) OR ((status)::text = ANY ((ARRAY['running'::character varying, 'committed'::character varying])::text[]))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_inventory_mode",
+      "c",
+      "CHECK (((inventory_mode IS NULL) OR ((inventory_mode)::text = ANY ((ARRAY['per_location'::character varying, 'scope_missing'::character varying])::text[]))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_lease",
+      "c",
+      "CHECK (((((status)::text = 'running'::text) AND (lease_id IS NOT NULL) AND (lease_expires_at IS NOT NULL) AND (finished_at IS NULL) AND (failure_reason IS NULL) AND (committed_at IS NULL)) OR (((status)::text <> 'running'::text) AND (lease_id IS NULL) AND (lease_expires_at IS NULL) AND (finished_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_shop_gid",
+      "c",
+      "CHECK (((shop_gid)::text ~ '^gid://shopify/Shop/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_status",
+      "c",
+      "CHECK (((status)::text = ANY ((ARRAY['running'::character varying, 'committed'::character varying, 'failed'::character varying, 'cancelled'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_runs_versions",
+      "c",
+      "CHECK (((run_seq >= 1) AND (generation >= 1)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_import_runs_connection",
+      "f",
+      "FOREIGN KEY (connection_id, tenant_id) REFERENCES shopify_connections(id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_import_runs_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_import_runs_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_runs_id_connection",
+      "u",
+      "UNIQUE (id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_runs_seq",
+      "u",
+      "UNIQUE (connection_id, run_seq)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_catalog_runs_tenant_connection",
+      "CREATE INDEX ix_shopify_catalog_runs_tenant_connection ON public.shopify_catalog_import_runs USING btree (tenant_id, connection_id, run_seq)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_catalog_import_runs_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_import_runs_pkey ON public.shopify_catalog_import_runs USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_runs_id_connection",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_runs_id_connection ON public.shopify_catalog_import_runs USING btree (id, connection_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_runs_one_running",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_runs_one_running ON public.shopify_catalog_import_runs USING btree (connection_id) WHERE ((status)::text = 'running'::text)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_runs_seq",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_runs_seq ON public.shopify_catalog_import_runs USING btree (connection_id, run_seq)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_inventory_items": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_inventory_items_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_item_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tracking",
+      "character varying(10)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_updated_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lifecycle",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "removed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "first_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_inventory_items_lifecycle",
+      "c",
+      "CHECK (((((lifecycle)::text = 'present'::text) AND (removed_at IS NULL)) OR (((lifecycle)::text = 'detached'::text) AND (removed_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_items_gid",
+      "c",
+      "CHECK (((inventory_item_gid)::text ~ '^gid://shopify/InventoryItem/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_items_tracking",
+      "c",
+      "CHECK (((tracking)::text = ANY ((ARRAY['tracked'::character varying, 'untracked'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_inventory_items_connection",
+      "f",
+      "FOREIGN KEY (connection_id, tenant_id) REFERENCES shopify_connections(id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_inventory_items_first_run",
+      "f",
+      "FOREIGN KEY (first_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_inventory_items_last_run",
+      "f",
+      "FOREIGN KEY (last_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_inventory_items_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_items_identity",
+      "u",
+      "UNIQUE (connection_id, inventory_item_gid)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_items_parent_key",
+      "u",
+      "UNIQUE (id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_catalog_inventory_items_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_inventory_items_pkey ON public.shopify_catalog_inventory_items USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_items_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_items_identity ON public.shopify_catalog_inventory_items USING btree (connection_id, inventory_item_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_items_parent_key",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_items_parent_key ON public.shopify_catalog_inventory_items USING btree (id, connection_id, tenant_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_inventory_levels": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_inventory_levels_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_item_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "location_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_level_gid",
+      "character varying(128)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "available",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_updated_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lifecycle",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "removed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "first_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_inventory_levels_lifecycle",
+      "c",
+      "CHECK (((((lifecycle)::text = 'present'::text) AND (removed_at IS NULL)) OR (((lifecycle)::text = 'detached'::text) AND (removed_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_levels_gid",
+      "c",
+      "CHECK (((inventory_level_gid)::text ~ '^gid://shopify/InventoryLevel/[1-9][0-9]{0,19}\\?inventory_item_id=[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_inventory_levels_first_run",
+      "f",
+      "FOREIGN KEY (first_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_inventory_levels_last_run",
+      "f",
+      "FOREIGN KEY (last_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_levels_item",
+      "f",
+      "FOREIGN KEY (inventory_item_id, connection_id, tenant_id) REFERENCES shopify_catalog_inventory_items(id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_levels_location",
+      "f",
+      "FOREIGN KEY (location_id, connection_id, tenant_id) REFERENCES shopify_catalog_locations(id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_inventory_levels_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_levels_identity",
+      "u",
+      "UNIQUE (connection_id, inventory_level_gid)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_levels_item_location",
+      "u",
+      "UNIQUE (inventory_item_id, location_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_catalog_inventory_levels_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_inventory_levels_pkey ON public.shopify_catalog_inventory_levels USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_levels_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_levels_identity ON public.shopify_catalog_inventory_levels USING btree (connection_id, inventory_level_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_levels_item_location",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_levels_item_location ON public.shopify_catalog_inventory_levels USING btree (inventory_item_id, location_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_locations": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_locations_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "location_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "name",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "is_active",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "fulfills_online_orders",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lifecycle",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "removed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "first_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_locations_gid",
+      "c",
+      "CHECK (((location_gid)::text ~ '^gid://shopify/Location/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_locations_lifecycle",
+      "c",
+      "CHECK (((((lifecycle)::text = 'present'::text) AND (removed_at IS NULL)) OR (((lifecycle)::text = 'deleted'::text) AND (removed_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_locations_connection",
+      "f",
+      "FOREIGN KEY (connection_id, tenant_id) REFERENCES shopify_connections(id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_locations_first_run",
+      "f",
+      "FOREIGN KEY (first_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_locations_last_run",
+      "f",
+      "FOREIGN KEY (last_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_locations_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_locations_identity",
+      "u",
+      "UNIQUE (connection_id, location_gid)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_locations_parent_key",
+      "u",
+      "UNIQUE (id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_catalog_locations_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_locations_pkey ON public.shopify_catalog_locations USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_locations_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_locations_identity ON public.shopify_catalog_locations USING btree (connection_id, location_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_locations_parent_key",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_locations_parent_key ON public.shopify_catalog_locations USING btree (id, connection_id, tenant_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_products": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_products_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "product_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "title",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "handle",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "vendor",
+      "character varying(255)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "product_type",
+      "character varying(255)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "options",
+      "jsonb",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "image_url",
+      "character varying(2048)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "image_alt",
+      "character varying(512)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "images",
+      "jsonb",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "online_store_published_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "is_gift_card",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "requires_selling_plan",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "combined_listing_role",
+      "character varying(16)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "has_only_default_variant",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "variants_count",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_created_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_updated_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lifecycle",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "removed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "first_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_products_combined_role",
+      "c",
+      "CHECK (((combined_listing_role IS NULL) OR ((combined_listing_role)::text = ANY ((ARRAY['PARENT'::character varying, 'CHILD'::character varying])::text[]))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_products_gid",
+      "c",
+      "CHECK (((product_gid)::text ~ '^gid://shopify/Product/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_products_lifecycle",
+      "c",
+      "CHECK (((((lifecycle)::text = 'present'::text) AND (removed_at IS NULL)) OR (((lifecycle)::text = 'deleted'::text) AND (removed_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_products_status",
+      "c",
+      "CHECK (((status)::text = ANY ((ARRAY['ACTIVE'::character varying, 'ARCHIVED'::character varying, 'DRAFT'::character varying, 'UNLISTED'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_products_variants_count",
+      "c",
+      "CHECK ((variants_count >= 0))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_products_connection",
+      "f",
+      "FOREIGN KEY (connection_id, tenant_id) REFERENCES shopify_connections(id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_products_first_run",
+      "f",
+      "FOREIGN KEY (first_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_products_last_run",
+      "f",
+      "FOREIGN KEY (last_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_products_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_products_identity",
+      "u",
+      "UNIQUE (connection_id, product_gid)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_products_parent_key",
+      "u",
+      "UNIQUE (id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_catalog_products_tenant",
+      "CREATE INDEX ix_shopify_catalog_products_tenant ON public.shopify_catalog_products USING btree (tenant_id, connection_id, lifecycle)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_catalog_products_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_products_pkey ON public.shopify_catalog_products USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_products_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_products_identity ON public.shopify_catalog_products USING btree (connection_id, product_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_products_parent_key",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_products_parent_key ON public.shopify_catalog_products USING btree (id, connection_id, tenant_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_staged_records": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_staged_records_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "kind",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "gid",
+      "character varying(128)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "parent_gid",
+      "character varying(128)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "payload",
+      "jsonb",
+      true,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_staged_kind",
+      "c",
+      "CHECK (((kind)::text = ANY ((ARRAY['product'::character varying, 'variant'::character varying, 'inventory_item'::character varying, 'location'::character varying, 'inventory_level'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_staged_records_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_staged_records_run_id_fkey",
+      "f",
+      "FOREIGN KEY (run_id) REFERENCES shopify_catalog_import_runs(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_staged_identity",
+      "u",
+      "UNIQUE (run_id, kind, gid)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_catalog_staged_records_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_staged_records_pkey ON public.shopify_catalog_staged_records USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_staged_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_staged_identity ON public.shopify_catalog_staged_records USING btree (run_id, kind, gid)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_catalog_variants": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_catalog_variants_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "product_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_item_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "variant_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "title",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "sku",
+      "character varying(255)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "barcode",
+      "character varying(255)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "position",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "price",
+      "numeric",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "compare_at_price",
+      "numeric",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "currency_code",
+      "character varying(3)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "selected_options",
+      "jsonb",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "image_url",
+      "character varying(2048)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "image_alt",
+      "character varying(512)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "image_source",
+      "character varying(8)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "inventory_policy",
+      "character varying(8)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "available_for_sale",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "requires_components",
+      "boolean",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_created_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "source_updated_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lifecycle",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "removed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "first_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_seen_run_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_catalog_variants_currency",
+      "c",
+      "CHECK (((currency_code)::text ~ '^[A-Z]{3}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_variants_gid",
+      "c",
+      "CHECK (((variant_gid)::text ~ '^gid://shopify/ProductVariant/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_variants_image",
+      "c",
+      "CHECK ((((image_url IS NULL) AND (image_source IS NULL) AND (image_alt IS NULL)) OR ((image_url IS NOT NULL) AND ((image_source)::text = ANY ((ARRAY['variant'::character varying, 'product'::character varying])::text[])))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_variants_inventory_policy",
+      "c",
+      "CHECK (((inventory_policy)::text = ANY ((ARRAY['DENY'::character varying, 'CONTINUE'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_variants_lifecycle",
+      "c",
+      "CHECK (((((lifecycle)::text = 'present'::text) AND (removed_at IS NULL)) OR (((lifecycle)::text = 'deleted'::text) AND (removed_at IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_catalog_variants_price",
+      "c",
+      "CHECK (((price >= (0)::numeric) AND ((compare_at_price IS NULL) OR (compare_at_price >= (0)::numeric))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_variants_first_run",
+      "f",
+      "FOREIGN KEY (first_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_variants_item",
+      "f",
+      "FOREIGN KEY (inventory_item_id, connection_id, tenant_id) REFERENCES shopify_catalog_inventory_items(id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_variants_last_run",
+      "f",
+      "FOREIGN KEY (last_seen_run_id, connection_id) REFERENCES shopify_catalog_import_runs(id, connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_catalog_variants_product",
+      "f",
+      "FOREIGN KEY (product_id, connection_id, tenant_id) REFERENCES shopify_catalog_products(id, connection_id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_catalog_variants_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_catalog_variants_identity",
+      "u",
+      "UNIQUE (connection_id, variant_gid)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_catalog_variants_item",
+      "CREATE INDEX ix_shopify_catalog_variants_item ON public.shopify_catalog_variants USING btree (inventory_item_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_catalog_variants_product",
+      "CREATE INDEX ix_shopify_catalog_variants_product ON public.shopify_catalog_variants USING btree (product_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_catalog_variants_pkey",
+      "CREATE UNIQUE INDEX shopify_catalog_variants_pkey ON public.shopify_catalog_variants USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_catalog_variants_identity",
+      "CREATE UNIQUE INDEX uq_shopify_catalog_variants_identity ON public.shopify_catalog_variants USING btree (connection_id, variant_gid)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_connection_audit": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_connection_audit_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "action",
+      "character varying(48)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "actor_user_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "detail",
+      "jsonb",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "shopify_connection_audit_connection_id_fkey",
+      "f",
+      "FOREIGN KEY (connection_id) REFERENCES shopify_connections(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_connection_audit_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_connection_audit_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_connection_audit_tenant_created",
+      "CREATE INDEX ix_shopify_connection_audit_tenant_created ON public.shopify_connection_audit USING btree (tenant_id, created_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_connection_audit_pkey",
+      "CREATE UNIQUE INDEX shopify_connection_audit_pkey ON public.shopify_connection_audit USING btree (id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_connections": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_connections_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(24)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "generation",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "credential_version",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "access_token_enc",
+      "text",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "access_token_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "refresh_token_enc",
+      "text",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "refresh_token_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "granted_scopes",
+      "character varying(512)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connected_by_user_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connected_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "disconnected_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "disconnect_reason",
+      "character varying(32)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "quarantined_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "quarantine_reason",
+      "character varying(32)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "revalidation_requested_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reconcile_request_version",
+      "bigint",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "reconcile_attempts",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "reconcile_next_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reconcile_lease_id",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reconcile_lease_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_refreshed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_verified_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_connections_credentials",
+      "c",
+      "CHECK (((((status)::text = ANY ((ARRAY['active'::character varying, 'quarantined'::character varying])::text[])) AND (access_token_enc IS NOT NULL) AND (refresh_token_enc IS NOT NULL) AND (access_token_expires_at IS NOT NULL) AND (refresh_token_expires_at IS NOT NULL)) OR (((status)::text = ANY ((ARRAY['reauth_required'::character varying, 'disconnected'::character varying, 'uninstalled'::character varying])::text[])) AND (access_token_enc IS NULL) AND (refresh_token_enc IS NULL) AND (access_token_expires_at IS NULL) AND (refresh_token_expires_at IS NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_connections_status",
+      "c",
+      "CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'quarantined'::character varying, 'reauth_required'::character varying, 'disconnected'::character varying, 'uninstalled'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_connections_versions",
+      "c",
+      "CHECK (((generation >= 1) AND (credential_version >= 1)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_connections_connected_by_user_id_fkey",
+      "f",
+      "FOREIGN KEY (connected_by_user_id) REFERENCES users(id) ON DELETE SET NULL",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_connections_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_connections_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_connections_id_tenant",
+      "u",
+      "UNIQUE (id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_connections_shop_domain",
+      "u",
+      "UNIQUE (shop_domain)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_connections_shop_gid",
+      "u",
+      "UNIQUE (shop_gid)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_connections_tenant_id",
+      "CREATE INDEX ix_shopify_connections_tenant_id ON public.shopify_connections USING btree (tenant_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_connections_pkey",
+      "CREATE UNIQUE INDEX shopify_connections_pkey ON public.shopify_connections USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_connections_id_tenant",
+      "CREATE UNIQUE INDEX uq_shopify_connections_id_tenant ON public.shopify_connections USING btree (id, tenant_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_connections_shop_domain",
+      "CREATE UNIQUE INDEX uq_shopify_connections_shop_domain ON public.shopify_connections USING btree (shop_domain)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_connections_shop_gid",
+      "CREATE UNIQUE INDEX uq_shopify_connections_shop_gid ON public.shopify_connections USING btree (shop_gid)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_install_flows": {
+    "columns": [
+     [
+      "id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "state_hash",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "browser_hash",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "redirect_hash",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "phase",
+      "character varying(24)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "owner_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "online_token_enc",
+      "text",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "owner_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "generation",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "handoff_hash",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "expires_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_install_phase",
+      "c",
+      "CHECK (((phase)::text = ANY ((ARRAY['online'::character varying, 'offline'::character varying, 'exchanging_online'::character varying, 'exchanging_offline'::character varying, 'ready'::character varying, 'redeeming'::character varying, 'redeemed'::character varying, 'failed'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_install_terminal_secrets",
+      "c",
+      "CHECK ((((phase)::text <> ALL ((ARRAY['redeemed'::character varying, 'failed'::character varying])::text[])) OR (online_token_enc IS NULL)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_install_flows_connection_id_fkey",
+      "f",
+      "FOREIGN KEY (connection_id) REFERENCES shopify_connections(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_install_flows_handoff_hash_key",
+      "u",
+      "UNIQUE (handoff_hash)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_install_flows_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_install_flows_state_hash_key",
+      "u",
+      "UNIQUE (state_hash)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_install_browser_created",
+      "CREATE INDEX ix_shopify_install_browser_created ON public.shopify_install_flows USING btree (browser_hash, created_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_install_created",
+      "CREATE INDEX ix_shopify_install_created ON public.shopify_install_flows USING btree (created_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_install_flows_expires_at",
+      "CREATE INDEX ix_shopify_install_flows_expires_at ON public.shopify_install_flows USING btree (expires_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_install_shop_created",
+      "CREATE INDEX ix_shopify_install_shop_created ON public.shopify_install_flows USING btree (shop_domain, created_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_install_flows_handoff_hash_key",
+      "CREATE UNIQUE INDEX shopify_install_flows_handoff_hash_key ON public.shopify_install_flows USING btree (handoff_hash)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_install_flows_pkey",
+      "CREATE UNIQUE INDEX shopify_install_flows_pkey ON public.shopify_install_flows USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_install_flows_state_hash_key",
+      "CREATE UNIQUE INDEX shopify_install_flows_state_hash_key ON public.shopify_install_flows USING btree (state_hash)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_oauth_states": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_oauth_states_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "state_hash",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "actor_user_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "session_ref_hash",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "redirect_uri_fingerprint",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "return_path",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_generation_at_start",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "status",
+      "character varying(24)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "failure_code",
+      "character varying(48)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "code_enc",
+      "text",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "completion_handle_hash",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "expires_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "completion_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "callback_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "completed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_oauth_states_code_lifetime",
+      "c",
+      "CHECK (((code_enc IS NULL) OR ((status)::text = 'callback_received'::text)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_oauth_states_status",
+      "c",
+      "CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'callback_received'::character varying, 'exchanging'::character varying, 'completed'::character varying, 'failed'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_oauth_states_actor_user_id_fkey",
+      "f",
+      "FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_oauth_states_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_oauth_states_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_oauth_states_completion_handle_hash",
+      "u",
+      "UNIQUE (completion_handle_hash)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_oauth_states_state_hash",
+      "u",
+      "UNIQUE (state_hash)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_oauth_states_expires_at",
+      "CREATE INDEX ix_shopify_oauth_states_expires_at ON public.shopify_oauth_states USING btree (expires_at)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_oauth_states_tenant_status",
+      "CREATE INDEX ix_shopify_oauth_states_tenant_status ON public.shopify_oauth_states USING btree (tenant_id, status)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_oauth_states_pkey",
+      "CREATE UNIQUE INDEX shopify_oauth_states_pkey ON public.shopify_oauth_states USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_oauth_states_completion_handle_hash",
+      "CREATE UNIQUE INDEX uq_shopify_oauth_states_completion_handle_hash ON public.shopify_oauth_states USING btree (completion_handle_hash)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_oauth_states_state_hash",
+      "CREATE UNIQUE INDEX uq_shopify_oauth_states_state_hash ON public.shopify_oauth_states USING btree (state_hash)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_owner_identities": {
+    "columns": [
+     [
+      "connection_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shopify_user_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "user_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_owner_positive",
+      "c",
+      "CHECK ((shopify_user_id > 0))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_connection_id_fkey",
+      "f",
+      "FOREIGN KEY (connection_id) REFERENCES shopify_connections(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_pkey",
+      "p",
+      "PRIMARY KEY (connection_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_shop_gid_key",
+      "u",
+      "UNIQUE (shop_gid)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_user_id_fkey",
+      "f",
+      "FOREIGN KEY (user_id) REFERENCES users(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_owner_identities_user_id_key",
+      "u",
+      "UNIQUE (user_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_owner_identities_pkey",
+      "CREATE UNIQUE INDEX shopify_owner_identities_pkey ON public.shopify_owner_identities USING btree (connection_id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_owner_identities_shop_gid_key",
+      "CREATE UNIQUE INDEX shopify_owner_identities_shop_gid_key ON public.shopify_owner_identities USING btree (shop_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_owner_identities_user_id_key",
+      "CREATE UNIQUE INDEX shopify_owner_identities_user_id_key ON public.shopify_owner_identities USING btree (user_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_privacy_deliveries": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_privacy_deliveries_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "request_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "webhook_id",
+      "character varying(36)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "header_triggered_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "received_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_privacy_deliveries_webhook_id",
+      "c",
+      "CHECK (((webhook_id IS NULL) OR ((webhook_id)::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_deliveries_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_deliveries_request_id_fkey",
+      "f",
+      "FOREIGN KEY (request_id) REFERENCES shopify_privacy_requests(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_privacy_deliveries_webhook",
+      "u",
+      "UNIQUE (request_id, webhook_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_privacy_deliveries_request",
+      "CREATE INDEX ix_shopify_privacy_deliveries_request ON public.shopify_privacy_deliveries USING btree (request_id, id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_privacy_deliveries_pkey",
+      "CREATE UNIQUE INDEX shopify_privacy_deliveries_pkey ON public.shopify_privacy_deliveries USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_privacy_deliveries_webhook",
+      "CREATE UNIQUE INDEX uq_shopify_privacy_deliveries_webhook ON public.shopify_privacy_deliveries USING btree (request_id, webhook_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_privacy_request_events": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_privacy_request_events_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "request_id",
+      "bigint",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "action",
+      "character varying(48)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "state",
+      "character varying(24)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reason",
+      "character varying(48)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "detail",
+      "jsonb",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "shopify_privacy_request_events_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_request_events_request_id_fkey",
+      "f",
+      "FOREIGN KEY (request_id) REFERENCES shopify_privacy_requests(id) ON DELETE CASCADE",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_request_events_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_privacy_request_events_request",
+      "CREATE INDEX ix_shopify_privacy_request_events_request ON public.shopify_privacy_request_events USING btree (request_id, id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_privacy_request_events_pkey",
+      "CREATE UNIQUE INDEX shopify_privacy_request_events_pkey ON public.shopify_privacy_request_events USING btree (id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_privacy_requests": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_privacy_requests_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "topic",
+      "character varying(32)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "body_sha256",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "identity_state",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "receipt_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_delivery_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "customer_ref_kind",
+      "character varying(8)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "orders_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "data_request_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "state",
+      "character varying(24)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "reason",
+      "character varying(48)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "audit_version",
+      "character varying(48)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "proposed_action",
+      "jsonb",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "eligible_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "evaluated_delivery_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "probe_requested_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "probe_delivery_count",
+      "integer",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "probe_reconcile_version",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "attempts",
+      "integer",
+      true,
+      "0",
+      "",
+      ""
+     ],
+     [
+      "next_attempt_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lease_id",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lease_expires_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "delivery_count",
+      "integer",
+      true,
+      "1",
+      "",
+      ""
+     ],
+     [
+      "received_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "last_delivery_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "deadline_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "assessed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "completed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "policy_version",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "completion_evidence",
+      "jsonb",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "created_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "updated_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_privacy_requests_assessment",
+      "c",
+      "CHECK ((((state)::text <> ALL ((ARRAY['assessed'::character varying, 'blocked_policy'::character varying, 'completed'::character varying])::text[])) OR ((audit_version IS NOT NULL) AND (assessed_at IS NOT NULL) AND (proposed_action IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_attribution",
+      "c",
+      "CHECK ((((connection_id IS NULL) = (tenant_id IS NULL)) AND (((identity_state)::text = 'matched'::text) = (connection_id IS NOT NULL)) AND ((receipt_generation IS NULL) OR (connection_id IS NOT NULL)) AND ((last_delivery_generation IS NULL) OR (connection_id IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_blocked_policy",
+      "c",
+      "CHECK ((((state)::text <> 'blocked_policy'::text) OR (((topic)::text = 'shop/redact'::text) AND (connection_id IS NOT NULL) AND (eligible_generation IS NOT NULL) AND (evaluated_delivery_count IS NOT NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_completion",
+      "c",
+      "CHECK (((((state)::text = 'completed'::text) AND (completed_at IS NOT NULL) AND (policy_version IS NOT NULL) AND (completion_evidence IS NOT NULL) AND ((topic)::text = 'shop/redact'::text) AND (connection_id IS NOT NULL)) OR (((state)::text <> 'completed'::text) AND (completed_at IS NULL) AND (policy_version IS NULL) AND (completion_evidence IS NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_counters",
+      "c",
+      "CHECK (((attempts >= 0) AND (delivery_count >= 1) AND (deadline_at > received_at) AND (last_delivery_at >= received_at) AND ((probe_delivery_count IS NULL) OR ((probe_delivery_count >= 1) AND (probe_delivery_count <= delivery_count))) AND ((evaluated_delivery_count IS NULL) OR ((evaluated_delivery_count >= 1) AND (evaluated_delivery_count <= delivery_count))) AND ((probe_delivery_count IS NULL) = (probe_requested_at IS NULL)) AND ((probe_delivery_count IS NULL) = (probe_reconcile_version IS NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_digest",
+      "c",
+      "CHECK (((body_sha256)::text ~ '^[0-9a-f]{64}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_identity",
+      "c",
+      "CHECK (((identity_state)::text = ANY ((ARRAY['matched'::character varying, 'unknown'::character varying, 'conflict'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_reason",
+      "c",
+      "CHECK ((((state)::text = ANY ((ARRAY['received'::character varying, 'completed'::character varying])::text[])) OR (reason IS NOT NULL)))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_ref_kind",
+      "c",
+      "CHECK (((customer_ref_kind IS NULL) OR ((customer_ref_kind)::text = ANY ((ARRAY['id'::character varying, 'email'::character varying, 'phone'::character varying, 'none'::character varying])::text[]))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_schedule",
+      "c",
+      "CHECK (((((state)::text = ANY ((ARRAY['received'::character varying, 'awaiting_evidence'::character varying])::text[])) = (next_attempt_at IS NOT NULL)) AND ((lease_id IS NULL) OR ((state)::text = ANY ((ARRAY['received'::character varying, 'awaiting_evidence'::character varying])::text[]))) AND ((lease_id IS NULL) = (lease_expires_at IS NULL))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_shop_domain",
+      "c",
+      "CHECK (((shop_domain)::text ~ '^[a-z0-9][a-z0-9-]{0,62}\\.myshopify\\.com$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_shop_gid",
+      "c",
+      "CHECK (((shop_gid)::text ~ '^gid://shopify/Shop/[1-9][0-9]{0,19}$'::text))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_state",
+      "c",
+      "CHECK (((state)::text = ANY ((ARRAY['received'::character varying, 'awaiting_evidence'::character varying, 'assessed'::character varying, 'blocked_policy'::character varying, 'manual_review'::character varying, 'completed'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_topic",
+      "c",
+      "CHECK (((topic)::text = ANY ((ARRAY['customers/data_request'::character varying, 'customers/redact'::character varying, 'shop/redact'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "ck_shopify_privacy_requests_topic_fields",
+      "c",
+      "CHECK (((((topic)::text = 'shop/redact'::text) AND (customer_ref_kind IS NULL) AND (orders_count IS NULL) AND (data_request_id IS NULL)) OR (((topic)::text = 'customers/redact'::text) AND (customer_ref_kind IS NOT NULL) AND (orders_count IS NOT NULL) AND (orders_count >= 0) AND (data_request_id IS NULL)) OR (((topic)::text = 'customers/data_request'::text) AND (customer_ref_kind IS NOT NULL) AND (orders_count IS NOT NULL) AND (orders_count >= 0) AND (data_request_id IS NOT NULL) AND (data_request_id >= 1))))",
+      false,
+      false,
+      true
+     ],
+     [
+      "fk_shopify_privacy_requests_connection",
+      "f",
+      "FOREIGN KEY (connection_id, tenant_id) REFERENCES shopify_connections(id, tenant_id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_requests_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_privacy_requests_tenant_id_fkey",
+      "f",
+      "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_privacy_requests_due",
+      "CREATE INDEX ix_shopify_privacy_requests_due ON public.shopify_privacy_requests USING btree (next_attempt_at) WHERE ((state)::text = ANY ((ARRAY['received'::character varying, 'awaiting_evidence'::character varying])::text[]))",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_privacy_requests_shop",
+      "CREATE INDEX ix_shopify_privacy_requests_shop ON public.shopify_privacy_requests USING btree (shop_domain, shop_gid)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_privacy_requests_tenant",
+      "CREATE INDEX ix_shopify_privacy_requests_tenant ON public.shopify_privacy_requests USING btree (tenant_id, connection_id, state)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_privacy_requests_pkey",
+      "CREATE UNIQUE INDEX shopify_privacy_requests_pkey ON public.shopify_privacy_requests USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_privacy_requests_open",
+      "CREATE UNIQUE INDEX uq_shopify_privacy_requests_open ON public.shopify_privacy_requests USING btree (topic, shop_domain, shop_gid, body_sha256) WHERE ((state)::text = ANY ((ARRAY['received'::character varying, 'awaiting_evidence'::character varying, 'assessed'::character varying, 'blocked_policy'::character varying, 'manual_review'::character varying])::text[]))",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_shop_leases": {
+    "columns": [
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "lease_id",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "purpose",
+      "character varying(16)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "tenant_id",
+      "integer",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "acquired_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "expires_at",
+      "timestamp with time zone",
+      true,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "ck_shopify_shop_leases_purpose",
+      "c",
+      "CHECK (((purpose)::text = ANY ((ARRAY['exchange'::character varying, 'refresh'::character varying])::text[])))",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_shop_leases_pkey",
+      "p",
+      "PRIMARY KEY (shop_domain)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "shopify_shop_leases_pkey",
+      "CREATE UNIQUE INDEX shopify_shop_leases_pkey ON public.shopify_shop_leases USING btree (shop_domain)",
+      true,
+      true,
+      true
+     ]
+    ]
+   },
+   "shopify_webhook_events": {
+    "columns": [
+     [
+      "id",
+      "bigint",
+      true,
+      "nextval('shopify_webhook_events_id_seq'::regclass)",
+      "",
+      ""
+     ],
+     [
+      "webhook_id",
+      "character varying(128)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "topic",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_domain",
+      "character varying(255)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "shop_gid",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "body_sha256",
+      "character varying(64)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "header_triggered_at",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_id",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "connection_generation",
+      "bigint",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "outcome",
+      "character varying(32)",
+      true,
+      null,
+      "",
+      ""
+     ],
+     [
+      "resolution",
+      "character varying(32)",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "received_at",
+      "timestamp with time zone",
+      true,
+      "now()",
+      "",
+      ""
+     ],
+     [
+      "processed_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ],
+     [
+      "resolved_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+     ]
+    ],
+    "constraints": [
+     [
+      "shopify_webhook_events_connection_id_fkey",
+      "f",
+      "FOREIGN KEY (connection_id) REFERENCES shopify_connections(id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "shopify_webhook_events_pkey",
+      "p",
+      "PRIMARY KEY (id)",
+      false,
+      false,
+      true
+     ],
+     [
+      "uq_shopify_webhook_events_webhook_id",
+      "u",
+      "UNIQUE (webhook_id)",
+      false,
+      false,
+      true
+     ]
+    ],
+    "indexes": [
+     [
+      "ix_shopify_webhook_events_connection",
+      "CREATE INDEX ix_shopify_webhook_events_connection ON public.shopify_webhook_events USING btree (connection_id, resolution)",
+      true,
+      true,
+      true
+     ],
+     [
+      "ix_shopify_webhook_events_shop_digest",
+      "CREATE INDEX ix_shopify_webhook_events_shop_digest ON public.shopify_webhook_events USING btree (shop_domain, body_sha256)",
+      true,
+      true,
+      true
+     ],
+     [
+      "shopify_webhook_events_pkey",
+      "CREATE UNIQUE INDEX shopify_webhook_events_pkey ON public.shopify_webhook_events USING btree (id)",
+      true,
+      true,
+      true
+     ],
+     [
+      "uq_shopify_webhook_events_webhook_id",
+      "CREATE UNIQUE INDEX uq_shopify_webhook_events_webhook_id ON public.shopify_webhook_events USING btree (webhook_id)",
+      true,
+      true,
+      true
+     ]
+    ]
+   }
+  }
+ }
+}

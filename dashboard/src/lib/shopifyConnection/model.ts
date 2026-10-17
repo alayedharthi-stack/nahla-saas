@@ -290,18 +290,21 @@ export function messageKeyForFailure(f: SafeFailure): MessageKey {
 // ── Telemetry / error-report redaction ────────────────────────────────────────
 
 const SCRUBBED = '[scrubbed]'
+const INSTALL_MARKER_RE = /install(?:_|%5f|%255f)(?:handle|error)/i
+const PILOT_MARKER_RE = /pilot(?:_|%5f|%255f)code/i
 
 /** A Shopify connection path (any case, percent-encoding or slash form) or return key. */
 export function isShopifyConnectionText(text: string): boolean {
   if (typeof text !== 'string' || !text) return false
-  if (RETURN_MARKER_RE.test(text)) return true
+  if (RETURN_MARKER_RE.test(text) || INSTALL_MARKER_RE.test(text) || PILOT_MARKER_RE.test(text)) return true
   let decoded = text
   try {
     decoded = decodeURIComponent(text)
   } catch {
     /* malformed escape: inspect the raw form */
   }
-  return decoded.toLowerCase().replace(/\/{2,}/g, '/').includes('/integrations/shopify')
+  const path = decoded.toLowerCase().replace(/\/{2,}/g, '/')
+  return path.includes('/integrations/shopify') || path.includes('/app/shopify')
 }
 
 /**
@@ -310,24 +313,32 @@ export function isShopifyConnectionText(text: string): boolean {
  * but no query/fragment is replaced). Everything else is returned unchanged.
  */
 export function redactShopifyUrl(url: string): string {
+  // This may be free text containing a credential BEFORE a later URL's ?/#.
+  // Truncating only the URL suffix would retain that admission credential.
+  if (typeof url === 'string' && PILOT_MARKER_RE.test(url)) return SCRUBBED
   if (typeof url !== 'string' || !isShopifyConnectionText(url)) return url
   const cut = url.search(/[?#]/)
   if (cut !== -1) return url.slice(0, cut)
-  return RETURN_MARKER_RE.test(url) ? SCRUBBED : url
+  return RETURN_MARKER_RE.test(url) || INSTALL_MARKER_RE.test(url) ? SCRUBBED : url
 }
 
 /** Redact every string in place (objects / arrays), bounded depth. */
-export function redactShopifyDeep<T>(value: T, depth = 0): T {
+export function redactShopifyDeep<T>(value: T, depth = 0, shopifyContext = false): T {
   if (typeof value === 'string') return redactShopifyUrl(value) as unknown as T
   if (!value || typeof value !== 'object' || depth > 16) return value
   const bag = value as unknown as Record<string, unknown>
+  shopifyContext ||= Object.values(bag).some(v => typeof v === 'string' && isShopifyConnectionText(v))
   for (const key of Object.keys(bag)) {
     const v = bag[key]
+    if (['install_handle', 'pilot_code', 'browser', 'totp'].includes(key.toLowerCase()) || (shopifyContext && key.toLowerCase() === 'handle')) {
+      bag[key] = SCRUBBED
+      continue
+    }
     if (typeof v === 'string') {
       const r = redactShopifyUrl(v)
       if (r !== v) bag[key] = r
     } else if (v && typeof v === 'object') {
-      redactShopifyDeep(v, depth + 1)
+      redactShopifyDeep(v, depth + 1, shopifyContext)
     }
   }
   return value
@@ -337,7 +348,7 @@ function scrubHandleKeys(value: unknown, depth = 0): void {
   if (!value || typeof value !== 'object' || depth > 16) return
   const bag = value as Record<string, unknown>
   for (const key of Object.keys(bag)) {
-    if (key.toLowerCase() === 'handle') bag[key] = SCRUBBED
+    if (['handle', 'install_handle', 'pilot_code', 'browser', 'totp'].includes(key.toLowerCase())) bag[key] = SCRUBBED
     else scrubHandleKeys(bag[key], depth + 1)
   }
 }

@@ -27,7 +27,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode
 
 import httpx
@@ -53,6 +53,26 @@ _MAX_RESPONSE_BYTES = 65536
 _TOKEN_RE = re.compile(r"[\x21-\x7e]{1,512}")
 _SHOP_GID_RE = re.compile(r"gid://shopify/Shop/([1-9][0-9]{0,19})")
 SHOP_IDENTITY_QUERY = "query NahlaShopIdentity { shop { id myshopifyDomain } }"
+
+# Shop-scoped ``app/uninstalled`` subscription (the legacy install flow cannot
+# use app-scoped TOML subscriptions). Only this one topic is ever listed or
+# created; no other subscription is read, changed or deleted.
+WEBHOOK_TOPIC_APP_UNINSTALLED = "APP_UNINSTALLED"
+WEBHOOK_FORMAT_JSON = "JSON"
+WEBHOOK_PAGE_SIZE = 50
+_SUBSCRIPTION_FIELDS = "id topic uri format includeFields filter"
+UNINSTALL_WEBHOOKS_QUERY = (
+    "query NahlaUninstallWebhooks($first: Int!, $after: String) {"
+    " webhookSubscriptions(first: $first, after: $after, topics: [APP_UNINSTALLED]) {"
+    f" nodes {{ {_SUBSCRIPTION_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}"
+)
+UNINSTALL_WEBHOOK_CREATE = (
+    "mutation NahlaUninstallWebhookCreate($subscription: WebhookSubscriptionInput!) {"
+    " webhookSubscriptionCreate(topic: APP_UNINSTALLED, webhookSubscription: $subscription) {"
+    f" webhookSubscription {{ {_SUBSCRIPTION_FIELDS} }} userErrors {{ field message }} }} }}"
+)
+_SUBSCRIPTION_GID_RE = re.compile(r"gid://shopify/WebhookSubscription/[1-9][0-9]{0,19}")
+_MAX_CURSOR = 512
 
 
 class OAuthQueryError(Exception):
@@ -165,6 +185,10 @@ class ShopifyApiError(Exception):
         self.code = code
 
 
+class OwnerGrantRejected(ShopifyApiError):
+    """Definitive non-issuance or a recognizable online response, never offline."""
+
+
 @dataclass(frozen=True)
 class TokenGrant:
     access_token: str = field(repr=False)
@@ -178,6 +202,32 @@ class TokenGrant:
 class ShopIdentity:
     shop_gid: str
     shop_domain: str
+
+
+@dataclass(frozen=True)
+class WebhookSubscription:
+    """One shop-scoped subscription as Shopify reports it (no secret)."""
+
+    id: str
+    topic: str
+    uri: str
+    format: str
+    include_fields: Tuple[str, ...] = ()
+    filter: str = ""
+
+
+def parse_webhook_subscription(node: Any) -> WebhookSubscription:
+    """Strictly read one ``WebhookSubscription`` node. Raises ShopifyApiError."""
+    if not isinstance(node, dict):
+        raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+    sid, topic, uri, fmt = node.get("id"), node.get("topic"), node.get("uri"), node.get("format")
+    include, flt = node.get("includeFields"), node.get("filter")
+    if (not isinstance(sid, str) or not _SUBSCRIPTION_GID_RE.fullmatch(sid)
+            or not all(isinstance(v, str) and 0 < len(v) <= 2048 for v in (topic, uri, fmt))
+            or not (include is None or (isinstance(include, list) and all(isinstance(f, str) for f in include)))
+            or not (flt is None or isinstance(flt, str))):
+        raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+    return WebhookSubscription(sid, topic, uri, fmt, tuple(include or ()), flt or "")
 
 
 def parse_scopes(raw: Any) -> FrozenSet[str]:
@@ -217,6 +267,30 @@ def parse_token_grant(body: Mapping[str, Any]) -> TokenGrant:
     scopes = parse_scopes(body.get("scope"))
     validate_scopes(scopes)
     return TokenGrant(access, refresh, expires_in, refresh_expires_in, scopes)
+
+
+@dataclass(frozen=True)
+class OwnerGrant:
+    access_token: str = field(repr=False)
+    expires_in: int
+    user_id: int
+
+
+def parse_owner_grant(body: Dict[str, Any]) -> OwnerGrant:
+    """Only an explicitly identified Shopify account owner may bootstrap a tenant."""
+    access = body.get("access_token")
+    lifetime = _positive_int(body.get("expires_in"), upper=86400)
+    user = body.get("associated_user")
+    if not isinstance(access, str) or not _TOKEN_RE.fullmatch(access) or lifetime is None:
+        raise ShopifyApiError("invalid_response", "owner_unverified")
+    if not isinstance(user, dict) or user.get("account_owner") is not True or user.get("collaborator") is not False:
+        raise ShopifyApiError("permanent", "owner_required")
+    uid = user.get("id")
+    if type(uid) is not int or not 0 < uid < 2**63:
+        raise ShopifyApiError("invalid_response", "owner_unverified")
+    validate_scopes(parse_scopes(body.get("scope")))
+    validate_scopes(parse_scopes(body.get("associated_user_scope")))
+    return OwnerGrant(access, lifetime, uid)
 
 
 class ShopifyApi:
@@ -291,6 +365,29 @@ class ShopifyApi:
             raise self._classify_token_failure(status)
         return parse_token_grant(body)
 
+    async def exchange_owner_code(self, *, shop_domain: str, code: str) -> OwnerGrant:
+        status, body = await self._post(
+            self._admin_url(shop_domain, "oauth/access_token"),
+            {"client_id": self._client_id, "client_secret": self.__client_secret, "code": code}, {},
+        )
+        if status != 200:
+            if status in (400, 401, 403):
+                raise OwnerGrantRejected("permanent", "grant_rejected")
+            raise self._classify_token_failure(status)
+        # The browser can edit grant_options[] before Shopify issues its code.
+        # Reject ambiguous/offline responses without exposing their credentials.
+        user = body.get("associated_user")
+        recognizable_online = (isinstance(user, dict) and type(user.get("id")) is int
+                               and 0 < user["id"] < 2**63
+                               and isinstance(body.get("associated_user_scope"), str)
+                               and not any(k in body for k in ("refresh_token", "refresh_token_expires_in")))
+        if not recognizable_online:
+            raise ShopifyApiError("invalid_response", "owner_grant_ambiguous")
+        try:
+            return parse_owner_grant(body)
+        except ShopifyApiError as exc:
+            raise OwnerGrantRejected(exc.kind, exc.code) from None
+
     async def refresh(self, *, shop_domain: str, refresh_token: str) -> TokenGrant:
         status, body = await self._post(
             self._admin_url(shop_domain, "oauth/access_token"),
@@ -326,6 +423,80 @@ class ShopifyApi:
         if not isinstance(gid, str) or not _SHOP_GID_RE.fullmatch(gid) or domain is None:
             raise ShopifyApiError("invalid_response", "identity_unverified")
         return ShopIdentity(shop_gid=gid, shop_domain=domain)
+
+    async def _admin_graphql(self, shop_domain: str, access_token: str, query: str,
+                             variables: Dict[str, Any]) -> Dict[str, Any]:
+        """One Admin GraphQL call at the configured API version; ``data`` or a classified error.
+
+        GraphQL reports throttling and missing access in ``errors`` with HTTP
+        200; both are classified, never treated as an empty result.
+        """
+        status, body = await self._post(
+            self._admin_url(shop_domain, f"api/{self._api_version}/graphql.json"),
+            {"query": query, "variables": variables},
+            {"X-Shopify-Access-Token": access_token},
+        )
+        if status in (401, 403):
+            raise ShopifyApiError("rejected", "credentials_rejected")
+        if status == 429 or status >= 500:
+            raise ShopifyApiError("transient", "upstream_unavailable")
+        if status != 200:
+            raise ShopifyApiError("invalid_response", "unexpected_status")
+        errors = body.get("errors")
+        if errors:
+            codes = set()
+            for error in errors if isinstance(errors, list) else ():
+                extensions = error.get("extensions") if isinstance(error, dict) else None
+                if isinstance(extensions, dict):
+                    codes.add(extensions.get("code"))
+            if "THROTTLED" in codes:
+                raise ShopifyApiError("transient", "throttled")
+            if "ACCESS_DENIED" in codes:
+                raise ShopifyApiError("permanent", "access_denied")
+            raise ShopifyApiError("invalid_response", "graphql_errors")
+        data = body.get("data")
+        if not isinstance(data, dict):
+            raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+        return data
+
+    async def uninstall_webhook_page(self, *, shop_domain: str, access_token: str,
+                                     after: Optional[str] = None) -> Tuple[List[WebhookSubscription], Optional[str]]:
+        """One page of this app's ``APP_UNINSTALLED`` subscriptions for the shop:
+        (subscriptions, cursor of the next page or None)."""
+        if after is not None and (not isinstance(after, str) or not 0 < len(after) <= _MAX_CURSOR):
+            raise ShopifyApiError("invalid_response", "webhook_cursor_invalid")
+        data = await self._admin_graphql(shop_domain, access_token, UNINSTALL_WEBHOOKS_QUERY,
+                                         {"first": WEBHOOK_PAGE_SIZE, "after": after})
+        conn = data.get("webhookSubscriptions")
+        nodes = conn.get("nodes") if isinstance(conn, dict) else None
+        info = conn.get("pageInfo") if isinstance(conn, dict) else None
+        if not isinstance(nodes, list) or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+            raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+        subscriptions = [parse_webhook_subscription(node) for node in nodes]
+        if not info["hasNextPage"]:
+            return subscriptions, None
+        cursor = info.get("endCursor")
+        if not isinstance(cursor, str) or not 0 < len(cursor) <= _MAX_CURSOR or cursor == after:
+            raise ShopifyApiError("invalid_response", "webhook_cursor_invalid")
+        return subscriptions, cursor
+
+    async def create_uninstall_webhook(self, *, shop_domain: str, access_token: str, uri: str) -> WebhookSubscription:
+        """``webhookSubscriptionCreate`` for ``APP_UNINSTALLED`` → *uri*, JSON.
+
+        The returned subscription is not proof; the caller reads it back.
+        ``userErrors`` (for example an address already taken) raise.
+        """
+        data = await self._admin_graphql(shop_domain, access_token, UNINSTALL_WEBHOOK_CREATE,
+                                         {"subscription": {"uri": uri, "format": WEBHOOK_FORMAT_JSON}})
+        payload = data.get("webhookSubscriptionCreate")
+        if not isinstance(payload, dict):
+            raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+        user_errors = payload.get("userErrors")
+        if user_errors:
+            raise ShopifyApiError("permanent", "webhook_user_errors")
+        if user_errors is not None and not isinstance(user_errors, list):
+            raise ShopifyApiError("invalid_response", "webhook_response_invalid")
+        return parse_webhook_subscription(payload.get("webhookSubscription"))
 
 
 def numeric_shop_id(shop_gid: str) -> Optional[int]:

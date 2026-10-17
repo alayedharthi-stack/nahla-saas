@@ -27,6 +27,11 @@ Backoff: ``30 s · 2^(attempts-1)``, capped at one hour. A quarantine is never
 lifted by giving up: an unreachable Shopify keeps the credential unused
 (fail safe) until a probe succeeds or the merchant reconnects.
 
+Readiness: the same schedule drains grants stored without a verified
+``app/uninstalled`` subscription (``lifecycle.WEBHOOK_PENDING``) and any
+``active`` row without that proof for its generation; each attempt is one
+bounded registration with the stored grant (``lifecycle.reconcile``).
+
 Dormant by default: ``run_recovery_tick`` returns without touching the
 database unless the feature flag **and** every required configuration item
 (``config.evaluate_availability``) are present, and the scheduler loop is only
@@ -41,12 +46,17 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.orm import Session
 
 from services.shopify_connection import crypto, lifecycle
 from services.shopify_connection.config import ShopifyConfig, evaluate_availability
-from services.shopify_connection.models import STATUS_ACTIVE, STATUS_QUARANTINED, ShopifyConnection
+from services.shopify_connection.models import (
+    STATUS_ACTIVE,
+    STATUS_QUARANTINED,
+    ShopifyConnection,
+    ShopifyConnectionAudit,
+)
 from services.shopify_connection.oauth import ShopifyApi
 
 logger = logging.getLogger("nahla.shopify_connection")
@@ -63,11 +73,20 @@ def backoff_seconds(attempts: int) -> int:
     return min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2 ** min(attempts - 1, 16)))
 
 
+def _proven_clause():
+    """This generation has its ``app/uninstalled`` subscription evidence."""
+    c, a = ShopifyConnection, ShopifyConnectionAudit
+    return exists().where(a.tenant_id == c.tenant_id, a.connection_id == c.id, a.shop_domain == c.shop_domain,
+                          a.action == lifecycle.WEBHOOK_VERIFIED, a.generation == c.generation)
+
+
 def _pending_clause(now: datetime):
     c = ShopifyConnection
     return and_(
         or_(c.status == STATUS_QUARANTINED,
-            and_(c.status == STATUS_ACTIVE, c.revalidation_requested_at.isnot(None))),
+            and_(c.status == STATUS_ACTIVE, c.revalidation_requested_at.isnot(None)),
+            # An ``active`` row without readiness proof (from before the gate).
+            and_(c.status == STATUS_ACTIVE, ~_proven_clause())),
         or_(c.reconcile_next_at.is_(None), c.reconcile_next_at <= now),
         or_(c.reconcile_lease_expires_at.is_(None), c.reconcile_lease_expires_at < now),
     )
@@ -105,7 +124,8 @@ def _finalize(db: Session, connection_id: int, lease: str, claimed_version: int,
         db.rollback()
         return
     still_pending = conn.status == STATUS_QUARANTINED or (
-        conn.status == STATUS_ACTIVE and conn.revalidation_requested_at is not None)
+        conn.status == STATUS_ACTIVE
+        and (conn.revalidation_requested_at is not None or not lifecycle.webhook_proven(db, conn)))
     conn.reconcile_lease_id = None
     conn.reconcile_lease_expires_at = None
     if not still_pending:
@@ -128,13 +148,14 @@ async def run_claimed(
     api: ShopifyApi,
     cipher: crypto.TokenCipher,
     now: Optional[datetime] = None,
+    config: Optional[ShopifyConfig] = None,
 ) -> str:
     current = now or lifecycle.utcnow()
     if not lifecycle._reconcile_lease_valid(db, connection_id, lease, current):
         return "lease_lost"  # expired and possibly re-claimed: nothing is done
     try:
         result = await lifecycle.reconcile(db, connection_id=connection_id, api=api, cipher=cipher, now=now,
-                                           reconcile_lease=lease)
+                                           reconcile_lease=lease, config=config)
     except Exception as exc:  # noqa: BLE001 — the quarantine stays in place (fail safe)
         logger.error("[SHOPIFY_CONNECTION] reconcile failed connection=%s kind=%s",
                      connection_id, type(exc).__name__)
@@ -173,6 +194,13 @@ async def run_recovery_tick(
     try:
         if not lifecycle.tables_present(db):
             return {"skipped": "storage_unavailable"}
+        from services.shopify_connection.install_config import enabled as install_enabled
+        if install_enabled(env):
+            from sqlalchemy import inspect
+            from services.shopify_connection.install_models import INSTALL_TABLES
+            from services.shopify_connection.install import sweep_expired
+            if all(inspect(db.get_bind()).has_table(t.name) for t in INSTALL_TABLES):
+                counts["install_expired"] = sweep_expired(db, now=now)
         cipher = crypto.TokenCipher(config.encryption_key)
         client = api or _api_for(config)
         for _ in range(int(limit)):
@@ -183,7 +211,7 @@ async def run_recovery_tick(
             (cid, lease, claimed_version), = claimed
             counts["claimed"] += 1
             result = await run_claimed(db, connection_id=cid, lease=lease, claimed_version=claimed_version,
-                                       api=client, cipher=cipher, now=now)
+                                       api=client, cipher=cipher, now=now, config=config)
             counts[result] = counts.get(result, 0) + 1
         return counts
     finally:

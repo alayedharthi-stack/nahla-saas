@@ -6,6 +6,7 @@ import RootRedirect from './components/RootRedirect'
 import { isPlatformOwner } from './auth'
 import Landing from './pages/Landing'
 import Login from './pages/Login'
+import ShopifyInstall from './pages/ShopifyInstall'
 import Onboarding from './pages/Onboarding'
 import Billing from './pages/Billing'
 import BillingResult from './pages/BillingResult'
@@ -134,6 +135,7 @@ export default function App() {
 
           {/* Public — auth */}
           <Route path="/login"                element={<Login />} />
+          <Route path="/app/shopify"          element={<ShopifyInstall />} />
           <Route path="/onboarding"           element={<Onboarding />} />
           <Route path="/billing/payment-result" element={<BillingResult />} />
           <Route path="/register"                   element={<Register />} />

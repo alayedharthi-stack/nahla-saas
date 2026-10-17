@@ -1,8 +1,8 @@
 {
- "database_py_digest": "b3fcf5d151a106a9068985118d6489c381844c1ba5553fbffc9d94ffe272aa50",
+ "database_py_digest": "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09",
  "expectations_version": 3,
- "generated_at_utc": "2026-10-11T18:14:35Z",
- "generated_from_source_sha": "8308c16e39a18745239e869e6996c7aeaf680fd4",
+ "generated_at_utc": "2026-10-13T22:33:17Z",
+ "generated_from_source_sha": "e1f734d1c57a4f672bab2ac7df10f9e152f230b0",
  "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
  "retained": {
   "nonce": {
@@ -1324,7 +1324,7 @@
    ]
   ]
  },
- "server_version": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+ "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
  "shopify_s3": {
   "sequences": [
    [
