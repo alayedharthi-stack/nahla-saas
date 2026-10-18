@@ -1011,7 +1011,8 @@ async def sync_salla_coupons(request: Request, db: Session = Depends(get_db)):
 @router.patch("/{coupon_id}")
 async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
-    coupon = db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id).first()
+    coupon = (db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id)
+              .populate_existing().with_for_update().first())
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
 
@@ -1038,8 +1039,16 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
         meta["usage_limit"] = body.limit
     if body.category is not None:
         meta["category"] = body.category
+    state_integration = None
     if body.active is not None:
-        meta["active"] = body.active
+        if meta.get("salla_coupon_id"):
+            from store_integration.registry import _list_salla_integrations_for_tenant, _score_integration
+            integrations = _list_salla_integrations_for_tenant(db, tenant_id)
+            state_integration = max(integrations, key=_score_integration) if integrations else None
+            if state_integration is None:
+                raise HTTPException(status_code=409, detail="salla_integration_unavailable")
+        else:
+            meta["active"] = body.active
     if body.coupon_level is not None:
         level = str(body.coupon_level or "").strip().lower()
         if level and level not in NATIVE_AI_LEVELS:
@@ -1080,10 +1089,25 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
     coupon.extra_metadata = meta
     flag_modified(coupon, "extra_metadata")
 
+    if state_integration is not None:
+        from services.coupon_active_sync import queue_active_change
+        queue_active_change(coupon, state_integration, body.active)
+
     db.add(coupon)
     db.commit()
+    if state_integration is not None:
+        from services.coupon_active_sync import dispatch_active_change
+        from store_integration.registry import adapter_for_integration
+        await dispatch_active_change(db, tenant_id, coupon_id, state_integration,
+                                     adapter_for_integration(state_integration))
+        db.refresh(coupon)
+        meta = dict(coupon.extra_metadata or {})
     return {
-        "updated": True,
+        "updated": not bool(meta.get("active_sync_pending")),
+        "accepted": True,
+        "sync_status": meta.get("sync_status"),
+        "sync_error": meta.get("sync_error"),
+        "active": meta.get("active"),
         "ai_allocatable": explicit_ai_allocatable(meta),
         "coupon_level": coupon.coupon_level,
         "allocation_channel": coupon.allocation_channel,

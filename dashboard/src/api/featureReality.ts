@@ -302,7 +302,7 @@ export interface DashboardCoupon {
   salla_coupon_name?: string | null
   sync_direction?: string | null
   /** Machine key: synced | not_pushed | failed | imported */
-  sync_badge?: 'synced' | 'not_pushed' | 'failed' | 'imported'
+  sync_badge?: 'synced' | 'not_pushed' | 'failed' | 'imported' | 'pending'
   /** Arabic badge label from API. */
   sync_badge_label?: string
   /** Bronze / silver / gold / vip — drives the level chip. */

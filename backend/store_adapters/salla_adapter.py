@@ -4038,6 +4038,36 @@ class SallaAdapter(BaseStoreAdapter):
             self._log_error("get_coupons", exc)
             return []
 
+    async def get_coupon_by_id(self, coupon_id: str) -> Dict[str, Any]:
+        self._require_auth("get_coupon_by_id")
+        if not str(coupon_id).isdigit():
+            raise ValueError("invalid_coupon_id")
+        response = await self._get(f"/coupons/{coupon_id}")
+        return response.get("data") or {}
+
+    async def set_coupon_active(self, coupon_id: str, active: bool) -> None:
+        """Status-only PUT; preserve dates, limits, amount and eligibility.
+
+        Contract: https://docs.salla.dev/coupon/update. Confirmation is a separate
+        GET owned by the durable status dispatcher; a 2xx alone is not evidence.
+        """
+        from core.acceptance_execution_context import deny_external_egress
+        deny_external_egress(egress_kind="salla_integration", operation="put", tenant_id=self._tenant_id)
+        self._require_auth("set_coupon_active")
+        if not str(coupon_id).isdigit() or not isinstance(active, bool):
+            raise ValueError("invalid_coupon_status_change")
+        await self._ensure_token_fresh()
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            url = f"{SALLA_API_BASE}/coupons/{coupon_id}"
+            payload = {"status": "active" if active else "inactive"}
+            response = await client.put(url, headers=self._headers(), json=payload)
+            if response.status_code == 401 and self._refresh_token:
+                if await self._refresh_access_token():
+                    response = await client.put(url, headers=self._headers(), json=payload)
+            if response.status_code == 401:
+                self._mark_needs_reauth("salla_coupon_status_401")
+            response.raise_for_status()
+
     async def create_coupon(
         self,
         code: str,
