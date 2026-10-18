@@ -159,7 +159,14 @@ jobs:
         id: capture
         # Writes artifacts only. Never installs this file into the source tree;
         # stale committed expectations must still fail the normal tests below.
-        run: python -B scripts/ci/capture_shopify_s3_expectations.py
+        # Capture validates the checked-out source, while the job still records
+        # the separate harness SHA in provenance. No source or guard is edited.
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD^{tree})" = ed39fdf26a3550d775be6900083cf509a82ececb
+          printf 'capture_workflow_sha=%s source_sha=%s\n' "$GITHUB_SHA" "$SOURCE_SHA"
+          GITHUB_SHA="$SOURCE_SHA" python -B scripts/ci/capture_shopify_s3_expectations.py
 
       - name: Full current-source DB-free and bootstrap suites (zero skips)
         if: ${{ !cancelled() && matrix.pg == '16' && steps.provenance.outcome == 'success' }}
@@ -505,6 +512,14 @@ jobs:
           git -C ui remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
           git -C ui fetch --no-tags --depth=1 origin a12dd410f3e54308fa4af3198ed3af63a00bd91d
           git -C ui checkout --detach FETCH_HEAD
+          # Historical positive controls required by the unchanged layout test.
+          for revision in 3a3867cf5cec2d2315f9b7d9ecc6bc5ad83fcecb a8b3573f677bc2f3de99085477c02e3164dbe507 5446a32781c6874672cae6eb6bef4dc3e5624224; do
+            git -C ui fetch --no-tags --depth=1 origin "$revision"
+            test "$(git -C ui rev-parse FETCH_HEAD)" = "$revision"
+            git -C ui cat-file -e "$revision:dashboard/src/components/conversations/MessagePresentationCard.tsx"
+            git -C ui cat-file -e "$revision:dashboard/src/components/inbound/InboundMediaPreview.tsx"
+            git -C ui cat-file -e "$revision:dashboard/src/pages/Conversations.tsx"
+          done
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
