@@ -5,6 +5,30 @@ on:
 permissions:
   contents: read
 jobs:
+  runtime:
+    name: Exact-head runtime suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r backend/requirements.txt pytest
+      - name: Existing silent-exception lint
+        run: python scripts/lint_no_silent_except.py
+      - name: Existing root runtime suite
+        run: python -m pytest -q --maxfail=1 --junitxml=/tmp/runtime.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: salla-full-runtime-${{ github.event.pull_request.head.sha }}
+          path: /tmp/runtime.xml
   coupon-runtime-pg:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -25,7 +49,7 @@ jobs:
           POSTGRES_DB: coupon_test
         ports: ['5433:5432']
         options: >-
-          --health-cmd 'pg_isready -U coupon_test -d coupon_test'
+          --health-cmd "pg_isready -U coupon_test -d coupon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4

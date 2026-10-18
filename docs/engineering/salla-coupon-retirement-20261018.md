@@ -72,7 +72,7 @@ not functional recovery. All original attempts remain private immutable audit.
 Actual PG tests cover transaction rollback, immutable history, old-source
 import, activation/delete/recreation, retries/push/allocation, identity isolation
 and import/dispatch locks. Existing source tests remain. CI includes this
-composite base in the normal runtime workflow and adds exact-head PG16/18 jobs
+composite base in a separate full root-runtime workflow and adds exact-head PG16/18 jobs
 with zero-skip JUnit checks. Local PG17 is not a substitute for those jobs.
 Independent final-head review, Shopify157 byte verification, full runtime CI,
 release gates and separate data-transaction approval remain prerequisites.
