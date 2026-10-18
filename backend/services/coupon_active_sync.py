@@ -8,6 +8,7 @@ import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm.attributes import flag_modified
+from services.coupon_identity import same_code, assert_dispatch_identity
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def reconcile_imported_state(raw, existing, observed_at, adapter):
         # Read current detail rather than trusting a replayed list/event payload.
         try:
             detail = await adapter.get_coupon_by_id(str(raw["id"]))
-            if str(detail.get("id")) != str(raw["id"]) or detail.get("code") != raw.get("code"):
+            if str(detail.get("id")) != str(raw["id"]) or not same_code(detail.get("code"), raw.get("code")):
                 return {"sync_status": "failed", "sync_error": "provider_state_unconfirmed", "salla_synced": False}
             return imported_state(detail, existing, observed_at)
         except Exception:
@@ -141,13 +142,15 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
                 or str(getattr(adapter, "store_id", "")) != str(cfg.get("store_id") or store_id)):
             raise ValueError("adapter_tenant_mismatch")
         raw = await adapter.get_coupon_by_id(provider_id)
-        if str(raw.get("id")) != provider_id or raw.get("code") != row.code:
+        if str(raw.get("id")) != provider_id:
             raise ValueError("provider_coupon_identity_mismatch")
+        binding = {"tenant_id": tenant_id, "integration_id": integration.id, "store_id": store_id}
+        assert_dispatch_identity(db, row, binding, provider_id, raw.get("code"))
         desired = pending["desired"]
         if normalized_active(raw) is not desired:
             await adapter.set_coupon_active(provider_id, desired)
             raw = await adapter.get_coupon_by_id(provider_id)
-        if (str(raw.get("id")) != provider_id or raw.get("code") != row.code
+        if (str(raw.get("id")) != provider_id or not same_code(raw.get("code"), row.code)
                 or normalized_active(raw) is not desired):
             raise ValueError("provider_state_unconfirmed")
         now = utcnow()
@@ -155,6 +158,7 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
                     last_synced_at=now.isoformat(), active_applied_at=now.isoformat(),
                     active_api_to_apply_ms=int((monotonic() - started) * 1000),
                     active_request_to_apply_ms=int((now - timestamp(pending["requested_at"])).total_seconds() * 1000))
+        meta.update(salla_identity=binding, salla_provider_code=raw["code"])
         source_at = timestamp(raw.get("updated_at"))
         if source_at:
             meta["active_source_updated_at"] = source_at.isoformat()
@@ -164,7 +168,8 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
         pending["attempts"] = int(pending.get("attempts", 0)) + 1
         pending["next_attempt_at"] = (utcnow() + timedelta(seconds=min(300, 10 * 2 ** min(pending["attempts"], 5)))).isoformat()
         reasons = {"integration_binding_unavailable", "adapter_tenant_mismatch",
-                   "provider_coupon_identity_mismatch", "provider_state_unconfirmed"}
+                   "provider_coupon_identity_mismatch", "provider_state_unconfirmed",
+                   "legacy_store_ambiguous", "coupon_identity_ambiguous", "provider_alias_conflict"}
         meta.update(active_sync_pending=pending, sync_status="failed", salla_synced=False,
                     sync_error=str(exc) if isinstance(exc, ValueError) and str(exc) in reasons else type(exc).__name__)
     row.extra_metadata = meta

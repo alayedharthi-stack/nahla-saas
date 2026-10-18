@@ -3224,17 +3224,25 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        from services.coupon_identity import adapter_binding, resolve_import_coupon, validate_import_binding, CouponIdentityConflict
+        identity_conflicts = 0
+        binding = adapter_binding(adapter, self.tenant_id, self._integration_connection_id)
+        if binding is not None:
+            validate_import_binding(self.db, binding)
+            # Serialize import inserts too: a missing coupon row cannot be row-locked.
+            from models import Tenant
+            self.db.query(Tenant.id).filter_by(id=self.tenant_id).with_for_update().one()
         for raw in raw_list:
             normalised = _normalise_coupon(raw)
             code = normalised["code"]
             if not code:
                 continue
-            existing = (
-                self.db.query(Coupon)
-                .filter_by(tenant_id=self.tenant_id, code=code)
-                .populate_existing().with_for_update()
-                .first()
-            )
+            try:
+                existing = resolve_import_coupon(self.db, self.tenant_id, raw, binding)
+            except CouponIdentityConflict as exc:
+                logger.warning("coupon_identity_import_blocked reason=%s", str(exc))
+                identity_conflicts += 1
+                continue
             exp = None
             if normalised["expires_at"]:
                 try:
@@ -3259,6 +3267,9 @@ class StoreSyncService:
                     import_meta = build_salla_import_metadata(raw, normalised, synced_at)
                 import_meta.pop("active", None)
                 import_meta.update(state_meta)
+                if binding is not None:
+                    import_meta["salla_identity"] = binding
+                    import_meta["salla_provider_code"] = raw["code"]
                 existing.description = normalised.get("name") or normalised["description"]
                 existing.discount_type = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
@@ -3280,6 +3291,9 @@ class StoreSyncService:
                 import_meta = build_salla_import_metadata(raw, normalised, synced_at)
                 from services.coupon_active_sync import imported_state
                 import_meta.update(imported_state(raw, {}, observed_at))
+                if binding is not None:
+                    import_meta["salla_identity"] = binding
+                    import_meta["salla_provider_code"] = raw["code"]
                 self.db.add(Coupon(
                     tenant_id=self.tenant_id,
                     code=code,
@@ -3296,13 +3310,13 @@ class StoreSyncService:
             "tenant=%s coupons sync done created=%d updated=%d items_seen=%d triggered_by=%s",
             self.tenant_id, created, updated, len(raw_list), triggered_by,
         )
-        failure_class = None
-        partial = False
+        failure_class = "coupon_identity_conflict" if identity_conflicts else None
+        partial = bool(identity_conflicts)
         fetch_ok = True
         if fetch_result:
-            partial = bool(fetch_result.get("partial"))
+            partial = partial or bool(fetch_result.get("partial"))
             fetch_ok = bool(fetch_result.get("ok"))
-            if partial:
+            if fetch_result.get("partial"):
                 failure_class = "partial_pagination"
         if record_sync_meta:
             self._record_coupon_sync_meta(

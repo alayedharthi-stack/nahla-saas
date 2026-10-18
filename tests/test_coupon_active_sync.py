@@ -19,7 +19,8 @@ def setup_state():
     db, tid = _make_db()
     coupon = Coupon(tenant_id=tid, code="STATUS1", source_type="manual",
                     extra_metadata={"source": "dashboard", "salla_coupon_id": "101",
-                                    "active": True, "sync_status": "synced", "salla_synced": True})
+                                    "active": True, "sync_status": "synced", "salla_synced": True,
+                                    "salla_identity": {"tenant_id": tid, "integration_id": 22, "store_id": "202"}})
     db.add(coupon)
     db.commit()
     integration = SimpleNamespace(id=22, tenant_id=tid, external_store_id="202", provider="salla",
@@ -219,6 +220,9 @@ def test_status_adapter_sends_only_status_and_propagates_failure(monkeypatch):
 @pytest.mark.parametrize("origin", ["manual", "imported", "system"])
 def test_poll_imports_active_both_directions_without_duplicate_or_pending_override(origin):
     db, row, integration, adapter = setup_state()
+    from database.models import Integration
+    db.add(Integration(id=22, tenant_id=row.tenant_id, provider="salla", enabled=True,
+                       external_store_id="202", config={"store_id": "202"}))
     row.source_type = origin
     db.commit()
     svc = StoreSyncService(db, row.tenant_id, adapter=adapter)
