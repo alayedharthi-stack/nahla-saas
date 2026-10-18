@@ -136,6 +136,7 @@ const SYNC_BADGE_VARIANT: Record<NonNullable<DashboardCoupon['sync_badge']>, 'gr
   not_pushed: 'slate',
   failed:     'red',
   imported:   'blue',
+  pending:    'slate',
 }
 
 /** Imported Salla coupons may carry advanced rules managed only in Salla admin. */
@@ -495,6 +496,7 @@ export default function Coupons() {
   }
 
   const canPushToSalla = (c: DashboardCoupon) => {
+    if (c.salla_coupon_id) return false
     if (sourceTypeOf(c) !== 'manual') return false
     const badge = c.sync_badge || 'not_pushed'
     return badge === 'not_pushed' || badge === 'failed'
