@@ -23,7 +23,7 @@ jobs:
       - name: Existing silent-exception lint
         run: python scripts/lint_no_silent_except.py
       - name: Existing root runtime suite
-        run: python -m pytest -q --maxfail=1 --junitxml=/tmp/runtime.xml
+        run: python -m pytest -q --junitxml=/tmp/runtime.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
