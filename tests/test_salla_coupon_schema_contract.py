@@ -1,5 +1,6 @@
 """Explicit graph/profile/rollback admission; no live database or approval."""
 import json
+import ast
 from pathlib import Path
 import pytest
 from backend.tests import _shopify_release_gate_harness as h
@@ -9,6 +10,21 @@ from scripts.operators import shopify_release_gate_render as render
 from scripts.operators.bootstrap_migration_contract import INTEGRATION_BOOTSTRAP_TARGET, repository_heads_expected
 
 ROOT=Path(__file__).resolve().parents[1]
+
+
+def test_schema_observer_executes_only_literal_read_queries():
+    tree=ast.parse((ROOT/'scripts/operators/coupon_retirement_schema.py').read_text())
+    sql=[]
+    for node in ast.walk(tree):
+        if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id in {'text','rows'}:
+            assert len(node.args)==1
+            if node.func.id=='text' and isinstance(node.args[0],ast.Name):
+                assert node.args[0].id=='sql'  # rows()'s only input; every call is literal below.
+            else:
+                assert isinstance(node.args[0],ast.Constant)
+                sql.append(node.args[0].value)
+    assert len(sql)>=8
+    assert all(query.lstrip().split()[0] in {'SELECT','SHOW'} for query in sql)
 
 
 def test_exact_new_graph_and_closed_named_profiles():

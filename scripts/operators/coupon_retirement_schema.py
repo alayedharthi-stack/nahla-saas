@@ -4,7 +4,7 @@ from sqlalchemy import text
 
 def observe(conn, gate):
     def rows(sql):
-        return [list(row) for row in conn.execute(text(sql)).fetchall()]
+        return [list(row) for row in conn.execute(text(sql))]
     relations = rows("""SELECT n.nspname,c.relname,c.relkind FROM pg_class c
         JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname NOT IN ('pg_catalog','information_schema')
