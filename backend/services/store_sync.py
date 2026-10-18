@@ -1646,6 +1646,7 @@ def _normalise_coupon(raw: Any) -> Dict:
     expires_raw = raw.get("expire_date", raw.get("expiry_date", raw.get("expires_at", None)))
     raw_dict = raw if isinstance(raw, dict) else {}
     coupon_name = extract_salla_coupon_name(raw_dict)
+    from services.coupon_active_sync import normalized_active
     return {
         "code":           raw.get("code", ""),
         "name":           coupon_name or "",
@@ -1654,7 +1655,7 @@ def _normalise_coupon(raw: Any) -> Dict:
         "discount_value": str(discount_val) if discount_val else "",
         "starts_at":      parse_salla_datetime(start_raw),
         "expires_at":     parse_salla_datetime(expires_raw) or expires_raw,
-        "active":         status == "active" if isinstance(status, str) else raw.get("active", True),
+        "active":         normalized_active(raw),
         "minimum_order":  min_order,
         "usage_limit":    usage_limit,
         "maximum_uses":   usage_limit,
@@ -3140,7 +3141,9 @@ class StoreSyncService:
         fetch_result=None,
         duration_ms=None,
         record_sync_meta: bool = True,
+        observed_at=None,
     ) -> int:
+        observed_at = observed_at or datetime.now(timezone.utc)
         adapter = self._get_adapter()
         if raw_list is None:
             if adapter is not None and hasattr(adapter, "fetch_coupons_paginated"):
@@ -3229,6 +3232,7 @@ class StoreSyncService:
             existing = (
                 self.db.query(Coupon)
                 .filter_by(tenant_id=self.tenant_id, code=code)
+                .populate_existing().with_for_update()
                 .first()
             )
             exp = None
@@ -3239,6 +3243,12 @@ class StoreSyncService:
                     pass
             synced_at = datetime.now(timezone.utc)
             if existing:
+                from services.coupon_active_sync import reconcile_imported_state
+                from services.coupon_sync_visibility import extract_salla_coupon_id
+                prior_id = (existing.extra_metadata or {}).get("salla_coupon_id")
+                if prior_id and extract_salla_coupon_id(raw) != str(prior_id):
+                    continue
+                state_meta = await reconcile_imported_state(raw, existing.extra_metadata or {}, observed_at, adapter)
                 preserve_origin = is_nahla_system_coupon(
                     getattr(existing, "source_type", None),
                     existing.extra_metadata,
@@ -3247,6 +3257,8 @@ class StoreSyncService:
                     import_meta = build_salla_reconcile_metadata(raw, synced_at, existing.extra_metadata)
                 else:
                     import_meta = build_salla_import_metadata(raw, normalised, synced_at)
+                import_meta.pop("active", None)
+                import_meta.update(state_meta)
                 existing.description = normalised.get("name") or normalised["description"]
                 existing.discount_type = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
@@ -3266,6 +3278,8 @@ class StoreSyncService:
                 updated += 1
             else:
                 import_meta = build_salla_import_metadata(raw, normalised, synced_at)
+                from services.coupon_active_sync import imported_state
+                import_meta.update(imported_state(raw, {}, observed_at))
                 self.db.add(Coupon(
                     tenant_id=self.tenant_id,
                     code=code,
