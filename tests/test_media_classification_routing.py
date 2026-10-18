@@ -310,12 +310,18 @@ class TestMediaClassifyTraceEmission:
         h = _Handler(); h.setLevel(logging.DEBUG)
         prev_level = _nrm.logger.level
         prev_propagate = _nrm.logger.propagate
+        prev_disabled = _nrm.logger.disabled
+        prev_global_disable = logging.root.manager.disable
         _nrm.logger.setLevel(logging.DEBUG)
         _nrm.logger.propagate = True
         _nrm.logger.addHandler(h)
         try:
+            _nrm.logger.disabled = False
+            logging.disable(logging.NOTSET)
             _nrm._emit_media_classify_trace(**kwargs)
         finally:
+            _nrm.logger.disabled = prev_disabled
+            logging.disable(prev_global_disable)
             _nrm.logger.removeHandler(h)
             _nrm.logger.setLevel(prev_level)
             _nrm.logger.propagate = prev_propagate
