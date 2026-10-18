@@ -425,11 +425,14 @@ jobs:
       A1_PG_INTEGRATION_REQUIRED: '1'
       A1_PG_TEST_DATABASE_URL: postgresql://proof:synthetic-proof-only@127.0.0.1:5432/postgres
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6
-          path: source
-          persist-credentials: false
+      - name: Fetch exact API source without initializing gitlinks
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C source fetch --no-tags --depth=1 origin efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6
+          git -C source checkout --detach FETCH_HEAD
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -494,11 +497,14 @@ jobs:
       VITE_SHOPIFY_INSTALL_FIRST_ENABLED: 'true'
       VITE_SHOPIFY_CATALOG_IMPORT_UI: 'true'
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: a12dd410f3e54308fa4af3198ed3af63a00bd91d
-          path: ui
-          persist-credentials: false
+      - name: Fetch exact frontend without initializing gitlinks
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          git init ui
+          git -C ui remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git -C ui fetch --no-tags --depth=1 origin a12dd410f3e54308fa4af3198ed3af63a00bd91d
+          git -C ui checkout --detach FETCH_HEAD
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
