@@ -1,7 +1,60 @@
 # Explicit coupon quarantine and rollback contract
 
+## Current compatibility completion
+
+Salla uses unapplied revision0126 with parent0124. Revision0125 is reserved for
+the external SHA-pinned Google sibling and is never admitted to a production
+profile. SQL/trigger bodies of the original quarantine migration are preserved.
+Bootstrap remains exactly0093. Source topology is exactly
+0092/0111/0114/0115/0126; historical topologies remain explicit, unknown heads
+and the Google-combined graph remain rejected by the production gate.
+
+The named S4_COUPON_PRE_DORMANT/PILOT profiles require database0111/0113/0124
+and the closed pre-quarantine observation. S4_COUPON_POST_DORMANT/PILOT require
+0111/0113/0126 and the closed post observation. Shopify's own branch revision
+stays0124 and its17 definitions/retained data remain unchanged. No profile
+automatically applies a migration. Existing flag, identity, backup/restore,
+age, target, source, inventory and independent approval checks still apply.
+
+Closure includes every quarantine table column, key, constraint and index;
+all owned relations/types; full function bodies, arguments, language, owner
+relationship, security/volatility/parallel/strict/leak/config/ACL properties;
+all user triggers on coupons and their referenced functions even without a
+retirement prefix; exact binding/enabled state; coupons/audit RLS and policies.
+Missing, disabled, changed, extra or unknown objects fail. Read-only checks
+observe again after the transaction boundary and retain table OID checks.
+
+Post0126 functional rollback is ONLY the tested alias-aware same-release SHA,
+with its exact runtime inventory, actual verified deployment UUID, fresh
+post0126 schema observation digest, all flags OFF and an independently reviewed
+zero-failure/zero-skip JUnit digest proving that an ordinary+canonical batch
+commits while retired history/audit stay unchanged. The actual final bridge
+SHA is bound externally by exact-head CI and the release approval; no synthetic
+fixture UUID is a production rollback. A4 and efb8 are rejected for POST.
+The old efb8 containment behavior documented below is a negative proof only.
+
+The historical S4 pre0126 prior-source contract retains its exact reviewed
+source/inventory pin and original source-schema file digest. Its compatibility
+report additionally binds the fresh current schema-file digest and the equal
+retained+17-definition digest. These explicit separate fields avoid claiming
+an old source carried the new migration-file digest. They are never accepted
+for POST0126. Drift in either proof is refused.
+
+The canonical source inventory is regenerated (currently167 entries), including
+the alias-aware coupon runtime closure and new read-only schema observer.
+The earlier157-byte-identical claim is superseded for the necessary contract,
+expectation and inventory edits. Shopify application/UI source and existing
+migrations0121-0124 remain unchanged; actual disposable pre/post observations
+verify its17 definitions, rather than reusing an old database digest.
+
+Release order, each operation separately authorized: reviewed bridge source and
+closed PRE profile; deploy/verify that actual bridge; manual0126 with empty
+audit; verify closed POST profile and compatible rollback evidence; only then
+fresh fenced CAS reconciliation. No deploy, migration, reconciliation, provider
+write, approval token or production rollback is performed by these tests.
+
 Clearing provider IDs alone leaves a code collision and permits the old importer
-to rebind history. Migration0125 adds an immutable private audit and persistent
+to rebind history. Migration0126 adds an immutable private audit and persistent
 database write fence. No Shopify table, previous migration0121-0124, router,
 release gate, flag or secret changes. No production repair is executed.
 
@@ -37,7 +90,7 @@ invocation. Its caller owns the maintenance fence, provider GET and transaction.
 6. Re-read DB/provider and repeat acceptance. Exactly one operational identity,
    no deleted/moved references, no messages or unrelated records affected.
 
-The primitive requires PostgreSQL0125, verified binding, distinct explicit
+The primitive requires PostgreSQL0126, verified binding, distinct explicit
 manual/imported rows, matching provider aliases/code and no contrary intent.
 No ID10505/10506, tenant1 or provider1847319598 is hardcoded in runtime.
 
@@ -53,7 +106,7 @@ of changing history; this PR adds no history editor or router change.
 ## Rollback
 
 Before commit, transaction rollback restores rows and removes staged audit/fence.
-After commit, application rollback MUST retain0125 and its DB fence. Downgrade
+After commit, application rollback MUST retain0126 and its DB fence. Downgrade
 refuses while any retirement exists. Tests execute the actual pinned efb8 import
 method: lower/mixed-case payloads fail closed instead of rebinding/recreating.
 This protects data; it DOES NOT restore old-version coupon availability. The

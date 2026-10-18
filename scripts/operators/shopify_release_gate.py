@@ -343,7 +343,7 @@ def check_graph(root: Path, phase_def: Mapping[str, Any]) -> Tuple[Check, Option
         return Check("graph", k.FAIL, k.R_GRAPH_EDGE_MISMATCH, {"revisions": bad_edges}), None
     if graph["heads"] != k.EXPECTED_REPOSITORY_HEADS:
         return Check("graph", k.FAIL, k.R_GRAPH_HEADS_MISMATCH, {"expected": sorted(k.EXPECTED_REPOSITORY_HEADS)}), None
-    delta = branch_chain(down, phase_def["shopify_row"], k.BRANCH_FORK_REVISION)
+    delta = branch_chain(down, phase_def.get("database_tip",phase_def["shopify_row"]), k.BRANCH_FORK_REVISION)
     if delta != tuple(phase_def["branch_delta"]):
         return Check("graph", k.FAIL, k.R_GRAPH_BRANCH_DELTA_MISMATCH, {"expected": list(phase_def["branch_delta"])}), None
     for row in sorted(k.RETAINED_ROWS):
@@ -405,7 +405,7 @@ def check_approval(environ: Mapping[str, str], args: argparse.Namespace, runtime
     status, reason, detail = k.evaluate_approval(
         record, phase_name=args.phase, release_sha=args.release_sha, runtime_digest=runtime[1], runtime_count=runtime[0],
         target=target, backup_service=args.expect_backup_service, backup_volume=args.expect_backup_volume, now=now,
-        rollback_bindings=schema_rollback_bindings(Path(args.root)) if args.phase in k.POST_INSTALL_PHASES else None)
+        rollback_bindings=schema_rollback_bindings(Path(args.root),args.phase) if args.phase in k.POST_INSTALL_PHASES else None)
     return Check("approval", status, reason, detail)
 
 
@@ -417,16 +417,24 @@ def read_json(path: Path) -> Optional[Any]:
         return None
 
 
-def schema_rollback_bindings(root: Path) -> Optional[Dict[str, Any]]:
+def schema_rollback_bindings(root: Path, phase_name: str = "S4_DORMANT") -> Optional[Dict[str, Any]]:
     """Source-pinned artifact/definition bindings used by renderer and runtime."""
     check, _expectations = check_expectations(root, "S4_DORMANT")
     if check.status != k.PASS:
         return None
-    artifact = read_json(root / k.INSTALL_ROLLBACK_RELATIVE_PATH)
+    artifact_path = k.COUPON_ROLLBACK_RELATIVE_PATH if phase_name in k.COUPON_POST_PHASES else k.INSTALL_ROLLBACK_RELATIVE_PATH
+    artifact = read_json(root / artifact_path)
     if not isinstance(artifact, dict):
         return None
     try:
-        return {"artifact": artifact, "artifact_sha256": file_sha256(root / k.INSTALL_ROLLBACK_RELATIVE_PATH),
+        return {"artifact": artifact, "artifact_sha256": file_sha256(root / artifact_path),
+                "coupon_schema_sha256": file_sha256(root / k.COUPON_EXPECTATIONS_RELATIVE_PATH),
+                "schema_definitions_sha256": hashlib.sha256(json.dumps(
+                    {name:_expectations[name] for name in ("retained","shopify_s4")},
+                    sort_keys=True,separators=(",",":")).encode()).hexdigest(),
+                "post_schema_observation_sha256": hashlib.sha256(json.dumps(
+                    read_json(root/k.COUPON_EXPECTATIONS_RELATIVE_PATH).get("post"),
+                    sort_keys=True,separators=(",",":")).encode()).hexdigest(),
                 "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
     except OSError:
         return None
@@ -454,6 +462,12 @@ def check_expectations(root: Path, phase_name: str = "S3") -> Tuple[Check, Optio
                 or any(expectations[key]["tables"].get(name) != definition
                        for name, definition in baseline.get("shopify_s3", {}).get("tables", {}).items())):
             return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
+    coupon = read_json(root / k.COUPON_EXPECTATIONS_RELATIVE_PATH)
+    profile = k.phase(phase_name).get("coupon_schema","pre")
+    if (not isinstance(coupon,dict) or coupon.get("database_py_digest") != current
+            or profile not in coupon or not isinstance(coupon[profile],dict)):
+        return Check("expectations",k.FAIL,k.R_EXPECTATIONS_STALE),None
+    expectations["coupon_retirement"] = coupon[profile]
     return Check("expectations", k.PASS, detail={"generated_from_source_sha": str(expectations.get("generated_from_source_sha") or "")[:12]}), expectations
 
 
@@ -638,6 +652,8 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
     conn = None
     locked = False
     identity_names = list(k.IDENTITY_TABLES) + list(phase_def["tables"])
+    if phase_def.get("coupon_schema") == "post":
+        identity_names.append("coupon_identity_retirements")
     try:
         try:
             conn = engine.connect().execution_options(postgresql_readonly=True)
@@ -679,9 +695,18 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
         status, reason, detail = k.evaluate_retained(observe_retained(conn), expectations.get("retained") or {})
         checks.append(Check("retained_schema", status, reason, detail))
 
+        from scripts.operators import coupon_retirement_schema as coupon_schema
+        actual = coupon_schema.observe(conn,table_definition)
+        wanted = expectations.get("coupon_retirement",coupon_schema.EMPTY)
+        valid = coupon_schema.matches(actual,wanted)
+        checks.append(Check("coupon_retirement_schema",k.PASS if valid else k.FAIL,
+                            None if valid else "coupon_retirement_schema_drift"))
+
         # A fresh transaction: the relations checked must still be the same objects.
         conn.rollback()
         after = relation_oids(conn, identity_names)
+        if not coupon_schema.matches(coupon_schema.observe(conn,table_definition),wanted):
+            checks.append(Check("coupon_retirement_recheck",k.FAIL,"coupon_retirement_schema_drift"))
         status, reason, detail = k.evaluate_relation_identity(before, after)
         checks.append(Check("relation_identity", status, reason, detail))
     except WallTimeout:

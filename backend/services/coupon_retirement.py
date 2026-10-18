@@ -35,7 +35,7 @@ def digest(value):
 def reconcile_duplicate(db, binding, canonical_id, retired_id, raw, expected_digest, inventory):
     """Stage an atomic repair; never commit or call a provider.
 
-    Requires PostgreSQL0125, exact locked before-images, inactive provider truth,
+    Requires PostgreSQL0126, exact locked before-images, inactive provider truth,
     no contrary pending intent, and a reviewed reference inventory tied to those
     images. The inventory is an external review input, NOT an inferred zero-ref
     claim. Caller must read provider detail under a bounded maintenance fence.

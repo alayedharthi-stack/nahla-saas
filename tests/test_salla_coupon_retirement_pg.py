@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -49,7 +49,7 @@ def pg():
             coupon_level TEXT, allocation_channel TEXT, UNIQUE(tenant_id,code))'''))
         conn.execute(text(f'INSERT INTO "{schema}".tenants VALUES (1),(2)'))
     engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
-    path = Path(__file__).resolve().parents[1] / "database/migrations/versions/0125_coupon_identity_retirements.py"
+    path = Path(__file__).resolve().parents[1] / "database/migrations/versions/0126_coupon_identity_retirements.py"
     spec = importlib.util.spec_from_file_location("retirement_migration", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
@@ -218,9 +218,8 @@ def test_transaction_rollback_and_application_rollback_keep_safety(pg):
         assert db.get(Coupon,10505).extra_metadata["active"] is False
 
 
-@pytest.mark.parametrize("code", ["shoes123","Shoes123"])
-def test_exact_previous_importer_is_fenced_after_application_rollback(pg,code):
-    """Execute the actual pinned efb8 method, not a rewritten approximation."""
+def previous_importer():
+    """Load the pinned efb8 method without importing another application tree."""
     import services.store_sync as module
     executable = shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
     source = subprocess.check_output([executable,"show",
@@ -231,6 +230,13 @@ def test_exact_previous_importer_is_fenced_after_application_rollback(pg,code):
     method = next(n for n in cls.body if isinstance(n,ast.AsyncFunctionDef) and n.name == "sync_coupons")
     namespace = dict(module.__dict__)
     exec(compile(ast.Module(body=[method],type_ignores=[]),"pinned-efb8-sync_coupons","exec"),namespace)
+    return namespace["sync_coupons"]
+
+
+@pytest.mark.parametrize("code", ["shoes123","Shoes123"])
+def test_exact_previous_importer_is_fenced_after_application_rollback(pg,code):
+    """Execute the actual pinned efb8 method, not a rewritten approximation."""
+    import_coupons = previous_importer()
     Session,_ = pg
     with Session() as db:
         repair(db)
@@ -238,6 +244,93 @@ def test_exact_previous_importer_is_fenced_after_application_rollback(pg,code):
         before = [snapshot(r) for r in db.query(Coupon).order_by(Coupon.id)]
         svc = StoreSyncService(db,1,integration_connection_id=22,adapter=Provider(1))
         with pytest.raises(IntegrityError,match="coupon_retired"):
-            asyncio.run(namespace["sync_coupons"](svc,raw_list=[dict(RAW,code=code)],record_sync_meta=False))
+            asyncio.run(import_coupons(svc,raw_list=[dict(RAW,code=code)],record_sync_meta=False))
         db.rollback()
         assert [snapshot(r) for r in db.query(Coupon).order_by(Coupon.id)] == before
+
+
+@pytest.mark.parametrize("code", ["shoes123", "Shoes123"])
+def test_old_batch_aborts_other_coupon_but_alias_aware_bridge_remains_functional(pg, code):
+    """A safe rollback must sync ordinary coupons, not merely reject old writes.
+
+    The pinned importer successfully writes the first coupon before the second
+    collides with retired history. Its entire transaction must roll back. The
+    current alias-aware implementation must commit the same batch while leaving
+    the retired row and immutable audit unchanged.
+    """
+    import_coupons = previous_importer()
+    Session, _ = pg
+    with Session() as db:
+        repair(db)
+        db.add(Coupon(id=10507, tenant_id=1, code="COAT20", source_type="imported",
+                      discount_type="percentage", discount_value="1",
+                      extra_metadata={"salla_coupon_id": "202", "external_id": "202",
+                                      "salla_identity": dict(BINDING), "active": False}))
+        db.commit()
+        before = [snapshot(row) for row in db.query(Coupon).order_by(Coupon.id)]
+        retired_before = snapshot(db.get(Coupon, 10506))
+        audit_before = db.execute(text("SELECT audit FROM coupon_identity_retirements")).scalar_one()
+        ordinary = dict(id=202, code="COAT20", status="inactive", type="percentage", amount=7)
+        batch = [ordinary, dict(RAW, code=code)]
+        svc = StoreSyncService(db, 1, integration_connection_id=22, adapter=Provider(1))
+        successful_updates = []
+
+        def record_update(_conn, _cursor, _statement, parameters, context, _executemany):
+            compiled = context.compiled
+            statement = compiled.statement if compiled is not None else None
+            if (getattr(statement, "is_update", False)
+                    and statement.table.name == "coupons"):
+                successful_updates.append(dict(parameters))
+
+        engine = db.get_bind()
+        event.listen(engine, "after_cursor_execute", record_update)
+        try:
+            with pytest.raises(IntegrityError, match="coupon_retired"):
+                asyncio.run(import_coupons(svc, raw_list=deepcopy(batch), record_sync_meta=False))
+        finally:
+            event.remove(engine, "after_cursor_execute", record_update)
+            db.rollback()
+        # Prove the ordinary update reached PostgreSQL before the fence failed.
+        assert any(10507 in parameters.values() for parameters in successful_updates)
+        assert [snapshot(row) for row in db.query(Coupon).order_by(Coupon.id)] == before
+        assert db.execute(text("SELECT audit FROM coupon_identity_retirements")).scalar_one() == audit_before
+
+        assert asyncio.run(svc.sync_coupons(raw_list=deepcopy(batch), record_sync_meta=False)) == 2
+        db.commit()
+        assert db.get(Coupon, 10507).discount_value == "7"
+        assert db.get(Coupon, 10505).discount_value == "2"
+        assert snapshot(db.get(Coupon, 10506)) == retired_before
+        assert db.execute(text("SELECT audit FROM coupon_identity_retirements")).scalar_one() == audit_before
+        assert db.query(Coupon).count() == 3
+
+
+def test_empty_retirement_migration_downgrades_and_reupgrades_real_postgresql(pg):
+    """Removing an unused fence is supported; a populated fence stays permanent."""
+    Session, migration = pg
+    assert migration.revision == "0126" and migration.down_revision == "0124"
+    with Session() as db:
+        before = [snapshot(row) for row in db.query(Coupon).order_by(Coupon.id)]
+        assert db.execute(text("SELECT count(*) FROM coupon_identity_retirements")).scalar_one() == 0
+        with Operations.context(MigrationContext.configure(db.connection())):
+            migration.downgrade()
+        db.commit()
+        assert db.execute(text("SELECT to_regclass('coupon_identity_retirements')")).scalar_one() is None
+        for function in ("guard_coupon_retirement", "guard_coupon_retirement_audit"):
+            assert db.execute(text("SELECT to_regprocedure(:name)"), {"name": function + "()"}).scalar_one() is None
+        assert db.execute(text("""SELECT count(*) FROM pg_trigger
+            WHERE tgrelid = 'coupons'::regclass AND tgname = 'coupon_retirement_guard'""")).scalar_one() == 0
+        assert [snapshot(row) for row in db.query(Coupon).order_by(Coupon.id)] == before
+        with Operations.context(MigrationContext.configure(db.connection())):
+            migration.upgrade()
+        db.commit()
+        assert db.execute(text("SELECT count(*) FROM coupon_identity_retirements")).scalar_one() == 0
+        assert db.execute(text("""SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+            AND tgname IN ('coupon_retirement_guard', 'coupon_retirement_audit_guard')
+            AND tgrelid IN ('coupons'::regclass, 'coupon_identity_retirements'::regclass)""")).scalar_one() == 2
+        # The reinstalled operations must really enforce the fence again.
+        repair(db)
+        db.commit()
+        with pytest.raises(IntegrityError, match="coupon_retired"):
+            db.execute(text("UPDATE coupons SET discount_value='9' WHERE id=10506"))
+        db.rollback()
+        assert db.get(Coupon, 10506).discount_value == "2"

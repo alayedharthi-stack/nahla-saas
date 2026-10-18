@@ -4,7 +4,7 @@ name: Draft Shopify release gate validation
 # secrets, persisted checkout credentials, or mutation of committed expectations.
 on:
   push:
-    branches: [codex/shopify-install-first-20261013, claude/shopify-pilot-bounded-catalog-import, codex/shopify-rollback-a4-binding-20261016]
+    branches: [codex/shopify-install-first-20261013, claude/shopify-pilot-bounded-catalog-import, codex/shopify-rollback-a4-binding-20261016, codex/salla-coupon-identity-20261018]
 
 permissions:
   contents: read
@@ -185,7 +185,7 @@ jobs:
           NAHLA_INSTALL_RELEASE_CAPTURE_DIR: ${{ runner.temp }}/shopify-gate-evidence
         run: |
           set -euo pipefail
-          python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
+          python -B -m pytest backend/tests/test_shopify_install_release_pg.py backend/tests/test_salla_coupon_schema_profiles_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/shopify-gate-evidence/shopify-install-release-pg.xml"
 

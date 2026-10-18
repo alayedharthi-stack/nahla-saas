@@ -1,12 +1,12 @@
 """Persistent coupon quarantine; survives application rollback. No data repair.
 
-Revision ID: 0125
+Revision ID: 0126
 Revises: 0124
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0125"
+revision = "0126"
 down_revision = "0124"
 branch_labels = None
 depends_on = None
