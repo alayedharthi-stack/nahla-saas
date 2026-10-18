@@ -22,6 +22,19 @@
   },
   "exceptions": [
     {
+      "exception_id": "AGENT-SCOPE-1228-SALLA-COUPON-ACTIVE-STATE",
+      "exact_file_scope": [
+        "backend/routers/coupons.py"
+      ],
+      "base_content_sha256": "5b5ce0cf5519193b5e702366f2cff562cab1080861056ce9a2cfcd129dccecdf",
+      "authorized_content_sha256": [
+        "9ed0adf4d7545f7dc8293353d201f7df10f112350a86ae8977cf9c6df0d6c4af"
+      ],
+      "task_scope": "PR #1228 at head 15f9183229b5fb2729f953126214d7b6aeadb47f only: repair the existing tenant-scoped coupon PATCH contract to persist a Salla active-state intent, serialize changes, verify provider confirmation and report pending/failure truthfully. No AI behavior, permissions, Shopify, coupon creation/deletion, pricing or scheduling authorization. Administrative PR scope; the existing guard enforces exact content and expiry, not PR identity.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1228#issuecomment-6239556811",
+      "expires_at": "2026-10-28"
+    },
+    {
       "exception_id": "AGENT-SCOPE-1162-LIFECYCLE-TENANT-RECIPIENTS",
       "exact_file_scope": ["backend/core/commerce_lifecycle/canary_guard.py"],
       "base_content_sha256": "82be1686c42e65baff7e033ba057202602ba230dcae1df9de6a19436d94b641b",
