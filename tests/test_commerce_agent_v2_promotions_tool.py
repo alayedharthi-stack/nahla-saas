@@ -1040,6 +1040,7 @@ def test_the_projection_log_says_how_many_were_considered_and_what_took_them(mon
 
     handler = Capture(level=logging.INFO)
     previous_level, previously_disabled = tool.logger.level, tool.logger.disabled
+    previous_global_disable = logging.root.manager.disable
     tool.logger.addHandler(handler)
     tool.logger.setLevel(logging.INFO)
     # Alembic's ``fileConfig``, run by a migration suite earlier in the same
@@ -1050,8 +1051,12 @@ def test_the_projection_log_says_how_many_were_considered_and_what_took_them(mon
     facts = [coupon_fact(promotion_id=90, code="OPEN10", coupon_level="", conditions={})]
     facts += [coupon_fact(promotion_id=91 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(3)]
     try:
+        # Read-only operator modules silence logging globally when imported.
+        # Restore that process setting after this isolated capture.
+        logging.disable(logging.NOTSET)
         run(context, monkeypatch, truth(shareable=facts), entitlement=entitled("bronze"))
     finally:
+        logging.disable(previous_global_disable)
         tool.logger.removeHandler(handler)
         tool.logger.setLevel(previous_level)
         tool.logger.disabled = previously_disabled
