@@ -17,6 +17,8 @@ NATIVE_AI_USAGE_LIMIT = 1
 
 def explicit_ai_allocatable(meta: Optional[Mapping[str, Any]]) -> bool:
     """True only for an explicit boolean/string true marker."""
+    if "salla_retirement" in (meta or {}):
+        return False
     raw = (meta or {}).get("ai_allocatable")
     if raw is True:
         return True

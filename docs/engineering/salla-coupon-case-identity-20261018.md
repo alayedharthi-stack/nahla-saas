@@ -1,5 +1,12 @@
 # Salla coupon case identity repair
 
+Update: the original non-executable proposal below is superseded by
+[the explicit quarantine transaction and rollback contract](salla-coupon-retirement-20261018.md).
+That necessary extension adds migration0125, runtime retirement guards and
+exact-head CI/PG16/18 proofs. Historical statements below that no migration or
+retirement handling is included describe the first candidate, not the current
+PR. No production repair or deployment has been executed.
+
 ## Observed first divergence
 
 On the verified demo tenant1/store22825873, Nahla created `NHLT2610182025`

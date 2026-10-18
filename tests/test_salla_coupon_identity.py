@@ -197,6 +197,24 @@ def test_normalization_does_not_collapse_other_identifiers(left, right):
     assert not same_code(left, right)
 
 
+@pytest.mark.parametrize("marker", [None, {}, {"version":999}])
+def test_retirement_marker_rejects_operations_even_with_legacy_active_flags(marker):
+    from services.native_ai_coupon_eligibility import explicit_ai_allocatable, is_native_ai_allocatable_coupon
+    from services.coupon_salla_push import is_pushable_manual_coupon
+    from services.coupon_identity import CouponIdentityConflict
+    db,tid,integration,provider,_ = setup()
+    row = Coupon(tenant_id=tid,code="FROZEN",source_type="manual",coupon_level="silver",allocation_channel="ai",
+        extra_metadata={"active":True,"ai_allocatable":True,"usage_limit":1,"salla_retirement":marker})
+    assert not explicit_ai_allocatable(row.extra_metadata)
+    assert not is_native_ai_allocatable_coupon(row,tenant_id=tid,resolved_level="silver")
+    assert not is_pushable_manual_coupon(row)
+    assert not asyncio.run(push_coupon_to_salla(db,tid,row,adapter=provider))[0]
+    with pytest.raises(CouponIdentityConflict,match="coupon_retired"):
+        queue_active_change(row,integration,True)
+    assert provider.raw == {} and provider.puts == []
+    db.close()
+
+
 @pytest.mark.parametrize("change", ["tenant", "store", "integration", "disabled", "config_store"])
 def test_import_source_binding_mismatch_fails_before_any_write(change):
     from services.coupon_identity import CouponIdentityConflict

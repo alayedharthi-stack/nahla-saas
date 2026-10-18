@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, codex/salla-production-preserve-shopify-20261018]
 
 jobs:
   lint-and-test:

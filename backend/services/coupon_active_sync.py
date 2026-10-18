@@ -92,6 +92,8 @@ async def reconcile_imported_state(raw, existing, observed_at, adapter):
 
 
 def queue_active_change(coupon, integration, active):
+    from services.coupon_retirement import assert_operational
+    assert_operational(coupon)
     meta = dict(coupon.extra_metadata or {})
     pending = meta.get("active_sync_pending") or {}
     if pending.get("desired") == active and pending.get("integration_id") == integration.id:
@@ -118,6 +120,8 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
            .populate_existing().with_for_update(skip_locked=True).first())
     if row is None:
         return
+    if "salla_retirement" in (row.extra_metadata or {}):
+        return  # Do not mutate frozen history or replay its former pending intent.
     meta = dict(row.extra_metadata or {})
     pending = dict(meta.get("active_sync_pending") or {})
     if not pending:
@@ -190,6 +194,8 @@ async def retry_active_changes(db, integration):
     now = utcnow()
     due = []
     for row in rows:
+        if "salla_retirement" in (row.extra_metadata or {}):
+            continue
         pending = (row.extra_metadata or {}).get("active_sync_pending") or {}
         next_at = timestamp(pending.get("next_attempt_at"))
         if (pending.get("integration_id") == integration.id

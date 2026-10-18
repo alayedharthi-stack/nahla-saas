@@ -73,6 +73,8 @@ def resolve_import_coupon(db, tenant_id, raw, binding):
     matched, collisions = [], []
     for row in candidates:
         meta = row.extra_metadata or {}
+        if "salla_retirement" in meta:
+            continue  # Immutable historical row; never an operational candidate.
         pid = provider_id(meta)
         if not binding_matches(meta, binding):
             if same_code(row.code, code):
@@ -95,6 +97,8 @@ def resolve_import_coupon(db, tenant_id, raw, binding):
 
 def assert_dispatch_identity(db, row, binding, incoming_id, code):
     from models import Coupon
+    if "salla_retirement" in (row.extra_metadata or {}):
+        raise CouponIdentityConflict("coupon_retired")
     if not binding_matches(row.extra_metadata, binding) or provider_id(row.extra_metadata) != incoming_id or not same_code(code, row.code):
         raise CouponIdentityConflict("provider_coupon_identity_mismatch")
     if not (row.extra_metadata or {}).get("salla_identity") and not legacy_scope_is_unique(db, binding):
@@ -103,5 +107,5 @@ def assert_dispatch_identity(db, row, binding, incoming_id, code):
         Coupon.extra_metadata["salla_coupon_id"].as_string() == incoming_id,
         Coupon.extra_metadata["external_id"].as_string() == incoming_id,
     )).all())
-    if any(binding_matches(other.extra_metadata, binding) for other in duplicates):
+    if any("salla_retirement" not in (other.extra_metadata or {}) and binding_matches(other.extra_metadata, binding) for other in duplicates):
         raise CouponIdentityConflict("coupon_identity_ambiguous")
