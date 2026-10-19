@@ -718,6 +718,24 @@ async def graph_post(
     return data, ctx
 
 
+def _automation_blocked_result(reason: str) -> tuple[Dict[str, Any], WhatsAppTokenContext]:
+    return (
+        {
+            "error": {
+                "code": "automation_blocked",
+                "type": "AutomationBlocked",
+                "message": f"Outbound send blocked by Nahla safety policy: {reason}",
+            },
+            "_nahla_classification": "automation_blocked",
+            "_nahla_block_reason": reason,
+        },
+        WhatsAppTokenContext(
+            token="", source="automation_guard", token_status="skipped",
+            expires_at=None, oauth_session_status="", oauth_session_message=None,
+        ),
+    )
+
+
 async def provider_send_message(
     db: Session,
     conn: Any,
@@ -828,37 +846,18 @@ async def provider_send_message(
                         allow_manual=allow_manual,
                     )
                 if _block.block:
-                    return (
-                        {
-                            "error": {
-                                "code": "automation_blocked",
-                                "type": "AutomationBlocked",
-                                "message": (
-                                    "Outbound send blocked by Nahla safety policy: "
-                                    f"{_block.reason}"
-                                ),
-                            },
-                            "_nahla_classification": "automation_blocked",
-                            "_nahla_block_reason": _block.reason,
-                        },
-                        WhatsAppTokenContext(
-                            token="",
-                            source="automation_guard",
-                            token_status="skipped",
-                            expires_at=None,
-                            oauth_session_status="",
-                            oauth_session_message=None,
-                        ),
-                    )
+                    return _automation_blocked_result(_block.reason)
             except Exception as _guard_exc:  # noqa: BLE001
                 if unsubscribe_notice:
                     raise
                 logger.warning(
-                    "[AUTOMATION_BLOCKED] guard check failed (non-fatal) "
-                    "tenant_id=%s err=%s",
+                    "[AUTOMATION_BLOCKED] guard verification failed "
+                    "tenant_id=%s error=%s",
                     tenant_id,
-                    _guard_exc,
+                    type(_guard_exc).__name__,
                 )
+                if not allow_manual:
+                    return _automation_blocked_result("ai_state_unavailable")
 
         if not allow_manual and db is not None and tenant_id:
             try:
@@ -929,6 +928,24 @@ async def provider_send_message(
     observe_wire_payload(tenant_id, send_payload, "provider_payload_assembly")
     send_payload = _scrub_outbound_payload(send_payload)
     observe_wire_payload(tenant_id, send_payload, "provider_marker_scrub")
+    # Final merchant send admission, after every awaited preparation step.
+    # Each part/retry enters this function again and gets an independent read.
+    # Platform sends without a merchant scope, manual staff sends, and the
+    # existing lifecycle automation_guard=False exception retain their policy.
+    if tenant_id and raw_to and not allow_manual and (automation_guard or unsubscribe_notice):
+        from core.ai_disabled_gate import evaluate_fresh_ai_disabled_send_block  # noqa: PLC0415
+
+        campaign_template = (
+            operation == "campaign_send"
+            and str(send_payload.get("type") or "text").strip().lower() == "template"
+        )
+        blocked, decision = evaluate_fresh_ai_disabled_send_block(
+            db, tenant_id=int(tenant_id), customer_phone=send_payload["to"],
+            blocked_path=blocked_path or operation,
+            check_store_mode=not (campaign_template or unsubscribe_notice),
+        )
+        if blocked:
+            return _automation_blocked_result(decision.reason)
     data = await provider_post_with_context(
         conn,
         ctx,

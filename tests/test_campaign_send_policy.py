@@ -36,6 +36,11 @@ def wire(monkeypatch):
     monkeypatch.setattr(service, "get_token_for_operation", token)
     monkeypatch.setattr(service, "provider_post_with_context", post)
     db, conn = MagicMock(), SimpleNamespace(extra_metadata={}, provider="meta")
+    fresh_db = MagicMock()
+    fresh_db.query.return_value.filter.return_value.first.side_effect = lambda: (settings.ai_settings,)
+    fresh_session = MagicMock()
+    fresh_session.return_value.__enter__.return_value = fresh_db
+    monkeypatch.setattr("core.ai_disabled_gate.Session", fresh_session)
 
     def send(operation="campaign_send", message_type="template", tenant_id=91):
         payload = {"messaging_product": "whatsapp", "to": "966500000002",
@@ -48,7 +53,7 @@ def wire(monkeypatch):
 
     return SimpleNamespace(send=send, settings=settings, conversations=conversations,
                            blocked=blocked, lookup=lookup, quota=quota, token=token,
-                           post=post, db=db)
+                           post=post, db=db, fresh_db=fresh_db)
 
 
 @pytest.mark.parametrize("mode", ["test", "off", "on"])
@@ -59,7 +64,9 @@ def test_campaign_templates_send_without_changing_ai_mode(wire, mode, tenant_id)
     assert "messages" in wire.send(tenant_id=tenant_id)
     wire.post.assert_awaited_once()
     wire.quota.assert_called_once()
-    wire.lookup.assert_called_once_with(wire.db, tenant_id, "966500000002")
+    assert wire.lookup.call_count == 2
+    assert wire.lookup.call_args_list[0].args == (wire.db, tenant_id, "966500000002")
+    assert wire.lookup.call_args_list[1].args == (wire.fresh_db, tenant_id, "966500000002")
     assert wire.settings.ai_settings == before
     assert not wire.conversations[0].ai_paused
 
