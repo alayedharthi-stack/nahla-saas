@@ -1,0 +1,60 @@
+name: Conversation AI pause PostgreSQL proof
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'backend/core/ai_disabled_gate.py'
+      - 'backend/core/ai_pause_guard.py'
+      - 'backend/routers/conversations.py'
+      - 'backend/services/whatsapp_platform/service.py'
+      - 'tests/test_conversation_ai_pause_pg.py'
+      - '.github/workflows/conversation-ai-pause-postgres.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  conversation-ai-pause-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nahla_pause_test
+          POSTGRES_PASSWORD: nahla_pause_test
+          POSTGRES_DB: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla_pause_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql://test:test@127.0.0.1:1/unused
+      REDIS_URL: redis://127.0.0.1:1/0
+      NAHLA_AI_PAUSE_PG_REQUIRED: '1'
+      NAHLA_AI_PAUSE_PG_ADMIN_DSN: postgresql://nahla_pause_test:nahla_pause_test@127.0.0.1:5433/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Prove independent sessions and final transport boundary
+        run: |
+          python -m pytest tests/test_conversation_ai_pause_pg.py -v --tb=short \
+            --junitxml=/tmp/conversation-ai-pause-postgres.xml
+          python scripts/check_junit_clean.py /tmp/conversation-ai-pause-postgres.xml
+      - name: Preserve PostgreSQL proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversation-ai-pause-postgres-proof
+          path: /tmp/conversation-ai-pause-postgres.xml
+          if-no-files-found: error
