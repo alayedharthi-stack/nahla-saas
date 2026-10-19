@@ -32,6 +32,25 @@ def digest(value):
     return sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _persist_audit(db, values):
+    """Require the write receipt and the exact persisted fence on this connection."""
+    written = db.execute(text("""INSERT INTO coupon_identity_retirements
+        (retired_id,canonical_id,tenant_id,integration_id,store_id,provider_id,code_key,audit)
+        VALUES (:rid,:cid,:tid,:iid,:store,:pid,:code,CAST(:audit AS JSON))
+        RETURNING retired_id"""), values).scalar_one_or_none()
+    if written != values["rid"]:
+        raise CouponIdentityConflict("repair_audit_not_persisted")
+    stored = db.execute(text("""SELECT retired_id,canonical_id,tenant_id,integration_id,
+        store_id,provider_id,code_key,audit FROM coupon_identity_retirements
+        WHERE retired_id=:rid FOR SHARE"""), {"rid": values["rid"]}).mappings().one_or_none()
+    expected = dict(retired_id=values["rid"], canonical_id=values["cid"],
+                    tenant_id=values["tid"], integration_id=values["iid"],
+                    store_id=values["store"], provider_id=values["pid"],
+                    code_key=values["code"], audit=json.loads(values["audit"]))
+    if stored is None or dict(stored) != expected:
+        raise CouponIdentityConflict("repair_audit_not_persisted")
+
+
 def reconcile_duplicate(db, binding, canonical_id, retired_id, raw, expected_digest, inventory):
     """Stage an atomic repair; never commit or call a provider.
 
@@ -92,35 +111,35 @@ def reconcile_duplicate(db, binding, canonical_id, retired_id, raw, expected_dig
     normal = _normalise_coupon(raw)
     if normal["discount_type"] != "percentage" or not raw.get("amount"):
         raise CouponIdentityConflict("repair_terms_review_required")
-    now = datetime.now(timezone.utc).isoformat()
-    meta = deepcopy(original.extra_metadata or {})
-    meta.pop("active_sync_pending", None)
-    meta.update(active=False, salla_identity=binding, salla_provider_code=raw["code"],
-                sync_status="synced", sync_error=None, salla_synced=True,
-                active_applied_at=now, active_observed_at=now, last_synced_at=now)
-    meta.pop("active_source_updated_at", None)
-    if timestamp(raw.get("updated_at")):
-        meta["active_source_updated_at"] = timestamp(raw["updated_at"]).isoformat()
-    original.extra_metadata = meta
-    original.discount_type, original.discount_value = normal["discount_type"], normal["discount_value"]
-    # Preserve ID/code/source/rules/references; remove operational IDs, not history.
-    old = deepcopy(duplicate.extra_metadata or {})
-    old.pop("salla_coupon_id", None)
-    old.pop("external_id", None)
-    old.pop("active_sync_pending", None)
-    old.update(active=False, ai_allocatable=False, salla_synced=False,
-               sync_status="retired", salla_retirement={"version": 1,
-                   "canonical_id": canonical_id, "binding": binding, "provider_id": pid,
-                   "original_code": duplicate.code, "retired_at": now})
-    duplicate.extra_metadata = old
-    db.flush()  # fence is installed only after both scoped updates succeed
-    audit = {"before": before, "before_digest": expected_digest, "inventory": inventory,
-             "provider_observation": deepcopy(raw), "recorded_at": now,
-             "after": {str(r.id): snapshot(r) for r in rows}}
-    db.execute(text("""INSERT INTO coupon_identity_retirements
-        (retired_id,canonical_id,tenant_id,integration_id,store_id,provider_id,code_key,audit)
-        VALUES (:rid,:cid,:tid,:iid,:store,:pid,:code,CAST(:audit AS JSON))"""),
-        dict(rid=retired_id,cid=canonical_id,tid=binding["tenant_id"],iid=binding["integration_id"],
-             store=binding["store_id"],pid=pid,code=code_key(original.code),
-             audit=json.dumps(audit, default=str)))
+    # Failure must unwind the two row changes even if the caller catches it.
+    # The caller retains ownership of the outer transaction and its commit.
+    with db.begin_nested():
+        now = datetime.now(timezone.utc).isoformat()
+        meta = deepcopy(original.extra_metadata or {})
+        meta.pop("active_sync_pending", None)
+        meta.update(active=False, salla_identity=binding, salla_provider_code=raw["code"],
+                    sync_status="synced", sync_error=None, salla_synced=True,
+                    active_applied_at=now, active_observed_at=now, last_synced_at=now)
+        meta.pop("active_source_updated_at", None)
+        if timestamp(raw.get("updated_at")):
+            meta["active_source_updated_at"] = timestamp(raw["updated_at"]).isoformat()
+        original.extra_metadata = meta
+        original.discount_type, original.discount_value = normal["discount_type"], normal["discount_value"]
+        # Preserve ID/code/source/rules/references; remove operational IDs, not history.
+        old = deepcopy(duplicate.extra_metadata or {})
+        old.pop("salla_coupon_id", None)
+        old.pop("external_id", None)
+        old.pop("active_sync_pending", None)
+        old.update(active=False, ai_allocatable=False, salla_synced=False,
+                   sync_status="retired", salla_retirement={"version": 1,
+                       "canonical_id": canonical_id, "binding": binding, "provider_id": pid,
+                       "original_code": duplicate.code, "retired_at": now})
+        duplicate.extra_metadata = old
+        db.flush()
+        audit = {"before": before, "before_digest": expected_digest, "inventory": inventory,
+                 "provider_observation": deepcopy(raw), "recorded_at": now,
+                 "after": {str(r.id): snapshot(r) for r in rows}}
+        _persist_audit(db, dict(rid=retired_id,cid=canonical_id,tid=binding["tenant_id"],
+            iid=binding["integration_id"],store=binding["store_id"],pid=pid,
+            code=code_key(original.code),audit=json.dumps(audit, default=str)))
     return {"canonical_id": canonical_id, "retired_id": retired_id, "before_digest": expected_digest}

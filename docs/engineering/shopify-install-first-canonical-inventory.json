@@ -32,7 +32,7 @@
     },
     {
       "path": "backend/services/coupon_retirement.py",
-      "sha256": "510bfb339db3a7c66ef202f07532a011d5481966275af28c716e6845ac5b0806"
+      "sha256": "4bcc8b5c1407eac654d01b544e7471be648eca78662f186f21f6f438ba772756"
     },
     {
       "path": "backend/services/coupon_salla_push.py",
@@ -640,7 +640,7 @@
     },
     {
       "path": "scripts/operators/coupon_retirement_schema.py",
-      "sha256": "6ea73551aff815da259ffd8e3a9f2fe00f24c49222c0a24a23110b9edc41712d"
+      "sha256": "98539020c6f24f44f697b5d2aa37d1b91ea517a8fcddada3e055a87aecbbe6de"
     },
     {
       "path": "scripts/operators/salla_coupon_rollback.draft.json",
@@ -648,7 +648,7 @@
     },
     {
       "path": "scripts/operators/salla_coupon_schema_expectations.json",
-      "sha256": "872ee0c4f7bba3a8be804dd92d304ba6dade07d541de3928030dc43248c05fcc"
+      "sha256": "8e12ffde1cf0a249b3ef10ac3636766c3d23c733b8a0fed92023a1a112d3c70d"
     },
     {
       "path": "scripts/operators/shopify_install_rollback.draft.json",
@@ -674,6 +674,6 @@
   "gate_sha256": "4a39b20943eda362a49b1fe09b2024b934da7c27639d94649079a673646af657",
   "gate_version": 2,
   "inventory_count": 167,
-  "inventory_digest": "47a500bbb0626cb282020aee3251fb62e1ea45579ac3156bd47f78a0b15716b2",
+  "inventory_digest": "cad9b2d68c8f71a8aa79eb11f50e15eef1fb7ba28bc3d3c6f36272caecb094d6",
   "unexpected_initializers": []
 }

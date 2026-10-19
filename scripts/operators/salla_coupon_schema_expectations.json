@@ -246,7 +246,8 @@
     "c",
     "coupon_identity_retirements"
    ]
-  ]
+  ],
+  "rules": []
  },
  "pre": {
   "execution": [
@@ -269,7 +270,9 @@
   ],
   "table": null,
   "triggers": [],
-  "types": []
+  "types": [],
+  "rules": []
  },
- "provenance": "Disposable local PostgreSQL17 genuine0093/0103/0111/0113/0124 then0126;17 Shopify definitions unchanged"
+ "provenance": "Disposable local PostgreSQL17 genuine0093/0103/0111/0113/0124 then0126;17 Shopify definitions unchanged",
+ "rules_contract_provenance": "Source-defined absence requirement added during audit-integrity repair; unit-only validation, no new PostgreSQL capture or security reproduction performed"
 }

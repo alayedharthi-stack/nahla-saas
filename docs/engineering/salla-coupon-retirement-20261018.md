@@ -127,10 +127,26 @@ import, activation/delete/recreation, retries/push/allocation, identity isolatio
 and import/dispatch locks. Existing source tests remain. CI includes this
 composite base in a separate full root-runtime workflow and adds exact-head PG16/18 jobs
 with zero-skip JUnit checks. Local PG17 is not a substitute for those jobs.
-Independent final-head review, Shopify157 byte verification, full runtime CI,
+Independent final-head review, canonical inventory verification, full runtime CI,
 release gates and separate data-transaction approval remain prerequisites.
 No merge or deployment is authorized. Coupon webhook handling and missing UI
 edit/creation surfaces remain the separately documented acceptance gaps.
+
+## Audit-integrity source repair (2026-10-19)
+
+Reconciliation now requires both an INSERT RETURNING receipt and a locked
+read-back matching every audit and identity field. The two coupon changes and
+audit verification share a savepoint; failure rolls back this repair while the
+caller retains ownership of the outer transaction. The schema observer also
+includes rewrite-rule definitions and enabled states; both profiles require
+their absence on the protected ownership surface.
+
+This follow-up is reviewed with ordinary unit tests using in-memory results.
+It does not repeat the prohibited database security reproduction. The new empty
+rules requirement is source-defined, not a claim of a fresh database capture.
+No production safety, successful live integration, or permission to reconcile
+data follows from unit or CI success alone. Existing database and rollout
+requirements remain subject to the explicitly allowed review scope.
 
 INTELLIGENCE_NON_INTERFERENCE_POLICY=ACTIVE
 MODEL_CHANGED=NO

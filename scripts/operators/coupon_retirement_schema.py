@@ -46,14 +46,20 @@ def observe(conn, gate):
     policies = rows("""SELECT schemaname,tablename,policyname,permissive,roles::text,cmd,qual,with_check
         FROM pg_policies WHERE schemaname='public' AND tablename IN ('coupons','coupon_identity_retirements')
         ORDER BY schemaname,tablename,policyname""")
+    rules = rows("""SELECT n.nspname,c.relname,r.rulename,r.ev_enabled,pg_get_ruledef(r.oid,true)
+        FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+        AND (c.oid='public.coupons'::regclass OR c.relname LIKE 'coupon_identity_%')
+        ORDER BY n.nspname,c.relname,r.rulename""")
     return {"relations":relations,"functions":functions,"triggers":triggers,
-            "types":types,"security":security,"policies":policies,
+            "types":types,"security":security,"policies":policies,"rules":rules,
             "execution":[conn.execute(text('SHOW session_replication_role')).scalar(),
                          conn.execute(text('SHOW row_security')).scalar()],
             "table":gate(conn,"coupon_identity_retirements") if exists else None}
 
 
-EMPTY = {"relations":[],"functions":[],"triggers":[],"types":[],"table":None}
+EMPTY = {"relations":[],"functions":[],"triggers":[],"types":[],"rules":[],"table":None}
 
 
 def matches(actual, expected):
