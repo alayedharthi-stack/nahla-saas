@@ -367,50 +367,115 @@ class TestRobustness:
 
 
 class TestProviderSendIntegration:
-    def test_provider_send_message_scrubs_before_post(self, monkeypatch):
+    def test_provider_send_message_scrubs_before_post(self, monkeypatch, tmp_path):
         """End-to-end: verify that the scrubbed payload (NOT the
         original) is what gets handed to the HTTP layer."""
         import asyncio
+        from sqlalchemy import create_engine, MetaData, JSON
+        from sqlalchemy.orm import Session
         from services.whatsapp_platform import service as wa_service
+        from models import Base, Tenant, TenantSettings, Customer, Conversation
 
-        captured = {}
+        try:
+            from sqlalchemy.dialects.postgresql import JSONB
+        except ImportError:
+            JSONB = None
 
-        async def _fake_get_token(*args, **kwargs):
-            class _Ctx:
-                token = "TKN"
-                source = "test"
-            return _Ctx()
+        detached = MetaData()
+        for tbl in Base.metadata.sorted_tables:
+            cloned = tbl.to_metadata(detached)
+            for col in cloned.columns:
+                if JSONB is not None and isinstance(col.type, JSONB):
+                    col.type = JSON()
 
-        async def _fake_post(conn, ctx, *, tenant_id, operation, path, json, timeout):
-            captured["json"] = json
-            return {"messages": [{"id": "wamid.x"}]}
+        engine = create_engine(f"sqlite:///{tmp_path / 'test.sqlite'}")
+        try:
+            detached.create_all(engine)
 
-        def _fake_wa_provider(conn):
-            return "meta"
+            with Session(engine) as setup_db:
+                setup_db.add(Tenant(id=1, name="Test Store"))
+                setup_db.flush()
+                setup_db.add(
+                    TenantSettings(
+                        tenant_id=1,
+                        ai_settings={"store_ai_mode": "on"},
+                    )
+                )
+                setup_db.add(
+                    Customer(
+                        id=1,
+                        tenant_id=1,
+                        phone="+966500000111",
+                        normalized_phone="+966500000111",
+                    )
+                )
+                setup_db.flush()
+                setup_db.add(
+                    Conversation(
+                        id=1,
+                        tenant_id=1,
+                        customer_id=1,
+                        status="active",
+                        ai_paused=False,
+                    )
+                )
+                setup_db.commit()
 
-        monkeypatch.setattr(wa_service, "get_token_for_operation", _fake_get_token)
-        monkeypatch.setattr(wa_service, "provider_post_with_context", _fake_post)
-        monkeypatch.setattr(wa_service, "wa_provider", _fake_wa_provider)
+            captured = {}
+            post_called = False
 
-        async def _run():
-            return await wa_service.provider_send_message(
-                db=None,
-                conn=object(),
-                tenant_id=1,
-                operation="send_message",
-                phone_id="123",
-                payload={
-                    "messaging_product": "whatsapp",
-                    "to": "+966500000111",
-                    "type": "text",
-                    "text": {"body": "أهلاً [TRANSFER] العميل العزيز"},
-                },
+            async def _fake_get_token(*args, **kwargs):
+                class _Ctx:
+                    token = "TKN"
+                    source = "test"
+                return _Ctx()
+
+            async def _fake_post(
+                conn, ctx, *, tenant_id, operation, path, json, timeout,
+                send_admission=None, **kwargs
+            ):
+                nonlocal post_called
+                assert send_admission is not None, (
+                    "send_admission was not passed to provider_post_with_context"
+                )
+                refusal = send_admission()
+                assert refusal is None, (
+                    f"send_admission blocked unexpectedly: {refusal}"
+                )
+                captured["json"] = json
+                post_called = True
+                return {"messages": [{"id": "wamid.x"}]}
+
+            def _fake_wa_provider(conn):
+                return "meta"
+
+            monkeypatch.setattr(wa_service, "get_token_for_operation", _fake_get_token)
+            monkeypatch.setattr(wa_service, "provider_post_with_context", _fake_post)
+            monkeypatch.setattr(wa_service, "wa_provider", _fake_wa_provider)
+
+            async def _run():
+                with Session(engine, autoflush=False) as db:
+                    return await wa_service.provider_send_message(
+                        db=db,
+                        conn=object(),
+                        tenant_id=1,
+                        operation="send_message",
+                        phone_id="123",
+                        payload={
+                            "messaging_product": "whatsapp",
+                            "to": "+966500000111",
+                            "type": "text",
+                            "text": {"body": "أهلاً [TRANSFER] العميل العزيز"},
+                        },
+                    )
+
+            asyncio.run(_run())
+
+            assert post_called, "fake post was never called"
+            sent = captured["json"]
+            assert "[TRANSFER]" not in sent["text"]["body"], (
+                "wire-layer scrub did not run — marker reached HTTP layer"
             )
-
-        asyncio.run(_run())
-
-        sent = captured["json"]
-        assert "[TRANSFER]" not in sent["text"]["body"], (
-            "wire-layer scrub did not run — marker reached HTTP layer"
-        )
-        assert "العميل العزيز" in sent["text"]["body"]
+            assert "العميل العزيز" in sent["text"]["body"]
+        finally:
+            engine.dispose()
