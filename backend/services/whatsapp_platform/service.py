@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 from sqlalchemy.orm import Session
@@ -375,6 +375,7 @@ async def provider_post_with_context(
     json: Optional[Dict[str, Any]] = None,
     params: Optional[Dict[str, Any]] = None,
     timeout: float = 20,
+    send_admission: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """POST to the provider with full observability.
 
@@ -439,6 +440,13 @@ async def provider_post_with_context(
 
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
+            # Client entry can suspend. Re-read after it, with no application
+            # await between this admission and invoking the HTTP transport.
+            # This is not an atomic cross-process pause/send barrier.
+            if send_admission is not None:
+                refusal = send_admission()
+                if refusal is not None:
+                    return refusal
             resp = await client.post(
                 full_url,
                 headers=headers,
@@ -932,6 +940,7 @@ async def provider_send_message(
     # Each part/retry enters this function again and gets an independent read.
     # Platform sends without a merchant scope, manual staff sends, and the
     # existing lifecycle automation_guard=False exception retain their policy.
+    send_admission = None
     if tenant_id and raw_to and not allow_manual and (automation_guard or unsubscribe_notice):
         from core.ai_disabled_gate import evaluate_fresh_ai_disabled_send_block  # noqa: PLC0415
 
@@ -939,13 +948,17 @@ async def provider_send_message(
             operation == "campaign_send"
             and str(send_payload.get("type") or "text").strip().lower() == "template"
         )
-        blocked, decision = evaluate_fresh_ai_disabled_send_block(
-            db, tenant_id=int(tenant_id), customer_phone=send_payload["to"],
-            blocked_path=blocked_path or operation,
-            check_store_mode=not (campaign_template or unsubscribe_notice),
-        )
-        if blocked:
-            return _automation_blocked_result(decision.reason)
+        def send_admission():
+            blocked, decision = evaluate_fresh_ai_disabled_send_block(
+                db, tenant_id=int(tenant_id), customer_phone=send_payload["to"],
+                blocked_path=blocked_path or operation,
+                check_store_mode=not (campaign_template or unsubscribe_notice),
+            )
+            return _automation_blocked_result(decision.reason)[0] if blocked else None
+
+        refusal = send_admission()
+        if refusal is not None:
+            return refusal, ctx
     data = await provider_post_with_context(
         conn,
         ctx,
@@ -954,6 +967,7 @@ async def provider_send_message(
         path=f"{phone_id}/messages",
         json=send_payload,
         timeout=timeout,
+        **({"send_admission": send_admission} if send_admission is not None else {}),
     )
     return data, ctx
 

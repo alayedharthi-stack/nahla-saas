@@ -27,6 +27,7 @@ from services.whatsapp_platform import service
 
 PHONE = "+12025550101"
 TENANT = 701
+REAL_PROVIDER_POST = service.provider_post_with_context
 
 
 @pytest.fixture()
@@ -145,9 +146,44 @@ def test_pause_committed_during_preparation_prevents_transport(pg_case, preparat
         post.assert_not_awaited()
 
 
-def test_pause_after_admission_cannot_recall_started_transport(pg_case, preparation):
-    """Explicit remaining boundary: pause is not a distributed drain barrier."""
-    _, post = preparation
+def test_pause_during_client_entry_prevents_http_post(pg_case, preparation, monkeypatch):
+    sent = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            await asyncio.sleep(0)
+            _pause(pg_case)
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            sent.append(kwargs)
+            raise AssertionError("paused send reached HTTP transport")
+
+    monkeypatch.setattr(service, "provider_post_with_context", REAL_PROVIDER_POST)
+    monkeypatch.setattr(service.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(service, "_provider_url", lambda *args: "https://offline.invalid/messages")
+    monkeypatch.setattr(service, "_provider_headers", lambda *args: {})
+    monkeypatch.setattr(service, "_record_provider_attempt", lambda **kwargs: None)
+    with Session(pg_case, autoflush=False) as worker:
+        held = _find_conversations_for_phone(worker, TENANT, PHONE)
+        result, _ = asyncio.run(_send(worker))
+        assert not any(row.ai_paused for row in held)
+        assert result["_nahla_block_reason"] == "manual_pause"
+        assert not sent
+
+
+def test_pause_after_http_invocation_is_not_a_drain_barrier(pg_case, preparation, monkeypatch):
+    """Pause may commit inside the HTTP library after its post was invoked."""
+    monkeypatch.setattr(service, "provider_post_with_context", REAL_PROVIDER_POST)
+    monkeypatch.setattr(service, "_provider_url", lambda *args: "https://offline.invalid/messages")
+    monkeypatch.setattr(service, "_provider_headers", lambda *args: {})
+    monkeypatch.setattr(service, "_record_provider_attempt", lambda **kwargs: None)
     with Session(pg_case, autoflush=False) as worker:
         _find_conversations_for_phone(worker, TENANT, PHONE)
 
@@ -155,12 +191,23 @@ def test_pause_after_admission_cannot_recall_started_transport(pg_case, preparat
             entered = asyncio.Event()
             finish = asyncio.Event()
 
-            async def fake_started_transport(*_args, **_kw):
-                entered.set()  # Real fresh admission has already allowed this call.
-                await finish.wait()
-                return {"messages": [{"id": "offline-in-flight"}]}
+            class Client:
+                def __init__(self, **kwargs):
+                    pass
 
-            post.side_effect = fake_started_transport
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *args):
+                    pass
+
+                async def post(self, *_args, **_kw):
+                    entered.set()  # The inner admission passed; post is now invoked.
+                    await finish.wait()  # Models a library pool/connect wait before bytes.
+                    return SimpleNamespace(status_code=200, text="{}", json=lambda: {
+                        "messages": [{"id": "offline-in-flight"}]})
+
+            monkeypatch.setattr(service.httpx, "AsyncClient", Client)
             task = asyncio.create_task(_send(worker))
             try:
                 await asyncio.wait_for(entered.wait(), timeout=5)
@@ -171,7 +218,6 @@ def test_pause_after_admission_cannot_recall_started_transport(pg_case, preparat
                 finish.set()
                 result, _ = await asyncio.wait_for(task, timeout=5)
                 assert result["messages"][0]["id"] == "offline-in-flight"
-                post.assert_awaited_once()
             finally:
                 if not task.done():
                     task.cancel()

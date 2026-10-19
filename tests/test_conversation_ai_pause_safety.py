@@ -20,6 +20,7 @@ from services.whatsapp_platform import service
 
 PHONE = "+12025550101"
 TENANT = 701
+REAL_PROVIDER_POST = service.provider_post_with_context
 
 
 @compiles(JSONB, "sqlite")
@@ -282,3 +283,40 @@ def test_final_check_is_read_only(local_db):
     finally:
         event.remove(engine, "before_cursor_execute", collect)
     assert statements and set(statements) == {"SELECT"}
+
+
+@pytest.mark.parametrize("pause_during_entry", [True, False])
+def test_real_provider_checks_after_client_entry(local_db, fake_transport, monkeypatch, pause_during_entry):
+    engine, db = local_db
+    sent = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            await asyncio.sleep(0)
+            if pause_during_entry:
+                _pause_in_other_session(engine)
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            sent.append(kwargs["json"])
+            return SimpleNamespace(status_code=200, text="{}", json=lambda: {
+                "messages": [{"id": "offline-wamid"}]})
+
+    monkeypatch.setattr(service, "provider_post_with_context", REAL_PROVIDER_POST)
+    monkeypatch.setattr(service.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(service, "_provider_url", lambda *args: "https://offline.invalid/messages")
+    monkeypatch.setattr(service, "_provider_headers", lambda *args: {})
+    monkeypatch.setattr(service, "_record_provider_attempt", lambda **kwargs: None)
+    result, _ = asyncio.run(_send(db))
+    if pause_during_entry:
+        assert result["_nahla_block_reason"] == "manual_pause"
+        assert not sent
+    else:
+        assert result["messages"]
+        assert sent[0]["text"] == {"body": "Candidate from model"}
