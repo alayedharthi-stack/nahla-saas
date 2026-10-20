@@ -3172,19 +3172,24 @@ async def pause_conversation_ai(body: AIPauseIn, request: Request, db: Session =
     if reason == "manual":
         reason = "manual_pause"
 
-    convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
-    before = [
-        {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
-        for c in convos
-    ]
-    if not convos:
-        # No row yet — create one so the merchant's button click is
-        # remembered the next time a webhook arrives.
-        convos = [_get_or_create_conversation(db, tenant_id, normalized_phone)]
+    try:
+        convos = _find_conversations_for_phone(db, tenant_id, normalized_phone)
+        before = [
+            {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
+            for c in convos
+        ]
+        if not convos:
+            # Creation and all sibling pauses belong to this one commit.
+            convos = [_get_or_create_conversation(db, tenant_id, normalized_phone)]
 
-    for c in convos:
-        _pause_ai(db, c, reason=reason, by=f"dashboard:{reason}", commit=False)
-    db.commit()
+        for c in convos:
+            _pause_ai(db, c, reason=reason, by=f"dashboard:{reason}", commit=False)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        _log.error("[AI_PAUSE_API] persistence_failed tenant=%s error=%s",
+                   tenant_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="ai_pause_persistence_failed") from exc
 
     after = [
         {"id": c.id, "ai_paused": bool(c.ai_paused), "reason": c.ai_paused_reason}
