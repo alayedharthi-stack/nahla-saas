@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -231,15 +232,16 @@ def decode_token_for_refresh(token: str) -> Optional[Dict[str, Any]]:
     except JWTError:
         return None
 
-    token_type = payload.get("type")
-    if token_type in ("password_reset", "verify_email", "invite"):
+    # Only access tokens omit type. Challenges/setup/reset/invite tokens
+    # must never become sessions through refresh, even if they carry a role.
+    if "type" in payload:
         return None
 
     exp = payload.get("exp")
-    if isinstance(exp, (int, float)):
-        exp_dt = datetime.fromtimestamp(int(exp), tz=timezone.utc)
-        if datetime.now(timezone.utc) - exp_dt > timedelta(days=JWT_REFRESH_GRACE_DAYS):
-            return None
+    if type(exp) not in (int, float) or (type(exp) is float and not math.isfinite(exp)):
+        return None
+    if exp < datetime.now(timezone.utc).timestamp() - JWT_REFRESH_GRACE_DAYS * 86400:
+        return None
 
     if is_jti_revoked(payload.get("jti")):
         return None
