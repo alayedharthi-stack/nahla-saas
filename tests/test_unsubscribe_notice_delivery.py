@@ -63,6 +63,10 @@ def send(payload, *, mode="test", notice=True, paused=False, blocked=False,
     with ExitStack() as stack:
         def mock(name, **kwargs):
             return stack.enter_context(patch(name, **kwargs))
+        # Persistence is mocked in this suite; the final check must use its
+        # own session while retaining the same real recipient-pause rules.
+        fresh_session = mock("core.ai_disabled_gate.Session")
+        fresh_session.return_value.__enter__.return_value = MagicMock()
         mock("core.ai_disabled_gate.is_ai_allowed_by_store_mode",
              return_value=store_ai_mode_allows({"store_ai_mode": mode,
                                                "ai_test_allowed_numbers": []}, PHONE))

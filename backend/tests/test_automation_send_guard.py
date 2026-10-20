@@ -220,6 +220,7 @@ class TestProviderSendAutomationGuard:
             return {"messages": [{"id": "wamid.blocked"}]}
 
         conn = MagicMock()
+        conn.provider = "meta"
         conn.extra_metadata = {}
         db = MagicMock()
         convo = _convo(ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
@@ -232,7 +233,7 @@ class TestProviderSendAutomationGuard:
             new=fake_post,
         ), patch(
             "services.whatsapp_platform.service.wa_provider",
-            return_value="360dialog",
+            return_value="meta",
         ), patch(
             "core.automation_send_guard.lookup_conversation_for_phone",
             return_value=convo,
@@ -275,6 +276,7 @@ class TestMediaFallbackBlockedWhenAiPaused:
         convo = _convo(ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
         db = MagicMock()
         mock_conn = MagicMock()
+        mock_conn.provider = "meta"
         mock_conn.extra_metadata = {}
         db.query.return_value.filter_by.return_value.first.return_value = mock_conn
 
@@ -324,6 +326,7 @@ class TestPostWaIntegration:
 
         convo = _convo(ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
         mock_conn = MagicMock()
+        mock_conn.provider = "meta"
         mock_conn.extra_metadata = {}
         mock_db = MagicMock()
         mock_db.query.return_value.filter_by.return_value.first.return_value = mock_conn
@@ -372,6 +375,7 @@ class TestPostWaIntegration:
 
         convo = _convo(ai_paused=True, ai_paused_reason=REASON_MANUAL_PAUSE)
         mock_conn = MagicMock()
+        mock_conn.provider = "meta"
         mock_conn.extra_metadata = {}
         mock_db = MagicMock()
         mock_db.query.return_value.filter_by.return_value.first.return_value = mock_conn

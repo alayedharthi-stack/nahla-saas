@@ -305,13 +305,15 @@ def pause_ai(
         else:
             db.flush()
     except Exception as exc:
-        logger.warning("[ai_pause] failed to persist pause state: %s", exc)
-        try:
+        logger.warning("[ai_pause] failed to persist pause state error=%s", type(exc).__name__)
+        if commit:
             db.rollback()
-        except Exception:
-            pass
+        # With commit=False the caller owns the entire transaction. Never
+        # swallow a failed flush and let it commit a partial/no-op pause.
+        raise
     logger.info(
-        "[ai_pause] PAUSED convo=%s tenant=%s reason=%s by=%s",
+        "[ai_pause] %s convo=%s tenant=%s reason=%s by=%s",
+        "PAUSED" if commit else "PAUSE_STAGED",
         convo.id, convo.tenant_id, reason, by,
     )
 

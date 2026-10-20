@@ -372,6 +372,68 @@ def no_ai_reply_result(decision: AIDisabledDecision) -> NoAIReplyResult:
     )
 
 
+def evaluate_fresh_ai_disabled_send_block(
+    db: Session,
+    *,
+    tenant_id: int,
+    customer_phone: str,
+    blocked_path: str = "provider_send_message",
+    check_store_mode: bool = True,
+) -> Tuple[bool, AIDisabledDecision]:
+    """Read committed AI state independently of a long-running worker.
+
+    A repeated ORM query on the worker's Session can reuse pre-pause objects.
+    Use a separate connection/transaction as well as a new identity map, so a
+    caller's transaction snapshot or pending writes cannot decide send safety.
+    Approved campaigns/consent notices retain their existing store-mode
+    exception, but still honor an explicit pause on ANY matching sibling.
+    """
+    try:
+        from sqlalchemy.engine import Connection  # noqa: PLC0415
+
+        if db is None or not tenant_id or not customer_phone:
+            raise ValueError("missing AI state scope")
+        bind = db.get_bind()
+        if isinstance(bind, Connection):
+            bind = bind.engine
+        with Session(bind=bind, autoflush=False) as fresh_db:
+            from models import TenantSettings  # noqa: PLC0415
+
+            if check_store_mode:
+                # Read only: get_or_create_settings also performs hygiene
+                # writes and must not run inside send admission.
+                settings = fresh_db.query(TenantSettings.ai_settings).filter(
+                    TenantSettings.tenant_id == tenant_id,
+                ).first()
+                mode = store_ai_mode_allows(settings[0] if settings else None, customer_phone)
+                if not mode.allowed:
+                    decision = AIDisabledDecision(
+                        disabled=True, reason=mode.reason, source=blocked_path,
+                    )
+                    return True, decision
+            rows = _find_conversations_for_phone(fresh_db, tenant_id, customer_phone)
+            paused = next((row for row in rows if disabled_reason_for_conversation(row)), None)
+            decision = AIDisabledDecision(
+                disabled=paused is not None,
+                reason=disabled_reason_for_conversation(paused),
+                conversation=paused, source=blocked_path,
+            )
+            if decision.disabled:
+                log_ai_disabled_send_block(
+                    tenant_id=tenant_id, customer_phone=customer_phone,
+                    decision=decision, blocked_path=blocked_path,
+                )
+            return decision.disabled, decision
+    except Exception as exc:
+        # Safety verification failure is not permission to send. Do not log
+        # exception text: driver errors can carry connection details.
+        logger.warning("[AI_DISABLED_SEND_BLOCK] verification_failed tenant=%s path=%s error=%s",
+                       tenant_id, blocked_path, type(exc).__name__)
+        return True, AIDisabledDecision(
+            disabled=True, reason="ai_state_unavailable", source=blocked_path,
+        )
+
+
 def evaluate_ai_disabled_send_block(
     db: Session,
     *,
@@ -416,6 +478,7 @@ __all__ = [
     "StoreAIModeDecision",
     "disabled_reason_for_conversation",
     "evaluate_ai_disabled_send_block",
+    "evaluate_fresh_ai_disabled_send_block",
     "is_ai_allowed_by_store_mode",
     "is_ai_disabled_for_conversation",
     "is_store_ai_enabled",
