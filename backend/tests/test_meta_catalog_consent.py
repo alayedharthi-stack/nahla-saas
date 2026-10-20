@@ -1,22 +1,29 @@
 """Catalog-only Meta consent: entry, callback, verification, storage and binding.
 
-No network: Graph is replaced by an in-process fake that records every call.
+No network: Graph replies use an in-process fake. The v26 transport tests keep
+``_graph_get`` intact and intercept HTTP with ``httpx.MockTransport``.
 Every credential (app secret, OAuth code, tokens, encryption key, JWT secret)
 is generated at runtime. Generic merchant data only (متجر تجريبي عام,
 «حذاء رياضي أبيض»).
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import hmac
 import json
 import logging
+import runpy
 import secrets
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, Request
@@ -42,6 +49,9 @@ from core.meta_catalog_consent_config import (  # noqa: E402
 from models import Base, MetaCatalogAuthorization, Tenant, WhatsAppConnection, WhatsAppOAuthNonce  # noqa: E402
 from routers import meta_catalog_consent as router_mod  # noqa: E402
 from services import meta_catalog_consent as consent  # noqa: E402
+
+_GRAPH_GET_WITH_HTTP = consent._graph_get
+_ASYNC_CLIENT_WITH_TRANSPORT = httpx.AsyncClient
 
 API_HOST = "api.catalog-review.example.test"
 DASH_HOST = "catalog-review.example.test"
@@ -1725,3 +1735,275 @@ def test_claim_recheck_failure_is_reported_as_storage_not_another_store(world, m
     monkeypatch.setattr(Session, "flush", _flush)
     state = _start(world)
     assert _result(_callback(world, code=_code(world), state=state)[1]) == "storage_unavailable"
+
+
+# ── v26 HTTP contract (real helper, no provider traffic) ───────────────────────
+
+_V26_PATHS = (
+    "oauth/access_token", "oauth/access_token", "debug_token", "me",
+    "me/permissions", CATALOG, f"{BUSINESS}/owned_product_catalogs", "me/business_users",
+)
+_V26_QUERY_KEYS = {
+    "debug_token": {"input_token", "access_token"},
+    "me": {"fields", "appsecret_proof"},
+    "me/permissions": {"appsecret_proof", "after"},
+    CATALOG: {"fields", "appsecret_proof"},
+    f"{BUSINESS}/owned_product_catalogs": {"fields", "limit", "appsecret_proof", "after"},
+    "me/business_users": {"fields", "limit", "appsecret_proof", "after"},
+}
+
+
+def _http_path(request):
+    return request.url.path.removeprefix("/v26.0/")
+
+
+def _http_stage(request):
+    path = _http_path(request)
+    if path == "oauth/access_token":
+        return "long_exchange" if request.url.params.get("grant_type") else "code_exchange"
+    return path
+
+
+@pytest.fixture()
+def v26_http(world, monkeypatch):
+    # Exercise the actual config file in a fresh namespace after the env override,
+    # even when the already-imported module still has the old cached version.
+    monkeypatch.setenv("META_GRAPH_API_VERSION", "v26.0")
+    monkeypatch.setattr(core_config, "META_GRAPH_API_VERSION", "v20.0")
+    fresh = runpy.run_path(core_config.__file__)
+    assert fresh["META_GRAPH_API_VERSION"] == "v26.0"
+    monkeypatch.setattr(core_config, "META_GRAPH_API_VERSION", fresh["META_GRAPH_API_VERSION"])
+    monkeypatch.setattr(consent, "_graph_get", _GRAPH_GET_WITH_HTTP)
+
+    http = SimpleNamespace(requests=[], reply=None, network_attempts=[])
+
+    def handle(request):
+        http.requests.append(request)
+        if http.reply is not None:
+            response = http.reply(request)
+            if response is not None:
+                return response
+        status, body = world.graph.answer(_http_path(request), dict(request.url.params))
+        return httpx.Response(status, json=body)
+
+    def client(**kwargs):
+        return _ASYNC_CLIENT_WITH_TRANSPORT(transport=httpx.MockTransport(handle), **kwargs)
+
+    def refuse_network(_transport, request):
+        http.network_attempts.append(request)
+        raise AssertionError("network transport forbidden in consent tests")
+
+    async def refuse_async_network(_transport, request):
+        refuse_network(_transport, request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse_network)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse_async_network)
+    yield http
+
+    # Check in teardown too: a callback's broad exception handler must not hide
+    # an unexpected write, product/WhatsApp edge, or attempt to use the network.
+    assert http.network_attempts == []
+    for request in http.requests:
+        assert request.method == "GET"
+        assert request.url.scheme == "https" and request.url.host == "graph.facebook.com"
+        assert request.url.path.startswith("/v26.0/")
+        path = _http_path(request)
+        assert path in _V26_PATHS
+        keys = set(request.url.params)
+        assert not keys & {"debug", "date_format", "metadata", "ids"}
+        if path == "oauth/access_token":
+            allowed = (
+                {"grant_type", "client_id", "client_secret", "fb_exchange_token"}
+                if _http_stage(request) == "long_exchange"
+                else {"client_id", "client_secret", "redirect_uri", "code"}
+            )
+            assert keys == allowed
+        else:
+            assert keys <= _V26_QUERY_KEYS[path]
+    with world.factory() as db:
+        assert db.query(WhatsAppConnection).count() == 0
+
+
+def _v26_callback(world, caplog, expected):
+    state = _start(world)
+    world.secrets.append(state)
+    status, location = _callback(world, code=_code(world), state=state)
+    assert status == 302 and location == RETURN + "#meta_catalog_consent=" + expected
+    _no_secret_in(caplog.text + location, world)
+    if expected != "connected":
+        assert _rows(world) == []
+
+
+def test_v26_fresh_config_controls_dialog_and_full_http_consent(world, v26_http, caplog):
+    assert consent._graph_get is _GRAPH_GET_WITH_HTTP
+    assert core_config.META_GRAPH_API_VERSION == consent._graph_version() == "v26.0"
+    start = world.client.post("/merchant/catalog/meta-consent/start", headers=_jwt())
+    assert start.status_code == 200 and v26_http.requests == []
+    url = urlsplit(start.json()["authorize_url"])
+    query = parse_qs(url.query)
+    assert (url.scheme, url.netloc, url.path) == ("https", "www.facebook.com", "/v26.0/dialog/oauth")
+    assert set(query) == {"client_id", "redirect_uri", "response_type", "config_id", "scope", "state"}
+    assert query["scope"] == ["catalog_management,business_management"]
+    assert query["client_id"] == [APP_ID] and query["redirect_uri"] == [REDIRECT]
+    assert query["response_type"] == ["code"] and query["config_id"] == ["400000000000001"]
+    state, code = query["state"][0], _code(world)
+    world.secrets.append(state)
+    status, location = _callback(world, code=code, state=state)
+    assert status == 302 and _result(location) == "connected"
+    assert [_http_path(r) for r in v26_http.requests] == list(_V26_PATHS)
+    app_secret = world.secrets[0]
+    first, second, debug, *verification = v26_http.requests
+    assert dict(first.url.params) == {
+        "client_id": APP_ID, "client_secret": app_secret, "redirect_uri": REDIRECT, "code": code,
+    }
+    assert dict(second.url.params) == {
+        "grant_type": "fb_exchange_token", "client_id": APP_ID,
+        "client_secret": app_secret, "fb_exchange_token": world.graph.short,
+    }
+    assert dict(debug.url.params) == {
+        "input_token": world.graph.long, "access_token": APP_ID + "|" + app_secret,
+    }
+    assert all("authorization" not in r.headers for r in (first, second, debug))
+    proof = hmac.new(app_secret.encode(), world.graph.long.encode(), hashlib.sha256).hexdigest()
+    for request in verification:
+        assert request.headers["authorization"] == "Bearer " + world.graph.long
+        assert request.url.params["appsecret_proof"] == proof
+        assert not set(request.url.params) & {"access_token", "input_token", "fb_exchange_token"}
+    assert dict(verification[0].url.params) == {"fields": "id", "appsecret_proof": proof}
+    assert dict(verification[1].url.params) == {"appsecret_proof": proof}
+    assert dict(verification[2].url.params) == {"fields": "id,business{id}", "appsecret_proof": proof}
+    assert dict(verification[3].url.params) == {"fields": "id", "limit": "100", "appsecret_proof": proof}
+    assert dict(verification[4].url.params) == {
+        "fields": "id,business{id},role", "limit": "100", "appsecret_proof": proof,
+    }
+    rows = _rows(world)
+    assert len(rows) == 1 and rows[0].status == "active"
+    assert rows[0].access_token_enc.startswith("enc1:") and world.graph.long not in rows[0].access_token_enc
+    summary = world.client.get("/merchant/catalog/meta-consent/status", headers=_jwt()).json()
+    assert summary["authorization"]["state"] == "active"
+    _no_secret_in(caplog.text + location + json.dumps(summary), world)
+
+
+@pytest.mark.parametrize("edge", ["me/permissions", f"{BUSINESS}/owned_product_catalogs", "me/business_users"])
+def test_v26_http_cursor_pagination_reuses_versioned_edge(world, v26_http, caplog, edge):
+    terminal_status, terminal_body = world.graph.answer(edge, {})
+    cursor = "opaque+/=&cursor"
+    # This URL is deliberately stale and foreign. Only its cursor may be used.
+    next_url = "https://untrusted.example.test/v20.0/products?access_token=" + world.graph.short
+
+    def page(params):
+        if "after" not in params:
+            return 200, {"data": [], "paging": {"cursors": {"after": cursor}, "next": next_url}}
+        assert params["after"] == cursor
+        return terminal_status, terminal_body
+
+    world.graph.overrides[edge] = page
+    _v26_callback(world, caplog, "connected")
+    requests = [r for r in v26_http.requests if _http_path(r) == edge]
+    assert len(requests) == 2 and "after" not in requests[0].url.params
+    assert requests[1].url.params["after"] == cursor
+    assert requests[0].url.copy_with(query=None) == requests[1].url.copy_with(query=None)
+    assert requests[0].headers["authorization"] == requests[1].headers["authorization"]
+    assert requests[0].url.params["appsecret_proof"] == requests[1].url.params["appsecret_proof"]
+    assert [_http_path(r) for r in v26_http.requests] == [
+        path for path in _V26_PATHS for _ in range(2 if path == edge else 1)
+    ]
+
+
+@pytest.mark.parametrize("paging", ["missing_cursor", "unbounded"])
+def test_v26_http_incomplete_admin_paging_fails_closed(world, v26_http, caplog, paging):
+    world.graph.overrides["me/business_users"] = lambda params: (200, {
+        "data": [],
+        "paging": {"next": "https://untrusted.example.test/products",
+                   **({"cursors": {"after": "NEXT"}} if paging == "unbounded" else {})},
+    })
+    expected = "business_admin_unverified" if paging == "unbounded" else "business_admin_missing"
+    _v26_callback(world, caplog, expected)
+    requests = [r for r in v26_http.requests if _http_path(r) == "me/business_users"]
+    assert len(requests) == (10 if paging == "unbounded" else 1)
+
+
+@pytest.mark.parametrize(("stage", "expected"), [
+    ("debug_token", "token_invalid"), ("me", "token_identity_mismatch"),
+    ("me/permissions", "scope_missing"), (CATALOG, "catalog_not_accessible"),
+    (f"{BUSINESS}/owned_product_catalogs", "catalog_ownership_unverified"),
+    ("me/business_users", "business_admin_unverified"),
+])
+def test_v26_http_provider_errors_are_sanitized(world, v26_http, caplog, stage, expected):
+    leaked = secrets.token_urlsafe(32)
+    world.secrets.append(leaked)
+    world.graph.overrides[stage] = (400, {"error": {
+        "message": "provider refused " + leaked + " access_token=" + world.graph.long,
+        "error_user_title": leaked, "error_user_msg": leaked, "fbtrace_id": leaked, "code": 190,
+    }})
+    _v26_callback(world, caplog, expected)
+    assert _http_stage(v26_http.requests[-1]) == stage
+
+
+@pytest.mark.parametrize("failure", ["http_error", "graph_error", "invalid_json"])
+def test_v26_http_code_exchange_errors_are_sanitized(world, v26_http, caplog, failure):
+    leaked = secrets.token_urlsafe(32)
+    world.secrets.append(leaked)
+
+    def fail(request):
+        assert _http_stage(request) == "code_exchange"
+        if failure == "invalid_json":
+            return httpx.Response(200, text=leaked)
+        return httpx.Response(400 if failure == "http_error" else 200,
+                              json={"error": {"message": leaked}})
+
+    v26_http.reply = fail
+    _v26_callback(world, caplog, "token_exchange_failed")
+    assert len(v26_http.requests) == 1
+
+
+@pytest.mark.parametrize("stage", ["code_exchange", "long_exchange", "debug_token", "me", "me/permissions",
+                                  CATALOG, f"{BUSINESS}/owned_product_catalogs", "me/business_users"])
+def test_v26_http_transport_errors_are_sanitized(world, v26_http, caplog, stage):
+    leaked = secrets.token_urlsafe(32)
+    world.secrets.append(leaked)
+
+    def fail(request):
+        if _http_stage(request) == stage:
+            raise httpx.ConnectError("provider " + leaked + " " + str(request.url), request=request)
+        return None
+
+    v26_http.reply = fail
+    _v26_callback(world, caplog, "error")
+    assert _http_stage(v26_http.requests[-1]) == stage
+
+
+@pytest.mark.parametrize("body", [b"", b"not-json", b"[]", b'"scalar"'])
+def test_v26_real_graph_helper_normalizes_non_object_responses(world, v26_http, body):
+    v26_http.reply = lambda request: httpx.Response(200, content=body)
+    status, payload = asyncio.run(consent._graph_get("/me", {"fields": "id"}, token=world.graph.long))
+    assert status == 200 and payload == {}
+    assert len(v26_http.requests) == 1 and v26_http.requests[0].url.path == "/v26.0/me"
+
+
+@pytest.mark.parametrize("status", [200, 400])
+def test_v26_http_failed_long_exchange_still_verifies_short_token(world, v26_http, caplog, status):
+    def reply(request):
+        if _http_stage(request) == "long_exchange":
+            return httpx.Response(status, json={"error": {"message": world.graph.long}})
+        return None
+
+    v26_http.reply = reply
+    _v26_callback(world, caplog, "connected")
+    assert [_http_path(r) for r in v26_http.requests] == list(_V26_PATHS)
+    assert v26_http.requests[2].url.params["input_token"] == world.graph.short
+    assert all(r.headers["authorization"] == "Bearer " + world.graph.short for r in v26_http.requests[3:])
+
+
+@pytest.mark.parametrize("stage", ["debug_token", "me/permissions"])
+def test_v26_http_missing_catalog_scope_stores_nothing(world, v26_http, caplog, stage):
+    if stage == "debug_token":
+        world.graph.debug["scopes"] = ["business_management"]
+    else:
+        world.graph.overrides[stage] = (200, {"data": [
+            {"permission": "business_management", "status": "granted"},
+            {"permission": "catalog_management", "status": "declined"},
+        ]})
+    _v26_callback(world, caplog, "scope_missing")
+    assert _http_stage(v26_http.requests[-1]) == stage
