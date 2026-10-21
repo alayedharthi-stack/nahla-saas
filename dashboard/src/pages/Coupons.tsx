@@ -32,6 +32,7 @@ import {
 import { Link } from 'react-router-dom'
 import { getTenantId } from '../auth'
 import Badge from '../components/ui/Badge'
+import CouponTermsEditor from '../components/CouponTermsEditor'
 import AiBanner from '../components/ui/AiBanner'
 import PageHeader from '../components/ui/PageHeader'
 import { useLanguage } from '../i18n/context'
@@ -325,6 +326,7 @@ export default function Coupons() {
   const [pushingId, setPushingId] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [aiEnableCoupon, setAiEnableCoupon] = useState<DashboardCoupon | null>(null)
+  const [editTermsCoupon, setEditTermsCoupon] = useState<DashboardCoupon | null>(null)
   const { t } = useLanguage()
 
   const levels = data.levels && data.levels.length === 4 ? data.levels : DEFAULT_LEVELS
@@ -972,6 +974,16 @@ export default function Coupons() {
                             إتاحة لتخصيص الذكاء
                           </button>
                         ) : null}
+                        {(sourceType === 'manual' || sourceType === 'imported') && c.sync_status !== 'retired' ? (
+                          <button
+                            type="button"
+                            onClick={() => setEditTermsCoupon(c)}
+                            className="text-[10px] px-2 py-1 rounded-md border border-brand-100 text-brand-600 hover:bg-brand-50 whitespace-nowrap"
+                            title="تعديل القيمة أو الصلاحية"
+                          >
+                            تعديل الشروط
+                          </button>
+                        ) : null}
                         <button className="text-slate-300 hover:text-red-500 transition-colors" onClick={() => handleDeleteCoupon(c)}>
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1006,6 +1018,17 @@ export default function Coupons() {
           load()
         }}
       />
+      {editTermsCoupon && (
+        <CouponTermsEditor
+          coupon={editTermsCoupon}
+          onSaved={() => {
+            setEditTermsCoupon(null)
+            load()
+          }}
+          onRefresh={() => load()}
+          onClose={() => setEditTermsCoupon(null)}
+        />
+      )}
     </div>
   )
 }
