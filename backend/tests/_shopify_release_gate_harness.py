@@ -109,7 +109,7 @@ def approval_for(root: Path, phase: str, db: str, *, release_sha: str = SYNTHETI
         snapshot = record["deployment_rollback_snapshot"]
         snapshot["source_sha"] = release_sha
         verified = k.parse_utc(snapshot["verified_redeployable_at_utc"])
-        bindings = gate.schema_rollback_bindings(root)
+        bindings = gate.schema_rollback_bindings(root,phase)
         record["schema_rollback"] = {
             "record_version": 1, "phase": "S4_DORMANT", "source_sha": release_sha,
             "railway_deployment_id": snapshot["railway_deployment_id"], "target": record["target"],
@@ -121,6 +121,14 @@ def approval_for(root: Path, phase: str, db: str, *, release_sha: str = SYNTHETI
             "verified_at_utc": iso(verified), "valid_until_utc": iso(verified + _dt.timedelta(hours=k.ROLLBACK_MAX_AGE_HOURS)),
             "independent_review_ref": "synthetic-0124-compatible-source-review",
         }
+        if phase in k.COUPON_POST_PHASES:
+            record["schema_rollback"].update(phase="S4_COUPON_POST_DORMANT",
+                database_heads=["0111","0113","0126"],coupon_schema_sha256=bindings["coupon_schema_sha256"],
+                post_schema_observation_sha256=bindings["post_schema_observation_sha256"],
+                flags={name:"false" for name in k.SHOPIFY_FLAG_ENVS},
+                functional_bridge_proof={"source_sha":release_sha,"database_heads":["0111","0113","0126"],
+                    "ordinary_and_canonical_batch_committed":True,"retired_history_and_audit_unchanged":True,
+                    "skipped":0,"failures":0,"errors":0,"tests":2,"junit_sha256":"b"*64,"independent_review_ref":"synthetic-bridge-proof"})
     return approval_file(root.parent / "approval", record, f"{root.name}_{phase}.json")
 
 
@@ -134,6 +142,8 @@ def prior_rollback_record(root: Path, record: Mapping[str, Any]) -> Dict[str, An
     rollback = changed["schema_rollback"]
     rollback.update(source_sha=prior["source_sha"], runtime_inventory_digest=prior["runtime_inventory_digest"],
                     runtime_inventory_count=prior["runtime_inventory_count"],
+                    source_schema_expectations_sha256=prior["source_schema_expectations_sha256"],
+                    schema_definitions_sha256=prior["schema_definitions_sha256"],
                     flags={name: "false" for name in k.SHOPIFY_FLAG_ENVS})
     return changed
 

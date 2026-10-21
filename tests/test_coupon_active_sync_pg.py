@@ -37,7 +37,8 @@ def test_two_workers_dispatch_only_once_under_real_row_lock():
                                   config={"store_id": "202", "api_sync_enabled": True, "refresh_token": "fake"})
     try:
         with Session() as db:
-            row = Coupon(tenant_id=1, code="GENERIC-STATUS", extra_metadata={"active": True, "salla_coupon_id": "101"})
+            row = Coupon(tenant_id=1, code="GENERIC-STATUS", extra_metadata={"active": True, "salla_coupon_id": "101",
+                         "salla_identity": {"tenant_id": 1, "integration_id": 22, "store_id": "202"}})
             db.add(row)
             db.flush()
             queue_active_change(row, integration, False)

@@ -15,6 +15,7 @@ modified or removed. No revision is stamped or version row fabricated.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -37,7 +38,7 @@ from scripts.operators.bootstrap_migration_contract import build_normal_bootstra
 REPO = Path(__file__).resolve().parents[2]
 GOOGLE_FILE = "0125_google_merchant_ledger.py"
 VERSION_DIR = Path("database/migrations/versions")
-SOURCE_HEADS = frozenset({"0092", "0111", "0114", "0115", "0124", "0125"})
+SOURCE_HEADS = frozenset({"0092", "0111", "0114", "0115", "0126", "0125"})
 S3_ROWS = frozenset({"0111", "0113", "0123"})
 BOTH_ROWS = frozenset({"0111", "0113", "0124", "0125"})
 NEW_TABLES = {
@@ -64,6 +65,7 @@ def _assert_combined_graph(root: Path) -> None:
     graph = gate.load_graph(root)
     assert graph["heads"] == SOURCE_HEADS
     assert graph["down"]["0124"] == graph["down"]["0125"] == ("0123",)
+    assert graph["down"]["0126"] == ("0124",)
     original = gate.load_graph(REPO)
     assert graph["known"] == original["known"] | {"0125"}
     assert {key: value for key, value in graph["down"].items() if key != "0125"} == original["down"]
@@ -245,6 +247,38 @@ def _assert_unchanged(url, baseline, planted, counts, expected_rows, applied):
     assert topo.row_counts(url, topo.SENTINEL_TABLES) == counts
     actual_tables = set(topo.schema_snapshot(url, exclude_prefixes=()))
     assert actual_tables == set(baseline["tables"]) | {table for rev in applied for table in NEW_TABLES[rev]}
+
+
+@pytest.mark.parametrize('order', [('0126','0125'),('0125','0126')])
+def test_salla_quarantine_and_google_orders_preserve_shopify_and_unknown_head_rejection(combined_root,admin_url,s3_template,order):
+    from scripts.operators import coupon_retirement_schema as coupon_schema
+    name=_new_database(admin_url,s3_template)
+    url=_database_url(admin_url,name)
+    try:
+        _alembic(combined_root,url,'upgrade','0124')
+        engine=create_engine(url)
+        with engine.connect() as conn:
+            before=gate.observe_footprint(conn,contract.phase('S4_DORMANT'))
+        assert len(before['definitions'])==17
+        planted=topo.plant_sentinels(url)
+        for revision in order:
+            _alembic(combined_root,url,'upgrade',revision)
+        topo.assert_rows(url,{'0111','0113','0125','0126'},'combined126125')
+        topo.assert_sentinels(url,planted,'combined126125')
+        expected=json.loads((REPO/contract.COUPON_EXPECTATIONS_RELATIVE_PATH).read_text())['post']
+        with engine.connect() as conn:
+            assert gate.observe_footprint(conn,contract.phase('S4_DORMANT'))==before
+            assert coupon_schema.matches(coupon_schema.observe(conn,gate.table_definition),expected)
+        for phase in contract.POST_INSTALL_PHASES.values():
+            assert gate.check_graph(combined_root,phase)[0].status==contract.FAIL
+        # Google remains a distinct source sibling, never a production profile.
+        assert contract.evaluate_rows(['0111','0113','0125','0126'],
+            contract.phase('S4_COUPON_POST_DORMANT')['rows'],gate.load_graph(REPO)['known'])[0]==contract.FAIL
+        _alembic(combined_root,url,bootstrap=True)
+        topo.assert_rows(url,{'0111','0113','0125','0126'},'bootstrap still0093')
+        engine.dispose()
+    finally:
+        _drop_database(admin_url,name)
 
 
 def _seed_surviving_sibling(url: str, revision: str, tenant_id: int) -> tuple[str, str]:
