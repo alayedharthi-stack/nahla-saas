@@ -245,7 +245,7 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
         loaded["record"], phase_name=phase, release_sha=release_sha, runtime_digest=digest, runtime_count=count,
         target=bound_target, backup_service=backup_service, backup_volume=backup_volume,
         now=now or _dt.datetime.now(_dt.timezone.utc),
-        rollback_bindings=gate.schema_rollback_bindings(root) if phase in k.POST_INSTALL_PHASES else None)
+        rollback_bindings=gate.schema_rollback_bindings(root,phase) if phase in k.POST_INSTALL_PHASES else None)
     return {"phase": phase, "status": status, "reason": reason, "inventory_count": count, "inventory_digest": digest,
             "approval_sha256": loaded["sha256"], "approval_b64": loaded["b64"], "detail": detail}
 
@@ -318,7 +318,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
     import os
 
     phase_def = k.phase(phase_name)
-    if phase_def is None or phase_name not in {"S3", "S4_DORMANT"}:
+    if phase_def is None or phase_name not in {"S3", "S4_DORMANT", "S4_COUPON_PRE_DORMANT", "S4_COUPON_POST_DORMANT"}:
         raise RenderRefusal("snapshot_phase_invalid")
     table_names = phase_def["tables"]
     expectations_key = phase_def.get("expectations_key", "shopify_s3")
@@ -347,6 +347,14 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
                 footprint = gate.observe_footprint(conn, phase_def)
                 rows = gate.read_version_rows(conn)
                 server_version = str(gate._scalar(conn, "SHOW server_version"))
+                coupon_observed = None
+                if phase_def.get("coupon_schema"):
+                    from scripts.operators import coupon_retirement_schema as coupon_schema
+                    coupon_observed = coupon_schema.observe(conn,gate.table_definition)
+                    pinned = gate.read_json((root or _REPO_ROOT)/k.COUPON_EXPECTATIONS_RELATIVE_PATH)
+                    if (not isinstance(pinned,dict) or not coupon_schema.matches(
+                            coupon_observed,pinned.get(phase_def["coupon_schema"]))):
+                        raise RenderRefusal("coupon_retirement_schema_drift")
                 conn.rollback()
         finally:
             engine.dispose()
@@ -363,7 +371,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
             or len(retained["unique_definitions"]) != len(k.UNIQUE_DEFINITION_PINS) or missing_shopify or footprint["stray_count"]
             or not sequences_ok or rows is None or set(rows) != phase_def["rows"] or len(rows) != len(phase_def["rows"])):
         raise RenderRefusal("database_is_not_a_complete_s3_build")
-    return k.normalize({
+    result = k.normalize({
         "expectations_version": k.EXPECTATIONS_VERSION,
         "generated_from_source_sha": source_sha,
         "database_py_digest": gate.database_py_digest(root or _REPO_ROOT),
@@ -373,6 +381,9 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
         "retained": retained,
         expectations_key: {"tables": footprint["definitions"], "sequences": footprint["sequences"]},
     })
+    if coupon_observed is not None:
+        result["coupon_retirement"] = k.normalize(coupon_observed)
+    return result
 
 
 def _add_target_arguments(parser: argparse.ArgumentParser) -> None:

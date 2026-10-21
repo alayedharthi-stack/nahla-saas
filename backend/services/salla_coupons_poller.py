@@ -207,7 +207,9 @@ async def _run_one_tick() -> Dict[str, Any]:
 
             try:
                 from services.coupon_active_sync import retry_active_changes
+                from services.coupon_terms_sync import retry_terms_changes
                 await retry_active_changes(db, intg)
+                await retry_terms_changes(db, intg)
                 recent_stats = None
                 if recent_due:
                     recent_stats = await _poll_recent_integration(db, intg)

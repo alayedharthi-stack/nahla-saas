@@ -1,0 +1,278 @@
+{
+ "database_py_digest": "36305993452890f1cea51dc24b0f654e272fcaa912041c690cbe863eb5c52f4d",
+ "post": {
+  "execution": [
+   "origin",
+   "on"
+  ],
+  "functions": [
+   [
+    "public",
+    "guard_coupon_retirement",
+    "",
+    "CREATE OR REPLACE FUNCTION public.guard_coupon_retirement()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n  IF TG_OP <> 'INSERT' AND EXISTS (\n    SELECT 1 FROM coupon_identity_retirements WHERE retired_id = OLD.id\n  ) THEN\n    RAISE EXCEPTION 'coupon_retired' USING ERRCODE = '23514';\n  END IF;\n  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;\n  IF EXISTS (\n    SELECT 1 FROM coupon_identity_retirements r\n    WHERE r.tenant_id = NEW.tenant_id AND r.canonical_id <> NEW.id\n    AND (translate(NEW.code, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = r.code_key\n      OR ((NEW.metadata->>'salla_coupon_id' = r.provider_id OR NEW.metadata->>'external_id' = r.provider_id)\n        AND NOT EXISTS (\n          SELECT 1 FROM integrations i WHERE i.tenant_id = NEW.tenant_id\n            AND i.id::text = NEW.metadata->'salla_identity'->>'integration_id'\n            AND NEW.metadata->'salla_identity'->>'tenant_id' = NEW.tenant_id::text\n            AND i.provider = 'salla' AND i.enabled\n            AND coalesce(nullif(i.external_store_id,''), i.config->>'store_id', i.config->>'merchant_id')\n                = NEW.metadata->'salla_identity'->>'store_id'\n            AND NEW.metadata->'salla_identity'->>'store_id' <> r.store_id\n        )))\n  ) THEN\n    RAISE EXCEPTION 'coupon_retired_identity_reserved' USING ERRCODE = '23514';\n  END IF;\n  RETURN NEW;\nEND $function$\n",
+    "plpgsql",
+    "v",
+    "u",
+    false,
+    false,
+    false,
+    null,
+    null,
+    true,
+    true
+   ],
+   [
+    "public",
+    "guard_coupon_retirement_audit",
+    "",
+    "CREATE OR REPLACE FUNCTION public.guard_coupon_retirement_audit()\n RETURNS trigger\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n  RAISE EXCEPTION 'coupon_retirement_audit_immutable' USING ERRCODE = '23514';\nEND $function$\n",
+    "plpgsql",
+    "v",
+    "u",
+    false,
+    false,
+    false,
+    null,
+    null,
+    true,
+    true
+   ]
+  ],
+  "policies": [],
+  "relations": [
+   [
+    "public",
+    "coupon_identity_retirements",
+    "r"
+   ],
+   [
+    "public",
+    "coupon_identity_retirements_pkey",
+    "i"
+   ],
+   [
+    "public",
+    "ix_coupon_retirement_identity",
+    "i"
+   ]
+  ],
+  "security": [
+   [
+    "public",
+    "coupon_identity_retirements",
+    false,
+    false,
+    "p",
+    true,
+    true
+   ],
+   [
+    "public",
+    "coupons",
+    false,
+    false,
+    "p",
+    true,
+    true
+   ]
+  ],
+  "table": {
+   "columns": [
+    [
+     "retired_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "canonical_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "tenant_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "integration_id",
+     "integer",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "store_id",
+     "text",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "provider_id",
+     "text",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "code_key",
+     "text",
+     true,
+     null,
+     "",
+     ""
+    ],
+    [
+     "audit",
+     "json",
+     true,
+     null,
+     "",
+     ""
+    ]
+   ],
+   "constraints": [
+    [
+     "ck_coupon_retirement_distinct",
+     "c",
+     "CHECK ((retired_id <> canonical_id))",
+     false,
+     false,
+     true
+    ],
+    [
+     "coupon_identity_retirements_canonical_id_fkey",
+     "f",
+     "FOREIGN KEY (canonical_id) REFERENCES coupons(id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "coupon_identity_retirements_integration_id_fkey",
+     "f",
+     "FOREIGN KEY (integration_id) REFERENCES integrations(id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "coupon_identity_retirements_pkey",
+     "p",
+     "PRIMARY KEY (retired_id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "coupon_identity_retirements_retired_id_fkey",
+     "f",
+     "FOREIGN KEY (retired_id) REFERENCES coupons(id)",
+     false,
+     false,
+     true
+    ],
+    [
+     "coupon_identity_retirements_tenant_id_fkey",
+     "f",
+     "FOREIGN KEY (tenant_id) REFERENCES tenants(id)",
+     false,
+     false,
+     true
+    ]
+   ],
+   "indexes": [
+    [
+     "coupon_identity_retirements_pkey",
+     "CREATE UNIQUE INDEX coupon_identity_retirements_pkey ON public.coupon_identity_retirements USING btree (retired_id)",
+     true,
+     true,
+     true
+    ],
+    [
+     "ix_coupon_retirement_identity",
+     "CREATE INDEX ix_coupon_retirement_identity ON public.coupon_identity_retirements USING btree (tenant_id, provider_id)",
+     true,
+     true,
+     true
+    ]
+   ]
+  },
+  "triggers": [
+   [
+    "public",
+    "coupon_identity_retirements",
+    "coupon_retirement_audit_guard",
+    "O",
+    "CREATE TRIGGER coupon_retirement_audit_guard BEFORE DELETE OR UPDATE ON public.coupon_identity_retirements FOR EACH ROW EXECUTE FUNCTION guard_coupon_retirement_audit()",
+    "public",
+    "guard_coupon_retirement_audit",
+    ""
+   ],
+   [
+    "public",
+    "coupons",
+    "coupon_retirement_guard",
+    "O",
+    "CREATE TRIGGER coupon_retirement_guard BEFORE INSERT OR DELETE OR UPDATE ON public.coupons FOR EACH ROW EXECUTE FUNCTION guard_coupon_retirement()",
+    "public",
+    "guard_coupon_retirement",
+    ""
+   ]
+  ],
+  "types": [
+   [
+    "public",
+    "_coupon_identity_retirements",
+    "b",
+    null
+   ],
+   [
+    "public",
+    "coupon_identity_retirements",
+    "c",
+    "coupon_identity_retirements"
+   ]
+  ],
+  "rules": []
+ },
+ "pre": {
+  "execution": [
+   "origin",
+   "on"
+  ],
+  "functions": [],
+  "policies": [],
+  "relations": [],
+  "security": [
+   [
+    "public",
+    "coupons",
+    false,
+    false,
+    "p",
+    true,
+    true
+   ]
+  ],
+  "table": null,
+  "triggers": [],
+  "types": [],
+  "rules": []
+ },
+ "provenance": "Disposable local PostgreSQL17 genuine0093/0103/0111/0113/0124 then0126;17 Shopify definitions unchanged",
+ "rules_contract_provenance": "Source-defined absence requirement added during audit-integrity repair; unit-only validation, no new PostgreSQL capture or security reproduction performed"
+}

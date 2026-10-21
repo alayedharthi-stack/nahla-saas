@@ -355,10 +355,14 @@ def apply_not_pushed_metadata(coupon: Coupon, *, reason: str) -> Dict[str, Any]:
 
 
 def is_pushable_manual_coupon(coupon: Coupon) -> bool:
+    if "salla_retirement" in (coupon.extra_metadata or {}):
+        return False
     if coupon.source_type == "imported":
         return False
     meta = coupon.extra_metadata or {}
     if meta.get("active_sync_pending"):
+        return False
+    if meta.get("terms_sync_pending"):
         return False
     if str(meta.get("source") or "").lower() == "salla":
         return False

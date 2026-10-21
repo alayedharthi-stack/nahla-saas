@@ -8,10 +8,12 @@ Backed by the real `Coupon` table and tenant AI settings where available.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+import math as _math
+
+from pydantic import BaseModel, StrictFloat, StrictInt, StrictStr, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -280,7 +282,7 @@ class CouponCreateIn(BaseModel):
 class CouponPatchIn(BaseModel):
     code: Optional[str] = None
     type: Optional[str] = None
-    value: Optional[str] = None
+    value: Optional[Union[StrictStr, StrictInt, StrictFloat]] = None
     description: Optional[str] = None
     limit: Optional[int] = None
     expires: Optional[str] = None
@@ -289,6 +291,13 @@ class CouponPatchIn(BaseModel):
     ai_allocatable: Optional[bool] = None
     coupon_level: Optional[str] = None
     allocation_channel: Optional[str] = None
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_bool_value(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError("value must not be boolean")
+        return v
 
 
 class CouponLevelIn(BaseModel):
@@ -1016,6 +1025,57 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
 
+    # ── Terms fields (value / expires) — detect via fields_set ────────────
+    terms_fields = {"value", "expires"} & body.model_fields_set
+
+    # Reject type combined with any terms fields (bound or unbound) to avoid
+    # validating value against the old type then applying the new type.
+    if terms_fields and "type" in body.model_fields_set:
+        raise HTTPException(status_code=409, detail="terms_and_type_combined_not_allowed")
+
+    # Validate numeric value: must be positive and finite.
+    if body.value is not None and isinstance(body.value, (int, float)):
+        _v = float(body.value)
+        if not _math.isfinite(_v) or _v <= 0:
+            raise HTTPException(status_code=422, detail="value must be a positive finite number")
+
+    terms_integration = None
+    validated_terms: Optional[Dict[str, Any]] = None
+    is_bound = False
+
+    if terms_fields:
+        from services.coupon_terms_sync import (  # noqa: PLC0415
+            CouponTermsError,
+            validate_terms,
+            resolve_terms_integration,
+        )
+        patch_for_terms: Dict[str, Any] = {}
+        if "value" in terms_fields:
+            patch_for_terms["value"] = body.value
+        if "expires" in terms_fields:
+            patch_for_terms["expires"] = body.expires
+        # Validate BEFORE any mutation; convert safe errors to 4xx
+        try:
+            validated_terms = validate_terms(coupon, patch_for_terms)
+        except CouponTermsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        _meta_now = coupon.extra_metadata or {}
+        is_bound = bool(
+            _meta_now.get("salla_coupon_id")
+            or _meta_now.get("external_id")
+            or _meta_now.get("salla_identity")
+        )
+        if is_bound:
+            # Reject combined terms + code/type/active for bound provider coupons
+            disallowed_combo = {"code", "type", "active"} & body.model_fields_set
+            if disallowed_combo:
+                raise HTTPException(status_code=409, detail="terms_and_type_combined_not_allowed")
+            terms_integration = resolve_terms_integration(db, coupon)
+            if terms_integration is None:
+                raise HTTPException(status_code=409, detail="salla_integration_unavailable")
+
+    # ── Standard non-terms field mutations ────────────────────────────────
     if body.code is not None:
         duplicate = db.query(Coupon).filter(
             Coupon.tenant_id == tenant_id,
@@ -1029,10 +1089,23 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
         coupon.description = body.description
     if body.type is not None:
         coupon.discount_type = body.type
-    if body.value is not None:
-        coupon.discount_value = str(body.value)
-    if body.expires is not None:
-        coupon.expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00")) if body.expires else None
+
+    # Apply value/expires: unbound → direct apply; bound → queued via terms sync
+    if terms_fields and validated_terms is not None:
+        if not is_bound:
+            if "amount" in validated_terms:
+                coupon.discount_value = validated_terms["amount"]
+            if "expires" in terms_fields:
+                if body.expires:
+                    coupon.expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00"))
+                else:
+                    coupon.expires_at = None
+    else:
+        # Original behavior when no terms fields in request
+        if body.value is not None:
+            coupon.discount_value = str(body.value)
+        if body.expires is not None:
+            coupon.expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00")) if body.expires else None
 
     meta = dict(coupon.extra_metadata or {})
     if body.limit is not None:
@@ -1089,12 +1162,33 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
     coupon.extra_metadata = meta
     flag_modified(coupon, "extra_metadata")
 
+    # Queue terms change for bound coupons (before commit)
+    if terms_integration is not None and validated_terms is not None:
+        from services.coupon_terms_sync import CouponTermsError, queue_terms_change  # noqa: PLC0415
+        try:
+            queue_terms_change(coupon, terms_integration, validated_terms)
+        except CouponTermsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
     if state_integration is not None:
         from services.coupon_active_sync import queue_active_change
-        queue_active_change(coupon, state_integration, body.active)
+        from services.coupon_identity import CouponIdentityConflict
+        try:
+            queue_active_change(coupon, state_integration, body.active)
+        except CouponIdentityConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     db.add(coupon)
     db.commit()
+
+    if terms_integration is not None:
+        from services.coupon_terms_sync import dispatch_terms_change  # noqa: PLC0415
+        from store_integration.registry import adapter_for_integration
+        await dispatch_terms_change(db, tenant_id, coupon_id, terms_integration,
+                                    adapter_for_integration(terms_integration))
+        db.refresh(coupon)
+        meta = dict(coupon.extra_metadata or {})
+
     if state_integration is not None:
         from services.coupon_active_sync import dispatch_active_change
         from store_integration.registry import adapter_for_integration
@@ -1102,8 +1196,9 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
                                      adapter_for_integration(state_integration))
         db.refresh(coupon)
         meta = dict(coupon.extra_metadata or {})
+
     return {
-        "updated": not bool(meta.get("active_sync_pending")),
+        "updated": not bool(meta.get("active_sync_pending") or meta.get("terms_sync_pending")),
         "accepted": True,
         "sync_status": meta.get("sync_status"),
         "sync_error": meta.get("sync_error"),

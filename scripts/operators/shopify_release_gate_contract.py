@@ -92,6 +92,16 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     CONTRACT_RELATIVE_PATH,
     EXPECTATIONS_RELATIVE_PATH,
     "scripts/operators/__init__.py",
+    "scripts/operators/coupon_retirement_schema.py",
+    "scripts/operators/salla_coupon_schema_expectations.json",
+    "scripts/operators/salla_coupon_rollback.draft.json",
+    "backend/services/coupon_identity.py",
+    "backend/services/coupon_active_sync.py",
+    "backend/services/coupon_terms_sync.py",
+    "backend/services/coupon_retirement.py",
+    "backend/services/coupon_salla_push.py",
+    "backend/services/native_ai_coupon_eligibility.py",
+    "backend/services/store_sync.py",
     "scripts/operators/bootstrap_migration_contract.py",
     # Graph discovery imports dormant revision 0115 even when it is not applied.
     # Pin its exact package/model closure; no other backend imports are allowed.
@@ -138,8 +148,9 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0122": "0121",
     "0123": "0122",
     "0124": "0123",
+    "0126": "0124",
 }
-EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0124"})
+EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0126"})
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
@@ -179,6 +190,14 @@ POST_INSTALL_PHASES: Mapping[str, Dict[str, Any]] = {
     for name in ("S4_DORMANT", "S4_PILOT")
 }
 INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
+COUPON_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/salla_coupon_schema_expectations.json"
+COUPON_ROLLBACK_RELATIVE_PATH = "scripts/operators/salla_coupon_rollback.draft.json"
+COUPON_POST_PHASES = frozenset({"S4_COUPON_POST_DORMANT", "S4_COUPON_POST_PILOT"})
+for _mode in ("DORMANT", "PILOT"):
+    POST_INSTALL_PHASES["S4_COUPON_PRE_" + _mode] = dict(POST_INSTALL_PHASES["S4_" + _mode], coupon_schema="pre")
+    POST_INSTALL_PHASES["S4_COUPON_POST_" + _mode] = dict(POST_INSTALL_PHASES["S4_" + _mode],
+        rows=frozenset({"0111","0113","0126"}), database_tip="0126",
+        branch_delta=("0118","0120","0121","0122","0123","0124","0126"), coupon_schema="post")
 INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.draft.json"
 ROLLBACK_MAX_AGE_HOURS = 24
 PILOT_SHOP = "nahlah-dev.myshopify.com"
@@ -189,7 +208,7 @@ INTERMEDIATE_STATES: Mapping[str, FrozenSet[str]] = {
     "S1": frozenset({"0111", "0113", "0121"}),
     "S2": frozenset({"0111", "0113", "0122"}),
 }
-SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILOT"})
+SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3"}) | frozenset(POST_INSTALL_PHASES)
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
@@ -552,7 +571,7 @@ def _catalog_import_bound_valid(raw: object) -> bool:
 
 def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[str, Optional[str], Dict[str, Any]]:
     enabled = sorted(name for name in SHOPIFY_FLAG_ENVS if truthy(environ.get(name)))
-    if phase_name == "S4_PILOT":
+    if phase_name in {"S4_PILOT", "S4_COUPON_PRE_PILOT", "S4_COUPON_POST_PILOT"}:
         required = {"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"}
         if not required <= set(enabled) <= required | {CATALOG_IMPORT_FLAG}:
             return FAIL, R_FLAG_ENABLED, {"enabled": enabled}
@@ -618,7 +637,8 @@ def _present(mapping: Any, fields: Tuple[str, ...]) -> bool:
 
 
 DORMANT_PRIOR_FIELDS: Tuple[str, ...] = ("rollback_mode", "source_sha", "runtime_inventory_digest",
-                                          "runtime_inventory_count", "schema_expectations_sha256")
+                                          "runtime_inventory_count", "schema_expectations_sha256",
+                                          "source_schema_expectations_sha256", "schema_definitions_sha256")
 
 
 def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
@@ -637,9 +657,54 @@ def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, An
             or type(prior.get("runtime_inventory_count")) is not int or prior["runtime_inventory_count"] <= 0
             or not isinstance(prior.get("schema_expectations_sha256"), str)
             or not DIGEST_RE.fullmatch(prior["schema_expectations_sha256"])
+            or not DIGEST_RE.fullmatch(str(prior.get("source_schema_expectations_sha256") or ""))
+            or prior.get("schema_definitions_sha256") != bindings.get("schema_definitions_sha256")
+            or not DIGEST_RE.fullmatch(str(bindings.get("schema_definitions_sha256") or ""))
             or prior.get("schema_expectations_sha256") != bindings.get("schema_expectations_sha256")):
         return None
     return prior
+
+
+def evaluate_coupon_rollback(evidence, snapshot, bindings, **kwargs):
+    """Post0126 only admits an actually tested same-source alias-aware bridge."""
+    import copy
+    if not isinstance(evidence,dict) or not isinstance(bindings,dict):
+        return R_SCHEMA_ROLLBACK_INVALID
+    artifact = bindings.get("artifact")
+    proof = evidence.get("functional_bridge_proof")
+    if (not isinstance(artifact,dict) or artifact.get("phase") != "S4_COUPON_POST_DORMANT"
+            or artifact.get("database_heads") != ["0111","0113","0126"]
+            or artifact.get("schema_action") != "retain_0126_no_downgrade"
+            or artifact.get("expectations_path") != COUPON_EXPECTATIONS_RELATIVE_PATH
+            or evidence.get("source_sha") != kwargs["release_sha"]
+            or evidence.get("phase") != "S4_COUPON_POST_DORMANT"
+            or evidence.get("database_heads") != ["0111","0113","0126"]
+            or evidence.get("coupon_schema_sha256") != bindings.get("coupon_schema_sha256")
+            or evidence.get("post_schema_observation_sha256") != bindings.get("post_schema_observation_sha256")
+            or not DIGEST_RE.fullmatch(str(bindings.get("post_schema_observation_sha256") or ""))
+            or evidence.get("flags") != {name:"false" for name in SHOPIFY_FLAG_ENVS}
+            or not DIGEST_RE.fullmatch(str(bindings.get("coupon_schema_sha256") or ""))
+            or not isinstance(proof,dict) or proof.get("source_sha") != kwargs["release_sha"]
+            or proof.get("database_heads") != ["0111","0113","0126"]
+            or proof.get("ordinary_and_canonical_batch_committed") is not True
+            or proof.get("retired_history_and_audit_unchanged") is not True
+            or type(proof.get("skipped")) is not int or proof.get("skipped") != 0
+            or type(proof.get("failures")) is not int or proof.get("failures") != 0
+            or type(proof.get("errors")) is not int or proof.get("errors") != 0
+            or type(proof.get("tests")) is not int or proof.get("tests") <= 0
+            or not DIGEST_RE.fullmatch(str(proof.get("junit_sha256") or ""))
+            or not proof.get("independent_review_ref")):
+        return R_SCHEMA_ROLLBACK_INVALID
+    # Retain all existing deployment UUID, age, source/inventory, target, flags,
+    # 17-table definition and approval checks after validating the new profile.
+    adapted, bound = copy.deepcopy(evidence), copy.deepcopy(bindings)
+    for item in (adapted,bound["artifact"]):
+        item["phase"] = "S4_DORMANT"
+        item["database_heads"] = ["0111","0113","0124"]
+    bound["artifact"]["schema_action"] = "retain_0124_no_downgrade"
+    bound["artifact"]["expectations_path"] = INSTALL_EXPECTATIONS_RELATIVE_PATH
+    kwargs["phase_name"] = "S4_" + kwargs["phase_name"].rsplit("_",1)[1]
+    return evaluate_schema_rollback(adapted,snapshot,bound,**kwargs)
 
 
 def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Optional[Mapping[str, Any]], *,
@@ -659,6 +724,12 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
       this release's identical S4 definitions and every flag ``"false"``. An
       older source is never accepted merely because it is redeployable.
     """
+    if phase_name in COUPON_POST_PHASES:
+        return evaluate_coupon_rollback(evidence,snapshot,bindings,phase_name=phase_name,
+            release_sha=release_sha,runtime_digest=runtime_digest,runtime_count=runtime_count,
+            target=target,approved_at=approved_at,now=now)
+    if phase_name.startswith("S4_COUPON_PRE_"):
+        phase_name = "S4_" + phase_name.rsplit("_",1)[1]
     if not isinstance(evidence, dict) or not isinstance(bindings, dict):
         return R_SCHEMA_ROLLBACK_INVALID
     artifact = bindings.get("artifact")
@@ -677,6 +748,8 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
     else:
         prior = _pinned_dormant_prior(artifact, bindings) if phase_name == "S4_DORMANT" else None
         if (prior is None or rollback_source != prior["source_sha"]
+                or evidence.get("source_schema_expectations_sha256") != prior["source_schema_expectations_sha256"]
+                or evidence.get("schema_definitions_sha256") != prior["schema_definitions_sha256"]
                 or evidence.get("flags") != {name: "false" for name in SHOPIFY_FLAG_ENVS}):
             return R_SCHEMA_ROLLBACK_INVALID
         inventory_digest, inventory_count = prior["runtime_inventory_digest"], prior["runtime_inventory_count"]

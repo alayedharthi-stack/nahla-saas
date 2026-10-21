@@ -26,6 +26,8 @@ SHOP = foundation.SHOP_SHOES
 
 @pytest.fixture
 def store(pg, monkeypatch):
+    # Match production for every install, expiry, isolation and concurrency proof.
+    pg.Session.configure(autoflush=False)
     from alembic.operations import Operations
     from alembic.migration import MigrationContext
     path = foundation._REPO / "database/migrations/versions/0124_shopify_install_first.py"
@@ -89,7 +91,9 @@ def redeem(pg, fake, browser, handle, **kwargs):
         return asyncio.run(install.redeem(db, browser=browser, handle=handle, config=CFG, api=fake, **kwargs))
 
 
-def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch):
+@pytest.mark.parametrize("autoflush", [True, False], ids=["autoflush", "production-no-autoflush"])
+def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch, autoflush):
+    store.Session.configure(autoflush=autoflush)
     fake, browser = Fake(), secrets.token_hex(32)
     kind, state = online(store, fake, browser)
     with store.Session() as db:
@@ -98,6 +102,14 @@ def test_first_install_atomic_principal_and_single_use_login(store, monkeypatch)
         flow = db.query(Flow).one()
         assert browser not in flow.browser_hash and flow.online_token_enc.startswith("sgcm1:")
     kind, handle = callback(store, fake, browser, state)
+    assert kind == "ready"
+    assert fake.calls.count(("owner", SHOP)) == fake.calls.count(("exchange", SHOP)) == 1
+    with store.Session() as db:
+        from services.shopify_connection.models import ShopifyConnection
+        connection = db.query(ShopifyConnection).one()
+        assert lifecycle.is_ready(db, connection)
+        assert db.query(Flow).one().phase == "ready"
+        assert db.query(Tenant).count() == db.query(User).count() == 1
     session = redeem(store, fake, browser, handle)
     with store.Session() as db:
         user = db.query(User).one(); owner = db.query(Owner).one()
@@ -173,7 +185,13 @@ def test_two_shops_isolate_sessions_handoffs_and_owner_mapping(store):
 def test_existing_unmapped_tenant_never_adopted(store):
     fake = Fake()
     merchant = foundation.Merchant(store, "existing")
-    foundation.connect(store, merchant, SHOP, fake)
+    # Build the legacy fixture with its original session policy; the install
+    # rejection below still runs with production's disabled autoflush.
+    store.Session.configure(autoflush=True)
+    try:
+        foundation.connect(store, merchant, SHOP, fake)
+    finally:
+        store.Session.configure(autoflush=False)
     with pytest.raises(install.InstallRejected):
         installed(store, fake, secrets.token_hex(32))
     with store.Session() as db:

@@ -282,7 +282,7 @@ def derive_sync_badge(source_type: str, meta: Dict[str, Any]) -> str:
     sync_status = str(meta.get("sync_status") or "").lower()
     if sync_status == "failed":
         return "failed"
-    if meta.get("active_sync_pending") or sync_status == "pending":
+    if meta.get("active_sync_pending") or meta.get("terms_sync_pending") or sync_status == "pending":
         return "pending"
 
     if source_type == "imported":
@@ -315,6 +315,10 @@ def derive_coupon_sync_visibility(
         meta.get("salla_synced") is True
         or str(sync_status or "").lower() == "synced"
     )
+    if meta.get("active_sync_pending") or meta.get("terms_sync_pending"):
+        salla_synced = False
+        if str(sync_status or "").lower() != "failed":
+            sync_status = "pending"
     return {
         "source_type": source_type,
         "source_label": derive_source_label(source_type, meta),
