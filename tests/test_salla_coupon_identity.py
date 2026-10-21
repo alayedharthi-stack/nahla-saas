@@ -15,7 +15,7 @@ from services.coupon_active_sync import dispatch_active_change, queue_active_cha
 class Provider:
     def __init__(self, tenant_id, integration_id=22, store_id="202"):
         self._tenant_id, self._integration_id, self.store_id = tenant_id, integration_id, store_id
-        self.raw, self.puts = {}, []
+        self.raw, self.puts, self.gets = {}, [], 0
 
     async def create_coupon(self, **kwargs):
         self.raw = dict(id=101, code=kwargs["code"], status="active", amount=1, type="percentage")
@@ -23,6 +23,7 @@ class Provider:
 
     async def get_coupon_by_id(self, coupon_id):
         assert coupon_id == "101"
+        self.gets += 1
         return deepcopy(self.raw)
 
     async def set_coupon_active(self, coupon_id, active):
@@ -90,12 +91,14 @@ def test_import_create_case_replay_disable_reenable():
     db, tid, integration, provider, svc = setup()
     for code, status, amount in [("GIFT123", "active", 1), ("gift123", "inactive", 2), ("Gift123", "active", 2)]:
         raw = dict(id=101, code=code, status=status, type="percentage", amount=amount)
+        provider.raw = deepcopy(raw)
         for _ in range(3):
             apply(db, svc, raw)
         row = db.query(Coupon).filter_by(tenant_id=tid).one()
         assert row.extra_metadata["active"] is (status == "active")
         assert row.source_type == "imported" and row.code == "GIFT123"
         assert row.discount_value == str(amount)
+    assert provider.gets > 0
     db.close()
 
 

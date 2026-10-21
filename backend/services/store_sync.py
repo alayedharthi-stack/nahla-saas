@@ -3226,6 +3226,7 @@ class StoreSyncService:
         updated = 0
         from services.coupon_identity import adapter_binding, resolve_import_coupon, validate_import_binding, CouponIdentityConflict
         identity_conflicts = 0
+        terms_failures = 0
         binding = adapter_binding(adapter, self.tenant_id, self._integration_connection_id)
         if binding is not None:
             validate_import_binding(self.db, binding)
@@ -3257,6 +3258,11 @@ class StoreSyncService:
                 if prior_id and extract_salla_coupon_id(raw) != str(prior_id):
                     continue
                 state_meta = await reconcile_imported_state(raw, existing.extra_metadata or {}, observed_at, adapter)
+                from services.coupon_terms_sync import (  # noqa: PLC0415
+                    reconcile_imported_terms as _reconcile_terms,
+                    provider_expiry_utc as _prov_exp_utc,
+                )
+                terms_raw, terms_delta = await _reconcile_terms(self.db, existing, raw, observed_at, adapter, binding)
                 preserve_origin = is_nahla_system_coupon(
                     getattr(existing, "source_type", None),
                     existing.extra_metadata,
@@ -3270,15 +3276,52 @@ class StoreSyncService:
                 if binding is not None:
                     import_meta["salla_identity"] = binding
                     import_meta["salla_provider_code"] = raw["code"]
-                existing.description = normalised.get("name") or normalised["description"]
-                existing.discount_type = normalised["discount_type"]
-                existing.discount_value = normalised["discount_value"]
-                existing.expires_at = exp
+                if terms_raw is None:
+                    existing.description = normalised.get("name") or normalised["description"]
+                    if isinstance(terms_delta, dict) and terms_delta.get("sync_status") == "failed":
+                        terms_failures += 1
+                if terms_raw is not None:
+                    terms_normalised = _normalise_coupon(terms_raw)
+                    _expiry_key = terms_raw.get("expiry_date") or terms_raw.get("expires_at") or terms_raw.get("expire_date")
+                    _terms_expiry_bad = False
+                    if binding is not None:
+                        _utc_exp = _prov_exp_utc(_expiry_key)
+                        if _expiry_key and _utc_exp is None:
+                            _terms_expiry_bad = True
+                    if _terms_expiry_bad:
+                        # Non-empty unparseable expiry: keep ALL prior type/value/expiry,
+                        # mark sync globally failed, do not advance terms watermarks.
+                        terms_failures += 1
+                        if terms_delta is None:
+                            terms_delta = {}
+                        terms_delta.pop("terms_source_updated_at", None)
+                        terms_delta.pop("terms_applied_at", None)
+                        terms_delta["provider_terms_unconfirmed"] = True
+                        terms_delta["sync_status"] = "failed"
+                        terms_delta["sync_error"] = "provider_terms_unconfirmed"
+                        terms_delta["salla_synced"] = False
+                    else:
+                        existing.description = terms_normalised.get("name") or terms_normalised["description"]
+                        existing.discount_type = terms_normalised["discount_type"]
+                        existing.discount_value = terms_normalised["discount_value"]
+                        if binding is not None:
+                            existing.expires_at = _utc_exp.replace(tzinfo=None) if _utc_exp is not None else None
+                        else:
+                            _exp2 = None
+                            if terms_normalised.get("expires_at"):
+                                try:
+                                    _exp2 = datetime.fromisoformat(str(terms_normalised["expires_at"]).replace("Z", "+00:00"))
+                                except (ValueError, TypeError):
+                                    pass
+                            existing.expires_at = _exp2
                 merged_meta = merge_salla_import_metadata(
                     existing.extra_metadata,
                     import_meta,
                     preserve_origin=preserve_origin,
                 )
+                if terms_delta:
+                    for _k, _v in terms_delta.items():
+                        merged_meta[_k] = _v
                 if should_mark_imported_source_type(
                     getattr(existing, "source_type", None),
                     existing.extra_metadata,
@@ -3294,6 +3337,25 @@ class StoreSyncService:
                 if binding is not None:
                     import_meta["salla_identity"] = binding
                     import_meta["salla_provider_code"] = raw["code"]
+                    from services.coupon_terms_sync import provider_expiry_utc as _prov_exp_utc_new  # noqa: PLC0415
+                    from services.coupon_active_sync import timestamp as _coupon_ts  # noqa: PLC0415
+                    _exp_raw_new = raw.get("expiry_date") or raw.get("expires_at") or raw.get("expire_date")
+                    _utc_new = _prov_exp_utc_new(_exp_raw_new)
+                    if _exp_raw_new and _utc_new is None:
+                        # Non-empty provider expiry that cannot be confirmed → skip creation.
+                        terms_failures += 1
+                        continue
+                    else:
+                        exp = _utc_new.replace(tzinfo=None) if _utc_new is not None else None
+                        # Watermark: record provider timestamp and when terms were accepted.
+                        _raw_ts = raw.get("updated_at")
+                        if _raw_ts:
+                            _ts_dt = _coupon_ts(_raw_ts)
+                            if _ts_dt is not None and _ts_dt.tzinfo is not None:
+                                import_meta["terms_source_updated_at"] = _ts_dt.isoformat()
+                        import_meta["terms_applied_at"] = (
+                            observed_at.isoformat() if hasattr(observed_at, "isoformat") else str(observed_at)
+                        )
                 self.db.add(Coupon(
                     tenant_id=self.tenant_id,
                     code=code,
@@ -3311,7 +3373,9 @@ class StoreSyncService:
             self.tenant_id, created, updated, len(raw_list), triggered_by,
         )
         failure_class = "coupon_identity_conflict" if identity_conflicts else None
-        partial = bool(identity_conflicts)
+        if terms_failures and failure_class is None:
+            failure_class = "provider_terms_unconfirmed"
+        partial = bool(identity_conflicts or terms_failures)
         fetch_ok = True
         if fetch_result:
             partial = partial or bool(fetch_result.get("partial"))

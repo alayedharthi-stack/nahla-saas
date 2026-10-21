@@ -1,7 +1,7 @@
 name: Salla coupon identity proof
 on:
   pull_request:
-    branches: [main, master, codex/salla-production-preserve-shopify-20261018]
+    branches: [main, master, codex/salla-production-preserve-shopify-20261018, codex/salla-coupon-identity-20261018]
 permissions:
   contents: read
 jobs:
@@ -76,17 +76,47 @@ jobs:
         env:
           ENVIRONMENT: test
         run: |
-          python -m pytest -q tests/test_salla_coupon_identity.py tests/test_salla_coupon_schema_contract.py tests/test_coupon_retirement_audit_integrity.py tests/test_coupon_active_sync.py tests/test_coupon_salla_two_way_sync.py tests/test_salla_coupons_poller.py tests/test_coupon_sync_visibility.py tests/test_coupon_source_filters.py tests/test_salla_coupon_discount_normalise.py --junitxml=/tmp/coupon-runtime.xml
+          python -m pytest -q tests/test_salla_coupon_identity.py tests/test_salla_coupon_schema_contract.py tests/test_coupon_retirement_audit_integrity.py tests/test_coupon_active_sync.py tests/test_coupon_salla_two_way_sync.py tests/test_salla_coupons_poller.py tests/test_coupon_sync_visibility.py tests/test_coupon_source_filters.py tests/test_salla_coupon_discount_normalise.py tests/test_coupon_terms_sync.py tests/test_coupon_terms_adapter.py tests/test_coupon_terms_api.py --junitxml=/tmp/coupon-runtime.xml
           python scripts/check_junit_clean.py /tmp/coupon-runtime.xml
       - name: PostgreSQL identity, quarantine, rollback and concurrency
         env:
           A1_PG_INTEGRATION_REQUIRED: '1'
           A1_PG_TEST_DATABASE_URL: postgresql://coupon_test:coupon_test@127.0.0.1:5433/coupon_test
         run: |
-          python -m pytest -q tests/test_salla_coupon_identity_pg.py tests/test_coupon_active_sync_pg.py tests/test_salla_coupon_retirement_pg.py --junitxml=/tmp/coupon-pg.xml
+          python -m pytest -q tests/test_salla_coupon_identity_pg.py tests/test_coupon_active_sync_pg.py tests/test_salla_coupon_retirement_pg.py tests/test_coupon_terms_sync_pg.py --junitxml=/tmp/coupon-pg.xml
           python scripts/check_junit_clean.py /tmp/coupon-pg.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: salla-coupon-pg${{ matrix.version }}-${{ github.event.pull_request.head.sha }}
           path: /tmp/coupon-*.xml
+  coupon-editor:
+    name: Coupon editor Node build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Run coupon terms editor tests
+        working-directory: dashboard
+        run: |
+          set -euo pipefail
+          npx --yes tsx@4 src/utils/couponTerms.test.ts 2>&1 | tee "$RUNNER_TEMP/coupon-terms-editor-${{ github.event.pull_request.head.sha }}.log"
+      - name: Dashboard build
+        working-directory: dashboard
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coupon-editor-log-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/coupon-terms-editor-${{ github.event.pull_request.head.sha }}.log
