@@ -16,6 +16,12 @@ on:
       - backend/services/shopify_catalog/config.py
       - backend/services/shopify_catalog/store.py
       - backend/routers/shopify_catalog_import.py
+      - backend/services/coupon_terms_sync.py
+      - backend/store_adapters/salla_adapter.py
+      - backend/routers/coupons.py
+      - dashboard/src/pages/Coupons.tsx
+      - dashboard/src/components/CouponTermsEditor.tsx
+      - dashboard/src/api/featureReality.ts
       - scripts/operators/shopify_release_gate_contract.py
       - backend/tests/test_shopify_catalog_import*.py
       - tests/test_shopify_catalog_import.py

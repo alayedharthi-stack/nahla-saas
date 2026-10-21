@@ -873,7 +873,10 @@ export const featureRealityApi = {
       body: JSON.stringify(body),
     })
   },
-  updateCoupon(couponId: string, patch: Record<string, unknown>): Promise<{ updated: boolean }> {
+  updateCoupon(
+    couponId: string,
+    patch: Record<string, unknown>,
+  ): Promise<{ updated: boolean; accepted?: boolean; sync_status?: string | null; sync_error?: string | null }> {
     return apiCall(`/coupons/${couponId}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),

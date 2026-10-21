@@ -8,7 +8,7 @@ import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm.attributes import flag_modified
-from services.coupon_identity import same_code, assert_dispatch_identity
+from services.coupon_identity import same_code, assert_dispatch_identity, CouponIdentityConflict
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,8 @@ def queue_active_change(coupon, integration, active):
     from services.coupon_retirement import assert_operational
     assert_operational(coupon)
     meta = dict(coupon.extra_metadata or {})
+    if meta.get("terms_sync_pending"):
+        raise CouponIdentityConflict("terms_sync_pending_active_blocked")
     pending = meta.get("active_sync_pending") or {}
     if pending.get("desired") == active and pending.get("integration_id") == integration.id:
         return
@@ -128,6 +130,20 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
         return
     next_at = timestamp(pending.get("next_attempt_at"))
     if next_at and utcnow() < next_at:
+        return
+    # Do not make external calls while a terms sync is also pending.
+    if meta.get("terms_sync_pending"):
+        pending["attempts"] = int(pending.get("attempts", 0)) + 1
+        pending["next_attempt_at"] = (utcnow() + timedelta(seconds=min(300, 10 * 2 ** min(pending["attempts"], 5)))).isoformat()
+        meta.update(
+            active_sync_pending=pending,
+            sync_status="failed",
+            salla_synced=False,
+            sync_error="terms_sync_pending_active_blocked",
+        )
+        row.extra_metadata = meta
+        flag_modified(row, "extra_metadata")
+        db.commit()
         return
     provider_id = str(meta.get("salla_coupon_id") or meta.get("external_id") or "")
     started = monotonic()

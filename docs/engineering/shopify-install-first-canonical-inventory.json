@@ -24,7 +24,7 @@
     },
     {
       "path": "backend/services/coupon_active_sync.py",
-      "sha256": "8f21f5a3130d5076cfcc886ff9b135c393f5fc0ad050ce3f8ff9f667e4d34331"
+      "sha256": "50f4d922fbad86935e45eb35881397bf1704b7169759beeac20579dff72a900f"
     },
     {
       "path": "backend/services/coupon_identity.py",
@@ -36,7 +36,11 @@
     },
     {
       "path": "backend/services/coupon_salla_push.py",
-      "sha256": "d6bb29bbd6536a99feff732f03bcccad40d11d79014690c03d7b3199f98abb1b"
+      "sha256": "62a98a8f0180da071e0d08ede6e24660a1badcd4a65557f89884d7b1eb636d3d"
+    },
+    {
+      "path": "backend/services/coupon_terms_sync.py",
+      "sha256": "ea633096499c95c890a727158cf54b1a7ed61f4edd2392f396cee2e58a1af875"
     },
     {
       "path": "backend/services/native_ai_coupon_eligibility.py",
@@ -80,7 +84,7 @@
     },
     {
       "path": "backend/services/store_sync.py",
-      "sha256": "9d179530d6f8007c439958f2f96ed61661f1b2f0791bf5d7f5129b25aeec2f67"
+      "sha256": "68c5c3e41a09ced7b2e7338685ed80689198d3bd52157608e5814b11c768ae29"
     },
     {
       "path": "database/__init__.py",
@@ -664,7 +668,7 @@
     },
     {
       "path": "scripts/operators/shopify_release_gate_contract.py",
-      "sha256": "726c0a4ebcbb6487e5e2714df81a9584f51a141285a4555ab4d2842326a2a088"
+      "sha256": "5506742ebf1ea86e23aac0084e028a2001438e4a9afb2bd9804a9ee6256c5365"
     },
     {
       "path": "scripts/operators/shopify_release_schema_expectations.json",
@@ -673,7 +677,7 @@
   ],
   "gate_sha256": "4a39b20943eda362a49b1fe09b2024b934da7c27639d94649079a673646af657",
   "gate_version": 2,
-  "inventory_count": 167,
-  "inventory_digest": "cad9b2d68c8f71a8aa79eb11f50e15eef1fb7ba28bc3d3c6f36272caecb094d6",
+  "inventory_count": 168,
+  "inventory_digest": "1049e930b9b8a858a01defc0c30c3008b4bf8c84217c2e197f492fa20499b5fe",
   "unexpected_initializers": []
 }

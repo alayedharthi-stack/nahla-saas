@@ -97,6 +97,7 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "scripts/operators/salla_coupon_rollback.draft.json",
     "backend/services/coupon_identity.py",
     "backend/services/coupon_active_sync.py",
+    "backend/services/coupon_terms_sync.py",
     "backend/services/coupon_retirement.py",
     "backend/services/coupon_salla_push.py",
     "backend/services/native_ai_coupon_eligibility.py",
