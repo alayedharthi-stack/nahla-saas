@@ -1,0 +1,145 @@
+name: salla-ui-live-composition-proof
+
+on:
+  pull_request:
+    branches:
+      - codex/salla-ui-preserve-live-20261018
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: dashboard
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Verify live base is ancestor
+        working-directory: .
+        run: |
+          LIVE_BASE="a12dd410f3e54308fa4af3198ed3af63a00bd91d"
+          if ! git merge-base --is-ancestor "$LIVE_BASE" HEAD; then
+            echo "ERROR: live base $LIVE_BASE is not an ancestor of HEAD"
+            exit 1
+          fi
+          echo "Live base ancestry check passed."
+
+      - name: Verify diff contains exactly the allowed paths
+        working-directory: .
+        run: |
+          LIVE_BASE="a12dd410f3e54308fa4af3198ed3af63a00bd91d"
+          ALLOWED_PATHS=(
+            "dashboard/src/api/featureReality.ts"
+            "dashboard/src/pages/Coupons.tsx"
+            "dashboard/src/components/CouponTermsEditor.tsx"
+            "dashboard/src/utils/couponTerms.ts"
+            "dashboard/src/utils/couponTerms.test.ts"
+            ".github/workflows/salla-ui-live-composition-proof.yml"
+          )
+          CHANGED=$(git diff --name-only "$LIVE_BASE" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Check no forbidden paths
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            ALLOWED=false
+            for ap in "${ALLOWED_PATHS[@]}"; do
+              if [ "$path" = "$ap" ]; then
+                ALLOWED=true
+                break
+              fi
+            done
+            if [ "$ALLOWED" = "false" ]; then
+              echo "ERROR: unexpected changed path: $path"
+              exit 1
+            fi
+          done <<< "$CHANGED"
+
+          # Check all six required paths are present (five coupon source + workflow)
+          REQUIRED_COUPON=(
+            "dashboard/src/api/featureReality.ts"
+            "dashboard/src/pages/Coupons.tsx"
+            "dashboard/src/components/CouponTermsEditor.tsx"
+            "dashboard/src/utils/couponTerms.ts"
+            "dashboard/src/utils/couponTerms.test.ts"
+            ".github/workflows/salla-ui-live-composition-proof.yml"
+          )
+          for rp in "${REQUIRED_COUPON[@]}"; do
+            if ! echo "$CHANGED" | grep -qxF "$rp"; then
+              echo "ERROR: expected changed path not found: $rp"
+              exit 1
+            fi
+          done
+          echo "Diff path check passed."
+
+      - name: Verify HEAD blob IDs against reviewed Salla42b1 hashes
+        working-directory: .
+        run: |
+          declare -A EXPECTED_BLOBS=(
+            ["dashboard/src/api/featureReality.ts"]="465ea9adb98ab3479519495be2935aadbbb8a881"
+            ["dashboard/src/pages/Coupons.tsx"]="2efef9e09de832006f96bac43cb514a53a71100e"
+            ["dashboard/src/components/CouponTermsEditor.tsx"]="3890d6f095d4ce542b23a97cf123009c23989622"
+            ["dashboard/src/utils/couponTerms.ts"]="698b8fe43eed7a45643a0ffb5e22edbb06a8b943"
+            ["dashboard/src/utils/couponTerms.test.ts"]="4e09caeb4d04449a5706473a31fc66f06bf765a2"
+          )
+          ALL_OK=true
+          for filepath in "${!EXPECTED_BLOBS[@]}"; do
+            EXPECTED="${EXPECTED_BLOBS[$filepath]}"
+            ACTUAL=$(git ls-tree HEAD "$filepath" | awk '{print $3}')
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "ERROR: blob mismatch for $filepath"
+              echo "  expected: $EXPECTED"
+              echo "  actual:   $ACTUAL"
+              ALL_OK=false
+            else
+              echo "OK: $filepath ($ACTUAL)"
+            fi
+          done
+          if [ "$ALL_OK" = "false" ]; then exit 1; fi
+          echo "All blob ID checks passed."
+
+      - name: Install dashboard dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run couponTerms unit tests
+        run: npx --yes tsx@4 src/utils/couponTerms.test.ts
+
+      - name: Build dashboard
+        run: npm run build
+
+      - name: Check Shopify install-first
+        run: npm run check:shopify-install-first
+
+      - name: Check Shopify install-sentry
+        run: npm run check:shopify-install-sentry
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Check inbound media presentation
+        run: npm run check:inbound-media-presentation
+
+      - name: Check inbound media cache isolation
+        run: npm run check:inbound-media-cache-isolation
+
+      - name: Check conversation bubble layout
+        env:
+          BUBBLE_LAYOUT_EVIDENCE_DIR: ${{ runner.temp }}
+        run: npm run check:conversation-bubble-layout
