@@ -1,0 +1,28 @@
+{
+  "record_version": 1,
+  "rollback_mode": "same_source_flags_off",
+  "expectations_path": "scripts/operators/salla_coupon_schema_expectations.json",
+  "status": "DRAFT_ONLY_REQUIRES_EXACT_SOURCE_AND_INVENTORY_PINS",
+  "phase": "S4_COUPON_POST_DORMANT",
+  "database_heads": [
+    "0111",
+    "0113",
+    "0126"
+  ],
+  "shopify_table_count": 17,
+  "bootstrap_target": "0093",
+  "schema_action": "retain_0126_no_downgrade",
+  "flags": {
+    "NAHLA_SHOPIFY_CONNECTION_ENABLED": "false",
+    "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "false",
+    "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED": "false",
+    "VITE_SHOPIFY_CONNECTION_UI": "false",
+    "VITE_SHOPIFY_INSTALL_FIRST_ENABLED": "false",
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI": "false"
+  },
+  "incompatible_rollback": "a4_and_efb8_are_not_functional_after_retirement",
+  "approval": "none"
+}

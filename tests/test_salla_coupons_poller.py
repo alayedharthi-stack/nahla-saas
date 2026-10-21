@@ -109,7 +109,8 @@ def test_sync_coupons_records_metadata_on_integration():
         "failure_class": None,
         "retry_after": None,
     }
-    svc = StoreSyncService(db, tenant_id, integration_connection_id=intg.id, adapter=MagicMock())
+    adapter = MagicMock(_tenant_id=tenant_id, _integration_id=intg.id, store_id="9001")
+    svc = StoreSyncService(db, tenant_id, integration_connection_id=intg.id, adapter=adapter)
     count = asyncio.run(svc.sync_coupons(triggered_by="test_poller", raw_list=raw, fetch_result=fetch_result))
     db.commit()
     db.refresh(intg)
@@ -234,7 +235,7 @@ def test_recent_coupon_poller_imports_without_delaying_full_reconciliation(monke
     db.add(intg)
     db.commit()
     raw = {"id": 99, "code": "SHOES10", "type": "percentage", "amount": 10, "name": "Shoe offer"}
-    adapter = MagicMock()
+    adapter = MagicMock(_tenant_id=tenant_id, _integration_id=intg.id, store_id="generic-store")
     adapter.fetch_recent_coupons_paginated = AsyncMock(return_value={
         "ok": True, "items": [raw], "items_seen": 1, "pages_fetched": 1,
         "partial": False, "failure_class": None, "retry_after": None,

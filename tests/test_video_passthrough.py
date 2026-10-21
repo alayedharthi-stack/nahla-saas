@@ -245,10 +245,14 @@ class TestVideoMediaRouteTrace:
         h = _H(); h.setLevel(logging.DEBUG)
         prev_level     = _nrm.logger.level
         prev_propagate = _nrm.logger.propagate
+        prev_disabled = _nrm.logger.disabled
+        prev_global_disable = logging.root.manager.disable
         _nrm.logger.setLevel(logging.DEBUG)
         _nrm.logger.propagate = True
         _nrm.logger.addHandler(h)
         try:
+            _nrm.logger.disabled = False
+            logging.disable(logging.NOTSET)
             async def _go():
                 return await _nrm.normalize_whatsapp_inbound(
                     db=MagicMock(), wa_conn=MagicMock(), tenant_id=42,
@@ -267,6 +271,8 @@ class TestVideoMediaRouteTrace:
                 )
             _run(_go())
         finally:
+            _nrm.logger.disabled = prev_disabled
+            logging.disable(prev_global_disable)
             _nrm.logger.removeHandler(h)
             _nrm.logger.setLevel(prev_level)
             _nrm.logger.propagate = prev_propagate
@@ -711,10 +717,14 @@ class TestVideoFrameVision:
         h = _H(); h.setLevel(logging.DEBUG)
         prev_level     = _nrm.logger.level
         prev_propagate = _nrm.logger.propagate
+        prev_disabled = _nrm.logger.disabled
+        prev_global_disable = logging.root.manager.disable
         _nrm.logger.setLevel(logging.DEBUG)
         _nrm.logger.propagate = True
         _nrm.logger.addHandler(h)
         try:
+            _nrm.logger.disabled = False
+            logging.disable(logging.NOTSET)
             async def _go():
                 return await _nrm.normalize_whatsapp_inbound(
                     db=MagicMock(), wa_conn=MagicMock(), tenant_id=99,
@@ -730,6 +740,8 @@ class TestVideoFrameVision:
                 )
             _run(_go())
         finally:
+            _nrm.logger.disabled = prev_disabled
+            logging.disable(prev_global_disable)
             _nrm.logger.removeHandler(h)
             _nrm.logger.setLevel(prev_level)
             _nrm.logger.propagate = prev_propagate

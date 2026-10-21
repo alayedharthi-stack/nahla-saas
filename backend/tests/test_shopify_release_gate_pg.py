@@ -138,7 +138,7 @@ def _run(root: Path, phase: str, db: str, **kwargs):
 
 ALL_CHECKS = {"root", "release_sha", "inventory", "libraries", "migration_preflight", "graph", "identity", "database_target", "approval",
               "shopify_flags", "expectations", "connect", "lock", "server", "version_rows", "shopify_footprint", "retained_schema",
-              "relation_identity", "unlock"}
+              "coupon_retirement_schema", "relation_identity", "unlock"}
 
 
 def _assert_pass(root: Path, phase: str, db: str, step: str, **kwargs) -> str:

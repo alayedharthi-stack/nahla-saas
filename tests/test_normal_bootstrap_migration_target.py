@@ -34,7 +34,9 @@ def test_repository_accepts_only_known_parallel_head_topologies() -> None:
     # 0120 topology stays accepted and both heads together are not.
     # The Shopify catalog mirror 0122 extends 0121 the same way, and the
     # Shopify privacy requests 0123 extend 0122 the same way.
-    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0124"})
+    assert REPOSITORY_ALEMBIC_HEADS == frozenset({"0092", "0111", "0114", "0115", "0126"})
+    assert repository_heads_expected({"0092", "0111", "0114", "0115", "0124"})
+    assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0125", "0126"})
     assert repository_heads_expected({"0092", "0111", "0114", "0115", "0123"})
     assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0123", "0124"})
     assert not repository_heads_expected({"0092", "0111", "0114", "0115", "0124", "0125"})

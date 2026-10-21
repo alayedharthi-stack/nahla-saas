@@ -20,15 +20,21 @@ on:
       - backend/tests/test_shopify_catalog_import*.py
       - tests/test_shopify_catalog_import.py
       - tests/test_shopify_install_release_contract.py
+      - .github/workflows/shopify-install-first-proof.yml
 permissions:
   contents: read
 jobs:
   install-first:
+    name: Install-first proof / PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['16', '18']
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        image: docker.io/library/postgres:${{ matrix.pg }}
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: synthetic-proof-only
@@ -39,6 +45,17 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify PostgreSQL server major version
+        env:
+          PGPASSWORD: synthetic-proof-only
+        run: |
+          set -euo pipefail
+          svn=$(psql -X -tAc 'SHOW server_version_num' -h 127.0.0.1 -p 5432 -U proof postgres)
+          echo "server_version_num=${svn}"
+          major=$((svn / 10000))
+          [ "$major" -eq "${{ matrix.pg }}" ] || { echo "FATAL: expected PG${{ matrix.pg }}, got major ${major}"; exit 1; }
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -89,5 +106,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: shopify-install-first-pg
+          name: shopify-install-first-pg${{ matrix.pg }}
           path: install-first-pg.xml

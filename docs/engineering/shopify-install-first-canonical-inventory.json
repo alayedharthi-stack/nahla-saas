@@ -1,6 +1,6 @@
 {
-  "binding": "Canonical Git index bytes; the source commit is bound externally by the CI artifact and any future release approval.",
-  "database_py_digest": "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09",
+  "binding": "Canonical source bytes; exact commit bound externally by CI and release approval.",
+  "database_py_digest": "36305993452890f1cea51dc24b0f654e272fcaa912041c690cbe863eb5c52f4d",
   "files": [
     {
       "path": "backend/__init__.py",
@@ -21,6 +21,26 @@
     {
       "path": "backend/routers/shopify_install.py",
       "sha256": "8c753e462e206865b46b6d0218692df4549285ef09e9d9ac1f93cea155680d78"
+    },
+    {
+      "path": "backend/services/coupon_active_sync.py",
+      "sha256": "8f21f5a3130d5076cfcc886ff9b135c393f5fc0ad050ce3f8ff9f667e4d34331"
+    },
+    {
+      "path": "backend/services/coupon_identity.py",
+      "sha256": "3a6aee0f221535971b947895312292aaf72b7078b75068ff76ec72c2ea78ecec"
+    },
+    {
+      "path": "backend/services/coupon_retirement.py",
+      "sha256": "4bcc8b5c1407eac654d01b544e7471be648eca78662f186f21f6f438ba772756"
+    },
+    {
+      "path": "backend/services/coupon_salla_push.py",
+      "sha256": "d6bb29bbd6536a99feff732f03bcccad40d11d79014690c03d7b3199f98abb1b"
+    },
+    {
+      "path": "backend/services/native_ai_coupon_eligibility.py",
+      "sha256": "3cd05f6a7798acf1d1d50fff1e5ee31eb87fb21391b43a4cd27c856bbc4b2820"
     },
     {
       "path": "backend/services/shopify_catalog/config.py",
@@ -57,6 +77,10 @@
     {
       "path": "backend/services/shopify_privacy/config.py",
       "sha256": "3ef56ff771e1a7172ac6ce5e1467a63e4bcb41b017edb34ea986dd0cde2b94b9"
+    },
+    {
+      "path": "backend/services/store_sync.py",
+      "sha256": "9d179530d6f8007c439958f2f96ed61661f1b2f0791bf5d7f5129b25aeec2f67"
     },
     {
       "path": "database/__init__.py",
@@ -571,6 +595,10 @@
       "sha256": "3fad0e350d89689d1af9f10f9f6a46ed286fa47360bd224d90baf7908d9d4a50"
     },
     {
+      "path": "database/migrations/versions/0126_coupon_identity_retirements.py",
+      "sha256": "74a168e4c58bb61654187b4a019a594c586b0def72728f4fd48064f104b34b54"
+    },
+    {
       "path": "database/migrations/versions/__init__.py",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
@@ -600,7 +628,7 @@
     },
     {
       "path": "scripts/operators/bootstrap_migration_contract.py",
-      "sha256": "be838ef7f860935dde9d1db9268a57c5c54239fa72dde6e04cb0b89d795f80bc"
+      "sha256": "c5870c4137e2cef915ab161e44bbe32585670ad08e390d2661605f006c38cc23"
     },
     {
       "path": "scripts/operators/commerce_runtime_pilot_migration.py",
@@ -611,29 +639,41 @@
       "sha256": "c27a79dd7900e978558cb6ab46a9dd6a8465228e5309f9d33b51561d5585f21b"
     },
     {
+      "path": "scripts/operators/coupon_retirement_schema.py",
+      "sha256": "98539020c6f24f44f697b5d2aa37d1b91ea517a8fcddada3e055a87aecbbe6de"
+    },
+    {
+      "path": "scripts/operators/salla_coupon_rollback.draft.json",
+      "sha256": "d5930278182ffb05dbf23539319af2053c90cf5beff90d86db9087e95314f5c7"
+    },
+    {
+      "path": "scripts/operators/salla_coupon_schema_expectations.json",
+      "sha256": "8e12ffde1cf0a249b3ef10ac3636766c3d23c733b8a0fed92023a1a112d3c70d"
+    },
+    {
       "path": "scripts/operators/shopify_install_rollback.draft.json",
-      "sha256": "65d2932642581b256ce683dad4bbbd59440332d5aa2410688512349560d15bf3"
+      "sha256": "b103716095b18391c3227f67c4f6a1a70ea796ef85ea62e26bc8c872e43016e5"
     },
     {
       "path": "scripts/operators/shopify_install_schema_expectations.json",
-      "sha256": "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
+      "sha256": "6efa4b1277b22a191473b3fb52807e48f32d079190298ead90a3abbc7921485a"
     },
     {
       "path": "scripts/operators/shopify_release_gate.py",
-      "sha256": "c7e61a5433c43c6503043e13eb010bec3fe243e57ec4aff268584bc9f8ec966b"
+      "sha256": "4a39b20943eda362a49b1fe09b2024b934da7c27639d94649079a673646af657"
     },
     {
       "path": "scripts/operators/shopify_release_gate_contract.py",
-      "sha256": "ca86ff8edc27b5727044abfc3926bf5f4ca6dd5bd61c2d917e6620bf2b552541"
+      "sha256": "726c0a4ebcbb6487e5e2714df81a9584f51a141285a4555ab4d2842326a2a088"
     },
     {
       "path": "scripts/operators/shopify_release_schema_expectations.json",
-      "sha256": "13e2d23e44cd10017a0a2fddfe3317ea9609a14ef147e6cc5c0bf634bc3a0988"
+      "sha256": "6c7792dffca871a851cc47d2aaeeff347db58fd56fc7c4b0410c1a0bfbb44f9b"
     }
   ],
-  "gate_sha256": "c7e61a5433c43c6503043e13eb010bec3fe243e57ec4aff268584bc9f8ec966b",
+  "gate_sha256": "4a39b20943eda362a49b1fe09b2024b934da7c27639d94649079a673646af657",
   "gate_version": 2,
-  "inventory_count": 157,
-  "inventory_digest": "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88",
+  "inventory_count": 167,
+  "inventory_digest": "cad9b2d68c8f71a8aa79eb11f50e15eef1fb7ba28bc3d3c6f36272caecb094d6",
   "unexpected_initializers": []
 }

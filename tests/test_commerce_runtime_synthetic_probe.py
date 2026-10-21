@@ -142,9 +142,12 @@ def test_the_capture_hears_a_disabled_sanitiser_logger_and_restores_it() -> None
     probe reported zero audit lines for a listing the sanitiser had audited."""
     logger = logging.getLogger(probe.SANITIZER_LOGGER)
     previous_level, previously_disabled = logger.level, logger.disabled
+    previous_global_disable = logging.root.manager.disable
     logger.setLevel(logging.WARNING)
     logger.disabled = True
     try:
+        # Operator modules imported by other suites silence process logging.
+        logging.disable(logging.NOTSET)
         with probe.capturing_sanitizer_log() as capture:
             logger.info("[OUTBOUND_URL_AUDIT] tenant=7 to=+********01 url_count=4 hosts=demo-probe.example-store.sa")
             logger.warning("[EXTERNAL_RESEARCH_BLOCKED] tenant=7 marker=sources_header")
@@ -153,6 +156,7 @@ def test_the_capture_hears_a_disabled_sanitiser_logger_and_restores_it() -> None
         assert logger.disabled is True and logger.level == logging.WARNING
         assert capture not in logger.handlers
     finally:
+        logging.disable(previous_global_disable)
         logger.setLevel(previous_level)
         logger.disabled = previously_disabled
 

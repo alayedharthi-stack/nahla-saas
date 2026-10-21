@@ -1,0 +1,92 @@
+name: Salla coupon identity proof
+on:
+  pull_request:
+    branches: [main, master, codex/salla-production-preserve-shopify-20261018]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    name: Exact-head runtime suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r backend/requirements.txt pytest
+      - name: Existing silent-exception lint
+        run: python scripts/lint_no_silent_except.py
+      - name: Existing root runtime suite
+        run: python -m pytest -q --junitxml=/tmp/runtime.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: salla-full-runtime-${{ github.event.pull_request.head.sha }}
+          path: /tmp/runtime.xml
+  coupon-runtime-pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '16'
+            image: docker.io/library/postgres:16
+          - version: '18'
+            image: docker.io/library/postgres:18
+    services:
+      postgres:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: coupon_test
+          POSTGRES_PASSWORD: coupon_test
+          POSTGRES_DB: coupon_test
+        ports: ['5433:5432']
+        options: >-
+          --health-cmd "pg_isready -U coupon_test -d coupon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt -r backend/requirements.txt pytest
+      - name: Verify PostgreSQL server major version
+        env:
+          PGPASSWORD: coupon_test
+        run: |
+          set -euo pipefail
+          svn=$(psql -X -tAc 'SHOW server_version_num' -h 127.0.0.1 -p 5433 -U coupon_test coupon_test)
+          echo "server_version_num=${svn}"
+          major=$((svn / 10000))
+          [ "$major" -eq "${{ matrix.version }}" ] || { echo "FATAL: expected PG${{ matrix.version }}, got major ${major}"; exit 1; }
+      - name: Coupon runtime
+        env:
+          ENVIRONMENT: test
+        run: |
+          python -m pytest -q tests/test_salla_coupon_identity.py tests/test_salla_coupon_schema_contract.py tests/test_coupon_retirement_audit_integrity.py tests/test_coupon_active_sync.py tests/test_coupon_salla_two_way_sync.py tests/test_salla_coupons_poller.py tests/test_coupon_sync_visibility.py tests/test_coupon_source_filters.py tests/test_salla_coupon_discount_normalise.py --junitxml=/tmp/coupon-runtime.xml
+          python scripts/check_junit_clean.py /tmp/coupon-runtime.xml
+      - name: PostgreSQL identity, quarantine, rollback and concurrency
+        env:
+          A1_PG_INTEGRATION_REQUIRED: '1'
+          A1_PG_TEST_DATABASE_URL: postgresql://coupon_test:coupon_test@127.0.0.1:5433/coupon_test
+        run: |
+          python -m pytest -q tests/test_salla_coupon_identity_pg.py tests/test_coupon_active_sync_pg.py tests/test_salla_coupon_retirement_pg.py --junitxml=/tmp/coupon-pg.xml
+          python scripts/check_junit_clean.py /tmp/coupon-pg.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: salla-coupon-pg${{ matrix.version }}-${{ github.event.pull_request.head.sha }}
+          path: /tmp/coupon-*.xml

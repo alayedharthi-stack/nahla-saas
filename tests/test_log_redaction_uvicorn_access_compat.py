@@ -154,16 +154,22 @@ def test_a_uvicorn_access_record_through_real_logger_and_handler() -> None:
     handler = logging.StreamHandler(stream)
     handler.setFormatter(_access_formatter())
     saved = (logger.handlers[:], logger.propagate, logger.level, logger.filters[:])
+    saved_disable = (logger.disabled, logging.root.manager.disable)
     logger.handlers = [handler]
     logger.propagate = False
     logger.setLevel(logging.INFO)
     err = io.StringIO()
     try:
+        # Other suites import operators that globally silence process logging.
+        logger.disabled = False
+        logging.disable(logging.NOTSET)
         install_log_redaction(logger_names=("uvicorn.access",), root=logging.getLogger("nahla.compat.noroot"))
         with patch("sys.stderr", err):
             path = f"/webhook/whatsapp?hub.verify_token={CANARY_VERIFY_TOKEN}&hub.challenge=42"
             logger.info(UVICORN_ACCESS_MSG, CLIENT_ADDR, "GET", path, "1.1", 200)
     finally:
+        logger.disabled = saved_disable[0]
+        logging.disable(saved_disable[1])
         logger.handlers, logger.propagate, logger.level, logger.filters = saved
     out = stream.getvalue()
     assert "--- Logging error ---" not in err.getvalue()
@@ -208,10 +214,13 @@ def test_b_httpx_mock_transport_request_log_formats_through_named_logger() -> No
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(message)s"))
     saved = (logger.handlers[:], logger.propagate, logger.level, logger.filters[:])
+    saved_disable = (logger.disabled, logging.root.manager.disable)
     logger.handlers = [handler]
     logger.propagate = False
     logger.setLevel(logging.INFO)
     try:
+        logger.disabled = False
+        logging.disable(logging.NOTSET)
         install_log_redaction(logger_names=("httpx",), root=logging.getLogger("nahla.compat.noroot"))
         transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True}))
         with patch("sys.stderr", err), httpx.Client(transport=transport) as client:
@@ -220,6 +229,8 @@ def test_b_httpx_mock_transport_request_log_formats_through_named_logger() -> No
                 params={"client_secret": CANARY_APP_SECRET, "fb_exchange_token": CANARY_EXCHANGE_TOKEN},
             )
     finally:
+        logger.disabled = saved_disable[0]
+        logging.disable(saved_disable[1])
         logger.handlers, logger.propagate, logger.level, logger.filters = saved
     out = stream.getvalue()
     assert "HTTP Request: GET https://graph.facebook.com/v21.0/oauth/access_token?" in out
