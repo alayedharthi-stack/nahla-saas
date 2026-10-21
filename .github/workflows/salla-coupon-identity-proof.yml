@@ -37,9 +37,9 @@ jobs:
       matrix:
         include:
           - version: '16'
-            image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+            image: docker.io/library/postgres:16
           - version: '18'
-            image: public.ecr.aws/docker/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+            image: docker.io/library/postgres:18
     services:
       postgres:
         image: ${{ matrix.image }}
@@ -63,6 +63,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r backend/requirements.txt pytest
+      - name: Verify PostgreSQL server major version
+        env:
+          PGPASSWORD: coupon_test
+        run: |
+          set -euo pipefail
+          svn=$(psql -X -tAc 'SHOW server_version_num' -h 127.0.0.1 -p 5433 -U coupon_test coupon_test)
+          echo "server_version_num=${svn}"
+          major=$((svn / 10000))
+          [ "$major" -eq "${{ matrix.version }}" ] || { echo "FATAL: expected PG${{ matrix.version }}, got major ${major}"; exit 1; }
       - name: Coupon runtime
         env:
           ENVIRONMENT: test
