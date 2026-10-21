@@ -40,7 +40,7 @@
     },
     {
       "path": "backend/services/coupon_terms_sync.py",
-      "sha256": "ea633096499c95c890a727158cf54b1a7ed61f4edd2392f396cee2e58a1af875"
+      "sha256": "c5901fc88de3824bf50e4468d6f45d3a437f30d7a5d1e8f87c4eea7e7613a143"
     },
     {
       "path": "backend/services/native_ai_coupon_eligibility.py",
@@ -678,6 +678,6 @@
   "gate_sha256": "4a39b20943eda362a49b1fe09b2024b934da7c27639d94649079a673646af657",
   "gate_version": 2,
   "inventory_count": 168,
-  "inventory_digest": "1049e930b9b8a858a01defc0c30c3008b4bf8c84217c2e197f492fa20499b5fe",
+  "inventory_digest": "1dc7ec5ac31047a4ac0e9806e9aea48b8a2c56064a3cc0e958de8023ff6acf66",
   "unexpected_initializers": []
 }

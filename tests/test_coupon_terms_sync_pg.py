@@ -542,7 +542,7 @@ def test_reconcile_watermark_ordering_and_conflict_resolution():
                 original_expires = r.expires_at
 
             adapter2 = _make_adapter(1, 10, "STORE1", 9001, "PROMO25", "percentage",
-                                     "28.00", "2027-06-30")
+                                     "28.00", "2027-06-30", updated_at=T2_str)
             with Session() as db:
                 await dispatch_terms_change(db, 1, row_id, intg, adapter2)
 
@@ -550,6 +550,15 @@ def test_reconcile_watermark_ordering_and_conflict_resolution():
                 r = db.query(Coupon).filter_by(id=row_id).one()
                 assert r.discount_value == "35.00"
                 assert r.expires_at == original_expires, "amount-only sync must not mutate expires_at"
+                # adapter2 GET returns fixed T2 (2027-01-10) which is earlier than T3 (2027-02-01);
+                # watermark must stay at T3 — max(T3, T2) = T3.
+                wm_stored = r.extra_metadata.get("terms_source_updated_at")
+                assert wm_stored is not None, "terms_source_updated_at must be present after dispatch"
+                wm_utc = datetime.fromisoformat(wm_stored).astimezone(timezone.utc)
+                assert wm_utc == T3_dt, (
+                    f"terms_source_updated_at must stay T3 ({T3_dt.isoformat()!r}) "
+                    f"when readback timestamp (2026) is older; got {wm_utc.isoformat()!r}"
+                )
 
         asyncio.run(run())
     finally:

@@ -584,7 +584,9 @@ async def dispatch_terms_change(db, tenant_id, coupon_id, integration, adapter):
         )
         source_at = timestamp(raw.get("updated_at"))
         if source_at:
-            meta["terms_source_updated_at"] = source_at.isoformat()
+            prior_source_at = timestamp(meta.get("terms_source_updated_at"))
+            if prior_source_at is None or source_at > prior_source_at:
+                meta["terms_source_updated_at"] = source_at.isoformat()
         meta.pop("terms_sync_pending", None)
 
     except Exception as exc:

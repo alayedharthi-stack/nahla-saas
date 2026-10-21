@@ -39,6 +39,7 @@ from services.coupon_terms_sync import (  # noqa: E402
     reconcile_imported_terms,
     validate_terms,
 )
+from services.store_sync import StoreSyncService  # noqa: E402
 
 
 # ── SQLite JSONB → JSON remapping (mirrors test_coupon_salla_two_way_sync) ───
@@ -840,6 +841,115 @@ def test_reconcile_equal_timestamp_same_amount_no_detail():
     )
     assert adapter.get_coupon_by_id.call_count == 0
     assert result_raw is not None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G. dispatch watermark guard: readback older/newer/missing + stale mid sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── dispatch-watermark regression timestamp constants ──────────────────────
+_WM_T3 = datetime(2027, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+_WM_T2 = _WM_T3 - timedelta(days=5)   # older than T3
+_WM_T4 = _WM_T3 + timedelta(days=5)   # newer than T3
+_WM_T2_5 = _WM_T3 - timedelta(days=2)  # mid: T2 < T2.5 < T3
+
+
+@pytest.mark.parametrize("readback_ts,expected_wm", [
+    (_WM_T2,  _WM_T3),  # older T2: max(T3, T2) = T3 → watermark stays
+    (_WM_T4,  _WM_T4),  # newer T4: max(T3, T4) = T4 → watermark advances
+    (None,    _WM_T3),  # missing : no readback ts  → watermark stays T3
+])
+def test_dispatch_watermark_guards_subsequent_stale_sync(readback_ts, expected_wm):
+    """After successful dispatch the watermark is max(prior, readback) or prior when
+    readback has no timestamp.  A subsequent sync_coupons call with a mid-T2.5 payload
+    (below T3 in every parametrize case) must be rejected as stale: value/watermark
+    must not revert and no extra detail GET may fire."""
+    db, tid = _make_db()
+    ig = _make_integration(db, tid)
+    row = _make_bound_coupon(
+        db, tid, ig,
+        pid="99200", code="WMDSP1",
+        discount_type="fixed", discount_value="25.00",
+        extra={"terms_source_updated_at": _WM_T3.isoformat()},
+    )
+
+    queue_terms_change(row, ig, {"amount": "30.00"})
+    db.commit()
+
+    # GET-before: pre-PUT state matches row; GET-after: PUT confirmed
+    get_before = _provider_raw(pid="99200", code="WMDSP1", discount_type="fixed", amount="25.00")
+    get_after = dict(_provider_raw(pid="99200", code="WMDSP1", discount_type="fixed", amount="30.00"))
+    if readback_ts is not None:
+        get_after["updated_at"] = readback_ts.isoformat()
+    # when readback_ts is None, no "updated_at" key → triggers missing-timestamp path
+
+    dispatch_adapter = SimpleNamespace(
+        _tenant_id=tid,
+        _integration_id=ig.id,
+        store_id="STORE1",
+        get_coupon_by_id=AsyncMock(side_effect=[get_before, get_after]),
+        update_coupon_terms=AsyncMock(return_value=None),
+    )
+
+    asyncio.run(dispatch_terms_change(db, tid, row.id, ig, dispatch_adapter))
+    db.refresh(row)
+
+    assert row.discount_value == "30.00"
+    assert row.extra_metadata["terms_sync_status"] == "synced"
+    assert dispatch_adapter.update_coupon_terms.call_count == 1  # PUT exactly once
+
+    # Verify watermark was set to max(T3, readback) or stays at T3 when missing
+    wm_raw = row.extra_metadata.get("terms_source_updated_at")
+    assert wm_raw is not None, "terms_source_updated_at must be set after successful dispatch"
+    wm_dt = datetime.fromisoformat(wm_raw)
+    wm_utc = wm_dt.astimezone(timezone.utc) if wm_dt.tzinfo else wm_dt.replace(tzinfo=timezone.utc)
+    assert wm_utc == expected_wm, (
+        f"watermark mismatch: expected {expected_wm.isoformat()!r}, got {wm_utc.isoformat()!r}"
+    )
+
+    # Mid T2.5 payload (T2 < T2.5 < T3 ≤ expected_wm) must be rejected as stale
+    mid_raw = dict(_provider_raw(pid="99200", code="WMDSP1", discount_type="fixed", amount="10.00"))
+    mid_raw["updated_at"] = _WM_T2_5.isoformat()
+
+    fresh_observed = datetime.now(timezone.utc)
+
+    sync_adapter = SimpleNamespace(
+        _tenant_id=tid,
+        _integration_id=ig.id,
+        store_id="STORE1",
+        get_coupon_by_id=AsyncMock(return_value=mid_raw),
+        update_coupon_terms=AsyncMock(return_value=None),
+    )
+
+    svc = StoreSyncService(db, tid, integration_connection_id=ig.id, adapter=sync_adapter)
+    asyncio.run(svc.sync_coupons(
+        raw_list=[mid_raw],
+        record_sync_meta=False,
+        observed_at=fresh_observed,
+    ))
+    db.commit()
+    db.refresh(row)
+
+    assert row.discount_value == "30.00", (
+        "stale mid-T2.5 sync must not revert dispatched value 30"
+    )
+    assert sync_adapter.get_coupon_by_id.call_count == 0, (
+        "no extra detail GET for stale mid-T2.5 observation"
+    )
+    # Watermark must not have regressed
+    wm_after_raw = row.extra_metadata.get("terms_source_updated_at")
+    assert wm_after_raw is not None
+    wm_after_dt = datetime.fromisoformat(wm_after_raw)
+    wm_after_utc = (
+        wm_after_dt.astimezone(timezone.utc) if wm_after_dt.tzinfo
+        else wm_after_dt.replace(tzinfo=timezone.utc)
+    )
+    assert wm_after_utc == expected_wm, (
+        "watermark must not regress after stale mid-T2.5 sync attempt"
+    )
+    from sqlalchemy.orm import class_mapper
+    model_cls = type(row)
+    assert db.query(model_cls).filter_by(tenant_id=tid).count() == 1
 
 
 def test_reconcile_equal_timestamp_different_amount_triggers_canonical_get():
