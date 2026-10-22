@@ -222,6 +222,10 @@ class ProviderRequest:
     observations: Tuple[ToolObservation, ...]
     feedback: Tuple[VerificationFeedback, ...]
     budget: BudgetView
+    # Set by the loop when a tool request could not be followed by another
+    # step: no step or no tool call remains after this one. The step must
+    # answer with what the turn has already observed.
+    reply_only: bool = False
 
 
 @dataclasses.dataclass(frozen=True)

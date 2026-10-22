@@ -171,11 +171,7 @@ class AgentLoop:
             # F1: the attempt is debited durably, under ownership and revision
             # guards, *before* the provider is invoked.
             self._debit(session, steps=1, phase=ac.LoopPhase.REASONING.value)
-            request = ac.ProviderRequest(
-                step_no=session.progress.steps_used, context=context, tools=self._registry.definitions,
-                observations=session.provider_observations(), feedback=session.provider_feedback(),
-                budget=session.budget_view(),
-            )
+            request = self._request(context, session)
             result = self._provider_step(provider, request, session)
             session.check_cancelled(cancelled)
 
@@ -401,11 +397,7 @@ class AgentLoop:
         try:
             session.check_cancelled(cancelled)
             self._debit(session, steps=1, phase=ac.LoopPhase.REASONING.value)
-            request = ac.ProviderRequest(
-                step_no=session.progress.steps_used, context=context, tools=self._registry.definitions,
-                observations=session.provider_observations(), feedback=session.provider_feedback(),
-                budget=session.budget_view(),
-            )
+            request = self._request(context, session)
             result = self._provider_step(provider, request, session)
             session.check_cancelled(cancelled)
             if isinstance(result, ac.ProviderReply):
@@ -429,6 +421,25 @@ class AgentLoop:
             # Recorded however the step ended, a stop that ends the turn included.
             session.record(answered_event, {"outcome": outcome})
         return answer if answer is not None else draft
+
+    def _request(self, context: ac.AuthorizedContext, session: "_Session") -> ac.ProviderRequest:
+        """The request for the step just debited.
+
+        When nothing could follow a tool request — this is the last step, or no
+        tool call remains — the step is marked ``reply_only``: a lookup asked
+        for now would run and leave no step to answer with, and the customer
+        would get nothing. The step answers from what the turn already observed.
+        """
+        budget = session.budget_view()
+        reason = ("last_step" if budget.remaining_steps <= 0
+                  else "no_tool_calls" if budget.remaining_tool_calls <= 0 else "")
+        if reason:
+            session.record("reply_only_step", {"step_no": session.progress.steps_used, "reason": reason})
+        return ac.ProviderRequest(
+            step_no=session.progress.steps_used, context=context, tools=self._registry.definitions,
+            observations=session.provider_observations(), feedback=session.provider_feedback(),
+            budget=budget, reply_only=bool(reason),
+        )
 
     def _provider_step(self, provider: Any, request: ac.ProviderRequest, session: "_Session") -> ac.ProviderResult:
         """Invoke the provider under an enforced wait and validate its result whole."""
