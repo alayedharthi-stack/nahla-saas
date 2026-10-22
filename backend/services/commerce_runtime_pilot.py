@@ -28,6 +28,7 @@ import hashlib
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from core import store_staff_rows as _staff_rows
 from services.turn_trace import SOURCE_COMMERCE_RUNTIME as TRACE_SOURCE
 
 logger = logging.getLogger("nahla.commerce_runtime.pilot")
@@ -44,6 +45,9 @@ HISTORY_LIMIT = 15
 # Recorded when the send path's transmitted text could not be observed. It is
 # never recorded as *unchanged*: an unobserved wire is unknown, not clean.
 WIRE_UNOBSERVED = "wire_text_unobserved"
+
+# The role a row a person at the store typed is kept under (``core.store_staff_rows``).
+STAFF_ROLE = _staff_rows.STAFF_ROLE
 
 # Prefixes the reason when a refused turn is nevertheless kept, because this
 # runtime owns that exact inbound message: ``unfinished_`` when it still has
@@ -459,8 +463,8 @@ def _phone_is_unambiguous(db: Any, *, tenant_id: int, conversation_id: int,
 
 
 def _history_rows(db: Any, *, tenant_id: int, conversation_id: int,
-                  phone: str) -> List[Tuple[str, str, Any]]:
-    """``(direction, body, extra_metadata)`` for this conversation, newest last.
+                  phone: str) -> List[Tuple[str, str, Any, str]]:
+    """``(direction, body, extra_metadata, event_type)`` for this conversation, newest last.
 
     Bound to the conversation the runtime admitted this turn under, never
     resolved from the phone number: one tenant can hold several conversations
@@ -485,8 +489,8 @@ def _history_rows(db: Any, *, tenant_id: int, conversation_id: int,
         .limit(HISTORY_LIMIT)
         .all()
     )
-    return [(str(event.direction or ""), str(event.body or ""), event.extra_metadata)
-            for event in reversed(events)]
+    return [(str(event.direction or ""), str(event.body or ""), event.extra_metadata,
+             str(event.event_type or "")) for event in reversed(events)]
 
 
 def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
@@ -503,6 +507,11 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
     The inbound message being answered now is dropped when the store has already
     persisted it, so the model is not shown the same customer turn twice. A read
     that fails yields no history rather than a guess.
+
+    An outbound row a person at the store typed (``core.store_staff_rows``) is
+    the staff member's message, not the assistant's: it is kept under
+    ``STAFF_ROLE`` with the channel and kind the platform recorded, and a media
+    row without words is kept as its kind alone rather than as placeholder text.
     """
     try:
         rows = _history_rows(db, tenant_id=int(tenant_id),
@@ -514,7 +523,9 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
     from core.outbound_wire_audit import wire_transcript_text  # noqa: PLC0415
 
     turns = []
-    for direction, body, metadata in rows:
+    for row in rows:
+        direction, body, metadata = row[0], row[1], row[2]
+        event_type = row[3] if len(row) > 3 else ""
         outbound = direction in {"out", "outbound"}
         if outbound:
             meta = metadata or {}
@@ -528,6 +539,16 @@ def _prior_turns(db: Any, *, tenant_id: int, conversation_id: int, phone: str,
                 logger.info("[COMMERCE_RUNTIME_PILOT] omitting an unobserved outbound "
                             "row from the model's history tenant=%s conversation=%s",
                             tenant_id, conversation_id)
+                continue
+            staffed = _staff_rows.staff_row(event_type, metadata, body, direction=direction)
+            if staffed is not None:
+                if not staffed.text and staffed.kind == _staff_rows.TEXT_KIND:
+                    continue
+                turn = {"role": STAFF_ROLE, "text": staffed.text,
+                        "channel": staffed.channel, "kind": staffed.kind}
+                if staffed.imported:
+                    turn["imported_history"] = True
+                turns.append(turn)
                 continue
         text = str(body or "").strip()
         if not text:
