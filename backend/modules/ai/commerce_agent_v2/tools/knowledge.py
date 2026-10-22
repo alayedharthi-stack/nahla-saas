@@ -94,12 +94,15 @@ async def search_merchant_knowledge_impl(
         scope=SCOPE_TURN,
         purpose="model_store_knowledge",
         query=text,
+        # The model named what it is looking for: a section titled by one of
+        # its words is on topic however many other words the query carries.
+        title_names_topic=True,
     )
     if str(record.get("status") or "") not in {STATUS_OK, STATUS_NO_RESULTS}:
         return KnowledgeSearchResult(
             status="error", failure_reason="knowledge_retrieval_failed"
         )
-    rows = retrieved_sections(context, scope=SCOPE_TURN, query=text)
+    rows = retrieved_sections(context, scope=SCOPE_TURN, query=text, title_names_topic=True)
     return _result_from_rows(
         context, rows, source="merchant_knowledge", required_product_id=None
     )

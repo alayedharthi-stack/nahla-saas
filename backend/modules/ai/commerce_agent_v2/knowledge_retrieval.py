@@ -119,7 +119,8 @@ def build_product_anchor(
 
 
 def lookup_signature(
-    *, scope: str, query: str, product_ids: list[int], subject: str = ""
+    *, scope: str, query: str, product_ids: list[int], subject: str = "",
+    title_names_topic: bool = False,
 ) -> str:
     parts = [
         str(scope),
@@ -127,6 +128,10 @@ def lookup_signature(
         query_fingerprint(subject),
         ",".join(str(pid) for pid in sorted(product_ids)),
     ]
+    # A lookup that qualifies sections by their titles is a different lookup:
+    # an earlier one of the same words without the rule never answers for it.
+    if title_names_topic:
+        parts.append("title_names_topic")
     return "|".join(parts)
 
 
@@ -169,6 +174,7 @@ def _retrieve(
     product_ids: list[int],
     limit: int,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> dict[str, Any]:
     # The retriever scores the product subject and the customer question as two
     # independent dimensions and keeps the better one, so they are passed
@@ -185,6 +191,7 @@ def _retrieve(
         # Store-wide questions need policies as well as product knowledge.
         # Product-anchored retrieval keeps its existing, narrower kind set.
         include_merchant_facts=not product_ids,
+        title_names_topic=title_names_topic,
     )
 
 
@@ -200,6 +207,7 @@ def _record(
     duration_ms: int,
     failure_reason: str | None = None,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> dict[str, Any]:
     """Append one attempt to the run ledger; bodies never enter the record."""
     record = {
@@ -219,8 +227,13 @@ def _record(
         "duration_ms": int(duration_ms),
         "failure_reason": failure_reason,
     }
+    by_title = [int(row["section_id"]) for row in sections if row.get("qualified_by_title")]
+    if by_title:
+        # Sections found only because the query named their title.
+        record["title_qualified_section_ids"] = by_title
     signature = lookup_signature(
-        scope=scope, query=query, product_ids=product_ids, subject=subject
+        scope=scope, query=query, product_ids=product_ids, subject=subject,
+        title_names_topic=title_names_topic,
     )
     context.cache_knowledge_rows(signature, sections)
     return context.record_knowledge_lookup(record, signature=signature)
@@ -235,17 +248,21 @@ def run_knowledge_lookup(
     product_ids: list[int] | None = None,
     limit: int = KNOWLEDGE_RESULT_LIMIT,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> dict[str, Any]:
     """Run one bounded tenant-scoped lookup and record the attempt.
 
     Never raises: a retrieval failure is recorded as an outcome so the caller
     can answer from structured evidence, and so a later "not documented" reply
-    can prove a lookup actually ran.
+    can prove a lookup actually ran. ``title_names_topic`` is for a lookup the
+    model asked for: a store-wide section whose title the query names as a
+    whole word qualifies whatever its word ratio.
     """
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
     query = normalize_lookup_query(query)
     subject = normalize_lookup_query(subject)
-    signature = lookup_signature(scope=scope, query=query, product_ids=ids, subject=subject)
+    signature = lookup_signature(scope=scope, query=query, product_ids=ids, subject=subject,
+                                 title_names_topic=title_names_topic)
     if context.knowledge_lookup_seen(signature):
         for existing in reversed(context.knowledge_lookups):
             if existing.get("scope") == scope and existing.get("product_ids") == ids:
@@ -253,7 +270,7 @@ def run_knowledge_lookup(
     if not str(query or "").strip():
         return _record(
             context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
-            status=STATUS_SKIPPED_NO_QUERY, sections=[], duration_ms=0,
+            title_names_topic=title_names_topic, status=STATUS_SKIPPED_NO_QUERY, sections=[], duration_ms=0,
         )
     started = time.monotonic()
     fault = active_knowledge_fault()
@@ -263,13 +280,14 @@ def run_knowledge_lookup(
         status = STATUS_TIMEOUT if fault == "timeout" else STATUS_ERROR
         return _record(
             context, scope=scope, purpose=purpose, query=query, product_ids=ids,
-            subject=subject, status=status, sections=[],
+            subject=subject, title_names_topic=title_names_topic, status=status, sections=[],
             duration_ms=int((time.monotonic() - started) * 1000),
             failure_reason=f"phase_2_7b_injected_knowledge_fault:{fault}",
         )
     try:
         payload = _retrieve(
-            context, query=query, product_ids=ids, limit=limit, subject=subject
+            context, query=query, product_ids=ids, limit=limit, subject=subject,
+            title_names_topic=title_names_topic,
         )
     except Exception as exc:  # noqa: BLE001 — recorded as an outcome, never fatal
         logger.debug(
@@ -278,7 +296,7 @@ def run_knowledge_lookup(
         )
         return _record(
             context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
-            status=STATUS_ERROR, sections=[],
+            title_names_topic=title_names_topic, status=STATUS_ERROR, sections=[],
             duration_ms=int((time.monotonic() - started) * 1000),
             failure_reason=f"knowledge_retrieval_exception:{type(exc).__name__}",
         )
@@ -286,13 +304,13 @@ def run_knowledge_lookup(
     if payload.get("kb_retrieval_failed"):
         return _record(
             context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
-            status=STATUS_ERROR, sections=[], duration_ms=duration_ms,
+            title_names_topic=title_names_topic, status=STATUS_ERROR, sections=[], duration_ms=duration_ms,
             failure_reason="knowledge_retrieval_failed",
         )
     rows = _section_rows(payload)
     return _record(
         context, scope=scope, purpose=purpose, query=query, product_ids=ids, subject=subject,
-        status=STATUS_OK if rows else STATUS_NO_RESULTS,
+        title_names_topic=title_names_topic, status=STATUS_OK if rows else STATUS_NO_RESULTS,
         sections=rows, duration_ms=duration_ms,
     )
 
@@ -493,6 +511,7 @@ def retrieved_sections(
     query: str,
     product_ids: list[int] | None = None,
     subject: str = "",
+    title_names_topic: bool = False,
 ) -> list[dict[str, Any]]:
     """The raw sections one recorded lookup returned, without re-querying."""
     ids = sorted({int(pid) for pid in (product_ids or []) if int(pid) > 0})
@@ -502,6 +521,7 @@ def retrieved_sections(
             query=normalize_lookup_query(query),
             product_ids=ids,
             subject=normalize_lookup_query(subject),
+            title_names_topic=title_names_topic,
         )
     )
 
