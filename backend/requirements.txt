@@ -40,7 +40,7 @@ sentry-sdk[fastapi]>=2.10.0,<3.0.0
 phonenumbers>=8.13.0
 
 # ── Spreadsheet parsing (customer import) ────────────────────────────────────
-openpyxl>=3.1.2
+openpyxl>=3.1.5
 
 # ── AI / Claude ───────────────────────────────────────────────────────────────
 anthropic>=0.30.0
