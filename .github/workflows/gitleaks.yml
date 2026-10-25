@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Full history so the action can reason about the commit graph,
           # not just HEAD. Required for the diff-aware mode used on PRs.
