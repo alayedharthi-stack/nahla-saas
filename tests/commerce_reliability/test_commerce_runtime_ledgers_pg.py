@@ -1168,9 +1168,15 @@ def test_standalone_0108_schema_keeps_the_foundation_terminal_available(pg_admin
 def _wait_for_lock_waiters(engine, expected: int) -> None:
     """Return once exactly ``expected`` other backends of this database wait on
     a lock. Synchronisation is on observed backend state, never on elapsed
-    time; the deadline only turns a hang into a failure."""
+    time; the deadline only turns a hang into a failure.
+
+    Inside one transaction ``pg_stat_activity`` lists the backends captured at
+    its first read and keeps that list until the transaction ends: a contender
+    whose connection opens after the first poll is never listed, so a poll loop
+    inside one transaction can count 0 until the deadline. Each poll runs as its
+    own autocommit statement and therefore sees the backends that exist now."""
     deadline = time.monotonic() + 30
-    with engine.connect() as conn:
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         while True:
             waiting = int(conn.execute(text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
