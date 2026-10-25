@@ -15,7 +15,9 @@ from typing import Any, Dict, Optional
 from ..types import (
     BrainContext,
     INTENT_GREETING,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
     INTENT_PRODUCT_VISUAL_REQUEST,
+    INTENT_SOLUTION_SEEKING_COMMERCE,
     INTENT_START_ORDER,
     INTENT_TALK_HUMAN,
     INTENT_TRACK_ORDER,
@@ -75,8 +77,31 @@ _BROWSE_INTENTS = frozenset({
     "hesitation",
 })
 
+# Authoritative intent names already computed for the turn. Reuse
+# ctx.intent only — do not reclassify the inbound message here.
+_AUTHORITATIVE_SOLUTION_SEEKING_INTENTS = frozenset({
+    INTENT_SOLUTION_SEEKING_COMMERCE,
+    INTENT_NEED_BASED_PRODUCT_ADVICE,
+    "need_based_product_advice",
+})
+
 HIGH_BROWSE_THRESHOLD = 0.62
 MEDIUM_BROWSE_THRESHOLD = 0.40
+
+
+def is_authoritative_solution_seeking_intent(intent_name: str) -> bool:
+    """True when the turn's existing intent already owns solution-seeking advice."""
+    return str(intent_name or "").strip() in _AUTHORITATIVE_SOLUTION_SEEKING_INTENTS
+
+
+def _explicit_catalog_browse_frame(
+    *,
+    inventory_frame: bool,
+    explore_frame: bool,
+    navigation_state: bool,
+) -> bool:
+    """Stronger catalog commands / in-session navigation — not general_store_browse."""
+    return bool(inventory_frame or explore_frame or navigation_state)
 
 
 def _normalize_ar(text: str) -> str:
@@ -317,19 +342,35 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         hard_blocked = True
         block_reason = "specific_product_target"
 
-    exit_reason = ""
-    if advisory_or_comparison and not hard_blocked:
-        exit_reason = "advisory_or_comparison"
-
+    authoritative_solution_seeking = is_authoritative_solution_seeking_intent(intent_name)
+    explicit_catalog_frame = _explicit_catalog_browse_frame(
+        inventory_frame=inventory_frame,
+        explore_frame=explore_frame,
+        navigation_state=navigation_state,
+    )
+    # general_store_browse is a broad token conjunction (question opener +
+    # merchant scope). It must not erase an already-authoritative
+    # solution-seeking turn. Explicit catalog frames still own.
+    catalog_browse_heuristic = explicit_catalog_frame or (
+        not authoritative_solution_seeking
+        and (general_store_browse or score >= HIGH_BROWSE_THRESHOLD)
+    )
     catalog_browse_intent = (
         not hard_blocked
         and not advisory_or_comparison
-        and (
-            inventory_frame
-            or general_store_browse
-            or score >= HIGH_BROWSE_THRESHOLD
-        )
+        and catalog_browse_heuristic
     )
+
+    exit_reason = ""
+    if advisory_or_comparison and not hard_blocked:
+        exit_reason = "advisory_or_comparison"
+    elif (
+        authoritative_solution_seeking
+        and general_store_browse
+        and not explicit_catalog_frame
+        and not hard_blocked
+    ):
+        exit_reason = "authoritative_solution_seeking"
 
     scoped_catalog_subject = ""
     try:
@@ -371,6 +412,8 @@ def evaluate_catalog_navigation_signals(ctx: BrainContext) -> CatalogNavigationS
         "navigation_state": navigation_state,
         "score": round(score, 3),
         "product_visual_request": product_visual_request,
+        "authoritative_solution_seeking": authoritative_solution_seeking,
+        "explicit_catalog_frame": explicit_catalog_frame,
     })
 
     return CatalogNavigationSignals(
@@ -416,6 +459,13 @@ def message_indicates_catalog_browse(message: str, *, intent_name: str = "") -> 
         score += 0.22
     if str(intent_name or "").strip() in _BROWSE_INTENTS:
         score += 0.10
+    explicit_catalog_frame = _explicit_catalog_browse_frame(
+        inventory_frame=inventory_frame,
+        explore_frame=explore_frame,
+        navigation_state=False,
+    )
+    if is_authoritative_solution_seeking_intent(intent_name):
+        return explicit_catalog_frame
     return score >= HIGH_BROWSE_THRESHOLD or inventory_frame or general_store_browse
 
 
@@ -461,6 +511,7 @@ __all__ = [
     "HIGH_BROWSE_THRESHOLD",
     "MEDIUM_BROWSE_THRESHOLD",
     "evaluate_catalog_navigation_signals",
+    "is_authoritative_solution_seeking_intent",
     "is_collections_start_over_request",
     "is_group_products_more_request",
     "is_navigation_more_request",

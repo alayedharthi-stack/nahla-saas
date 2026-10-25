@@ -17,6 +17,7 @@ from ..types import BrainContext, Decision
 from .navigation_signals import (
     HIGH_BROWSE_THRESHOLD,
     evaluate_catalog_navigation_signals,
+    is_authoritative_solution_seeking_intent,
     is_collections_start_over_request,
     is_navigation_more_request,
 )
@@ -247,6 +248,29 @@ def _try_native_catalog_entry_decision(
             },
         },
     )
+
+
+def _should_yield_to_authoritative_solution_seeking(
+    ctx: BrainContext,
+    signals: Any,
+) -> bool:
+    """Yield PATH_GROUPS when the turn's existing intent is solution-seeking.
+
+    Reuses ``ctx.intent`` only. Does not reclassify the message. Explicit
+    catalog frames (inventory/explore/in-session navigation) keep ownership.
+    """
+    intent_name = str(getattr(getattr(ctx, "intent", None), "name", "") or "")
+    if not is_authoritative_solution_seeking_intent(intent_name):
+        return False
+    evidence = dict(getattr(signals, "evidence", None) or {})
+    if (
+        evidence.get("explicit_catalog_frame")
+        or evidence.get("inventory_frame")
+        or evidence.get("explore_frame")
+        or bool(getattr(signals, "navigation_state", False))
+    ):
+        return False
+    return True
 
 
 def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
@@ -727,6 +751,15 @@ def try_catalog_navigation_decision(ctx: BrainContext) -> Optional[Decision]:
             ctx,
             navigator_owner=False,
             owner_exit_reason=signals.exit_reason or "advisory_or_comparison",
+            extra={"signals": signals.evidence},
+        )
+        return None
+
+    if _should_yield_to_authoritative_solution_seeking(ctx, signals):
+        _log_navigator_event(
+            ctx,
+            navigator_owner=False,
+            owner_exit_reason=signals.exit_reason or "authoritative_solution_seeking",
             extra={"signals": signals.evidence},
         )
         return None
