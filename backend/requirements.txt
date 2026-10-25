@@ -34,7 +34,7 @@ cryptography>=42.0.0,<46.0.0
 redis>=5.0.0,<6.0.0
 
 # ── Error monitoring (Phase 1A) ──────────────────────────────────────────────
-sentry-sdk[fastapi]>=2.10.0,<3.0.0
+sentry-sdk[fastapi]>=2.60.0,<3.0.0
 
 # ── Phone normalization ───────────────────────────────────────────────────────
 phonenumbers>=8.13.0
