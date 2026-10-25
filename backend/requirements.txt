@@ -31,7 +31,7 @@ pyotp>=2.9.0,<3.0.0
 cryptography>=42.0.0,<46.0.0
 
 # ── Rate limiting + JWT revocation (Phase 1A) ────────────────────────────────
-redis>=5.0.0,<6.0.0
+redis>=7.4.0,<8.0.0
 
 # ── Error monitoring (Phase 1A) ──────────────────────────────────────────────
 sentry-sdk[fastapi]>=2.10.0,<3.0.0
