@@ -942,7 +942,8 @@ async def push_coupon_salla(coupon_id: int, request: Request, db: Session = Depe
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    coupon = db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id).first()
+    coupon = (db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id)
+              .populate_existing().with_for_update().first())
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
 
@@ -1021,12 +1022,32 @@ async def sync_salla_coupons(request: Request, db: Session = Depends(get_db)):
 @router.patch("/{coupon_id}")
 async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
-    if body.code is not None:
+    terms_fields = {"value", "expires"} & body.model_fields_set
+    if body.code is not None or terms_fields:
         db.query(Tenant.id).filter_by(id=tenant_id).with_for_update().one()
     coupon = (db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id)
               .populate_existing().with_for_update().first())
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
+
+    meta_now = coupon.extra_metadata or {}
+    provider_bound = bool(meta_now.get("salla_coupon_id") or meta_now.get("external_id") or meta_now.get("salla_identity"))
+    if terms_fields and provider_bound:
+        if body.model_fields_set - {"value", "expires"}:
+            raise HTTPException(status_code=409, detail="coupon_terms_must_be_edited_separately")
+        from services.coupon_terms_sync import CouponTermsError, apply_bound_terms  # noqa: PLC0415
+        from services.coupon_identity import CouponIdentityConflict  # noqa: PLC0415
+        from store_integration.registry import adapter_for_integration  # noqa: PLC0415
+        fields = {name: getattr(body, name) for name in terms_fields}
+        try:
+            from services.coupon_terms_sync import bound_integration  # noqa: PLC0415
+            integration, _, _ = bound_integration(db, coupon)
+            confirmed, result_meta = await apply_bound_terms(db, coupon, fields,
+                                                                adapter_for_integration(integration))
+        except (CouponTermsError, CouponIdentityConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"updated": confirmed, "accepted": True, "sync_status": result_meta.get("sync_status"),
+                "sync_error": result_meta.get("sync_error")}
 
     if body.code is not None:
         duplicate = db.query(Coupon).filter(

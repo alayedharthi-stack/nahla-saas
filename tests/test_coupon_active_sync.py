@@ -19,6 +19,7 @@ def setup_state():
     db, tid = _make_db()
     coupon = Coupon(tenant_id=tid, code="STATUS1", source_type="manual",
                     extra_metadata={"source": "dashboard", "salla_coupon_id": "101",
+                                    "salla_identity": {"tenant_id": tid, "integration_id": 22, "store_id": "202"},
                                     "active": True, "sync_status": "synced", "salla_synced": True})
     db.add(coupon)
     db.add(Integration(id=22, tenant_id=tid, provider="salla", enabled=True,
@@ -215,6 +216,33 @@ def test_status_adapter_sends_only_status_and_propagates_failure(monkeypatch):
     with pytest.raises(httpx.HTTPStatusError):
         asyncio.run(adapter.set_coupon_active("101", True))
     assert seen[1][1] == {"status": "active"}
+
+
+def test_terms_adapter_sends_only_requested_fields_and_propagates_failure(monkeypatch):
+    import json
+    import httpx
+    from store_adapters.salla_adapter import SallaAdapter
+
+    adapter = SallaAdapter(api_key="fake-test-only", store_id="202", tenant_id=1, integration_id=22)
+    adapter._ensure_token_fresh = AsyncMock()
+    request = httpx.Request("PUT", "https://api.salla.dev/admin/v2/coupons/101")
+    responses = [httpx.Response(200, request=request), httpx.Response(422, request=request)]
+    seen = []
+
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def put(self, url, **kwargs):
+            seen.append((url, json.loads(kwargs["content"])))
+            return responses.pop(0)
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    asyncio.run(adapter.update_coupon_terms("101", amount="2.5", expiry_date="2027-03-02"))
+    assert seen[0][1] == {"amount": 2.5, "expiry_date": "2027-03-02"}
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(adapter.update_coupon_terms("101", amount="3"))
+    assert seen[1][1] == {"amount": 3}
 
 
 @pytest.mark.parametrize("origin", ["manual", "imported", "system"])

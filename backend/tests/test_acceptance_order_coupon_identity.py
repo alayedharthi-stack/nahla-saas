@@ -2,13 +2,14 @@
 import asyncio
 import socket
 import os
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 import pytest
@@ -20,6 +21,7 @@ from modules.ai.commerce_agent_v2.tools.orders import list_customer_orders_impl,
 from services.coupon_identity import CouponIdentityConflict, resolve_import_coupon, same_code
 from services.coupon_active_sync import queue_active_change, dispatch_active_change
 from services.store_sync import StoreSyncService
+from services.coupon_salla_push import push_coupon_to_salla
 from routers import coupons as coupon_routes
 from tests.commerce_scenario_fixtures import (
     DEFAULT_PHONE_E164, make_scenario_db, seed_tenant, seed_customer, seed_conversation, seed_order,
@@ -59,6 +61,8 @@ def world(monkeypatch, request, pg_engine):
         engine = pg_engine
         pg_connection = engine.connect()
         outer = pg_connection.begin()
+        pg_connection.execute(text("SET LOCAL TIME ZONE 'Asia/Riyadh'"))
+        assert pg_connection.execute(text("SHOW TIME ZONE")).scalar_one() == "Asia/Riyadh"
         db = Session(bind=pg_connection, join_transaction_mode="create_savepoint")
     else:
         db, engine = make_scenario_db()
@@ -199,7 +203,7 @@ def test_case_variant_import_updates_same_bound_identity_and_origin(world):
         assert asyncio.run(svc.sync_coupons(raw_list=[raw], record_sync_meta=False)) == 1
         world.db.commit()
     world.db.refresh(row)
-    assert world.db.query(Coupon).count() == 1
+    assert world.db.query(Coupon).filter_by(tenant_id=world.tenant.id).count() == 1
     assert row.code == "COAT10" and row.discount_value == "2"
     assert row.source_type == "manual" and row.extra_metadata["source"] == "dashboard"
     assert row.extra_metadata["active"] is False
@@ -241,7 +245,130 @@ def test_other_store_cannot_adopt_case_variant_even_under_same_tenant(world):
     other_binding = {"tenant_id": world.tenant.id, "integration_id": other.id, "store_id": "second-store"}
     with pytest.raises(CouponIdentityConflict, match="coupon_identity_ambiguous"):
         resolve_import_coupon(world.db, world.tenant.id, {"id": 202, "code": "coat10"}, other_binding)
-    assert world.db.query(Coupon).count() == 1
+    assert world.db.query(Coupon).filter_by(tenant_id=world.tenant.id).count() == 1
+
+
+def test_disabled_original_store_does_not_authorize_legacy_adoption(world):
+    old, old_binding, _ = coupon_scope(world)
+    row = manual(world, old_binding)
+    meta = dict(row.extra_metadata)
+    meta.pop("salla_identity")
+    row.extra_metadata = meta
+    old.enabled = False
+    replacement = Integration(tenant_id=world.tenant.id, provider="salla", enabled=True,
+                              external_store_id="replacement-store", config={"store_id": "replacement-store"})
+    world.db.add(replacement)
+    world.db.commit()
+    binding = {"tenant_id": world.tenant.id, "integration_id": replacement.id,
+               "store_id": "replacement-store"}
+    with pytest.raises(CouponIdentityConflict, match="legacy_identity_unverified"):
+        resolve_import_coupon(world.db, world.tenant.id, {"id": 101, "code": "coat10"}, binding)
+    assert not row.extra_metadata.get("salla_identity")
+
+
+def test_verified_push_records_store_binding_and_provider_id(world):
+    integration, binding, adapter = coupon_scope(world)
+    row = Coupon(tenant_id=world.tenant.id, code="COAT10", discount_type="percentage",
+                 discount_value="1", source_type="manual", extra_metadata={"source": "dashboard"})
+    world.db.add(row)
+    world.db.commit()
+    adapter.create_coupon = AsyncMock(return_value={"id": 101, "code": "coat10"})
+    adapter.get_coupon_by_id = AsyncMock(return_value={"id": 101, "code": "coat10"})
+    ok, _ = asyncio.run(push_coupon_to_salla(world.db, world.tenant.id, row, adapter=adapter))
+    world.db.commit()
+    assert ok and row.extra_metadata["salla_identity"] == binding
+    assert row.extra_metadata["salla_coupon_id"] == "101"
+    assert row.extra_metadata.get("coupon_create_unverified") is None
+    assert not asyncio.run(push_coupon_to_salla(world.db, world.tenant.id, row, adapter=adapter))[0]
+    adapter.create_coupon.assert_awaited_once()
+
+
+def test_push_without_provider_readback_remains_unverified_and_cannot_retry(world):
+    _, binding, adapter = coupon_scope(world)
+    row = Coupon(tenant_id=world.tenant.id, code="COAT10", discount_type="percentage",
+                 discount_value="1", source_type="manual", extra_metadata={"source": "dashboard"})
+    world.db.add(row)
+    world.db.commit()
+    adapter.create_coupon = AsyncMock(return_value={"id": 101, "code": "coat10"})
+    adapter.get_coupon_by_id = AsyncMock(return_value={"id": 999, "code": "coat10"})
+    ok, _ = asyncio.run(push_coupon_to_salla(world.db, world.tenant.id, row, adapter=adapter))
+    world.db.commit()
+    assert not ok and row.extra_metadata["coupon_create_unverified"] is True
+    assert row.extra_metadata.get("salla_identity") is None
+    assert row.extra_metadata["salla_coupon_id"] == "101"
+    assert not asyncio.run(push_coupon_to_salla(world.db, world.tenant.id, row, adapter=adapter))[0]
+    adapter.create_coupon.assert_awaited_once()
+    with pytest.raises(CouponIdentityConflict, match="legacy_identity_unverified"):
+        resolve_import_coupon(world.db, world.tenant.id, {"id": 101, "code": "COAT10"}, binding)
+
+
+def test_import_expiry_is_utc_clock_across_repeated_reconciliation(world):
+    integration, binding, adapter = coupon_scope(world)
+    svc = StoreSyncService(world.db, world.tenant.id, integration_connection_id=integration.id, adapter=adapter)
+    for expiry, expected in [
+        ("2027-03-02T00:30:00Z", datetime(2027, 3, 2, 0, 30)),
+        ("2027-03-03T05:45:00+03:00", datetime(2027, 3, 3, 2, 45)),
+        ("2027-03-04", datetime(2027, 3, 3, 21, 0)),
+    ]:
+        raw = {"id": 101, "code": "COAT10", "type": "percentage", "amount": 2,
+               "expiry_date": expiry}
+        assert asyncio.run(svc.sync_coupons(raw_list=[raw], record_sync_meta=False)) == 1
+        world.db.commit()
+        saved = world.db.query(Coupon).filter_by(tenant_id=world.tenant.id).one()
+        world.db.refresh(saved)
+        assert saved.expires_at == expected
+        assert saved.extra_metadata["salla_identity"] == binding
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+@pytest.mark.parametrize("source_type", ["manual", "imported"])
+def test_bound_value_and_expiry_require_provider_readback(world, monkeypatch, confirmed, source_type):
+    integration, binding, adapter = coupon_scope(world)
+    row = manual(world, binding)
+    row.source_type = source_type
+    world.db.commit()
+    prior = {"id": 101, "code": "coat10", "type": "percentage", "amount": "1",
+             "expiry_date": "2027-03-01"}
+    changed = dict(prior, amount="2.5", expiry_date="2027-03-02") if confirmed else prior
+    adapter.get_coupon_by_id = AsyncMock(side_effect=[prior, changed])
+    adapter.update_coupon_terms = AsyncMock()
+    monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: world.tenant.id)
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+    result = asyncio.run(coupon_routes.patch_coupon(
+        row.id, coupon_routes.CouponPatchIn(value="2.5", expires="2027-03-02"),
+        SimpleNamespace(), world.db,
+    ))
+    world.db.refresh(row)
+    adapter.update_coupon_terms.assert_awaited_once_with("101", amount="2.5", expiry_date="2027-03-02")
+    assert row.extra_metadata["salla_coupon_id"] == "101"
+    assert row.extra_metadata["salla_identity"] == binding
+    if confirmed:
+        assert result["updated"] is True and row.discount_value == "2.5", result
+        assert row.expires_at == datetime(2027, 3, 1, 21)
+        assert not row.extra_metadata.get("terms_sync_pending")
+    else:
+        assert result["updated"] is False and row.discount_value == "1"
+        assert row.extra_metadata["sync_error"] == "provider_terms_unconfirmed"
+        assert row.extra_metadata["terms_sync_pending"]
+
+
+def test_fixed_coupon_salla_amount_alias_can_confirm_terms(world, monkeypatch):
+    _, _, adapter = coupon_scope(world)
+    row = manual(world, {"tenant_id": world.tenant.id,
+                         "integration_id": adapter._integration_id, "store_id": adapter.store_id})
+    row.discount_type = "fixed"
+    world.db.commit()
+    adapter.get_coupon_by_id = AsyncMock(return_value={"id": 101, "code": "coat10",
+                                                      "type": "amount", "amount": "2.5"})
+    adapter.update_coupon_terms = AsyncMock()
+    monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: world.tenant.id)
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+    result = asyncio.run(coupon_routes.patch_coupon(
+        row.id, coupon_routes.CouponPatchIn(value="2.5"), SimpleNamespace(), world.db,
+    ))
+    assert result["updated"] is True
+    assert row.discount_value == "2.5"
+    adapter.update_coupon_terms.assert_not_awaited()
 
 
 def test_active_change_accepts_only_same_id_ascii_case_and_confirms(world):
@@ -311,7 +438,7 @@ def test_concurrent_api_creates_serialize_case_variants(pg_engine, monkeypatch):
     if pg_engine is None:
         pytest.skip("isolated PostgreSQL target required")
     with Session(pg_engine) as db:
-        tenant = seed_tenant(db, name="Synthetic concurrent clothing store")
+        tenant = seed_tenant(db, name="Synthetic concurrent clothing store " + uuid4().hex)
         tenant_id = tenant.id
         db.commit()
     monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: tenant_id)

@@ -6,7 +6,7 @@ import { resolve, extname, sep } from 'node:path'
 import { chromium } from 'playwright'
 
 const root = resolve(process.env.NAHLA_COUPON_TEST_DIST || 'dist')
-let saved = [], received = []
+let saved = [], received = [], edits = []
 const json = (res, value, status = 200) => {
   res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(value))
 }
@@ -18,6 +18,16 @@ const server = createServer(async (req, res) => {
     saved.push({ ...payload, id: saved.length + 1, source_type: 'manual', origin: 'manual',
       active: true, usages: 0, sync_status: 'local' })
     json(res, saved.at(-1), 201); return
+  }
+  if (path === '/coupons/1' && req.method === 'PATCH') {
+    let body = ''; for await (const part of req) body += part
+    const payload = JSON.parse(body); edits.push(payload)
+    if (edits.length === 1) {
+      json(res, { updated: false, accepted: true, sync_status: 'failed', sync_error: 'provider_terms_unconfirmed' })
+      return
+    }
+    saved[0] = { ...saved[0], value: payload.value, expires: '2027-03-01T21:00:00Z', sync_status: 'synced' }
+    json(res, { updated: true, accepted: true, sync_status: 'synced' }); return
   }
   if (path === '/coupons' && !String(req.headers.accept).includes('text/html')) {
     json(res, { coupons: saved, rules: [], levels: [], global_defaults: {}, ai_policy: {} }); return
@@ -79,6 +89,38 @@ try {
     await context.close()
     console.log(JSON.stringify({ timezoneId, controlled_date: true, controlled_time: true, payload_matches: true, saved_readback_matches: true }))
   }
+  saved = [{ id: 1, code: 'EDITBOUND', type: 'percentage', value: '1',
+    expires: '2027-02-28T21:00:00Z', source_type: 'manual', origin: 'manual',
+    salla_coupon_id: '101', active: true, usages: 0, sync_status: 'synced' }]
+  edits = []
+  const context = await browser.newContext({ timezoneId: 'Asia/Riyadh' })
+  await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
+  await context.addInitScript(({ origin }) => {
+    const claims = { sub: 'synthetic@example.test', role: 'merchant', tenant_id: 11, user_id: 11, exp: Math.floor(Date.now() / 1000) + 72 * 3600 }
+    localStorage.setItem('nahla_api_base_override', origin)
+    localStorage.setItem('nahla_auth', '1')
+    localStorage.setItem('nahla_token', `synthetic.${btoa(JSON.stringify(claims))}.synthetic`)
+    localStorage.setItem('nahla_tenant_id', '11')
+    localStorage.setItem('nahla_role', 'merchant')
+  }, { origin })
+  const page = await context.newPage()
+  await page.goto(origin + '/coupons')
+  await page.locator('tr').filter({ hasText: 'EDITBOUND' }).locator('button').filter({ hasText: /تعديل/ }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.locator('#coupon-terms-value').fill('2.5')
+  await dialog.locator('#coupon-terms-expires').fill('2027-03-02')
+  await dialog.locator('button[type=submit]').click()
+  await dialog.getByRole('status').waitFor()
+  assert.equal(await dialog.isVisible(), true, 'failed provider confirmation keeps editor open')
+  assert.deepEqual(edits[0], { value: '2.5', expires: '2027-03-02' })
+  assert.equal(saved[0].value, '1', 'failed provider confirmation leaves local value unchanged')
+  await dialog.locator('button[type=submit]').click()
+  await dialog.waitFor({ state: 'detached' })
+  assert.deepEqual(edits[1], edits[0])
+  assert.equal(saved[0].value, '2.5')
+  assert.equal(saved[0].expires, '2027-03-01T21:00:00Z')
+  await context.close()
+  console.log('COUPON_TERMS_BROWSER_PASS failed readback retained editor; confirmed readback closed it')
   console.log('COUPON_EXPIRY_BROWSER_PASS local synthetic persistence; backend persistence tested separately')
 } finally {
   if (browser) await browser.close()

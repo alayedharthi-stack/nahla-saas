@@ -38,15 +38,7 @@ def adapter_binding(adapter, tenant_id, connection_id=None):
 
 def binding_matches(meta, binding):
     prior = (meta or {}).get("salla_identity")
-    return prior is None or prior == binding
-
-
-def legacy_scope_is_unique(db, binding):
-    from models import Integration
-    rows = db.query(Integration).filter_by(tenant_id=binding["tenant_id"], provider="salla", enabled=True).all()
-    # An unbound legacy record cannot be adopted across multiple merchant stores.
-    stores = {str(row.external_store_id or (row.config or {}).get("store_id") or (row.config or {}).get("merchant_id") or "") for row in rows}
-    return stores == {binding["store_id"]} and any(row.id == binding["integration_id"] for row in rows)
+    return prior == binding
 
 
 def validate_import_binding(db, binding):
@@ -76,13 +68,15 @@ def resolve_import_coupon(db, tenant_id, raw, binding):
         if "salla_retirement" in meta:
             continue  # Immutable historical row; never an operational candidate.
         pid = provider_id(meta)
+        if not meta.get("salla_identity") and (pid == incoming_id or same_code(row.code, code)):
+            # An enabled integration is not proof that an old row belonged to
+            # that store. Only a prior verified binding permits adoption.
+            raise CouponIdentityConflict("legacy_identity_unverified")
         if not binding_matches(meta, binding):
             if same_code(row.code, code):
                 collisions.append(row)
             continue
         if pid == incoming_id:
-            if not meta.get("salla_identity") and not legacy_scope_is_unique(db, binding):
-                raise CouponIdentityConflict("legacy_store_ambiguous")
             # A genuine provider rename is not a case-only identity transition.
             if not same_code(row.code, code):
                 raise CouponIdentityConflict("provider_code_changed")
@@ -101,8 +95,6 @@ def assert_dispatch_identity(db, row, binding, incoming_id, code):
         raise CouponIdentityConflict("coupon_retired")
     if not binding_matches(row.extra_metadata, binding) or provider_id(row.extra_metadata) != incoming_id or not same_code(code, row.code):
         raise CouponIdentityConflict("provider_coupon_identity_mismatch")
-    if not (row.extra_metadata or {}).get("salla_identity") and not legacy_scope_is_unique(db, binding):
-        raise CouponIdentityConflict("legacy_store_ambiguous")
     duplicates = (db.query(Coupon).filter(Coupon.tenant_id == row.tenant_id, Coupon.id != row.id).filter(or_(
         Coupon.extra_metadata["salla_coupon_id"].as_string() == incoming_id,
         Coupon.extra_metadata["external_id"].as_string() == incoming_id,
