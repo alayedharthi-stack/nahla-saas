@@ -18,6 +18,28 @@ class CouponTermsError(ValueError):
     pass
 
 
+def _lock_current_owner(db, row_id, tenant_id, operation_id, pid, binding,
+                        original_code, original_type, states=("in_flight", "write_in_flight")):
+    """Check the durable owner under a fresh short lock, never across I/O."""
+    from models import Coupon
+
+    db.rollback()
+    current = (db.query(Coupon).filter_by(id=row_id, tenant_id=tenant_id)
+               .populate_existing().with_for_update().first())
+    if current is None:
+        db.rollback()
+        raise CouponTermsError("coupon_identity_unavailable")
+    meta = dict(current.extra_metadata or {})
+    pending = meta.get("terms_sync_pending") or {}
+    if (pending.get("operation_id") != operation_id or pending.get("state") not in states
+            or pending.get("provider_id") != pid or pending.get("binding") != binding
+            or meta.get("active_sync_pending") or current.code != original_code
+            or current.discount_type != original_type):
+        db.rollback()
+        raise CouponTermsError("coupon_operation_superseded")
+    return current, meta, pending
+
+
 def _amount(value, discount_type):
     if not re.fullmatch(r"\d+(?:\.\d+)?", str(value)):
         raise CouponTermsError("invalid_coupon_value")
@@ -118,8 +140,6 @@ def _check_remote(db, row, binding, pid, raw):
 
 async def apply_bound_terms(db, row, fields, adapter):
     """Durable intent, GET/targeted PUT/GET, then confirmed local commit."""
-    from models import Coupon
-
     integration, binding, pid = bound_integration(db, row)
     desired = desired_terms(row, fields)
     row_id, tenant_id = row.id, row.tenant_id
@@ -130,11 +150,17 @@ async def apply_bound_terms(db, row, fields, adapter):
     if meta.get("active_sync_pending"):
         raise CouponTermsError("coupon_change_already_pending")
     pending = meta.get("terms_sync_pending")
-    if pending and (pending.get("desired") != desired or pending.get("provider_id") != pid):
-        raise CouponTermsError("coupon_change_already_pending")
+    if pending:
+        # A matching live request is still owned by its original worker. A
+        # timeout with an unknown outcome never transfers that ownership.
+        if (pending.get("state") != "failed" or meta.get("sync_status") != "failed"
+                or pending.get("desired") != desired or pending.get("provider_id") != pid
+                or pending.get("binding") != binding):
+            raise CouponTermsError("coupon_change_already_pending")
     operation_id = uuid4().hex
-    meta["terms_sync_pending"] = {"operation_id": operation_id, "desired": desired,
-                                  "provider_id": pid, "binding": binding}
+    meta["terms_sync_pending"] = {"operation_id": operation_id, "state": "in_flight",
+                                  "requested_at": datetime.now(timezone.utc).isoformat(),
+                                  "desired": desired, "provider_id": pid, "binding": binding}
     meta.update(sync_status="pending", salla_synced=False, sync_error=None)
     row.extra_metadata = meta
     flag_modified(row, "extra_metadata")
@@ -146,6 +172,16 @@ async def apply_bound_terms(db, row, fields, adapter):
         raw = await adapter.get_coupon_by_id(pid)
         _check_remote(db, row, binding, pid, raw)
         if not _remote_matches(raw, desired):
+            current, fresh_meta, reserved = _lock_current_owner(
+                db, row_id, tenant_id, operation_id, pid, binding,
+                original_code, original_type, states=("in_flight",))
+            # A timed-out PUT may still apply later at Salla. Persist the
+            # write-started state before I/O so no request can steal it.
+            reserved["state"] = "write_in_flight"
+            fresh_meta["terms_sync_pending"] = reserved
+            current.extra_metadata = fresh_meta
+            flag_modified(current, "extra_metadata")
+            db.commit()  # Release the row lock before provider I/O.
             await adapter.update_coupon_terms(pid, **desired)
             raw = await adapter.get_coupon_by_id(pid)
         _check_remote(db, row, binding, pid, raw)
@@ -163,19 +199,11 @@ async def apply_bound_terms(db, row, fields, adapter):
 
     # The provider I/O ran outside a row lock. Drop the read transaction and
     # reload under a fresh lock before touching local state or JSON metadata.
-    db.rollback()
-    current = (db.query(Coupon).filter_by(id=row_id, tenant_id=tenant_id)
-               .populate_existing().with_for_update().first())
-    if current is None:
-        db.rollback()
-        return False, {"sync_status": "failed", "sync_error": "coupon_identity_unavailable"}
-    meta = dict(current.extra_metadata or {})
-    pending = meta.get("terms_sync_pending") or {}
-    if (pending.get("operation_id") != operation_id or pending.get("provider_id") != pid
-            or pending.get("binding") != binding or meta.get("active_sync_pending")
-            or current.code != original_code or current.discount_type != original_type):
-        db.rollback()
-        return False, {"sync_status": "failed", "sync_error": "coupon_operation_superseded"}
+    try:
+        current, meta, pending = _lock_current_owner(
+            db, row_id, tenant_id, operation_id, pid, binding, original_code, original_type)
+    except CouponTermsError as exc:
+        return False, {"sync_status": "failed", "sync_error": str(exc)}
     if failure is None:
         if confirmed_amount is not None:
             current.discount_value = confirmed_amount
@@ -185,6 +213,10 @@ async def apply_bound_terms(db, row, fields, adapter):
         meta.update(sync_status="synced", salla_synced=True, sync_error=None,
                     terms_confirmed_at=datetime.now(timezone.utc).isoformat())
     else:
+        # Only a failure before PUT is known-safe to retry. A PUT timeout or
+        # failed readback has an unknown remote outcome and needs reconciliation.
+        pending["state"] = "unknown" if pending.get("state") == "write_in_flight" else "failed"
+        meta["terms_sync_pending"] = pending
         meta.update(sync_status="failed", salla_synced=False, sync_error=failure)
     current.extra_metadata = meta
     flag_modified(current, "extra_metadata")

@@ -352,6 +352,13 @@ def test_bound_value_and_expiry_require_provider_readback(world, monkeypatch, co
         assert result["updated"] is False and row.discount_value == "1"
         assert row.extra_metadata["sync_error"] == "provider_terms_unconfirmed"
         assert row.extra_metadata["terms_sync_pending"]
+        assert row.extra_metadata["terms_sync_pending"]["state"] == "unknown"
+        with pytest.raises(HTTPException) as retry:
+            asyncio.run(coupon_routes.patch_coupon(
+                row.id, coupon_routes.CouponPatchIn(value="2.5", expires="2027-03-02"),
+                SimpleNamespace(), world.db,
+            ))
+        assert retry.value.status_code == 409
 
 
 def test_fixed_coupon_salla_amount_alias_can_confirm_terms(world, monkeypatch):
@@ -371,6 +378,56 @@ def test_fixed_coupon_salla_amount_alias_can_confirm_terms(world, monkeypatch):
     assert result["updated"] is True
     assert row.discount_value == "2.5"
     adapter.update_coupon_terms.assert_not_awaited()
+
+
+def test_known_provider_timeout_is_retryable_only_for_same_desired_terms(world, monkeypatch):
+    _, binding, adapter = coupon_scope(world)
+    row = manual(world, binding)
+    adapter.get_coupon_by_id = AsyncMock(side_effect=TimeoutError)
+    adapter.update_coupon_terms = AsyncMock()
+    monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: world.tenant.id)
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+    failed = asyncio.run(coupon_routes.patch_coupon(
+        row.id, coupon_routes.CouponPatchIn(value="2"), SimpleNamespace(), world.db,
+    ))
+    assert failed["updated"] is False
+    assert row.extra_metadata["terms_sync_pending"]["state"] == "failed"
+    with pytest.raises(HTTPException) as different:
+        asyncio.run(coupon_routes.patch_coupon(
+            row.id, coupon_routes.CouponPatchIn(value="3"), SimpleNamespace(), world.db,
+        ))
+    assert different.value.status_code == 409
+    world.db.rollback()
+    remote = {"id": 101, "code": "coat10", "type": "percentage", "amount": "2"}
+    adapter.get_coupon_by_id.side_effect = None
+    adapter.get_coupon_by_id.return_value = remote
+    retry = asyncio.run(coupon_routes.patch_coupon(
+        row.id, coupon_routes.CouponPatchIn(value="2"), SimpleNamespace(), world.db,
+    ))
+    assert retry["updated"] is True
+    assert row.discount_value == "2"
+    adapter.update_coupon_terms.assert_not_awaited()
+
+
+def test_put_timeout_keeps_unknown_owner_and_blocks_automatic_retry(world, monkeypatch):
+    _, binding, adapter = coupon_scope(world)
+    row = manual(world, binding)
+    adapter.get_coupon_by_id = AsyncMock(return_value={"id": 101, "code": "coat10",
+                                                      "type": "percentage", "amount": "1"})
+    adapter.update_coupon_terms = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: world.tenant.id)
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+    failed = asyncio.run(coupon_routes.patch_coupon(
+        row.id, coupon_routes.CouponPatchIn(value="2"), SimpleNamespace(), world.db,
+    ))
+    assert failed["updated"] is False and row.discount_value == "1"
+    assert row.extra_metadata["terms_sync_pending"]["state"] == "unknown"
+    with pytest.raises(HTTPException) as retry:
+        asyncio.run(coupon_routes.patch_coupon(
+            row.id, coupon_routes.CouponPatchIn(value="2"), SimpleNamespace(), world.db,
+        ))
+    assert retry.value.status_code == 409
+    adapter.update_coupon_terms.assert_awaited_once()
 
 
 def test_active_change_accepts_only_same_id_ascii_case_and_confirms(world):
@@ -470,7 +527,8 @@ def test_concurrent_api_creates_serialize_case_variants(pg_engine, monkeypatch):
 
 
 @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
-@pytest.mark.parametrize("sequence", ["terms_then_retry_active", "active_then_terms", "stale_metadata_write"])
+@pytest.mark.parametrize("sequence", ["terms_then_retry_active", "active_then_terms",
+                                     "stale_metadata_write", "stale_owner"])
 def test_terms_and_active_interleaving_preserves_fresh_metadata(
         dialect, sequence, tmp_path, pg_engine, monkeypatch):
     if dialect == "postgresql":
@@ -517,6 +575,16 @@ def test_terms_and_active_interleaving_preserves_fresh_metadata(
     observed = {}
 
     async def get(_pid):
+        if sequence == "stale_owner" and "blocked_live_retry" not in observed:
+            observed["blocked_live_retry"] = []
+            for requested in ("2", "3"):
+                with Session(engine) as contender:
+                    with pytest.raises(HTTPException) as exc:
+                        await coupon_routes.patch_coupon(
+                            rid, coupon_routes.CouponPatchIn(value=requested),
+                            SimpleNamespace(), contender)
+                    assert exc.value.status_code == 409
+                    observed["blocked_live_retry"].append(requested)
         return dict(remote)
 
     async def active(_pid, value):
@@ -557,12 +625,18 @@ def test_terms_and_active_interleaving_preserves_fresh_metadata(
     if sequence == "terms_then_retry_active":
         assert observed["blocked_during_terms"] is True
         assert asyncio.run(patch(coupon_routes.CouponPatchIn(active=False)))["updated"] is True
+    if sequence == "stale_owner":
+        assert observed["blocked_live_retry"] == ["2", "3"]
+        assert asyncio.run(patch(coupon_routes.CouponPatchIn(value="3")))["updated"] is True
 
     with Session(engine) as check:
         saved = check.get(Coupon, rid)
-        assert saved.discount_value == "2"
-        assert saved.extra_metadata["active"] is False
-        assert remote["status"] == "inactive"
+        expected_amount = "3" if sequence == "stale_owner" else "2"
+        assert saved.discount_value == expected_amount
+        assert remote["amount"] == expected_amount
+        expected_active = sequence == "stale_owner"
+        assert saved.extra_metadata["active"] is expected_active
+        assert remote["status"] == ("active" if expected_active else "inactive")
         assert not saved.extra_metadata.get("terms_sync_pending")
         assert not saved.extra_metadata.get("active_sync_pending")
     if dialect == "sqlite":
