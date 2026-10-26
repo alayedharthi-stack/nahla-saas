@@ -1032,6 +1032,8 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
 
     meta_now = coupon.extra_metadata or {}
     provider_bound = bool(meta_now.get("salla_coupon_id") or meta_now.get("external_id") or meta_now.get("salla_identity"))
+    if body.active is not None and meta_now.get("terms_sync_pending"):
+        raise HTTPException(status_code=409, detail="coupon_change_already_pending")
     if terms_fields and provider_bound:
         if body.model_fields_set - {"value", "expires"}:
             raise HTTPException(status_code=409, detail="coupon_terms_must_be_edited_separately")

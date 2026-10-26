@@ -9,12 +9,14 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import JSON, create_engine, text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import Session
 
 import pytest
 
-from models import Base, Coupon, Integration, Order, WhatsAppConnection
+from models import Base, Coupon, Integration, Order, Tenant, WhatsAppConnection
 from core.local_order_resolver import read_customer_order_history, order_business_created_at
 from modules.ai.commerce_agent_v2.context import CommerceAgentContext
 from modules.ai.commerce_agent_v2.tools.orders import list_customer_orders_impl, resolve_customer_order_impl
@@ -465,3 +467,103 @@ def test_concurrent_api_creates_serialize_case_variants(pg_engine, monkeypatch):
     assert sorted(results) == [201, 409]
     with Session(pg_engine) as db:
         assert db.query(Coupon).filter_by(tenant_id=tenant_id).count() == 1
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+@pytest.mark.parametrize("sequence", ["terms_then_retry_active", "active_then_terms", "stale_metadata_write"])
+def test_terms_and_active_interleaving_preserves_fresh_metadata(
+        dialect, sequence, tmp_path, pg_engine, monkeypatch):
+    if dialect == "postgresql":
+        if pg_engine is None:
+            pytest.skip("isolated PostgreSQL target required")
+        engine = pg_engine
+    else:
+        engine = create_engine(f"sqlite:///{tmp_path / 'coupon-race.db'}")
+        saved = []
+        for table in Base.metadata.sorted_tables:
+            for column in table.columns:
+                if isinstance(column.type, JSONB):
+                    saved.append((column, column.type))
+                    column.type = JSON()
+        try:
+            Base.metadata.create_all(engine)
+        finally:
+            for column, original in saved:
+                column.type = original
+
+    with Session(engine) as setup:
+        tenant = Tenant(name="Synthetic coupon race " + uuid4().hex, is_active=True)
+        setup.add(tenant)
+        setup.commit()
+        tid = tenant.id
+        integration = Integration(tenant_id=tid, provider="salla", enabled=True,
+                                  external_store_id="synthetic-store", config={
+                                      "store_id": "synthetic-store", "api_sync_enabled": True,
+                                      "refresh_token": "PUBLIC_SYNTHETIC_NOT_SECRET"})
+        setup.add(integration)
+        setup.commit()
+        iid = integration.id
+        binding = {"tenant_id": tid, "integration_id": iid, "store_id": "synthetic-store"}
+        row = Coupon(tenant_id=tid, code="RACETEST", discount_type="percentage",
+                     discount_value="1", source_type="manual", extra_metadata={
+                         "source": "dashboard", "salla_coupon_id": "101", "external_id": "101",
+                         "salla_identity": binding, "active": True, "sync_status": "synced",
+                         "salla_synced": True})
+        setup.add(row)
+        setup.commit()
+        rid = row.id
+
+    remote = {"id": 101, "code": "racetest", "type": "percentage", "amount": "1", "status": "active"}
+    observed = {}
+
+    async def get(_pid):
+        return dict(remote)
+
+    async def active(_pid, value):
+        remote["status"] = "active" if value else "inactive"
+
+    async def terms(_pid, **desired):
+        remote["amount"] = desired["amount"]
+        if sequence == "terms_then_retry_active":
+            with Session(engine) as other:
+                with pytest.raises(HTTPException) as exc:
+                    await coupon_routes.patch_coupon(
+                        rid, coupon_routes.CouponPatchIn(active=False), SimpleNamespace(), other)
+                assert exc.value.status_code == 409
+                observed["blocked_during_terms"] = True
+        elif sequence == "stale_metadata_write":
+            with Session(engine) as other:
+                concurrent = other.get(Coupon, rid)
+                meta = dict(concurrent.extra_metadata)
+                meta["active"] = False
+                concurrent.extra_metadata = meta
+                flag_modified(concurrent, "extra_metadata")
+                other.commit()
+                remote["status"] = "inactive"
+
+    adapter = SimpleNamespace(_tenant_id=tid, _integration_id=iid, store_id="synthetic-store",
+                              get_coupon_by_id=get, set_coupon_active=active,
+                              update_coupon_terms=terms)
+    monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: tid)
+    monkeypatch.setattr("store_integration.registry.adapter_for_integration", lambda _: adapter)
+
+    async def patch(body):
+        with Session(engine) as db:
+            return await coupon_routes.patch_coupon(rid, body, SimpleNamespace(), db)
+
+    if sequence == "active_then_terms":
+        assert asyncio.run(patch(coupon_routes.CouponPatchIn(active=False)))["updated"] is True
+    assert asyncio.run(patch(coupon_routes.CouponPatchIn(value="2")))["updated"] is True
+    if sequence == "terms_then_retry_active":
+        assert observed["blocked_during_terms"] is True
+        assert asyncio.run(patch(coupon_routes.CouponPatchIn(active=False)))["updated"] is True
+
+    with Session(engine) as check:
+        saved = check.get(Coupon, rid)
+        assert saved.discount_value == "2"
+        assert saved.extra_metadata["active"] is False
+        assert remote["status"] == "inactive"
+        assert not saved.extra_metadata.get("terms_sync_pending")
+        assert not saved.extra_metadata.get("active_sync_pending")
+    if dialect == "sqlite":
+        engine.dispose()

@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import re
+from uuid import uuid4
 
 from sqlalchemy.orm.attributes import flag_modified
 from core.salla_order_fidelity import _riyadh_tz
@@ -117,8 +118,12 @@ def _check_remote(db, row, binding, pid, raw):
 
 async def apply_bound_terms(db, row, fields, adapter):
     """Durable intent, GET/targeted PUT/GET, then confirmed local commit."""
+    from models import Coupon
+
     integration, binding, pid = bound_integration(db, row)
     desired = desired_terms(row, fields)
+    row_id, tenant_id = row.id, row.tenant_id
+    original_code, original_type = row.code, row.discount_type
     if adapter_binding(adapter, row.tenant_id, integration.id) != binding:
         raise CouponTermsError("adapter_binding_unavailable")
     meta = dict(row.extra_metadata or {})
@@ -127,12 +132,16 @@ async def apply_bound_terms(db, row, fields, adapter):
     pending = meta.get("terms_sync_pending")
     if pending and (pending.get("desired") != desired or pending.get("provider_id") != pid):
         raise CouponTermsError("coupon_change_already_pending")
-    meta["terms_sync_pending"] = {"desired": desired, "provider_id": pid, "binding": binding}
+    operation_id = uuid4().hex
+    meta["terms_sync_pending"] = {"operation_id": operation_id, "desired": desired,
+                                  "provider_id": pid, "binding": binding}
     meta.update(sync_status="pending", salla_synced=False, sync_error=None)
     row.extra_metadata = meta
     flag_modified(row, "extra_metadata")
     db.commit()
 
+    confirmed_amount = confirmed_expiry = None
+    failure = None
     try:
         raw = await adapter.get_coupon_by_id(pid)
         _check_remote(db, row, binding, pid, raw)
@@ -143,25 +152,41 @@ async def apply_bound_terms(db, row, fields, adapter):
         if not _remote_matches(raw, desired):
             raise CouponTermsError("provider_terms_unconfirmed")
         if "amount" in desired:
-            row.discount_value = format(Decimal(str(raw["amount"])), "f")
+            confirmed_amount = format(Decimal(str(raw["amount"])), "f")
         if "expiry_date" in desired:
             stamp = provider_expiry_utc_naive(raw.get("expiry_date") or raw.get("expire_date") or raw.get("expires_at"))
             if stamp is None:
                 raise CouponTermsError("provider_terms_unconfirmed")
-            row.expires_at = stamp
-        meta = dict(row.extra_metadata or {})
+            confirmed_expiry = stamp
+    except Exception as exc:
+        failure = str(exc) if isinstance(exc, (CouponTermsError, CouponIdentityConflict)) else type(exc).__name__
+
+    # The provider I/O ran outside a row lock. Drop the read transaction and
+    # reload under a fresh lock before touching local state or JSON metadata.
+    db.rollback()
+    current = (db.query(Coupon).filter_by(id=row_id, tenant_id=tenant_id)
+               .populate_existing().with_for_update().first())
+    if current is None:
+        db.rollback()
+        return False, {"sync_status": "failed", "sync_error": "coupon_identity_unavailable"}
+    meta = dict(current.extra_metadata or {})
+    pending = meta.get("terms_sync_pending") or {}
+    if (pending.get("operation_id") != operation_id or pending.get("provider_id") != pid
+            or pending.get("binding") != binding or meta.get("active_sync_pending")
+            or current.code != original_code or current.discount_type != original_type):
+        db.rollback()
+        return False, {"sync_status": "failed", "sync_error": "coupon_operation_superseded"}
+    if failure is None:
+        if confirmed_amount is not None:
+            current.discount_value = confirmed_amount
+        if confirmed_expiry is not None:
+            current.expires_at = confirmed_expiry
         meta.pop("terms_sync_pending", None)
         meta.update(sync_status="synced", salla_synced=True, sync_error=None,
                     terms_confirmed_at=datetime.now(timezone.utc).isoformat())
-        row.extra_metadata = meta
-        flag_modified(row, "extra_metadata")
-        db.commit()
-        return True, meta
-    except Exception as exc:
-        reason = str(exc) if isinstance(exc, (CouponTermsError, CouponIdentityConflict)) else type(exc).__name__
-        meta = dict(row.extra_metadata or {})
-        meta.update(sync_status="failed", salla_synced=False, sync_error=reason)
-        row.extra_metadata = meta
-        flag_modified(row, "extra_metadata")
-        db.commit()
-        return False, meta
+    else:
+        meta.update(sync_status="failed", salla_synced=False, sync_error=failure)
+    current.extra_metadata = meta
+    flag_modified(current, "extra_metadata")
+    db.commit()
+    return failure is None, meta

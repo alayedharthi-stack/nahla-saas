@@ -93,6 +93,8 @@ async def reconcile_imported_state(raw, existing, observed_at, adapter):
 
 def queue_active_change(coupon, integration, active):
     meta = dict(coupon.extra_metadata or {})
+    if meta.get("terms_sync_pending"):
+        raise CouponIdentityConflict("coupon_change_already_pending")
     pending = meta.get("active_sync_pending") or {}
     if pending.get("desired") == active and pending.get("integration_id") == integration.id:
         return
