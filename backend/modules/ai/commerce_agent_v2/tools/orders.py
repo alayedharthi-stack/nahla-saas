@@ -16,6 +16,7 @@ from core.local_order_resolver import (
     _snapshot_from_order,
     local_order_to_track_payload,
     read_customer_order_history,
+    order_business_created_at,
     resolve_customer_order_context,
 )
 from core.order_shipment_service import (
@@ -379,8 +380,12 @@ def _history_evidence(context: CommerceAgentContext, order: Any) -> tuple[str, O
             "source": str(snapshot.source or "local"),
         },
     )
+    created = order_business_created_at(order)
+    created_iso = created.isoformat() if created is not None else None
+    if created_iso:
+        evidence.fields["created_at"] = created_iso
     entry = OrderHistoryEntry(order_reference=reference, status_label=status_label,
-                              evidence_ref=evidence_ref)
+                              evidence_ref=evidence_ref, created_at=created_iso)
     return stage, entry, evidence
 
 
@@ -423,6 +428,7 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
             grouped: dict[str, list[tuple[OrderHistoryEntry, EvidenceRecord]]] = {
                 "ongoing": [], "finished": [], "unknown": []}
             left_out = 0
+            newest_entry = None
             for row in rows:
                 try:
                     _assert_discovered_order_is_customer_scoped(context, row)
@@ -432,6 +438,8 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
                         reasons.append("order_scope_unverified")
                     continue
                 stage, entry, evidence = _history_evidence(context, row)
+                if newest_entry is None:
+                    newest_entry = entry
                 grouped[stage].append((entry, evidence))
         if left_out:
             logger.info("[COMMERCE_V2_ORDERS] order history left out %s order(s) outside the customer "
@@ -447,6 +455,13 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
                        context.tenant_id, type(exc).__name__)
         return CustomerOrderHistoryResult(status="unavailable", failure_reason="history_unreadable")
     read_complete = not reasons
+    latest_reason = None
+    if not getattr(rows, "chronology_complete", False):
+        latest_reason = "order_chronology_unverified"
+    elif left_out:
+        latest_reason = "order_scope_unverified"
+    if latest_reason:
+        newest_entry = None
 
     def group(name: str) -> OrderHistoryGroup:
         by_status: dict[str, int] = {}
@@ -467,6 +482,8 @@ async def list_customer_orders_impl(context: CommerceAgentContext) -> CustomerOr
         incomplete_reasons=reasons,
         total_orders=proven if read_complete else None,
         total_orders_at_least=None if read_complete else proven,
+        latest_order=newest_entry,
+        latest_order_unavailable_reason=latest_reason,
         ongoing=group("ongoing"),
         finished=group("finished"),
         unknown=group("unknown"),

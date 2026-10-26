@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from test_coupon_salla_two_way_sync import _make_db
-from database.models import Coupon
+from database.models import Coupon, Integration
 from services.coupon_active_sync import (
     dispatch_active_change, imported_state, normalized_active, queue_active_change,
 )
@@ -21,6 +21,8 @@ def setup_state():
                     extra_metadata={"source": "dashboard", "salla_coupon_id": "101",
                                     "active": True, "sync_status": "synced", "salla_synced": True})
     db.add(coupon)
+    db.add(Integration(id=22, tenant_id=tid, provider="salla", enabled=True,
+                       external_store_id="202", config={"store_id": "202"}))
     db.commit()
     integration = SimpleNamespace(id=22, tenant_id=tid, external_store_id="202", provider="salla",
                                   enabled=True, config={"api_sync_enabled": True, "refresh_token": "fake"})
@@ -172,10 +174,9 @@ def test_retry_filters_backoff_before_batch_cap(monkeypatch):
 def test_invalid_patch_does_not_commit_partial_fields_or_housekeep(monkeypatch):
     from fastapi import HTTPException
     from routers.coupons import patch_coupon, CouponPatchIn
-    from database.models import Integration
     db, row, integration, adapter = setup_state()
     # Two connections formerly caused the mutating picker to commit early.
-    for iid in [22, 23]:
+    for iid in [23]:
         db.add(Integration(id=iid, tenant_id=row.tenant_id, provider="salla", enabled=True,
                            external_store_id=str(iid), config={}))
     db.commit()
