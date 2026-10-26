@@ -554,14 +554,15 @@ def test_terms_and_active_interleaving_preserves_fresh_metadata(
         setup.add(tenant)
         setup.commit()
         tid = tenant.id
+        store_id = "synthetic-store-" + uuid4().hex
         integration = Integration(tenant_id=tid, provider="salla", enabled=True,
-                                  external_store_id="synthetic-store", config={
-                                      "store_id": "synthetic-store", "api_sync_enabled": True,
+                                  external_store_id=store_id, config={
+                                      "store_id": store_id, "api_sync_enabled": True,
                                       "refresh_token": "PUBLIC_SYNTHETIC_NOT_SECRET"})
         setup.add(integration)
         setup.commit()
         iid = integration.id
-        binding = {"tenant_id": tid, "integration_id": iid, "store_id": "synthetic-store"}
+        binding = {"tenant_id": tid, "integration_id": iid, "store_id": store_id}
         row = Coupon(tenant_id=tid, code="RACETEST", discount_type="percentage",
                      discount_value="1", source_type="manual", extra_metadata={
                          "source": "dashboard", "salla_coupon_id": "101", "external_id": "101",
@@ -609,7 +610,7 @@ def test_terms_and_active_interleaving_preserves_fresh_metadata(
                 other.commit()
                 remote["status"] = "inactive"
 
-    adapter = SimpleNamespace(_tenant_id=tid, _integration_id=iid, store_id="synthetic-store",
+    adapter = SimpleNamespace(_tenant_id=tid, _integration_id=iid, store_id=store_id,
                               get_coupon_by_id=get, set_coupon_active=active,
                               update_coupon_terms=terms)
     monkeypatch.setattr(coupon_routes, "resolve_tenant_id", lambda _request: tid)
