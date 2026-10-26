@@ -335,7 +335,6 @@ def _history_group_view(group: Any) -> Dict[str, Any]:
         "listed": getattr(group, "listed", 0),
         "orders": [{"order_reference": getattr(entry, "order_reference", None),
                     "status_label": getattr(entry, "status_label", None),
-                    "created_at": getattr(entry, "created_at", None),
                     "evidence_ref": getattr(entry, "evidence_ref", None)}
                    for entry in list(getattr(group, "orders", None) or ())],
         "by_status": getattr(group, "by_status", None),

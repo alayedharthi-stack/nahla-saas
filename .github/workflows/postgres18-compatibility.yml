@@ -2,7 +2,7 @@ name: PostgreSQL 18 compatibility
 
 on:
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, codex/salla-production-preserve-shopify-20261018]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026]
   push:
     branches: [main, master]
 
@@ -50,10 +50,37 @@ jobs:
             --manifest scripts/required_postgres_proofs.json \
             --junit-dir /tmp/required-postgres18-proofs \
             --report /tmp/required-postgres18-proofs/report.json
+      - name: Salla acceptance races and Shopify rollback on PostgreSQL 18
+        env:
+          NAHLA_RELIABILITY_REQUIRE_PG: "1"
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
+          NAHLA_ACCEPTANCE_PG_URL: postgresql://acceptance:synthetic_acceptance_only@127.0.0.1:5433/acceptance_test
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          engine = create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"], isolation_level="AUTOCOMMIT")
+          with engine.connect() as conn:
+              conn.exec_driver_sql("CREATE ROLE acceptance LOGIN PASSWORD 'synthetic_acceptance_only'")
+              conn.exec_driver_sql("CREATE DATABASE acceptance_test OWNER acceptance")
+          engine.dispose()
+          PY
+          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts >/dev/null
+          mkdir -p "$RUNNER_TEMP/acceptance-pg18"
+          python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/rollback.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/rollback.xml"
+          python -B -m pytest backend/tests/test_acceptance_order_coupon_identity.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
       - name: Upload proof evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: required-postgres18-proofs
-          path: /tmp/required-postgres18-proofs
+          path: |
+            /tmp/required-postgres18-proofs
+            ${{ runner.temp }}/acceptance-pg18
           if-no-files-found: warn
