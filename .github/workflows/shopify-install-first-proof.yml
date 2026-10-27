@@ -4,6 +4,7 @@ on:
     branches: [codex/shopify-install-first-20261013]
   pull_request:
     paths:
+      - .github/workflows/shopify-install-first-proof.yml
       - backend/services/shopify_connection/install*.py
       - backend/services/shopify_connection/lifecycle.py
       - backend/services/shopify_connection/oauth.py
@@ -28,7 +29,7 @@ jobs:
     timeout-minutes: 25
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        image: docker.io/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: synthetic-proof-only
