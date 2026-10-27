@@ -666,6 +666,13 @@ def _order_history(binding: LiveToolBinding) -> at.ToolFunction:
                     "incomplete_reasons": list(getattr(result, "incomplete_reasons", None) or ()),
                     "total_orders": getattr(result, "total_orders", None),
                     "total_orders_at_least": getattr(result, "total_orders_at_least", None),
+                    "latest_order": (
+                        {"order_reference": result.latest_order.order_reference,
+                         "status_label": result.latest_order.status_label,
+                         "created_at": result.latest_order.created_at,
+                         "evidence_ref": result.latest_order.evidence_ref}
+                        if getattr(result, "latest_order", None) is not None else None),
+                    "latest_order_unavailable_reason": getattr(result, "latest_order_unavailable_reason", None),
                     "ongoing": _history_group_view(getattr(result, "ongoing", None)),
                     "finished": _history_group_view(getattr(result, "finished", None)),
                     "unknown": _history_group_view(getattr(result, "unknown", None))},
