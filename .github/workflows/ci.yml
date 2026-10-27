@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027]
 
 permissions:
   contents: read
@@ -232,7 +232,7 @@ jobs:
 
       - name: Build closed DR executor artifact
         working-directory: ops/staging_dr_executor
-        run: docker build --build-context 'alpine:3.20=docker-image://public.ecr.aws/docker/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' -t nahla-staging-dr-executor:ci .
+        run: docker build --build-context 'alpine:3.20=docker-image://docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' -t nahla-staging-dr-executor:ci .
 
       - name: Verify executor image scripts and long-running entrypoint
         run: |
