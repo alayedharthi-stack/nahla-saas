@@ -27,7 +27,7 @@ name: gitleaks
 
 on:
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027, codex/salla-production-preserve-shopify-20261018, review/salla-app-first-ci-20261027]
   push:
     branches: [main, master]
   workflow_dispatch:
