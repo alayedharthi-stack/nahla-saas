@@ -255,6 +255,7 @@ class OrderHistoryEntry(BaseModel):
     order_reference: str | None = None
     status_label: str
     evidence_ref: str
+    created_at: str | None = None
 
 
 class OrderHistoryGroup(BaseModel):
@@ -295,6 +296,8 @@ class CustomerOrderHistoryResult(BaseModel):
     incomplete_reasons: list[str] = Field(default_factory=list)
     total_orders: int | None = Field(default=None, ge=0)
     total_orders_at_least: int | None = Field(default=None, ge=0)
+    latest_order: OrderHistoryEntry | None = None
+    latest_order_unavailable_reason: str | None = None
     ongoing: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
     finished: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)
     unknown: OrderHistoryGroup = Field(default_factory=OrderHistoryGroup)

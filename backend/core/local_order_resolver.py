@@ -8,7 +8,10 @@ Adapters import/sync only. AI replies and tracking read from here first.
 from __future__ import annotations
 
 import logging
+import heapq
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from sqlalchemy import or_
@@ -715,6 +718,30 @@ def has_local_orders(ctx: CustomerOrderContext) -> bool:
 CUSTOMER_ORDER_HISTORY_LIMIT = 50
 
 
+def order_business_created_at(order: Any) -> Optional[datetime]:
+    """Creation timestamp persisted by the order's source normalizer.
+
+    An imported order's insertion time is not evidence of when it was placed.
+    Stored provider timestamps are canonical UTC; normalize explicit offsets too.
+    """
+    meta = getattr(order, "extra_metadata", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    values = [meta.get("salla_created_at"), meta.get("created_at")]
+    for value in values:
+        try:
+            stamp = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        return (stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc))
+    return None
+
+
+class _OrderHistoryRows(list):
+    """List-compatible read with whether chronology was known across the read."""
+    chronology_complete: bool = True
+
+
 def read_customer_order_history(
     db: Any,
     *,
@@ -741,16 +768,41 @@ def read_customer_order_history(
     clauses = _customer_order_identity_clauses(Order, phone=phone, customer_id=customer_id)
     if not clauses:
         raise ValueError("customer_identity_missing")
-    rows = (
+    if int(limit) <= 0:
+        raise ValueError("history_limit_invalid")
+    query = (
         db.query(Order)
         .filter(Order.tenant_id == int(tenant_id), or_(*clauses))
         .filter(Order.is_abandoned.isnot(True),
                 func.lower(func.coalesce(Order.status, "")) != "abandoned")
-        .order_by(Order.id.desc())
-        .limit(int(limit))
-        .all()
     )
-    return rows, len(rows) < int(limit)
+    # Rank compact, customer-scoped timestamp projections BEFORE the result
+    # limit. Fetching rich order objects by insertion id first loses late imports.
+    # Streaming + top-k bounds memory; no items/contact payloads are scanned.
+    seen = 0
+    chronology_complete = True
+
+    def candidates():
+        nonlocal seen, chronology_complete
+        for row in query.with_entities(
+            Order.id,
+            Order.extra_metadata["salla_created_at"].as_string(),
+            Order.extra_metadata["created_at"].as_string(),
+        ).yield_per(200):
+            seen += 1
+            stamp = order_business_created_at(SimpleNamespace(
+                extra_metadata={"salla_created_at": row[1], "created_at": row[2]}))
+            if stamp is None:
+                chronology_complete = False
+            yield (stamp or datetime.min.replace(tzinfo=timezone.utc), row[0])
+
+    ranked = heapq.nlargest(int(limit), candidates())
+    ids = [identity for _, identity in ranked]
+    loaded = query.filter(Order.id.in_(ids)).populate_existing().all() if ids else []
+    by_id = {row.id: row for row in loaded}
+    rows = _OrderHistoryRows(by_id[identity] for identity in ids if identity in by_id)
+    rows.chronology_complete = chronology_complete and len(loaded) == len(ids)
+    return rows, seen <= int(limit) and len(loaded) == seen
 
 
 __all__ = [
