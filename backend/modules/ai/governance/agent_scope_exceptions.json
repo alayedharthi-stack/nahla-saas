@@ -18,19 +18,18 @@
   },
   "_awaiting_owner_approval": {
     "note": "Complete entries proposed for the owner's decision. They grant nothing: the guard reads only \"exceptions\", and only from BASE. On the owner's approval an entry moves into \"exceptions\" unchanged except for owner_approval_ref, which becomes the https link to that approval, in its own reviewed commit. An entry the owner declines is removed. A change to either blob after an entry was written invalidates its digests, and a new entry is proposed instead.",
-    "entries": [
-      {
-        "exception_id": "AGENT-SCOPE-1236-SALLA-ACCEPTANCE-COUPON-IDENTITY",
-        "exact_file_scope": ["backend/routers/coupons.py"],
-        "base_content_sha256": "9ed0adf4d7545f7dc8293353d201f7df10f112350a86ae8977cf9c6df0d6c4af",
-        "authorized_content_sha256": ["421769fed7f78c4e2d97384787b2997190ddd4d187110eb639032cfb884a599a"],
-        "task_scope": "PR #1236 Salla acceptance coupon identity and confirmed status/terms update only: tenant/store-bound Salla identity, case-safe code matching, confirmed provider readback, UTC expiry handling, and operation ownership. No AI behavior, permissions, Shopify, unrelated coupon feature, or deployment authorization.",
-        "owner_approval_ref": "PENDING_DURABLE_HTTPS_LINK_TO_SENTINEL_ebb512a1223c8191bba55ba5834d018d",
-        "expires_at": "2026-10-28"
-      }
-    ]
+    "entries": []
   },
   "exceptions": [
+    {
+      "exception_id": "AGENT-SCOPE-1236-SALLA-ACCEPTANCE-COUPON-IDENTITY",
+      "exact_file_scope": ["backend/routers/coupons.py"],
+      "base_content_sha256": "9ed0adf4d7545f7dc8293353d201f7df10f112350a86ae8977cf9c6df0d6c4af",
+      "authorized_content_sha256": ["421769fed7f78c4e2d97384787b2997190ddd4d187110eb639032cfb884a599a"],
+      "task_scope": "PR #1236 Salla acceptance coupon identity and confirmed status/terms update only: tenant/store-bound Salla identity, case-safe code matching, confirmed provider readback, UTC expiry handling, and operation ownership. No AI behavior, permissions, Shopify, unrelated coupon feature, or deployment authorization.",
+      "owner_approval_ref": "https://github.com/alayedharthi-stack/nahla-saas/pull/1239#issuecomment-6432877350",
+      "expires_at": "2026-10-28"
+    },
     {
       "exception_id": "AGENT-SCOPE-1228-SALLA-COUPON-ACTIVE-STATE",
       "exact_file_scope": [
