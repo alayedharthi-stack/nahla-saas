@@ -3224,23 +3224,43 @@ class StoreSyncService:
 
         created = 0
         updated = 0
+        from services.coupon_identity import (  # noqa: PLC0415
+            adapter_binding, resolve_import_coupon, validate_import_binding, CouponIdentityConflict,
+        )
+        from services.coupon_expiry import provider_expiry_utc_naive  # noqa: PLC0415
+        binding = adapter_binding(adapter, self.tenant_id, self._integration_connection_id)
+        if binding is not None:
+            validate_import_binding(self.db, binding)
+            # Reuse the reviewed draft's tenant row lock: an absent coupon
+            # cannot itself be locked against concurrent case-variant inserts.
+            from models import Tenant  # noqa: PLC0415
+            self.db.query(Tenant.id).filter_by(id=self.tenant_id).with_for_update().one()
+        identity_conflicts = 0
+        expiry_conflicts = 0
         for raw in raw_list:
             normalised = _normalise_coupon(raw)
             code = normalised["code"]
             if not code:
                 continue
-            existing = (
-                self.db.query(Coupon)
-                .filter_by(tenant_id=self.tenant_id, code=code)
-                .populate_existing().with_for_update()
-                .first()
-            )
-            exp = None
-            if normalised["expires_at"]:
-                try:
-                    exp = datetime.fromisoformat(str(normalised["expires_at"]).replace("Z", "+00:00"))
-                except Exception:
-                    pass
+            try:
+                existing = resolve_import_coupon(self.db, self.tenant_id, raw, binding)
+            except CouponIdentityConflict as exc:
+                logger.warning("coupon_identity_import_blocked reason=%s", str(exc))
+                identity_conflicts += 1
+                continue
+            if existing and (existing.extra_metadata or {}).get("terms_sync_pending"):
+                # A provider poll is not a confirmed reply to the pending edit.
+                continue
+            source_raw = raw.dict() if hasattr(raw, "dict") else raw
+            expiry_raw = (source_raw.get("expire_date") or source_raw.get("expiry_date")
+                          or source_raw.get("expires_at"))
+            try:
+                exp = provider_expiry_utc_naive(expiry_raw)
+            except ValueError:
+                logger.warning("coupon_import_blocked reason=provider_expiry_unverified")
+                expiry_conflicts += 1
+                continue
+            normalised["expires_at"] = exp.isoformat() + "Z" if exp else None
             synced_at = datetime.now(timezone.utc)
             if existing:
                 from services.coupon_active_sync import reconcile_imported_state
@@ -3259,6 +3279,8 @@ class StoreSyncService:
                     import_meta = build_salla_import_metadata(raw, normalised, synced_at)
                 import_meta.pop("active", None)
                 import_meta.update(state_meta)
+                if binding is not None:
+                    import_meta["salla_identity"] = dict(binding)
                 existing.description = normalised.get("name") or normalised["description"]
                 existing.discount_type = normalised["discount_type"]
                 existing.discount_value = normalised["discount_value"]
@@ -3278,6 +3300,8 @@ class StoreSyncService:
                 updated += 1
             else:
                 import_meta = build_salla_import_metadata(raw, normalised, synced_at)
+                if binding is not None:
+                    import_meta["salla_identity"] = dict(binding)
                 from services.coupon_active_sync import imported_state
                 import_meta.update(imported_state(raw, {}, observed_at))
                 self.db.add(Coupon(
@@ -3304,6 +3328,12 @@ class StoreSyncService:
             fetch_ok = bool(fetch_result.get("ok"))
             if partial:
                 failure_class = "partial_pagination"
+        if identity_conflicts:
+            failure_class = "coupon_identity_conflict"
+            partial = True
+        elif expiry_conflicts:
+            failure_class = "coupon_expiry_unverified"
+            partial = True
         if record_sync_meta:
             self._record_coupon_sync_meta(
                 triggered_by=triggered_by,

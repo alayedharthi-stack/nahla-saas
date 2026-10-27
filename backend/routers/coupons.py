@@ -13,11 +13,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+from services.coupon_identity import same_code
 from sqlalchemy.orm.attributes import flag_modified
 
 from core.database import get_db
 from core.tenant import DEFAULT_AI, get_or_create_settings, get_or_create_tenant, merge_defaults, resolve_tenant_id
-from models import Coupon
+from models import Coupon, Tenant
 from services.coupon_sync_visibility import (
     compute_source_type_counts,
     derive_coupon_sync_visibility,
@@ -38,6 +40,14 @@ from services.native_ai_coupon_eligibility import (
     explicit_ai_allocatable,
     validate_native_ai_opt_in,
 )
+
+
+def _coupon_expiry_for_storage(value: str) -> datetime:
+    """Store the submitted instant as naive UTC for Coupon.expires_at."""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 router = APIRouter(prefix="/coupons", tags=["Coupons"])
 
@@ -834,12 +844,14 @@ async def save_coupon_dashboard_settings(
 async def create_coupon(body: CouponCreateIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
+    # Serialize case-variant creates with imports before checking for a row.
+    db.query(Tenant.id).filter_by(id=tenant_id).with_for_update().one()
 
     existing = db.query(Coupon).filter(
         Coupon.tenant_id == tenant_id,
-        Coupon.code == body.code,
-    ).first()
-    if existing:
+        func.lower(Coupon.code) == body.code.lower(),
+    ).all()
+    if any(same_code(row.code, body.code) for row in existing):
         raise HTTPException(status_code=409, detail="Coupon code already exists")
 
     usage_limit = int(body.limit or 0)
@@ -854,9 +866,7 @@ async def create_coupon(body: CouponCreateIn, request: Request, db: Session = De
 
     expires_at = None
     if body.expires:
-        expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00"))
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = _coupon_expiry_for_storage(body.expires)
 
     level = str(body.coupon_level or "").strip().lower() or None
     if level and level not in NATIVE_AI_LEVELS:
@@ -932,7 +942,8 @@ async def push_coupon_salla(coupon_id: int, request: Request, db: Session = Depe
     tenant_id = resolve_tenant_id(request)
     get_or_create_tenant(db, tenant_id)
 
-    coupon = db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id).first()
+    coupon = (db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id)
+              .populate_existing().with_for_update().first())
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
 
@@ -1011,18 +1022,42 @@ async def sync_salla_coupons(request: Request, db: Session = Depends(get_db)):
 @router.patch("/{coupon_id}")
 async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db: Session = Depends(get_db)):
     tenant_id = resolve_tenant_id(request)
+    terms_fields = {"value", "expires"} & body.model_fields_set
+    if body.code is not None or terms_fields:
+        db.query(Tenant.id).filter_by(id=tenant_id).with_for_update().one()
     coupon = (db.query(Coupon).filter(Coupon.id == coupon_id, Coupon.tenant_id == tenant_id)
               .populate_existing().with_for_update().first())
     if not coupon:
         raise HTTPException(status_code=404, detail="Coupon not found")
 
+    meta_now = coupon.extra_metadata or {}
+    provider_bound = bool(meta_now.get("salla_coupon_id") or meta_now.get("external_id") or meta_now.get("salla_identity"))
+    if body.active is not None and meta_now.get("terms_sync_pending"):
+        raise HTTPException(status_code=409, detail="coupon_change_already_pending")
+    if terms_fields and provider_bound:
+        if body.model_fields_set - {"value", "expires"}:
+            raise HTTPException(status_code=409, detail="coupon_terms_must_be_edited_separately")
+        from services.coupon_terms_sync import CouponTermsError, apply_bound_terms  # noqa: PLC0415
+        from services.coupon_identity import CouponIdentityConflict  # noqa: PLC0415
+        from store_integration.registry import adapter_for_integration  # noqa: PLC0415
+        fields = {name: getattr(body, name) for name in terms_fields}
+        try:
+            from services.coupon_terms_sync import bound_integration  # noqa: PLC0415
+            integration, _, _ = bound_integration(db, coupon)
+            confirmed, result_meta = await apply_bound_terms(db, coupon, fields,
+                                                                adapter_for_integration(integration))
+        except (CouponTermsError, CouponIdentityConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"updated": confirmed, "accepted": True, "sync_status": result_meta.get("sync_status"),
+                "sync_error": result_meta.get("sync_error")}
+
     if body.code is not None:
         duplicate = db.query(Coupon).filter(
             Coupon.tenant_id == tenant_id,
-            Coupon.code == body.code,
+            func.lower(Coupon.code) == body.code.lower(),
             Coupon.id != coupon_id,
-        ).first()
-        if duplicate:
+        ).all()
+        if any(same_code(row.code, body.code) for row in duplicate):
             raise HTTPException(status_code=409, detail="Coupon code already exists")
         coupon.code = body.code
     if body.description is not None:
@@ -1032,7 +1067,7 @@ async def patch_coupon(coupon_id: int, body: CouponPatchIn, request: Request, db
     if body.value is not None:
         coupon.discount_value = str(body.value)
     if body.expires is not None:
-        coupon.expires_at = datetime.fromisoformat(body.expires.replace("Z", "+00:00")) if body.expires else None
+        coupon.expires_at = _coupon_expiry_for_storage(body.expires) if body.expires else None
 
     meta = dict(coupon.extra_metadata or {})
     if body.limit is not None:
