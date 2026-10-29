@@ -1040,6 +1040,9 @@ def test_graph_edges_heads_and_branch_deltas_hold_for_every_phase():
     assert gate.branch_chain(graph["down"], "0123", "0112") == ("0118", "0120", "0121", "0122", "0123")
     assert gate.branch_chain(graph["down"], "0111", "0112") is None
     assert graph["down"]["0124"] == ("0123",)
+    assert graph["down"]["0125"] == ("0124",)
+    assert k.EXPECTED_DOWN_REVISIONS["0125"] == "0124"
+    assert "0125" not in k.POST_INSTALL_PHASES["S4_DORMANT"]["rows"]
     assert "0124" not in k.DEPLOY_PHASES["S3"]["branch_delta"]
 
 

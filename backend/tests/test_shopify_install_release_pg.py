@@ -21,6 +21,26 @@ from scripts.operators import shopify_release_gate_render as render
 pytestmark = h.pytestmark
 
 
+def test_source_0125_preserves_0124_dormant_schema(tmp_path):
+    """Capture a fresh, isolated 0124 schema before refreshing a source pin."""
+    db = h._fresh_db("install_source_pin")
+    try:
+        h._build(db, "0124")
+        root = harness.build_root(tmp_path / "root")
+        source = os.environ.get("SOURCE_SHA", harness.SYNTHETIC_RELEASE_SHA)
+        candidate = render.snapshot(h._alias_url(db), source_sha=source, root=root, phase_name="S4_DORMANT")
+        committed = json.loads((root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
+        for key in ("expectations_version", "retained", "shopify_s4"):
+            assert candidate[key] == committed[key], key
+        capture_dir = os.environ.get("NAHLA_INSTALL_RELEASE_CAPTURE_DIR")
+        if capture_dir:
+            path = Path(capture_dir) / "shopify-install-source-pin.candidate.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(candidate, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    finally:
+        h._drop(db)
+
+
 def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
     db = h._fresh_db("install_release")
     try:
@@ -89,8 +109,8 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
             h._sql(db, "DELETE FROM alembic_version")
             for revision in rows:
                 h._sql(db, "INSERT INTO alembic_version(version_num) VALUES ('" + revision + "')")
-            h._assert_fail(root, "S4_DORMANT", db, "Google/combined states refused",
-                           check="version_rows", reason=k.R_VERSION_ROWS_UNKNOWN)
+            h._assert_fail(root, "S4_DORMANT", db, "Communication/combined states refused",
+                           check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
     finally:
         h._drop(db)
 

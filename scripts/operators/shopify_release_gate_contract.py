@@ -138,8 +138,11 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0122": "0121",
     "0123": "0122",
     "0124": "0123",
+    "0125": "0124",
 }
-EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0124"})
+# The source graph includes Communication 0125. S4's deployed database rows
+# remain pinned to 0124 until a separately reviewed migration release.
+EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0125"})
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 

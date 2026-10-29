@@ -25,7 +25,7 @@
     "source_sha": "efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6",
     "runtime_inventory_count": 157,
     "runtime_inventory_digest": "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88",
-    "schema_expectations_sha256": "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
+    "schema_expectations_sha256": "d4a588f222e9d3da95db8936830850917aed5d12aab08b55661fc3ce62bb5911"
   },
   "approval": "none"
 }
