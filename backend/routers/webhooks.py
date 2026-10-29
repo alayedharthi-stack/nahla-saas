@@ -451,6 +451,8 @@ async def salla_communication_function(request: Request, db: Session = Depends(g
     secret, timestamp, nonce, and event identity. It never returns a success
     merely because an inbox row was created.
     """
+    import hashlib
+
     from models import SallaCommunicationFunctionNonce
     from core.salla_comm_function_auth import verify_function_request
     from core.salla_communication_whatsapp import (
@@ -498,7 +500,9 @@ async def salla_communication_function(request: Request, db: Session = Depends(g
         db,
         provider="salla_function",
         raw_body=raw_body,
-        headers={},
+        # Bind the persisted body to the bytes verified above. Do not store
+        # the signature, Function key, or request headers in this event.
+        headers={"x-nahla-comm-body-sha256": hashlib.sha256(raw_body).hexdigest()},
         parsed_payload=payload,
         event_type=EVENT,
         external_event_id=event_id,

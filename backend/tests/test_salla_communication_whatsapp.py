@@ -184,7 +184,8 @@ class FakeSession:
             elif key == "communication_send_state":
                 matched &= self.store_state["send_state"] is None
             else:
-                raise AssertionError(f"unexamined reservation predicate: {key}")
+                assert key in {"tenant_id", "provider", "event_type", "store_id", "signature_valid"}
+                matched &= getattr(self.event, key, None) == criterion.right.value
         if matched:
             self.event.communication_send_state = "sending"
             self.last_added = self.event
@@ -214,16 +215,63 @@ def setup_send(monkeypatch):
     )
     raw_body = json.dumps(payload(), ensure_ascii=False, separators=(",", ":"))
     event = SimpleNamespace(
-        id=1, provider="salla_function", event_type="communication.whatsapp.send",
+        id=1, tenant_id=1, provider="salla_function", event_type="communication.whatsapp.send",
         signature_valid=True, external_event_id="stable-event-id",
         store_id=STORE, parsed_payload=payload(), raw_body=raw_body,
-        raw_headers={}, communication_send_state=None,
+        raw_headers={"x-nahla-comm-body-sha256": hashlib.sha256(raw_body.encode()).hexdigest()},
+        communication_send_state=None,
         communication_provider_message_id=None, communication_send_error_code=None,
         communication_send_attempted_at=None,
     )
     db = FakeSession(order, connection)
     db.event = event
     return db, event
+
+
+@pytest.mark.asyncio
+async def test_engine_boundary_rejects_unsigned_or_rebound_send(monkeypatch):
+    from core.automation_engine import send_reserved_salla_communication
+
+    db, event = setup_send(monkeypatch)
+    for change, reason in (
+        ({"signature_valid": False}, "unverified_communication_source"),
+        ({"tenant_id": 2}, "communication_tenant_mismatch"),
+        ({"store_id": "other"}, "communication_store_mismatch"),
+    ):
+        original = {key: getattr(event, key) for key in change}
+        for key, value in change.items():
+            setattr(event, key, value)
+        with pytest.raises(RuntimeError, match=reason):
+            await send_reserved_salla_communication(
+                db, event, tenant_id=1, store_id=STORE,
+                integration_connection_id=7,
+            )
+        for key, value in original.items():
+            setattr(event, key, value)
+
+    altered = json.loads(event.raw_body)
+    altered["data"]["content"] = "Altered after verification"
+    event.raw_body = json.dumps(altered)
+    with pytest.raises(RuntimeError, match="communication_signed_body_mismatch"):
+        await send_reserved_salla_communication(
+            db, event, tenant_id=1, store_id=STORE,
+            integration_connection_id=7,
+        )
+    assert db.commits == []
+
+
+@pytest.mark.asyncio
+async def test_engine_boundary_requires_persisted_verified_body_digest(monkeypatch):
+    from core.automation_engine import send_reserved_salla_communication
+
+    db, event = setup_send(monkeypatch)
+    event.raw_headers = {}
+    with pytest.raises(RuntimeError, match="communication_signed_body_mismatch"):
+        await send_reserved_salla_communication(
+            db, event, tenant_id=1, store_id=STORE,
+            integration_connection_id=7,
+        )
+    assert db.commits == []
 
 
 def test_meta_receipt_is_the_only_delivery_evidence(monkeypatch):
@@ -316,6 +364,9 @@ async def test_wrong_store_or_recipient_fails_before_send(monkeypatch):
     event.raw_body = json.dumps(event.parsed_payload, separators=(",", ":"))
     event.raw_headers["x-salla-signature"] = hmac.new(
         b"synthetic-test-secret", event.raw_body.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    event.raw_headers["x-nahla-comm-body-sha256"] = hashlib.sha256(
+        event.raw_body.encode("utf-8")
     ).hexdigest()
     with pytest.raises(RuntimeError, match="pilot_not_enabled"):
         await dispatch_communication_whatsapp(
