@@ -27,18 +27,19 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           ref: 0334e867c408f12067410fd8e0a9f5a6355e37d8
           path: old_app
-          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           ref: 64bf7f112b649b33d14f7308c0f4aea8534e427a
           path: candidate_app
-          persist-credentials: false
+      - name: Remove checkout authentication before running application code
+        run: |
+          for path in . old_app candidate_app; do
+            git -C "$path" config --local --unset-all http.https://github.com/.extraheader || true
+          done
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
