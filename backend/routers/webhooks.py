@@ -21,6 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import (  # noqa: E402
@@ -318,6 +319,11 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
             "store_id": _peek_store_id,
         },
     )
+    # This event can trigger a customer-facing send. Legacy Salla intake may
+    # accept missing/invalid HMAC in monitor mode; a communication send must
+    # never use that relaxed acceptance path.
+    if _hit_event == "communication.whatsapp.send" and sig_reason != "SIG_PASS: valid signature":
+        sig_accepted = False
     signature_valid = sig_accepted
 
     if not sig_accepted:
@@ -349,8 +355,9 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     # ONLY when ops have flipped both flags after observing actual retry
     # rate. Salla also has app-level dedup via ``external_event_id`` which
     # remains the primary defense.
+    replay_channel = "salla"
     if evaluate_replay(
-        "salla",
+        replay_channel,
         raw_body,
         tenant_id=_peek_tenant_id,
         request_meta={"ip": client_ip, "store_id": _peek_store_id},
@@ -380,16 +387,25 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     store_id: str | None = None
     external_event_id: str | None = None
     if parsed_payload is not None:
-        event_type = parsed_payload.get("event") or None
+        raw_event_type = parsed_payload.get("event") or None
+        event_type = raw_event_type
         store_id = str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or "") or None
+        # Ordinary webhook observations and Function handoffs must never
+        # compete for the same send identity or deliver twice.
+        from core.salla_communication_whatsapp import inbox_event_type
+        event_type = inbox_event_type(event_type, request.headers)
         data = parsed_payload.get("data") or {}
         if isinstance(data, dict):
             # Identity includes status/payment/updated_at (or provider event id)
             # so exact retries stay one row while later distinct transitions persist.
             external_event_id = build_salla_webhook_external_event_id(
-                event_type=event_type,
+                event_type=raw_event_type,
                 parsed_payload=parsed_payload,
-                provider_prefix="salla",
+                provider_prefix=(
+                    "salla_observed"
+                    if event_type == "communication.whatsapp.observed"
+                    else "salla"
+                ),
             )
 
     audit("salla_webhook", salla_event=event_type or "unknown", store_id=store_id or "unknown", ip=client_ip)
@@ -426,6 +442,95 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 # ── Salla "Sync" OAuth app — separate webhook endpoint with its own secret ──
+
+@router.post("/webhook/salla/communication-function")
+async def salla_communication_function(request: Request, db: Session = Depends(get_db)):
+    """Authenticated synchronous handoff: success means Meta accepted the send.
+
+    The ordinary Salla webhook is observation-only. This route has its own
+    secret, timestamp, nonce, and event identity. It never returns a success
+    merely because an inbox row was created.
+    """
+    from models import SallaCommunicationFunctionNonce
+    from core.salla_comm_function_auth import verify_function_request
+    from core.salla_communication_whatsapp import (
+        EVENT, dispatch_communication_whatsapp, parse_notice,
+    )
+    from services.salla_integration_resolver import (
+        ResolvedSallaIntegration, resolve_salla_integration_connection,
+    )
+
+    raw_body = await request.body()
+    if not raw_body or len(raw_body) > 16384:
+        raise HTTPException(status_code=413, detail="communication_body_size_invalid")
+    valid, nonce = verify_function_request(raw_body, request.headers)
+    if not valid or nonce is None:
+        raise HTTPException(status_code=401, detail="communication_function_auth_failed")
+    try:
+        payload = _json.loads(raw_body)
+        parse_notice(payload)
+        store_id = str(payload.get("merchant") or "").strip()
+        event_id = build_salla_webhook_external_event_id(
+            event_type=EVENT, parsed_payload=payload, provider_prefix="salla_function",
+        )
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=422, detail="communication_payload_invalid")
+    if not store_id or not event_id:
+        raise HTTPException(status_code=422, detail="communication_identity_invalid")
+
+    resolved = resolve_salla_integration_connection(
+        db, webhook_provider_channel="salla", canonical_store_id=store_id,
+    )
+    if not isinstance(resolved, ResolvedSallaIntegration):
+        raise HTTPException(status_code=409, detail="communication_store_unresolved")
+
+    # A repeated signed request cannot be replayed, including after a crash.
+    # A legitimate new Function invocation uses a new nonce but the same
+    # provider event identity, so it can inspect the durable prior outcome.
+    db.add(SallaCommunicationFunctionNonce(nonce=nonce, created_at=datetime.now(timezone.utc)))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="communication_nonce_replayed")
+
+    ev = persist_event(
+        db,
+        provider="salla_function",
+        raw_body=raw_body,
+        headers={},
+        parsed_payload=payload,
+        event_type=EVENT,
+        external_event_id=event_id,
+        store_id=store_id,
+        tenant_id=int(resolved.tenant_id),
+        signature_valid=True,
+        initial_status="processed",  # never claimed by the async webhook worker
+    )
+    try:
+        await dispatch_communication_whatsapp(
+            db, ev,
+            tenant_id=int(resolved.tenant_id),
+            store_id=store_id,
+            integration_connection_id=int(resolved.integration_id),
+        )
+    except RuntimeError as exc:
+        db.refresh(ev)
+        # These codes contain no customer content, key, or provider payload.
+        return JSONResponse(
+            {"state": "unknown" if ev.communication_send_state in {"sending", "ambiguous"} else "rejected",
+             "code": str(exc)[:96]},
+            status_code=503 if ev.communication_send_state in {"sending", "ambiguous"} else 409,
+        )
+    db.refresh(ev)
+    if ev.communication_send_state not in {"accepted", "delivered", "read"} or not ev.communication_provider_message_id:
+        return JSONResponse({"state": "unknown", "code": "provider_acceptance_unconfirmed"}, status_code=503)
+    return {
+        "state": "provider_accepted",
+        "provider_message_id": ev.communication_provider_message_id,
+        "delivery": "confirmed" if ev.communication_send_state in {"delivered", "read"} else "unconfirmed",
+    }
+
 
 @router.post("/webhook/salla-oauth")
 async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):

@@ -1616,6 +1616,24 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
         except Exception:
             pass
 
+    # Keep the Salla-specific receipt correlation independent of the
+    # established campaign/AI status transaction. Its failure cannot undo
+    # their delivery records or trigger a customer send.
+    # The provider helper may also create an ordinary outbound ledger row.
+    # Correlate the Salla receipt independently even when that row matched.
+    comm_db = next(get_db(), None)
+    if comm_db is not None:
+        try:
+            from core.salla_communication_whatsapp import record_meta_delivery_status
+            _, changed = record_meta_delivery_status(comm_db, message_id=wamid, status=st)
+            if changed:
+                comm_db.commit()
+        except Exception as exc:
+            comm_db.rollback()
+            logger.warning("[StatusWebhook] communication receipt update failed: %s", type(exc).__name__)
+        finally:
+            comm_db.close()
+
 
 # Media types we can download + materialise as proper media bubbles in the
 # dashboard. Anything outside this set falls back to a friendly placeholder
