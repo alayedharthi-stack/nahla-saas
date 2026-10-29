@@ -149,7 +149,8 @@ def test_0125_communication_schema_is_exact_on_pg18(drift, tmp_path):
         assert by_name["retained_schema"].status == k.PASS
         assert by_name["unlock"].status == k.PASS
         if drift == "none":
-            assert all(check.status == k.PASS for check in checks), by_name
+            failures = [(check.name, check.reason, check.detail) for check in checks if check.status != k.PASS]
+            assert not failures, failures
             _isolated_healthz_smoke(db, tmp_path)
             root = harness.build_root(tmp_path / "gate")
             approval = _synthetic_approval(root, db)

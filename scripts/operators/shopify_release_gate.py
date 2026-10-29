@@ -667,15 +667,19 @@ def observe_communication_schema(conn) -> Dict[str, Any]:
 
 def check_communication_schema(conn, expected: Mapping[str, Any]) -> Check:
     observed = observe_communication_schema(conn)
-    valid = (observed["relations"] == [f"public.{name}" for name in expected["communication_relations"]]
-             and observed["functions_count"] == 0
-             and observed["constraints"] == ["public.salla_communication_function_nonces_pkey"]
-             and k.normalize(observed["nonce_definition"]) == k.normalize(expected["nonce_definition"])
-             and k.normalize(observed["webhook_columns"]) == k.normalize(expected["webhook_columns"]))
+    comparisons = {
+        "relations": observed["relations"] == [f"public.{name}" for name in expected["communication_relations"]],
+        "functions": observed["functions_count"] == 0,
+        "constraints": observed["constraints"] == ["public.salla_communication_function_nonces_pkey"],
+        "nonce_definition": k.normalize(observed["nonce_definition"]) == k.normalize(expected["nonce_definition"]),
+        "webhook_columns": k.normalize(observed["webhook_columns"]) == k.normalize(expected["webhook_columns"]),
+    }
+    valid = all(comparisons.values())
     return Check("communication_schema", k.PASS if valid else k.FAIL,
                  None if valid else k.R_COMM_SCHEMA_MISMATCH,
                  {"relations_count": len(observed["relations"]),
-                  "functions_count": observed["functions_count"]})
+                   "functions_count": observed["functions_count"],
+                   "mismatched_fields": sorted(name for name, equal in comparisons.items() if not equal)})
 
 
 def _timeout_code(exc: BaseException) -> bool:
