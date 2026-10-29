@@ -651,10 +651,13 @@ def observe_communication_schema(conn) -> Dict[str, Any]:
         "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
         "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
         "AND left(p.proname,20)='salla_communication_'")
+    # PostgreSQL 18 mirrors NOT NULL in pg_constraint; the exact column
+    # attnotnull values are already pinned by nonce_definition.
     constraints = [f"{schema}.{name}" for schema, name in _rows(conn,
         "SELECT n.nspname,c.conname FROM pg_constraint c "
         "JOIN pg_namespace n ON n.oid=c.connamespace "
         "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND c.contype <> 'n' "
         "AND left(c.conname,20)='salla_communication_' ORDER BY 1,2")]
     nonce = (table_definition(conn, "salla_communication_function_nonces")
              if _table_exists(conn, "salla_communication_function_nonces") else None)

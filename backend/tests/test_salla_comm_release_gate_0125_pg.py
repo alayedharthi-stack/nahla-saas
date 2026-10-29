@@ -124,7 +124,7 @@ def _synthetic_approval(root, db):
     return harness.approval_file(root.parent / "approval", record)
 
 
-@pytest.mark.parametrize("drift", ["none", "nonce_column", "audit_type"])
+@pytest.mark.parametrize("drift", ["none", "nonce_column", "audit_type", "extra_constraint"])
 def test_0125_communication_schema_is_exact_on_pg18(drift, tmp_path):
     if not h.ADMIN_URL or not h.HOST_ALIAS:
         pytest.fail("disposable PostgreSQL 18 service is required")
@@ -140,6 +140,9 @@ def test_0125_communication_schema_is_exact_on_pg18(drift, tmp_path):
             h._sql(db, "ALTER TABLE salla_communication_function_nonces ADD COLUMN injected text")
         elif drift == "audit_type":
             h._sql(db, "ALTER TABLE webhook_events ALTER COLUMN communication_send_state TYPE text")
+        elif drift == "extra_constraint":
+            h._sql(db, "ALTER TABLE salla_communication_function_nonces "
+                       "ADD CONSTRAINT salla_communication_extra CHECK (nonce <> '')")
         checks = gate.run_database_checks(
             h._alias_url(db), k.phase("S4_COMM_DORMANT"), known, expectations, db
         )
