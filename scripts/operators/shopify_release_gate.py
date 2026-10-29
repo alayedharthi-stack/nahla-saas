@@ -405,7 +405,7 @@ def check_approval(environ: Mapping[str, str], args: argparse.Namespace, runtime
     status, reason, detail = k.evaluate_approval(
         record, phase_name=args.phase, release_sha=args.release_sha, runtime_digest=runtime[1], runtime_count=runtime[0],
         target=target, backup_service=args.expect_backup_service, backup_volume=args.expect_backup_volume, now=now,
-        rollback_bindings=schema_rollback_bindings(Path(args.root)) if args.phase in k.POST_INSTALL_PHASES else None)
+        rollback_bindings=schema_rollback_bindings(Path(args.root), args.phase) if args.phase in k.POST_INSTALL_PHASES else None)
     return Check("approval", status, reason, detail)
 
 
@@ -417,17 +417,22 @@ def read_json(path: Path) -> Optional[Any]:
         return None
 
 
-def schema_rollback_bindings(root: Path) -> Optional[Dict[str, Any]]:
+def schema_rollback_bindings(root: Path, phase_name: str = "S4_DORMANT") -> Optional[Dict[str, Any]]:
     """Source-pinned artifact/definition bindings used by renderer and runtime."""
-    check, _expectations = check_expectations(root, "S4_DORMANT")
+    check, _expectations = check_expectations(root, phase_name)
     if check.status != k.PASS:
         return None
-    artifact = read_json(root / k.INSTALL_ROLLBACK_RELATIVE_PATH)
+    artifact_path = (k.COMM_ROLLBACK_RELATIVE_PATH if phase_name == "S4_COMM_DORMANT"
+                     else k.INSTALL_ROLLBACK_RELATIVE_PATH)
+    artifact = read_json(root / artifact_path)
     if not isinstance(artifact, dict):
         return None
     try:
-        return {"artifact": artifact, "artifact_sha256": file_sha256(root / k.INSTALL_ROLLBACK_RELATIVE_PATH),
-                "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
+        result = {"artifact": artifact, "artifact_sha256": file_sha256(root / artifact_path),
+                  "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
+        if phase_name == "S4_COMM_DORMANT":
+            result["communication_schema_sha256"] = file_sha256(root / k.COMM_EXPECTATIONS_RELATIVE_PATH)
+        return result
     except OSError:
         return None
 
@@ -454,6 +459,26 @@ def check_expectations(root: Path, phase_name: str = "S3") -> Tuple[Check, Optio
                 or any(expectations[key]["tables"].get(name) != definition
                        for name, definition in baseline.get("shopify_s3", {}).get("tables", {}).items())):
             return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
+    if phase_name == "S4_COMM_DORMANT":
+        communication = read_json(root / k.COMM_EXPECTATIONS_RELATIVE_PATH)
+        if (not isinstance(communication, dict) or communication.get("record_version") != 1
+                or communication.get("database_heads") != ["0111", "0113", "0125"]
+                or communication.get("schema_action") != "retain_0125_no_downgrade"
+                or communication.get("nonce_table") != "salla_communication_function_nonces"
+                or communication.get("webhook_table") != "webhook_events"
+                or not isinstance(communication.get("nonce_definition"), dict)
+                or not isinstance(communication.get("webhook_columns"), list)
+                or communication.get("communication_relations") != [
+                    "salla_communication_function_nonces", "salla_communication_function_nonces_pkey"]):
+            return Check("expectations", k.FAIL, k.R_EXPECTATIONS_UNREADABLE), None
+        migration = root / communication.get("migration_path", "")
+        try:
+            if (not migration.is_file() or not migration.resolve().is_relative_to(root.resolve())
+                    or file_sha256(migration) != communication.get("migration_sha256")):
+                return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
+        except (OSError, ValueError):
+            return Check("expectations", k.FAIL, k.R_EXPECTATIONS_STALE), None
+        expectations = dict(expectations, communication_0125=communication)
     return Check("expectations", k.PASS, detail={"generated_from_source_sha": str(expectations.get("generated_from_source_sha") or "")[:12]}), expectations
 
 
@@ -616,6 +641,43 @@ def read_version_rows(conn) -> Optional[List[str]]:
     return [str(row[0]) for row in _rows(conn, "SELECT version_num FROM public.alembic_version")]
 
 
+def observe_communication_schema(conn) -> Dict[str, Any]:
+    """Read only the 0125 schema, never nonce or audit row values."""
+    names = [f"{schema}.{name}" for schema, name in _rows(conn,
+        "SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND left(c.relname,20)='salla_communication_' ORDER BY 1,2")]
+    functions = _rows(conn,
+        "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND left(p.proname,20)='salla_communication_'")
+    constraints = [f"{schema}.{name}" for schema, name in _rows(conn,
+        "SELECT n.nspname,c.conname FROM pg_constraint c "
+        "JOIN pg_namespace n ON n.oid=c.connamespace "
+        "WHERE n.nspname NOT IN ('pg_catalog','information_schema') "
+        "AND left(c.conname,20)='salla_communication_' ORDER BY 1,2")]
+    nonce = (table_definition(conn, "salla_communication_function_nonces")
+             if _table_exists(conn, "salla_communication_function_nonces") else None)
+    webhook = (table_definition(conn, "webhook_events") if _table_exists(conn, "webhook_events") else None)
+    audit_columns = ([list(row) for row in webhook["columns"] if str(row[0]).startswith("communication_")]
+                     if webhook is not None else None)
+    return {"relations": names, "functions_count": len(functions), "constraints": constraints,
+            "nonce_definition": nonce, "webhook_columns": audit_columns}
+
+
+def check_communication_schema(conn, expected: Mapping[str, Any]) -> Check:
+    observed = observe_communication_schema(conn)
+    valid = (observed["relations"] == [f"public.{name}" for name in expected["communication_relations"]]
+             and observed["functions_count"] == 0
+             and observed["constraints"] == ["public.salla_communication_function_nonces_pkey"]
+             and k.normalize(observed["nonce_definition"]) == k.normalize(expected["nonce_definition"])
+             and k.normalize(observed["webhook_columns"]) == k.normalize(expected["webhook_columns"]))
+    return Check("communication_schema", k.PASS if valid else k.FAIL,
+                 None if valid else k.R_COMM_SCHEMA_MISMATCH,
+                 {"relations_count": len(observed["relations"]),
+                  "functions_count": observed["functions_count"]})
+
+
 def _timeout_code(exc: BaseException) -> bool:
     original = getattr(exc, "orig", exc)
     return str(getattr(original, "pgcode", "") or "") in ("57014", "55P03")
@@ -638,6 +700,8 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
     conn = None
     locked = False
     identity_names = list(k.IDENTITY_TABLES) + list(phase_def["tables"])
+    if phase_def.get("communication_schema_required"):
+        identity_names += ["webhook_events", "salla_communication_function_nonces"]
     try:
         try:
             conn = engine.connect().execution_options(postgresql_readonly=True)
@@ -671,6 +735,9 @@ def run_database_checks(url: str, phase_def: Mapping[str, Any], known: FrozenSet
 
         status, reason, detail = k.evaluate_rows(read_version_rows(conn), phase_def["rows"], known)
         checks.append(Check("version_rows", status, reason, detail))
+
+        if phase_def.get("communication_schema_required"):
+            checks.append(check_communication_schema(conn, expectations["communication_0125"]))
 
         status, reason, detail = k.evaluate_footprint(observe_footprint(conn, phase_def), phase_def,
                                                    expectations.get(phase_def.get("expectations_key", "shopify_s3")) or {})
@@ -840,7 +907,10 @@ def main(argv: Optional[Sequence[str]] = None, environ: Optional[Mapping[str, st
         if hasattr(signal, "SIGALRM"):
             signal.alarm(0)
     failed = [c.name for c in checks if not c.ok]
-    complete = {"connect", "lock", "server", "version_rows", "shopify_footprint", "retained_schema", "relation_identity", "unlock"} <= {c.name for c in checks}
+    required = {"connect", "lock", "server", "version_rows", "shopify_footprint", "retained_schema", "relation_identity", "unlock"}
+    if phase_def and phase_def.get("communication_schema_required"):
+        required.add("communication_schema")
+    complete = required <= {c.name for c in checks}
     verdict = k.PASS if checks and not failed and complete else k.FAIL
     if "connect" not in {c.name for c in checks}:
         emit("database checks skipped: a source-side check failed")
