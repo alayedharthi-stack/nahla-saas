@@ -860,7 +860,20 @@ async def whatsapp_incoming(request: Request):
 
         try:
             from core.runtime_perf import spawn_background  # noqa: PLC0415
-            spawn_background(_handle_whatsapp_body(body), name="webhook_meta")
+            from services.meta_receipt_context import verify_receipt_context
+
+            receipt_context = None
+            if result.is_valid:
+                try:
+                    receipt_context = verify_receipt_context(
+                        raw_body, sig_header, secret=META_APP_SECRET or None,
+                    )
+                except Exception as exc:
+                    logger.warning("[webhook/meta] receipt authority unavailable: %s", type(exc).__name__)
+            spawn_background(
+                _handle_whatsapp_body(body, receipt_context=receipt_context),
+                name="webhook_meta",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("[webhook/meta] spawn_background failed: %s", exc)
         # This request has finished deciding: the pilot's obligations are
@@ -1025,7 +1038,7 @@ def _pilot_refusal_response(accepted: Any, *, signature: Any = None) -> JSONResp
     return JSONResponse({"status": "retry", "reason": reason}, status_code=503)
 
 
-async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
+async def _handle_whatsapp_body(body: Dict[str, Any], *, receipt_context=None) -> None:
     # ── W2.0.1 (May 2026): Inbound-lifecycle telemetry wrap ─────────
     # Each Meta inbound message is wrapped in a per-message trace.
     # The context manager records EVENT_RECEIVED on entry and emits
@@ -1078,7 +1091,10 @@ async def _handle_whatsapp_body(body: Dict[str, Any]) -> None:
                 # unfinished, was answered, or has an unknown send outcome.
                 await _release_unrouted_obligation(phone_number_id, msg)
             for status in value.get("statuses", []):
-                await _handle_message_status(status)
+                await _handle_message_status(
+                    status, receipt_context=receipt_context,
+                    phone_number_id=str(phone_number_id or ""),
+                )
 
 
 async def _release_unrouted_obligation(phone_number_id: Any, msg: Dict[str, Any]) -> None:
@@ -1306,7 +1322,9 @@ def _sanitize_status_webhook_errors(errors: Any) -> List[Dict[str, Any]]:
     return out
 
 
-async def _handle_message_status(status: Dict[str, Any]) -> None:
+async def _handle_message_status(
+    status: Dict[str, Any], *, receipt_context=None, phone_number_id: str = "",
+) -> None:
     """Process the four WhatsApp delivery-status webhook events from
     Meta (``sent``, ``delivered``, ``read``, ``failed``)
     and persist them against the matching ``CampaignSendLog`` row.
@@ -1365,6 +1383,19 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
     now = datetime.utcnow()
 
     try:
+        # Communication owns a verified receipt exclusively. Resolve it before
+        # the campaign ledger, whose helper commits internally. A conflict must
+        # roll back without recording this callback under another sender.
+        from core.salla_communication_whatsapp import record_meta_delivery_status
+        comm_matched, comm_changed = record_meta_delivery_status(
+            db, message_id=wamid, status=st,
+            phone_number_id=phone_number_id,
+            receipt_payload=status, receipt_context=receipt_context,
+        )
+        if comm_matched:
+            if comm_changed:
+                db.commit()
+            return
         # ── Layer 1: per-recipient send log (preferred path) ────────
         from models import CampaignSendLog, Campaign  # noqa: PLC0415
         from sqlalchemy.orm.attributes import flag_modified  # noqa: PLC0415
@@ -1615,25 +1646,6 @@ async def _handle_message_status(status: Dict[str, Any]) -> None:
             db.close()
         except Exception:
             pass
-
-    # Keep the Salla-specific receipt correlation independent of the
-    # established campaign/AI status transaction. Its failure cannot undo
-    # their delivery records or trigger a customer send.
-    # The provider helper may also create an ordinary outbound ledger row.
-    # Correlate the Salla receipt independently even when that row matched.
-    comm_db = next(get_db(), None)
-    if comm_db is not None:
-        try:
-            from core.salla_communication_whatsapp import record_meta_delivery_status
-            _, changed = record_meta_delivery_status(comm_db, message_id=wamid, status=st)
-            if changed:
-                comm_db.commit()
-        except Exception as exc:
-            comm_db.rollback()
-            logger.warning("[StatusWebhook] communication receipt update failed: %s", type(exc).__name__)
-        finally:
-            comm_db.close()
-
 
 # Media types we can download + materialise as proper media bubbles in the
 # dashboard. Anything outside this set falls back to a friendly placeholder

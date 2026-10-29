@@ -75,7 +75,8 @@ jobs:
             --junitxml="$RUNNER_TEMP/acceptance-pg18/source-pin.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/source-pin.xml"
           python -B -m pytest backend/tests/test_salla_communication_migration_pg.py \
-            backend/tests/test_salla_communication_pg_reservation.py -q -ra --tb=short \
+            backend/tests/test_salla_communication_pg_reservation.py \
+            backend/tests/test_salla_communication_receipt_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/communication.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication.xml"
           python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \

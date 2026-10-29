@@ -337,9 +337,17 @@ async def send_reserved_salla_communication(
         if isinstance(messages, list) and messages and isinstance(messages[0], dict)
         else ""
     )
+    if len(message_id) > 128:
+        # Meta may have accepted the send. Truncating its identity would make
+        # the later receipt unmatchable and could collide with another ID.
+        event.communication_send_state = "ambiguous"
+        event.communication_send_error_code = "provider_message_id_too_long"
+        db.add(event)
+        db.commit()
+        raise RuntimeError("communication_provider_message_id_too_long")
     if message_id:
         event.communication_send_state = "accepted"
-        event.communication_provider_message_id = message_id[:128]
+        event.communication_provider_message_id = message_id
         event.communication_send_error_code = None
         db.add(event)
         db.commit()

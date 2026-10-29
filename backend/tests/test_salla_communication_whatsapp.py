@@ -58,6 +58,86 @@ def payload(*, content="Order updated", recipient=PHONE, entity_id=42):
     }
 
 
+@pytest.mark.asyncio
+async def test_function_persists_exact_verified_body_digest_on_first_and_duplicate(monkeypatch):
+    """A duplicate identity must keep the first verified body and send result."""
+    from routers.webhooks import salla_communication_function
+    from services.salla_integration_resolver import ResolvedSallaIntegration
+
+    class FakeDb:
+        def add(self, _row):
+            pass
+
+        def commit(self):
+            pass
+
+        def refresh(self, _row):
+            pass
+
+    class FakeRequest:
+        headers = {}
+
+        def __init__(self, body):
+            self._body = body
+
+        async def body(self):
+            return self._body
+
+    verified = []
+    persisted = []
+    dispatched = []
+    original = None
+
+    def verify(body, _headers):
+        verified.append(body)
+        return True, f"{len(verified):032x}"
+
+    def persist(_db, **kwargs):
+        nonlocal original
+        persisted.append(kwargs)
+        if original is None:
+            original = SimpleNamespace(
+                raw_body=kwargs["raw_body"].decode("utf-8"),
+                raw_headers=kwargs["headers"],
+                communication_send_state="accepted",
+                communication_provider_message_id="wamid.synthetic",
+            )
+        return original
+
+    async def dispatch(_db, event, **kwargs):
+        dispatched.append((event, kwargs))
+
+    monkeypatch.setattr("core.salla_comm_function_auth.verify_function_request", verify)
+    monkeypatch.setattr(
+        "services.salla_integration_resolver.resolve_salla_integration_connection",
+        lambda *_args, **_kwargs: ResolvedSallaIntegration(
+            integration_id=7, tenant_id=1, matched_via="synthetic"
+        ),
+    )
+    monkeypatch.setattr("routers.webhooks.persist_event", persist)
+    monkeypatch.setattr(
+        "core.salla_communication_whatsapp.dispatch_communication_whatsapp", dispatch
+    )
+
+    first = json.dumps(payload(content="\u062d\u0627\u0644\u0629 \u0627\u0644\u0637\u0644\u0628"), ensure_ascii=False).encode("utf-8")
+    duplicate = json.dumps(
+        payload(content="\u062d\u0627\u0644\u0629 \u0627\u0644\u0637\u0644\u0628"), ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    assert first != duplicate
+    for body in (first, duplicate):
+        result = await salla_communication_function(FakeRequest(body), FakeDb())
+        assert result["state"] == "provider_accepted"
+    assert verified == [first, duplicate]
+    assert [row["raw_body"] for row in persisted] == [first, duplicate]
+    assert [row["headers"]["x-nahla-comm-body-sha256"] for row in persisted] == [
+        hashlib.sha256(first).hexdigest(),
+        hashlib.sha256(duplicate).hexdigest(),
+    ]
+    assert original.raw_body == first.decode("utf-8")
+    assert original.raw_headers["x-nahla-comm-body-sha256"] == hashlib.sha256(first).hexdigest()
+    assert len(dispatched) == 2 and all(item[0] is original for item in dispatched)
+
+
 def test_identity_deduplicates_exact_retry_but_not_distinct_content():
     def identity(body):
         return build_salla_webhook_external_event_id(
@@ -129,10 +209,13 @@ class FakeQuery:
     def filter(self, *criteria):
         for criterion in criteria:
             key = criterion.left.key
-            expected = criterion.right.value
+            expected = True if str(criterion.right).lower() == "true" else criterion.right.value
             if getattr(self.row, key, None) != expected:
                 self.row = None
                 break
+        return self
+
+    def with_for_update(self):
         return self
 
     def filter_by(self, **criteria):
@@ -185,7 +268,8 @@ class FakeSession:
                 matched &= self.store_state["send_state"] is None
             else:
                 assert key in {"tenant_id", "provider", "event_type", "store_id", "signature_valid"}
-                matched &= getattr(self.event, key, None) == criterion.right.value
+                expected = True if str(criterion.right).lower() == "true" else criterion.right.value
+                matched &= getattr(self.event, key, None) == expected
         if matched:
             self.event.communication_send_state = "sending"
             self.last_added = self.event
@@ -274,36 +358,96 @@ async def test_engine_boundary_requires_persisted_verified_body_digest(monkeypat
     assert db.commits == []
 
 
+def test_meta_receipt_authority_binds_exact_signed_status_and_phone():
+    from services.meta_receipt_context import permits_receipt, verify_receipt_context
+
+    secret = "synthetic-meta-key"
+    status = {"id": "wamid.synthetic", "status": "delivered", "recipient_id": PHONE}
+    body = json.dumps({"entry": [{"changes": [{"value": {
+        "metadata": {"phone_number_id": "phone-one"}, "statuses": [status],
+    }}]}]}, separators=(",", ":")).encode()
+    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    assert verify_receipt_context(body, "sha256=" + "0" * 64, secret=secret) is None
+    context = verify_receipt_context(body, signature, secret=secret)
+    assert permits_receipt(context, status, "phone-one")
+    assert not permits_receipt(context, status, "phone-two")
+    assert not permits_receipt(context, {**status, "status": "read"}, "phone-one")
+    assert not permits_receipt(None, status, "phone-one")
+
+
 def test_meta_receipt_is_the_only_delivery_evidence(monkeypatch):
+    from services.meta_receipt_context import verify_receipt_context
+    from services.salla_communication_receipt_owner import CommunicationReceiptConflict
+
+    secret = "synthetic-receipt-key"
+    monkeypatch.setattr(
+        "services.salla_communication_receipt_owner.competing_receipt_owner",
+        lambda *_args: False,
+    )
+
+    def signed_status(state, *, message_id="wamid.synthetic", phone_id="test-phone-id"):
+        status = {"id": message_id, "status": state, "recipient_id": PHONE}
+        raw = json.dumps({
+            "entry": [{"changes": [{"value": {
+                "metadata": {"phone_number_id": phone_id}, "statuses": [status],
+            }}]}],
+        }, separators=(",", ":")).encode()
+        signature = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        context = verify_receipt_context(raw, signature, secret=secret)
+        assert context is not None
+        return status, context
+
+    def observe(db, state, *, message_id="wamid.synthetic", phone_id="test-phone-id",
+                receipt_context=None):
+        signed, context = signed_status(state, message_id=message_id, phone_id=phone_id)
+        return record_meta_delivery_status(
+            db, message_id=message_id, status=state, phone_number_id=phone_id,
+            receipt_payload=signed,
+            receipt_context=context if receipt_context is None else receipt_context,
+        )
+
     db, event = setup_send(monkeypatch)
     event.communication_send_state = "accepted"
     event.communication_provider_message_id = "wamid.synthetic"
-    assert record_meta_delivery_status(
-        db, message_id="other", status="delivered"
-    ) == (False, False)
+    assert observe(db, "delivered", message_id="other") == (False, False)
     assert event.communication_send_state == "accepted"
+    signed, _ = signed_status("delivered")
     assert record_meta_delivery_status(
-        db, message_id="wamid.synthetic", status="delivered"
-    ) == (True, True)
+        db, message_id="wamid.synthetic", status="delivered",
+        phone_number_id="test-phone-id", receipt_payload=signed,
+        receipt_context=None,
+    ) == (False, False)
+    assert observe(db, "delivered") == (True, True)
     assert event.communication_send_state == "delivered"
-    assert record_meta_delivery_status(
-        db, message_id="wamid.synthetic", status="delivered"
-    ) == (True, False)
-    assert record_meta_delivery_status(
-        db, message_id="wamid.synthetic", status="read"
-    ) == (True, True)
-    assert record_meta_delivery_status(
-        db, message_id="wamid.synthetic", status="failed"
-    ) == (True, False)
+    assert observe(db, "delivered") == (True, False)
+    assert observe(db, "read") == (True, True)
+    assert observe(db, "failed") == (True, False)
     assert event.communication_send_state == "read"
 
     db, event = setup_send(monkeypatch)
     event.communication_send_state = "accepted"
     event.communication_provider_message_id = "wamid.synthetic"
-    assert record_meta_delivery_status(
-        db, message_id="wamid.synthetic", status="failed"
-    ) == (True, True)
+    assert observe(db, "failed") == (True, True)
     assert event.communication_send_state == "delivery_failed"
+
+    db, event = setup_send(monkeypatch)
+    event.communication_send_state = "accepted"
+    event.communication_provider_message_id = "wamid.synthetic"
+    db.connection.tenant_id = 2
+    with pytest.raises(CommunicationReceiptConflict, match="tenant_mismatch"):
+        observe(db, "delivered")
+    assert event.communication_send_state == "accepted"
+
+    db, event = setup_send(monkeypatch)
+    event.communication_send_state = "accepted"
+    event.communication_provider_message_id = "wamid.synthetic"
+    monkeypatch.setattr(
+        "services.salla_communication_receipt_owner.competing_receipt_owner",
+        lambda *_args: True,
+    )
+    with pytest.raises(CommunicationReceiptConflict, match="owner_ambiguous"):
+        observe(db, "delivered")
+    assert event.communication_send_state == "accepted"
 
 
 @pytest.mark.asyncio
@@ -325,6 +469,29 @@ async def test_one_send_then_completion_retry_cannot_send_again(monkeypatch):
     assert len(sent) == 1
     assert sent[0]["text"]["body"] == payload()["data"]["content"]
     assert db.commits == ["sending", "accepted"]
+
+
+@pytest.mark.asyncio
+async def test_oversize_provider_id_is_ambiguous_and_never_automatically_resent(monkeypatch):
+    db, event = setup_send(monkeypatch)
+    sends = []
+
+    async def fake_provider(*args, **kwargs):
+        sends.append(kwargs["payload"])
+        return {"messages": [{"id": "x" * 129}]}, object()
+
+    monkeypatch.setattr("services.whatsapp_platform.service.provider_send_message", fake_provider)
+    with pytest.raises(RuntimeError, match="provider_message_id_too_long"):
+        await dispatch_communication_whatsapp(
+            db, event, tenant_id=1, store_id=STORE, integration_connection_id=7,
+        )
+    assert event.communication_send_state == "ambiguous"
+    assert event.communication_provider_message_id is None
+    with pytest.raises(RuntimeError, match="requires_reconciliation"):
+        await dispatch_communication_whatsapp(
+            db, event, tenant_id=1, store_id=STORE, integration_connection_id=7,
+        )
+    assert len(sends) == 1
 
 
 @pytest.mark.asyncio

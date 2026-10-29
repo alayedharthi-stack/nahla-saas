@@ -80,27 +80,69 @@ def inbox_event_type(event_type: str | None, headers: Mapping[str, Any]) -> str 
     return "communication.whatsapp.observed" if event_type == EVENT else event_type
 
 
-def record_meta_delivery_status(db: Session, *, message_id: str, status: str) -> tuple[bool, bool]:
+def record_meta_delivery_status(
+    db: Session, *, message_id: str, status: str, phone_number_id: str,
+    receipt_payload: dict, receipt_context: object,
+) -> tuple[bool, bool]:
     """Correlate a verified Meta status with this pilot's accepted send.
 
     Returns (matched, changed). The caller owns the transaction. A later
     status cannot downgrade read/delivered, and no status triggers a send.
     """
-    from models import WebhookEvent
+    import hashlib
+    import hmac
+    import json
+
+    from models import WebhookEvent, WhatsAppConnection
+    from services.meta_receipt_context import permits_receipt
+    from services.salla_communication_receipt_owner import (
+        CommunicationReceiptConflict, competing_receipt_owner,
+    )
+    from utils.phone_utils import normalize_to_e164
 
     if not message_id or status not in {"delivered", "read", "failed"}:
+        return False, False
+    if not permits_receipt(receipt_context, receipt_payload, phone_number_id):
+        return False, False
+    if receipt_payload.get("id") != message_id or receipt_payload.get("status") != status:
         return False, False
     event = (
         db.query(WebhookEvent)
         .filter(
             WebhookEvent.provider == "salla_function",
             WebhookEvent.event_type == EVENT,
+            WebhookEvent.signature_valid.is_(True),
             WebhookEvent.communication_provider_message_id == message_id,
         )
+        .with_for_update()
         .one_or_none()
     )
     if event is None:
         return False, False
+    connection = (
+        db.query(WhatsAppConnection)
+        .filter(
+            WhatsAppConnection.phone_number_id == phone_number_id,
+            WhatsAppConnection.provider == "meta",
+        )
+        .one_or_none()
+    )
+    if connection is None or connection.tenant_id != event.tenant_id:
+        raise CommunicationReceiptConflict("communication_receipt_tenant_mismatch")
+    digest = str((event.raw_headers or {}).get("x-nahla-comm-body-sha256") or "")
+    if not isinstance(event.raw_body, str) or not hmac.compare_digest(
+        digest, hashlib.sha256(event.raw_body.encode("utf-8")).hexdigest()
+    ):
+        raise CommunicationReceiptConflict("communication_receipt_source_mismatch")
+    try:
+        notice = parse_notice(json.loads(event.raw_body))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise CommunicationReceiptConflict("communication_receipt_source_invalid") from exc
+    recipient = normalize_to_e164(str(receipt_payload.get("recipient_id") or ""))
+    if not recipient or recipient != notice.recipient:
+        raise CommunicationReceiptConflict("communication_receipt_recipient_mismatch")
+    if competing_receipt_owner(db, message_id):
+        raise CommunicationReceiptConflict("communication_receipt_owner_ambiguous")
     current = event.communication_send_state
     next_state = {
         ("accepted", "delivered"): "delivered",
