@@ -528,40 +528,62 @@ def _trusted_scope_base() -> str:
     import re  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
 
-    event = os.environ.get("NAHLA_SCOPE_EVENT", "")
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_path:
+        raise ScopeDiffUnavailable("GitHub event file is unavailable")
+    try:
+        with open(event_path, encoding="utf-8") as source:
+            payload = json.load(source)
+    except (OSError, ValueError) as exc:
+        raise ScopeDiffUnavailable("GitHub event file cannot be read") from exc
+    if not isinstance(payload, dict):
+        raise ScopeDiffUnavailable("GitHub event is not an object")
     if event == "pull_request":
-        base = os.environ.get("NAHLA_SCOPE_PR_BASE_SHA", "")
+        request = payload.get("pull_request", {})
+        target = request.get("base", {}) if isinstance(request, dict) else {}
+        base = target.get("sha", "") if isinstance(target, dict) else ""
+        base_ref = target.get("ref", "") if isinstance(target, dict) else ""
     elif event == "push":
-        base = os.environ.get("NAHLA_SCOPE_PUSH_BEFORE", "")
+        base = payload.get("before", "")
+        base_ref = ""
     else:
         raise ScopeDiffUnavailable(f"unsupported scope event: {event!r}")
-    if not re.fullmatch(r"[0-9a-f]{40}", base) or base == "0" * 40:
+    if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}", base) or base == "0" * 40:
         raise ScopeDiffUnavailable("CI event did not provide a valid base commit SHA")
 
     repo = os.path.abspath(os.path.join(_HERE, "../.."))
-    present = subprocess.run(
-        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
-        cwd=repo, capture_output=True, text=True,
-    )
+    def _git(*argv: str):
+        return subprocess.run(
+            ["git", *argv], cwd=repo, capture_output=True, text=True,
+        )
+
+    present = _git("cat-file", "-e", f"{base}^{{commit}}")
+    if present.returncode != 0 and _git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+        if _git("fetch", "--no-tags", "--quiet", "--unshallow", "origin").returncode != 0:
+            raise ScopeDiffUnavailable("CI checkout history could not be fetched")
+        present = _git("cat-file", "-e", f"{base}^{{commit}}")
+    if present.returncode != 0 and event == "pull_request":
+        # The branch name comes from GitHub's event file, never PR source code.
+        if not isinstance(base_ref, str) or _git("check-ref-format", f"refs/heads/{base_ref}").returncode != 0:
+            raise ScopeDiffUnavailable("GitHub PR base branch is invalid")
+        fetched = _git(
+            "fetch", "--no-tags", "--quiet", "origin",
+            f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+        )
+        if fetched.returncode != 0:
+            raise ScopeDiffUnavailable("GitHub PR base branch could not be fetched")
+        present = _git("cat-file", "-e", f"{base}^{{commit}}")
     if present.returncode != 0:
         raise ScopeDiffUnavailable("CI event base commit is unavailable")
     if event == "pull_request":
         # actions/checkout uses GitHub's synthetic merge commit on PR events.
-        parent = subprocess.run(
-            ["git", "rev-parse", "HEAD^1"],
-            cwd=repo, capture_output=True, text=True,
-        )
+        parent = _git("rev-parse", "HEAD^1")
         if parent.returncode != 0 or parent.stdout.strip() != base:
             raise ScopeDiffUnavailable("PR base does not match checkout merge parent")
     else:
-        ancestor = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", base, "HEAD"],
-            cwd=repo, capture_output=True, text=True,
-        )
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo, capture_output=True, text=True,
-        )
+        ancestor = _git("merge-base", "--is-ancestor", base, "HEAD")
+        head = _git("rev-parse", "HEAD")
         if ancestor.returncode != 0 or head.returncode != 0 or head.stdout.strip() == base:
             raise ScopeDiffUnavailable("push before commit is not a prior ancestor")
     return base
@@ -1161,17 +1183,19 @@ def test_scope_base_ignores_inherited_coupon_but_blocks_new_edit(tmp_path, monke
     git("merge", "--no-ff", "communication", "-m", "PR merge")
 
     monkeypatch.setitem(globals(), "_HERE", str(tests))
-    monkeypatch.setenv("NAHLA_SCOPE_EVENT", "pull_request")
-    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", base)
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"pull_request": {"base": {"sha": base, "ref": "main"}}}), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     assert _trusted_scope_base() == base
     assert _branch_diff_paths() == {"backend/core/communication.py"}
     test_branch_diff_excludes_other_agent_scope_paths()
 
     # An older, valid ancestor is not the PR base and cannot be substituted.
-    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", older)
+    event_path.write_text(json.dumps({"pull_request": {"base": {"sha": older, "ref": "main"}}}), encoding="utf-8")
     with pytest.raises(ScopeDiffUnavailable):
         _trusted_scope_base()
-    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", base)
+    event_path.write_text(json.dumps({"pull_request": {"base": {"sha": base, "ref": "main"}}}), encoding="utf-8")
 
     git("reset", "--hard", base)
     git("checkout", "-b", "forbidden")
@@ -1185,12 +1209,12 @@ def test_scope_base_ignores_inherited_coupon_but_blocks_new_edit(tmp_path, monke
         test_branch_diff_excludes_other_agent_scope_paths()
 
     # Push checks cover the before..after range and reject an unknown base.
-    monkeypatch.setenv("NAHLA_SCOPE_EVENT", "push")
-    monkeypatch.setenv("NAHLA_SCOPE_PUSH_BEFORE", base)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+    event_path.write_text(json.dumps({"before": base}), encoding="utf-8")
     assert "backend/routers/coupons.py" in _branch_diff_paths()
-    monkeypatch.setenv("NAHLA_SCOPE_PUSH_BEFORE", "0" * 40)
+    event_path.write_text(json.dumps({"before": "0" * 40}), encoding="utf-8")
     with pytest.raises(ScopeDiffUnavailable):
         _branch_diff_paths()
-    monkeypatch.delenv("NAHLA_SCOPE_EVENT")
+    monkeypatch.delenv("GITHUB_EVENT_NAME")
     with pytest.raises(ScopeDiffUnavailable):
         _branch_diff_paths()

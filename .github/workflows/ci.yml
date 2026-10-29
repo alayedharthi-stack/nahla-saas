@@ -340,16 +340,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
-    env:
-      NAHLA_SCOPE_EVENT: ${{ github.event_name }}
-      NAHLA_SCOPE_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      NAHLA_SCOPE_PUSH_BEFORE: ${{ github.event.before }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
