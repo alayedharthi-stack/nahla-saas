@@ -23,10 +23,11 @@ def pilot_env():
 
 
 def test_post_0124_states_are_separate_and_bootstrap_stays_0093():
-    assert set(k.POST_INSTALL_PHASES) == {"S4_DORMANT", "S4_PILOT"}
+    assert set(k.POST_INSTALL_PHASES) == {"S4_DORMANT", "S4_PILOT", "S4_COMM_DORMANT"}
     assert set(k.DEPLOY_PHASES) == {"S0", "S3"}
     assert bootstrap.INTEGRATION_BOOTSTRAP_TARGET == "0093"
-    for name, definition in k.POST_INSTALL_PHASES.items():
+    for name in ("S4_DORMANT", "S4_PILOT"):
+        definition = k.POST_INSTALL_PHASES[name]
         assert definition["rows"] == {"0111", "0113", "0124"}
         assert len(definition["tables"]) == 17
         assert definition["expectations_key"] == "shopify_s4"
