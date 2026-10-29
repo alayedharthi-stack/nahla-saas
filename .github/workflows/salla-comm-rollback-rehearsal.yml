@@ -1,0 +1,61 @@
+name: Salla 0125 retained-schema rollback rehearsal
+
+on:
+  pull_request:
+    branches: [codex/salla-production-preserve-shopify-20261018]
+
+permissions:
+  contents: read
+
+jobs:
+  rollback-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 0334e867c408f12067410fd8e0a9f5a6355e37d8
+          path: old_app
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 64bf7f112b649b33d14f7308c0f4aea8534e427a
+          path: candidate_app
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install reviewed application test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r backend/requirements.txt pytest
+      - name: Check retained 0125 against previous application
+        env:
+          NAHLA_RELIABILITY_REQUIRE_PG: "1"
+          NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
+          SALLA_COMM_TEST_PG_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
+          SALLA_COMM_SEND_ENABLED: "false"
+        run: |
+          set -euo pipefail
+          printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts >/dev/null
+          python -c 'import os; import sqlalchemy as sa; e=sa.create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"]); c=e.connect(); v=int(c.exec_driver_sql("SHOW server_version_num").scalar()); print("PostgreSQL server_version_num=", v); assert 180000 <= v < 190000; c.close(); e.dispose()'
+          python -B -m pytest backend/tests/test_salla_communication_retained_0125_pg.py -q -ra --tb=short
+
