@@ -503,15 +503,7 @@ def test_no_decision_plan_or_projection_wiring() -> None:
 
 
 def test_coupon_eligibility_module_unchanged_by_wireup() -> None:
-    import subprocess
-
-    proc = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main...HEAD", "--", "backend/modules/ai/brain/truth_surface/coupon_offer_loader.py"],
-        cwd=os.path.abspath(os.path.join(_HERE, "../..")),
-        capture_output=True,
-        text=True,
-    )
-    assert proc.stdout.strip() == ""
+    assert "backend/modules/ai/brain/truth_surface/coupon_offer_loader.py" not in _branch_diff_paths()
 
 
 def test_constitution_compliance_green() -> None:
@@ -527,72 +519,69 @@ def test_constitution_compliance_green() -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-_SCOPE_DIFF_BASE = "origin/main"
-
-
 class ScopeDiffUnavailable(RuntimeError):
     """The branch diff could not be computed, so scope cannot be judged."""
 
 
-def _branch_diff_paths(base: str = _SCOPE_DIFF_BASE) -> set:
-    """Paths this branch changes against ``base``, or a hard failure.
+def _trusted_scope_base() -> str:
+    """Bind scope to the GitHub event and fail closed on missing history."""
+    import re  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
 
-    ``git diff`` writes its errors to stderr and leaves stdout EMPTY, so a
-    base ref that does not resolve — a shallow clone, a missing remote —
-    used to produce an empty set that satisfied every scope assertion.
-    The guard then reported PASS precisely when it could see nothing,
-    which is the one situation in which it has proved nothing at all.
+    event = os.environ.get("NAHLA_SCOPE_EVENT", "")
+    if event == "pull_request":
+        base = os.environ.get("NAHLA_SCOPE_PR_BASE_SHA", "")
+    elif event == "push":
+        base = os.environ.get("NAHLA_SCOPE_PUSH_BEFORE", "")
+    else:
+        raise ScopeDiffUnavailable(f"unsupported scope event: {event!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}", base) or base == "0" * 40:
+        raise ScopeDiffUnavailable("CI event did not provide a valid base commit SHA")
 
-    The exit code is therefore checked, and an empty result from a
-    successful diff is distinguished from a diff that never ran.
+    repo = os.path.abspath(os.path.join(_HERE, "../.."))
+    present = subprocess.run(
+        ["git", "cat-file", "-e", f"{base}^{{commit}}"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if present.returncode != 0:
+        raise ScopeDiffUnavailable("CI event base commit is unavailable")
+    if event == "pull_request":
+        # actions/checkout uses GitHub's synthetic merge commit on PR events.
+        parent = subprocess.run(
+            ["git", "rev-parse", "HEAD^1"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        if parent.returncode != 0 or parent.stdout.strip() != base:
+            raise ScopeDiffUnavailable("PR base does not match checkout merge parent")
+    else:
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base, "HEAD"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        if ancestor.returncode != 0 or head.returncode != 0 or head.stdout.strip() == base:
+            raise ScopeDiffUnavailable("push before commit is not a prior ancestor")
+    return base
+
+
+def _branch_diff_paths(base: str | None = None) -> set:
+    """Paths changed since the trusted event base, or a hard failure.
+
+    An unresolved ref must never look like an empty, passing diff.
     """
     import subprocess  # noqa: PLC0415
 
+    if base is None:
+        base = _trusted_scope_base()
     repo = os.path.abspath(os.path.join(_HERE, "../.."))
 
-    def _diff():
-        return subprocess.run(
-            ["git", "diff", "--name-only", f"{base}...HEAD"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-
-    proc = _diff()
-    if proc.returncode != 0:
-        # CI checks out a pull request shallow, so the base ref is simply
-        # absent rather than wrong. The guard fetches it itself instead of
-        # depending on how each job configures its checkout — a workflow
-        # is governance-core, and a scope guard that only works when
-        # somebody remembers to deepen a checkout is the inert guard this
-        # replaces.
-        branch = base.split("/", 1)[-1] if "/" in base else base
-        refspec = f"+refs/heads/{branch}:refs/remotes/origin/{branch}"
-        shallow = (
-            subprocess.run(
-                ["git", "rev-parse", "--is-shallow-repository"],
-                cwd=repo,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            == "true"
-        )
-        # A shallow clone rejects a plain fetch of a new root ("shallow
-        # roots are not allowed to be updated"), and a merge base needs
-        # real history on BOTH sides — deepening only the base ref leaves
-        # this branch grafted at one commit and git still reports no
-        # merge base. So the clone is unshallowed first, then the base
-        # ref fetched.
-        attempts = (
-            [["git", "fetch", "--no-tags", "--quiet", "--unshallow", "origin"]]
-            if shallow
-            else []
-        ) + [["git", "fetch", "--no-tags", "--quiet", "origin", refspec]]
-        for argv in attempts:
-            subprocess.run(argv, cwd=repo, capture_output=True, text=True)
-            proc = _diff()
-            if proc.returncode == 0:
-                break
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...HEAD"],
+        cwd=repo, capture_output=True, text=True,
+    )
     if proc.returncode != 0:
         raise ScopeDiffUnavailable(
             f"git diff {base}...HEAD failed with exit {proc.returncode}: "
@@ -617,7 +606,7 @@ class ScopeExceptionRegistryMalformed(AssertionError):
     """
 
 
-def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
+def _scope_exceptions_on_base(base: str | None = None) -> dict:
     """``exact path -> exception`` as the registry stands **on BASE**.
 
     Read with ``git show {base}:{path}``, never from the working tree, so a
@@ -637,6 +626,8 @@ def _scope_exceptions_on_base(base: str = _SCOPE_DIFF_BASE) -> dict:
     import subprocess  # noqa: PLC0415
     from datetime import date, datetime  # noqa: PLC0415
 
+    if base is None:
+        base = _trusted_scope_base()
     repo = os.path.abspath(os.path.join(_HERE, "../.."))
 
     def _expiry(raw: object, index: int) -> str:
@@ -747,8 +738,9 @@ def test_branch_diff_excludes_other_agent_scope_paths() -> None:
     """
     import subprocess
 
-    files = _branch_diff_paths()
-    excused = _scope_exceptions_on_base()
+    base = _trusted_scope_base()
+    files = _branch_diff_paths(base)
+    excused = _scope_exceptions_on_base(base)
 
     forbidden_exact = {
         "backend/routers/coupons.py",
@@ -1114,13 +1106,7 @@ def test_layer2_default_flag_disabled_without_patch(monkeypatch) -> None:
 
 
 def test_the_scope_guard_fails_closed_when_it_cannot_see_the_diff() -> None:
-    """An unreadable diff is a failure, never a silent pass.
-
-    This is the defect that let the scope guard run green in CI while the
-    branch really did touch an agent-owned path: the job checked out at
-    the default depth, ``origin/main`` did not resolve, stdout came back
-    empty and every assertion over the empty set held.
-    """
+    """An unreadable diff is a failure, never a silent pass."""
     with pytest.raises(ScopeDiffUnavailable):
         _branch_diff_paths("refs/nahla/definitely-not-a-ref")
 
@@ -1134,3 +1120,77 @@ def test_the_scope_guard_can_actually_see_this_branch_s_diff() -> None:
     """
     paths = _branch_diff_paths()
     assert isinstance(paths, set)
+
+
+def test_scope_base_ignores_inherited_coupon_but_blocks_new_edit(tmp_path, monkeypatch) -> None:
+    """A PR's actual base excludes inherited edits, not edits inside the PR."""
+    import subprocess  # noqa: PLC0415
+
+    repo = tmp_path / "scope"
+    tests = repo / "backend" / "tests"
+    coupons = repo / "backend" / "routers" / "coupons.py"
+    communication = repo / "backend" / "core" / "communication.py"
+    tests.mkdir(parents=True)
+    coupons.parent.mkdir(parents=True)
+    communication.parent.mkdir(parents=True)
+
+    def git(*args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Scope Test")
+    git("config", "user.email", "scope@example.invalid")
+    coupons.write_text("original\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "original")
+    older = git("rev-parse", "HEAD")
+
+    coupons.write_text("inherited in production base\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "production base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-b", "communication")
+    communication.write_text("new communication code\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "communication")
+    git("checkout", "main")
+    git("merge", "--no-ff", "communication", "-m", "PR merge")
+
+    monkeypatch.setitem(globals(), "_HERE", str(tests))
+    monkeypatch.setenv("NAHLA_SCOPE_EVENT", "pull_request")
+    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", base)
+    assert _trusted_scope_base() == base
+    assert _branch_diff_paths() == {"backend/core/communication.py"}
+    test_branch_diff_excludes_other_agent_scope_paths()
+
+    # An older, valid ancestor is not the PR base and cannot be substituted.
+    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", older)
+    with pytest.raises(ScopeDiffUnavailable):
+        _trusted_scope_base()
+    monkeypatch.setenv("NAHLA_SCOPE_PR_BASE_SHA", base)
+
+    git("reset", "--hard", base)
+    git("checkout", "-b", "forbidden")
+    coupons.write_text("edited inside PR\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "forbidden coupon edit")
+    git("checkout", "main")
+    git("merge", "--no-ff", "forbidden", "-m", "forbidden PR merge")
+    assert "backend/routers/coupons.py" in _branch_diff_paths()
+    with pytest.raises(AssertionError):
+        test_branch_diff_excludes_other_agent_scope_paths()
+
+    # Push checks cover the before..after range and reject an unknown base.
+    monkeypatch.setenv("NAHLA_SCOPE_EVENT", "push")
+    monkeypatch.setenv("NAHLA_SCOPE_PUSH_BEFORE", base)
+    assert "backend/routers/coupons.py" in _branch_diff_paths()
+    monkeypatch.setenv("NAHLA_SCOPE_PUSH_BEFORE", "0" * 40)
+    with pytest.raises(ScopeDiffUnavailable):
+        _branch_diff_paths()
+    monkeypatch.delenv("NAHLA_SCOPE_EVENT")
+    with pytest.raises(ScopeDiffUnavailable):
+        _branch_diff_paths()
