@@ -89,8 +89,8 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
             h._sql(db, "DELETE FROM alembic_version")
             for revision in rows:
                 h._sql(db, "INSERT INTO alembic_version(version_num) VALUES ('" + revision + "')")
-            h._assert_fail(root, "S4_DORMANT", db, "Google/combined states refused",
-                           check="version_rows", reason=k.R_VERSION_ROWS_UNKNOWN)
+            h._assert_fail(root, "S4_DORMANT", db, "Communication/combined states refused",
+                           check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
     finally:
         h._drop(db)
 
