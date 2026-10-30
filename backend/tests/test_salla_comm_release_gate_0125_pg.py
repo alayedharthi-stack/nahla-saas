@@ -6,6 +6,7 @@ connection is opened by this test.
 """
 from __future__ import annotations
 
+import base64
 import json
 from datetime import timedelta
 import os
@@ -34,6 +35,11 @@ def _isolated_healthz_smoke(db, tmp_path):
     env.update({
         "DATABASE_URL": h._loopback_url(db),
         "ENVIRONMENT": "production",
+        "JWT_SECRET": os.urandom(32).hex(),
+        "ADMIN_PASSWORD": os.urandom(24).hex(),
+        "WHATSAPP_VERIFY_TOKEN": os.urandom(24).hex(),
+        "ADMIN_EMAIL": "ci-smoke@example.invalid",
+        "TOTP_ENC_KEY": base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"),
         "NAHLA_DISABLE_SCHEDULERS": "1",
         "NAHLA_STARTUP_ROOT": str(h._REPO),
         "NAHLA_DB_STATEMENT_TIMEOUT_MS": "15000",
