@@ -1,0 +1,27 @@
+name: Abandoned cart read projection review
+on:
+  pull_request:
+    paths:
+      - 'backend/services/cart_recovery_status.py'
+      - 'tests/test_cart_recovery_status.py'
+      - '.github/workflows/cart-read-projection-review.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic-read-projection:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Existing repository dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r backend/requirements.txt
+          pip install pytest
+      - name: Existing synthetic in-memory projection tests
+        run: python -m pytest tests/test_cart_recovery_status.py -q --disable-warnings

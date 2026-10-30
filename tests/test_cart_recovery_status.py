@@ -516,3 +516,99 @@ def test_total_stages_derived_from_automation_config():
     s = summarise_for_orders(db, tid, [o])[o.id]
     assert s["total_stages"] == 4
     assert s["status"] == RECOVERY_STATUS_IN_PROGRESS
+
+def test_provider_acceptance_never_claims_delivery_or_read():
+    from types import SimpleNamespace
+    from services.cart_recovery_status import _step_for_event
+    event = SimpleNamespace(payload={}, id=901, created_at=datetime.now(timezone.utc))
+    execution = SimpleNamespace(status='sent', action_taken={'wa_message_id': 'synthetic-accepted'}, executed_at=datetime.now(timezone.utc), error_message=None)
+    step = _step_for_event(event, execution, is_root=True)
+    assert step['status'] == 'sent'  # legacy consumers remain compatible
+    assert step['delivery_status'] == 'accepted'
+    assert step['delivery_status'] not in {'delivered', 'read'}
+
+
+def test_unattempted_reminder_has_no_acceptance_evidence():
+    from types import SimpleNamespace
+    from services.cart_recovery_status import _step_for_event
+    event = SimpleNamespace(payload={}, id=902, created_at=datetime.now(timezone.utc))
+    step = _step_for_event(event, None, is_root=True)
+    assert step['delivery_status'] == 'pending'
+    assert step['sent_at'] is None
+    assert step['wa_message_id'] is None
+
+def test_no_saved_plan_does_not_invent_three_reminders():
+    from services.cart_recovery_status import _get_configured_steps
+    db, tid = _db()
+    assert _get_configured_steps(db, tid) == []
+
+
+def test_purchase_never_displays_remaining_plan_as_upcoming():
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=4)
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={'recovery_converted_at': '2026-10-29T08:00:00Z', 'recovery_cancel_reason': 'customer_purchased'})
+    cart = _order(db, tid, recovery_event_id=root.id)
+    timeline = timeline_for_order(db, tid, cart)
+    assert timeline['status'] == RECOVERY_STATUS_CONVERTED
+    assert all(s['status'] not in {'upcoming', 'pending'} for s in timeline['steps'])
+
+
+def test_cross_tenant_recovery_reference_never_exposes_timeline():
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=2)
+    root = _event(db, tid, cust.id, automation_id=auto.id)
+    cart = _order(db, tid, recovery_event_id=root.id)
+    assert timeline_for_order(db, tid + 999, cart)['steps'] == []
+
+import pytest
+
+@pytest.mark.parametrize('receipt_status', ['delivered', 'read', 'failed'])
+def test_delivery_requires_matching_tenant_and_provider_receipt(receipt_status):
+    from database.models import MessageDeliveryEvent
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=2)
+    root = _event(db, tid, cust.id, automation_id=auto.id)
+    _execution(db, tid, event_id=root.id, automation_id=auto.id, customer_id=cust.id, status='sent', action_taken={'wa_message_id': 'synthetic-receipt'})
+    cart = _order(db, tid, recovery_event_id=root.id)
+    assert timeline_for_order(db, tid, cart)['steps'][0]['delivery_status'] == 'accepted'
+    # Same message ID in another tenant must not supply receipt evidence.
+    db.add(MessageDeliveryEvent(tenant_id=tid+99, wamid='synthetic-receipt', status=receipt_status))
+    db.commit()
+    assert timeline_for_order(db, tid, cart)['steps'][0]['delivery_status'] == 'accepted'
+    db.query(MessageDeliveryEvent).delete()
+    db.add(MessageDeliveryEvent(tenant_id=tid, wamid='synthetic-receipt', status=receipt_status))
+    db.commit()
+    step = timeline_for_order(db, tid, cart)['steps'][0]
+    assert step['delivery_status'] == receipt_status
+    assert step['delivery_event_at'] is not None
+    assert step['status'] == 'sent'  # execution and delivery remain separate
+
+
+def test_legacy_purchase_reason_without_timestamp_stops_all_pending_display():
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=4)
+    root = _event(db, tid, cust.id, automation_id=auto.id, payload={'recovery_cancel_reason': 'customer_purchased'})
+    _event(db, tid, cust.id, automation_id=auto.id, payload={'parent_event_id': root.id, 'step_idx': 1})
+    cart = _order(db, tid, recovery_event_id=root.id)
+    timeline = timeline_for_order(db, tid, cart)
+    assert timeline['status'] == RECOVERY_STATUS_CONVERTED
+    assert timeline['next_pending_at'] is None
+    assert all(step['status'] == 'skipped' for step in timeline['steps'])
+
+def test_saved_delay_and_quiet_hours_do_not_fabricate_a_send_reservation():
+    db, tid = _db()
+    cust = _customer(db, tid)
+    auto = _automation(db, tid, num_steps=4)
+    auto.config = {**auto.config, 'respect_saudi_quiet_hours': True}
+    db.commit()
+    root = _event(db, tid, cust.id, automation_id=auto.id, created_at=datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc))
+    cart = _order(db, tid, recovery_event_id=root.id)
+    timeline = timeline_for_order(db, tid, cart)
+    virtual = [step for step in timeline['steps'] if step['event_id'] == 0]
+    assert len(virtual) == 3
+    assert all(step['scheduled_at'] is None for step in virtual)
+    assert all(step['delay_minutes'] > 0 for step in virtual)
