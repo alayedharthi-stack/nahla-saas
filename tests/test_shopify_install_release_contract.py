@@ -451,14 +451,12 @@ def test_tampered_or_incompatible_prior_pin_refuses_only_the_prior_path(prior_ap
     assert k.evaluate_approval(same, **tampered)[:2] == (k.PASS, None)
 
 
-def test_candidate_sources_definitions_must_still_equal_the_prior_pin(prior_approval, tmp_path):
-    # A candidate whose S4 expectations file differs from the pinned prior's
-    # can never name that prior as its rollback, even with matching evidence.
-    root, _path, record, kwargs = prior_approval
+def test_prior_schema_pin_cannot_be_changed_with_rollback_evidence(prior_approval):
+    # The 0334 schema pin is separate from this source's 0125 digest.
+    # Mutating the trusted prior binding cannot authorize another rollback.
+    _root, _path, record, kwargs = prior_approval
     bindings = copy.deepcopy(kwargs["rollback_bindings"])
-    bindings["schema_expectations_sha256"] = "e" * 64
-    record = copy.deepcopy(record)
-    record["schema_rollback"]["schema_expectations_sha256"] = "e" * 64
+    bindings["prior_schema_expectations_sha256"] = "e" * 64
     assert k.evaluate_approval(record, **{**kwargs, "rollback_bindings": bindings})[:2] == (
         k.FAIL, k.R_SCHEMA_ROLLBACK_INVALID)
 
