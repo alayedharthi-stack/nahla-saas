@@ -72,6 +72,13 @@ jobs:
           python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/rollback.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/rollback.xml"
+          python -B -m pytest tests/test_salla_comm_release_contract_0125.py \
+            backend/tests/test_salla_comm_release_gate_0125_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-release-gate.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-release-gate.xml"
+          python -B -m pytest backend/tests/test_salla_comm_retained_0125_rollback_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-retained-rollback.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-retained-rollback.xml"
           python -B -m pytest backend/tests/test_acceptance_order_coupon_identity.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/acceptance.xml"

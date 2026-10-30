@@ -69,7 +69,7 @@ def test_only_s0_and_s3_are_deployment_phases():
     assert k.INTERMEDIATE_STATES["S1"] == {"0111", "0113", "0121"} and k.INTERMEDIATE_STATES["S2"] == {"0111", "0113", "0122"}
     for name in ("S1", "S2", "LEGACY_462_S0", "head", "heads", "", "S4", "s0", "ANY"):
         assert k.phase(name) is None
-    assert k.SCHEMA_CHANGING_PHASES == {"S3", "S4_DORMANT", "S4_PILOT"}
+    assert k.SCHEMA_CHANGING_PHASES == {"S3", "S4_DORMANT", "S4_PILOT", "S4_COMM_DORMANT"}
     for phase in k.DEPLOY_PHASES.values():
         assert k.RETAINED_ROWS <= phase["rows"] and len(phase["rows"]) == 3
 
@@ -1040,6 +1040,9 @@ def test_graph_edges_heads_and_branch_deltas_hold_for_every_phase():
     assert gate.branch_chain(graph["down"], "0123", "0112") == ("0118", "0120", "0121", "0122", "0123")
     assert gate.branch_chain(graph["down"], "0111", "0112") is None
     assert graph["down"]["0124"] == ("0123",)
+    assert graph["down"]["0125"] == ("0124",)
+    assert k.EXPECTED_DOWN_REVISIONS["0125"] == "0124"
+    assert "0125" not in k.POST_INSTALL_PHASES["S4_DORMANT"]["rows"]
     assert "0124" not in k.DEPLOY_PHASES["S3"]["branch_delta"]
 
 

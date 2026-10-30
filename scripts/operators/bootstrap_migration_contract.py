@@ -54,6 +54,9 @@ SHOPIFY_PRIVACY_ALEMBIC_HEAD = "0123"
 # Install-first remains source-only until a separately authorized migration.
 # Its presence in the graph never changes normal bootstrap or deployment rows.
 SHOPIFY_INSTALL_FIRST_ALEMBIC_HEAD = "0124"
+# Salla Communication extends the source-only install-first branch. Normal
+# bootstrap remains pinned to 0093; this only names the exact new script head.
+SALLA_COMMUNICATION_ALEMBIC_HEAD = "0125"
 
 # These are the only script-directory topologies accepted by this contract.
 # They describe source checkouts, not bootstrap targets: normal bootstrap
@@ -72,7 +75,10 @@ CATALOG_CONSENT_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {
 SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CONNECTION_ALEMBIC_HEAD}
 SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_CATALOG_ALEMBIC_HEAD}
 SHOPIFY_PRIVACY_REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_PRIVACY_ALEMBIC_HEAD}
-REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_INSTALL_FIRST_ALEMBIC_HEAD}
+SHOPIFY_INSTALL_FIRST_REPOSITORY_ALEMBIC_HEADS = (
+    PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SHOPIFY_INSTALL_FIRST_ALEMBIC_HEAD}
+)
+REPOSITORY_ALEMBIC_HEADS = PAYMENTS_REPOSITORY_ALEMBIC_HEADS | {SALLA_COMMUNICATION_ALEMBIC_HEAD}
 SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     BASE_REPOSITORY_ALEMBIC_HEADS,
     ADDRESS_REPOSITORY_ALEMBIC_HEADS,
@@ -87,6 +93,7 @@ SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS = frozenset({
     SHOPIFY_CONNECTION_REPOSITORY_ALEMBIC_HEADS,
     SHOPIFY_CATALOG_REPOSITORY_ALEMBIC_HEADS,
     SHOPIFY_PRIVACY_REPOSITORY_ALEMBIC_HEADS,
+    SHOPIFY_INSTALL_FIRST_REPOSITORY_ALEMBIC_HEADS,
     REPOSITORY_ALEMBIC_HEADS,
 })
 
@@ -104,7 +111,8 @@ def repository_heads_expected(heads) -> bool:
     ``{0092, 0111, 0114, 0115, 0121}``, the Shopify catalog mirror
     ``{0092, 0111, 0114, 0115, 0122}`` and the Shopify privacy requests
     ``{0092, 0111, 0114, 0115, 0123}``, and dormant install-first
-    ``{0092, 0111, 0114, 0115, 0124}``. No arbitrary extra head is accepted.
+    ``{0092, 0111, 0114, 0115, 0124}`` and Salla Communication's exact
+    successor ``{0092, 0111, 0114, 0115, 0125}``. No arbitrary extra head is accepted.
     """
     found = frozenset(str(h) for h in heads)
     return found in SUPPORTED_REPOSITORY_ALEMBIC_HEAD_SETS

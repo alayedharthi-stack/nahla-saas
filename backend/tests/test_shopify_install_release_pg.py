@@ -89,8 +89,8 @@ def test_named_0124_dormant_pilot_and_evidence_retaining_rollback(tmp_path):
             h._sql(db, "DELETE FROM alembic_version")
             for revision in rows:
                 h._sql(db, "INSERT INTO alembic_version(version_num) VALUES ('" + revision + "')")
-            h._assert_fail(root, "S4_DORMANT", db, "Google/combined states refused",
-                           check="version_rows", reason=k.R_VERSION_ROWS_UNKNOWN)
+            h._assert_fail(root, "S4_DORMANT", db, "Communication/combined states refused",
+                           check="version_rows", reason=k.R_VERSION_ROWS_MISMATCH)
     finally:
         h._drop(db)
 
@@ -104,7 +104,7 @@ def test_first_dormant_deploy_runs_with_the_pinned_prior_rollback_and_pilot_stil
         prior = harness.prior_rollback_approval_for(root, "S4_DORMANT", h._target(db))
         record = json.loads(prior.read_text(encoding="utf-8"))
         assert record["schema_rollback"]["source_sha"] == record["deployment_rollback_snapshot"]["source_sha"] \
-            == "efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6" != record["release_sha"]
+            == "0334e867c408f12067410fd8e0a9f5a6355e37d8" != record["release_sha"]
         h._assert_pass(root, "S4_DORMANT", db, "first dormant deploy, pinned prior dormant rollback", approval=prior)
         deadline = datetime.now(timezone.utc) + timedelta(days=1)
         env = {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "true",
