@@ -1,0 +1,90 @@
+{
+  "record_version": 1,
+  "migration_path": "database/migrations/versions/0125_salla_communication_send_audit.py",
+  "migration_sha256": "d94e9bac1c841db81e98dd3c1eddf618e142f74612341a50c393878d622c63ac",
+  "database_heads": [
+    "0111",
+    "0113",
+    "0125"
+  ],
+  "schema_action": "retain_0125_no_downgrade",
+  "nonce_table": "salla_communication_function_nonces",
+  "nonce_definition": {
+    "columns": [
+      [
+        "nonce",
+        "character varying(32)",
+        true,
+        null,
+        "",
+        ""
+      ],
+      [
+        "created_at",
+        "timestamp with time zone",
+        true,
+        null,
+        "",
+        ""
+      ]
+    ],
+    "constraints": [
+      [
+        "salla_communication_function_nonces_pkey",
+        "p",
+        "PRIMARY KEY (nonce)",
+        false,
+        false,
+        true
+      ]
+    ],
+    "indexes": [
+      [
+        "salla_communication_function_nonces_pkey",
+        "CREATE UNIQUE INDEX salla_communication_function_nonces_pkey ON public.salla_communication_function_nonces USING btree (nonce)",
+        true,
+        true,
+        true
+      ]
+    ]
+  },
+  "webhook_table": "webhook_events",
+  "webhook_columns": [
+    [
+      "communication_send_state",
+      "character varying(16)",
+      false,
+      null,
+      "",
+      ""
+    ],
+    [
+      "communication_provider_message_id",
+      "character varying(128)",
+      false,
+      null,
+      "",
+      ""
+    ],
+    [
+      "communication_send_error_code",
+      "character varying(64)",
+      false,
+      null,
+      "",
+      ""
+    ],
+    [
+      "communication_send_attempted_at",
+      "timestamp with time zone",
+      false,
+      null,
+      "",
+      ""
+    ]
+  ],
+  "communication_relations": [
+    "salla_communication_function_nonces",
+    "salla_communication_function_nonces_pkey"
+  ]
+}

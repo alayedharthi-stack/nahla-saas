@@ -109,6 +109,8 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "backend/routers/shopify_install.py",
     "scripts/operators/shopify_install_schema_expectations.json",
     "scripts/operators/shopify_install_rollback.draft.json",
+    "scripts/operators/salla_comm_0125_schema_expectations.json",
+    "scripts/operators/salla_comm_0125_rollback.draft.json",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )
@@ -138,8 +140,11 @@ EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0122": "0121",
     "0123": "0122",
     "0124": "0123",
+    "0125": "0124",
 }
-EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0124"})
+# The source graph includes Communication 0125. S4's deployed database rows
+# remain pinned to 0124 until a separately reviewed migration release.
+EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "0115", "0125"})
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
@@ -178,8 +183,22 @@ POST_INSTALL_PHASES: Mapping[str, Dict[str, Any]] = {
            "expectations_key": "shopify_s4"}
     for name in ("S4_DORMANT", "S4_PILOT")
 }
+POST_INSTALL_PHASES = dict(POST_INSTALL_PHASES, S4_COMM_DORMANT={
+    "rows": frozenset({"0111", "0113", "0125"}), "shopify_row": "0125",
+    "tables": INSTALL_TABLES,
+    "branch_delta": ("0118", "0120", "0121", "0122", "0123", "0124", "0125"),
+    "expectations_key": "shopify_s4", "communication_schema_required": True,
+})
 INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
 INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.draft.json"
+# These three fields reconstruct the exact expectations bytes carried by the
+# previously reviewed 0334 source. A newly rendered 0125 file has its own hash.
+PRIOR_INSTALL_DATABASE_PY_DIGEST = "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09"
+PRIOR_INSTALL_GENERATED_AT_UTC = "2026-10-14T04:58:45Z"
+PRIOR_INSTALL_GENERATED_FROM_SOURCE_SHA = "e3693e4283b64af5812dec8e855d5e76a4f27b11"
+PRIOR_INSTALL_EXPECTATIONS_SHA256 = "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
+COMM_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/salla_comm_0125_schema_expectations.json"
+COMM_ROLLBACK_RELATIVE_PATH = "scripts/operators/salla_comm_0125_rollback.draft.json"
 ROLLBACK_MAX_AGE_HOURS = 24
 PILOT_SHOP = "nahlah-dev.myshopify.com"
 # Intermediate states of the manual migration window. Never a deployment
@@ -189,7 +208,7 @@ INTERMEDIATE_STATES: Mapping[str, FrozenSet[str]] = {
     "S1": frozenset({"0111", "0113", "0121"}),
     "S2": frozenset({"0111", "0113", "0122"}),
 }
-SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILOT"})
+SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILOT", "S4_COMM_DORMANT"})
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
@@ -249,6 +268,7 @@ SHOPIFY_FLAG_ENVS: Tuple[str, ...] = (
     "VITE_SHOPIFY_INSTALL_FIRST_ENABLED",
     "VITE_SHOPIFY_CATALOG_IMPORT_UI",
 )
+COMM_SEND_FLAG_ENV = "SALLA_COMM_WHATSAPP_ENABLED"
 TRUTHY = frozenset({"1", "true", "yes", "on"})
 # S4_PILOT may additionally enable the read-only catalog import, and only
 # with the runtime shop bound (backend/services/shopify_catalog/config.py,
@@ -336,6 +356,8 @@ R_BACKUP_NOT_RESTORABLE = "backup_not_restorable"
 R_BACKUP_TOO_OLD = "backup_too_old"
 R_RESTORE_NOT_VERIFIED = "restore_not_verified"
 R_FLAG_ENABLED = "shopify_flag_enabled"
+R_COMM_FLAG_ENABLED = "communication_send_flag_enabled"
+R_COMM_SCHEMA_MISMATCH = "communication_schema_mismatch"
 R_PILOT_ADMISSION_INVALID = "pilot_admission_invalid"
 R_CATALOG_IMPORT_BOUND_INVALID = "catalog_import_bound_invalid"
 R_CONNECT_FAILED = "connect_failed"
@@ -552,6 +574,8 @@ def _catalog_import_bound_valid(raw: object) -> bool:
 
 def evaluate_flags(environ: Mapping[str, str], phase_name: str = "S3") -> Tuple[str, Optional[str], Dict[str, Any]]:
     enabled = sorted(name for name in SHOPIFY_FLAG_ENVS if truthy(environ.get(name)))
+    if phase_name == "S4_COMM_DORMANT" and truthy(environ.get(COMM_SEND_FLAG_ENV)):
+        return FAIL, R_COMM_FLAG_ENABLED, {"enabled": [COMM_SEND_FLAG_ENV]}
     if phase_name == "S4_PILOT":
         required = {"NAHLA_SHOPIFY_CONNECTION_ENABLED", "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED"}
         if not required <= set(enabled) <= required | {CATALOG_IMPORT_FLAG}:
@@ -625,9 +649,8 @@ def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, An
     """The one earlier source the reviewed manifest names as a dormant rollback, or None.
 
     Exact fields only: a full commit SHA, that source's runtime inventory, and
-    its S4 schema-expectations hash, which must equal this source's (the same
-    canonical seventeen-table definitions, so the earlier release accepts the
-    0124 state this release leaves)."""
+    its historical S4 schema-expectations hash, proved from the exact prior
+    bytes rather than equated with this source's newly rendered file."""
     prior = artifact.get("dormant_prior_rollback")
     if (not isinstance(prior, dict) or set(prior) != set(DORMANT_PRIOR_FIELDS)
             or prior.get("rollback_mode") != "pinned_prior_flags_off"
@@ -637,9 +660,70 @@ def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, An
             or type(prior.get("runtime_inventory_count")) is not int or prior["runtime_inventory_count"] <= 0
             or not isinstance(prior.get("schema_expectations_sha256"), str)
             or not DIGEST_RE.fullmatch(prior["schema_expectations_sha256"])
-            or prior.get("schema_expectations_sha256") != bindings.get("schema_expectations_sha256")):
+            or prior.get("schema_expectations_sha256") != bindings.get("prior_schema_expectations_sha256")):
         return None
     return prior
+
+
+def _evaluate_comm_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Mapping[str, Any], *,
+                                   release_sha: str, target: Mapping[str, str], approved_at: _dt.datetime,
+                                   now: _dt.datetime) -> Optional[str]:
+    """Require a separately pinned 0125-compatible, flags-OFF rollback source."""
+    artifact = bindings.get("artifact")
+    if not isinstance(artifact, dict):
+        return R_SCHEMA_ROLLBACK_INVALID
+    expected_flags = {name: "false" for name in SHOPIFY_FLAG_ENVS + (COMM_SEND_FLAG_ENV,)}
+    prior = artifact.get("compatible_rollback")
+    if (artifact.get("record_version") != 2 or artifact.get("status") != "READY"
+            or artifact.get("rollback_mode") != "compatible_source_flags_off"
+            or artifact.get("phase") != "S4_COMM_DORMANT"
+            or artifact.get("database_heads") != ["0111", "0113", "0125"]
+            or artifact.get("shopify_table_count") != 17
+            or artifact.get("bootstrap_target") != "0093"
+            or artifact.get("schema_action") != "retain_0125_no_downgrade"
+            or artifact.get("expectations_path") != COMM_EXPECTATIONS_RELATIVE_PATH
+            or artifact.get("shopify_expectations_path") != INSTALL_EXPECTATIONS_RELATIVE_PATH
+            or artifact.get("flags") != expected_flags
+            or not isinstance(prior, dict)
+            or set(prior) != {"source_sha", "runtime_inventory_digest", "runtime_inventory_count",
+                              "shopify_expectations_sha256", "communication_expectations_sha256",
+                              "independent_review_ref"}
+            or not isinstance(prior.get("source_sha"), str)
+            or not RELEASE_SHA_RE.fullmatch(prior["source_sha"])
+            or prior["source_sha"] == release_sha
+            or not isinstance(prior.get("runtime_inventory_digest"), str)
+            or not DIGEST_RE.fullmatch(prior["runtime_inventory_digest"])
+            or type(prior.get("runtime_inventory_count")) is not int
+            or prior["runtime_inventory_count"] <= 0
+            or not isinstance(prior.get("shopify_expectations_sha256"), str)
+            or not DIGEST_RE.fullmatch(prior["shopify_expectations_sha256"])
+            or prior.get("communication_expectations_sha256") != bindings.get("communication_schema_sha256")
+            or not _present(prior, ("independent_review_ref",))):
+        return R_SCHEMA_ROLLBACK_INVALID
+    if (not isinstance(evidence, dict) or evidence.get("record_version") != 2
+            or evidence.get("phase") != "S4_COMM_DORMANT"
+            or evidence.get("source_sha") != prior["source_sha"]
+            or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
+            or snapshot.get("source_sha") != prior["source_sha"]
+            or evidence.get("target") != dict(target)
+            or evidence.get("flags") != expected_flags
+            or evidence.get("database_heads") != ["0111", "0113", "0125"]
+            or evidence.get("table_names") != sorted(INSTALL_TABLES + ("salla_communication_function_nonces",))
+            or evidence.get("runtime_inventory_digest") != prior["runtime_inventory_digest"]
+            or evidence.get("runtime_inventory_count") != prior["runtime_inventory_count"]
+            or evidence.get("schema_expectations_sha256") != prior["shopify_expectations_sha256"]
+            or evidence.get("communication_schema_sha256") != bindings.get("communication_schema_sha256")
+            or evidence.get("artifact_sha256") != bindings.get("artifact_sha256")
+            or evidence.get("independent_review_ref") != prior["independent_review_ref"]):
+        return R_SCHEMA_ROLLBACK_INVALID
+    verified = parse_utc(evidence.get("verified_at_utc"))
+    expires = parse_utc(evidence.get("valid_until_utc"))
+    if verified is None or expires is None or verified != parse_utc(snapshot.get("verified_redeployable_at_utc")):
+        return R_SCHEMA_ROLLBACK_INVALID
+    max_age = _dt.timedelta(hours=ROLLBACK_MAX_AGE_HOURS)
+    if not verified <= approved_at <= now < expires or now - verified > max_age or expires > verified + max_age:
+        return R_SCHEMA_ROLLBACK_STALE
+    return None
 
 
 def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], bindings: Optional[Mapping[str, Any]], *,
@@ -661,6 +745,10 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
     """
     if not isinstance(evidence, dict) or not isinstance(bindings, dict):
         return R_SCHEMA_ROLLBACK_INVALID
+    if phase_name == "S4_COMM_DORMANT":
+        return _evaluate_comm_schema_rollback(evidence, snapshot, bindings,
+                                              release_sha=release_sha, target=target,
+                                              approved_at=approved_at, now=now)
     artifact = bindings.get("artifact")
     if (not isinstance(artifact, dict) or artifact.get("record_version") != 1
             or artifact.get("rollback_mode") != "same_source_flags_off"
@@ -674,12 +762,14 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
     rollback_source = evidence.get("source_sha")
     if rollback_source == release_sha:
         inventory_digest, inventory_count = runtime_digest, runtime_count
+        expected_schema_sha = bindings.get("schema_expectations_sha256")
     else:
         prior = _pinned_dormant_prior(artifact, bindings) if phase_name == "S4_DORMANT" else None
         if (prior is None or rollback_source != prior["source_sha"]
                 or evidence.get("flags") != {name: "false" for name in SHOPIFY_FLAG_ENVS}):
             return R_SCHEMA_ROLLBACK_INVALID
         inventory_digest, inventory_count = prior["runtime_inventory_digest"], prior["runtime_inventory_count"]
+        expected_schema_sha = prior["schema_expectations_sha256"]
     if (evidence.get("record_version") != 1 or evidence.get("phase") != "S4_DORMANT"
             or snapshot.get("source_sha") != rollback_source
             or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
@@ -691,10 +781,11 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
             or evidence.get("runtime_inventory_count") != inventory_count
             or not _present(evidence, ("independent_review_ref",))):
         return R_SCHEMA_ROLLBACK_INVALID
-    for name in ("artifact_sha256", "schema_expectations_sha256"):
-        expected = bindings.get(name)
-        if not isinstance(expected, str) or not DIGEST_RE.fullmatch(expected) or evidence.get(name) != expected:
-            return R_SCHEMA_ROLLBACK_INVALID
+    if (evidence.get("artifact_sha256") != bindings.get("artifact_sha256")
+            or not isinstance(expected_schema_sha, str)
+            or not DIGEST_RE.fullmatch(expected_schema_sha)
+            or evidence.get("schema_expectations_sha256") != expected_schema_sha):
+        return R_SCHEMA_ROLLBACK_INVALID
     verified = parse_utc(evidence.get("verified_at_utc"))
     expires = parse_utc(evidence.get("valid_until_utc"))
     if verified is None or expires is None or verified != parse_utc(snapshot.get("verified_redeployable_at_utc")):

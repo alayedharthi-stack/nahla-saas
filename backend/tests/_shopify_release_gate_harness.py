@@ -134,6 +134,7 @@ def prior_rollback_record(root: Path, record: Mapping[str, Any]) -> Dict[str, An
     rollback = changed["schema_rollback"]
     rollback.update(source_sha=prior["source_sha"], runtime_inventory_digest=prior["runtime_inventory_digest"],
                     runtime_inventory_count=prior["runtime_inventory_count"],
+                    schema_expectations_sha256=prior["schema_expectations_sha256"],
                     flags={name: "false" for name in k.SHOPIFY_FLAG_ENVS})
     return changed
 

@@ -56,6 +56,7 @@ jobs:
           NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
           NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
           NAHLA_ACCEPTANCE_PG_URL: postgresql://acceptance:synthetic_acceptance_only@127.0.0.1:5433/acceptance_test
+          SALLA_COMM_TEST_PG_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -69,9 +70,22 @@ jobs:
           PY
           printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts >/dev/null
           mkdir -p "$RUNNER_TEMP/acceptance-pg18"
+          export NAHLA_INSTALL_RELEASE_CAPTURE_DIR="$RUNNER_TEMP/acceptance-pg18"
+          python -B -m pytest backend/tests/test_shopify_install_release_pg.py::test_source_0125_preserves_0124_dormant_schema -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/source-pin.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/source-pin.xml"
+          python -B -m pytest backend/tests/test_salla_communication_migration_pg.py \
+            backend/tests/test_salla_communication_pg_reservation.py \
+            backend/tests/test_salla_communication_receipt_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication.xml"
           python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/rollback.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/rollback.xml"
+          python -B -m pytest tests/test_salla_comm_release_contract_0125.py \
+            backend/tests/test_salla_comm_release_gate_0125_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-release-gate.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-release-gate.xml"
           python -B -m pytest backend/tests/test_acceptance_order_coupon_identity.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/acceptance.xml"

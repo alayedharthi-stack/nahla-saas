@@ -23,10 +23,11 @@ def pilot_env():
 
 
 def test_post_0124_states_are_separate_and_bootstrap_stays_0093():
-    assert set(k.POST_INSTALL_PHASES) == {"S4_DORMANT", "S4_PILOT"}
+    assert set(k.POST_INSTALL_PHASES) == {"S4_DORMANT", "S4_PILOT", "S4_COMM_DORMANT"}
     assert set(k.DEPLOY_PHASES) == {"S0", "S3"}
     assert bootstrap.INTEGRATION_BOOTSTRAP_TARGET == "0093"
-    for name, definition in k.POST_INSTALL_PHASES.items():
+    for name in ("S4_DORMANT", "S4_PILOT"):
+        definition = k.POST_INSTALL_PHASES[name]
         assert definition["rows"] == {"0111", "0113", "0124"}
         assert len(definition["tables"]) == 17
         assert definition["expectations_key"] == "shopify_s4"
@@ -228,7 +229,9 @@ def test_manifest_pins_exactly_one_full_prior_with_this_sources_s4_definitions()
     assert prior["source_sha"] == DEPLOYED_BASELINE
     assert (prior["runtime_inventory_count"], prior["runtime_inventory_digest"]) == (
         157, "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88")
-    assert prior["schema_expectations_sha256"] == gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)
+    assert prior["schema_expectations_sha256"] == k.PRIOR_INSTALL_EXPECTATIONS_SHA256
+    assert gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH) != prior["schema_expectations_sha256"]
+    assert gate.pinned_prior_expectations_hash(ROOT) == prior["schema_expectations_sha256"]
     # The same-source pilot contract and every flags-OFF value are unchanged.
     assert artifact["rollback_mode"] == "same_source_flags_off" and artifact["flags"] == ALL_FLAGS_OFF
     assert artifact["shopify_table_count"] == 17 and artifact["database_heads"] == ["0111", "0113", "0124"]
@@ -239,8 +242,17 @@ def test_first_dormant_deploy_accepts_the_exact_pinned_prior_deployment(prior_ap
     snapshot, rollback = record["deployment_rollback_snapshot"], record["schema_rollback"]
     assert record["release_sha"] != DEPLOYED_BASELINE == snapshot["source_sha"] == rollback["source_sha"]
     assert rollback["runtime_inventory_digest"] != record["runtime_inventory_digest"]   # the prior's own inventory
+    assert rollback["schema_expectations_sha256"] == k.PRIOR_INSTALL_EXPECTATIONS_SHA256
+    assert rollback["schema_expectations_sha256"] != kwargs["rollback_bindings"]["schema_expectations_sha256"]
     assert k.evaluate_approval(record, **kwargs)[:2] == (k.PASS, None)
     assert _verdict(root, path, record, kwargs["now"], "S4_DORMANT")["status"] == k.PASS
+
+
+def test_prior_evidence_cannot_borrow_current_sources_schema_hash(prior_approval):
+    _root, _path, record, kwargs = prior_approval
+    record = copy.deepcopy(record)
+    record["schema_rollback"]["schema_expectations_sha256"] = kwargs["rollback_bindings"]["schema_expectations_sha256"]
+    assert k.evaluate_approval(record, **kwargs)[:2] == (k.FAIL, k.R_SCHEMA_ROLLBACK_INVALID)
 
 
 @pytest.mark.parametrize("source_sha,inventory_digest", [
@@ -300,6 +312,7 @@ def test_pilot_still_requires_a_dormant_rollback_of_the_same_source(tmp_path):
     record["schema_rollback"]["source_sha"] = record["deployment_rollback_snapshot"]["source_sha"] = record["release_sha"]
     record["schema_rollback"]["runtime_inventory_digest"] = record["runtime_inventory_digest"]
     record["schema_rollback"]["runtime_inventory_count"] = record["runtime_inventory_count"]
+    record["schema_rollback"]["schema_expectations_sha256"] = kwargs["rollback_bindings"]["schema_expectations_sha256"]
     assert k.evaluate_approval(record, **kwargs)[:2] == (k.PASS, None)
 
 
@@ -439,15 +452,27 @@ def test_tampered_or_incompatible_prior_pin_refuses_only_the_prior_path(prior_ap
 
 
 def test_candidate_sources_definitions_must_still_equal_the_prior_pin(prior_approval, tmp_path):
-    # A candidate whose S4 expectations file differs from the pinned prior's
-    # can never name that prior as its rollback, even with matching evidence.
-    root, _path, record, kwargs = prior_approval
+    # Current-source and historical hashes are separate; forged prior evidence
+    # cannot authorize the old deployment.
+    _root, _path, record, kwargs = prior_approval
     bindings = copy.deepcopy(kwargs["rollback_bindings"])
-    bindings["schema_expectations_sha256"] = "e" * 64
-    record = copy.deepcopy(record)
-    record["schema_rollback"]["schema_expectations_sha256"] = "e" * 64
+    bindings["prior_schema_expectations_sha256"] = "e" * 64
     assert k.evaluate_approval(record, **{**kwargs, "rollback_bindings": bindings})[:2] == (
         k.FAIL, k.R_SCHEMA_ROLLBACK_INVALID)
+
+
+@pytest.mark.parametrize("old,new", [
+    (b'"expectations_version": 3', b'"expectations_version": 4'),
+    (b'"shopify_s4": {', b'"shopify_s4": { '),
+    (b'"generated_at_utc": "2026-10-29T08:02:15Z"', b'"generated_at_utc": "invalid"'),
+])
+def test_historical_pin_reconstruction_rejects_unreviewed_bytes(tmp_path, old, new):
+    path = tmp_path / k.INSTALL_EXPECTATIONS_RELATIVE_PATH
+    path.parent.mkdir(parents=True)
+    data = (ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_bytes()
+    assert data.count(old) == 1
+    path.write_bytes(data.replace(old, new, 1))
+    assert gate.pinned_prior_expectations_hash(tmp_path) is None
 
 
 @pytest.mark.parametrize("mutation", ["old", "expired", "overlong", "future", "mismatched_time"])

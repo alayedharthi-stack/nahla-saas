@@ -245,7 +245,7 @@ def approval_verdict(root: Path, *, approval_file: Path, release_sha: str, phase
         loaded["record"], phase_name=phase, release_sha=release_sha, runtime_digest=digest, runtime_count=count,
         target=bound_target, backup_service=backup_service, backup_volume=backup_volume,
         now=now or _dt.datetime.now(_dt.timezone.utc),
-        rollback_bindings=gate.schema_rollback_bindings(root) if phase in k.POST_INSTALL_PHASES else None)
+        rollback_bindings=gate.schema_rollback_bindings(root, phase) if phase in k.POST_INSTALL_PHASES else None)
     return {"phase": phase, "status": status, "reason": reason, "inventory_count": count, "inventory_digest": digest,
             "approval_sha256": loaded["sha256"], "approval_b64": loaded["b64"], "detail": detail}
 
@@ -318,7 +318,7 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
     import os
 
     phase_def = k.phase(phase_name)
-    if phase_def is None or phase_name not in {"S3", "S4_DORMANT"}:
+    if phase_def is None or phase_name not in {"S3", "S4_DORMANT", "S4_COMM_DORMANT"}:
         raise RenderRefusal("snapshot_phase_invalid")
     table_names = phase_def["tables"]
     expectations_key = phase_def.get("expectations_key", "shopify_s3")
@@ -346,6 +346,10 @@ def snapshot(database_url: str, *, source_sha: str, generated_at: Optional[str] 
                 retained = gate.observe_retained(conn)
                 footprint = gate.observe_footprint(conn, phase_def)
                 rows = gate.read_version_rows(conn)
+                if phase_name == "S4_COMM_DORMANT":
+                    comm = gate.read_json((root or _REPO_ROOT) / k.COMM_EXPECTATIONS_RELATIVE_PATH)
+                    if not isinstance(comm, dict) or gate.check_communication_schema(conn, comm).status != k.PASS:
+                        raise RenderRefusal("communication_schema_mismatch")
                 server_version = str(gate._scalar(conn, "SHOW server_version"))
                 conn.rollback()
         finally:

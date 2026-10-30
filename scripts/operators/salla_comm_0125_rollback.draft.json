@@ -1,0 +1,30 @@
+{
+  "record_version": 2,
+  "status": "DRAFT_ONLY_REQUIRES_COMPATIBLE_SOURCE_PINS",
+  "rollback_mode": "compatible_source_flags_off",
+  "phase": "S4_COMM_DORMANT",
+  "database_heads": [
+    "0111",
+    "0113",
+    "0125"
+  ],
+  "shopify_table_count": 17,
+  "bootstrap_target": "0093",
+  "schema_action": "retain_0125_no_downgrade",
+  "expectations_path": "scripts/operators/salla_comm_0125_schema_expectations.json",
+  "shopify_expectations_path": "scripts/operators/shopify_install_schema_expectations.json",
+  "flags": {
+    "NAHLA_SHOPIFY_CONNECTION_ENABLED": "false",
+    "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED": "false",
+    "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_INTAKE_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_WORKER_ENABLED": "false",
+    "NAHLA_SHOPIFY_PRIVACY_DESTRUCTIVE_ENABLED": "false",
+    "VITE_SHOPIFY_CONNECTION_UI": "false",
+    "VITE_SHOPIFY_INSTALL_FIRST_ENABLED": "false",
+    "VITE_SHOPIFY_CATALOG_IMPORT_UI": "false",
+    "SALLA_COMM_WHATSAPP_ENABLED": "false"
+  },
+  "compatible_rollback": null,
+  "approval": "none"
+}
