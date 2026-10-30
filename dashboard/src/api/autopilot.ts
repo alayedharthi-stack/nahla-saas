@@ -81,6 +81,7 @@ export type RecoveryStatus =
   | 'failed'
 
 export interface AbandonedCartRecoverySummary {
+  delivery_failures?: number
   status: RecoveryStatus
   steps_sent: number
   steps_failed: number
@@ -102,6 +103,9 @@ export interface AbandonedCartRecoverySummary {
 }
 
 export interface AbandonedCartRecoveryStep {
+  delivery_status?: string
+  delivery_event_at?: string | null
+  delivery_failure_code?: string | null
   step_idx: number
   event_id: number
   is_root: boolean

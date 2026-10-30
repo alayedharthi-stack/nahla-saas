@@ -45,6 +45,7 @@ const EXACT_CHILD: Record<string, string> = {
   '/coupons': '/marketing',
   '/widgets': '/marketing',
   '/campaigns/manual-coupon': '/campaigns',
+  '/abandoned-carts': '/overview',
   '/smart-automations': '/automation',
   '/templates': '/templates-hub',
   '/templates/manual-coupon': '/templates',

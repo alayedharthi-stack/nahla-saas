@@ -1,0 +1,40 @@
+name: Abandoned carts dashboard review
+on:
+  pull_request:
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/cart-dashboard-review.yml'
+permissions:
+  contents: read
+jobs:
+  cart-dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: Existing production build
+        run: npm run build
+      - name: Existing navigation contracts
+        run: |
+          npm run check:nav-simplified-p31
+          npm run check:route-hierarchy
+          npm run check:page-metadata
+      - name: Chromium synthetic carts only
+        run: |
+          npx playwright install --with-deps chromium
+          node scripts/check-abandoned-carts-browser.mjs
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: cart-dashboard-synthetic-preview
+          path: dashboard/cart-review-artifacts
+          retention-days: 7
