@@ -229,10 +229,22 @@ def test_manifest_pins_exactly_one_full_prior_with_this_sources_s4_definitions()
     assert prior["source_sha"] == DEPLOYED_BASELINE
     assert (prior["runtime_inventory_count"], prior["runtime_inventory_digest"]) == (
         157, "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88")
-    assert prior["schema_expectations_sha256"] == gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)
+    assert prior["schema_expectations_sha256"] == k.PRIOR_INSTALL_EXPECTATIONS_SHA256
+    assert gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH) != prior["schema_expectations_sha256"]
+    assert gate.pinned_prior_expectations_hash(ROOT) == prior["schema_expectations_sha256"]
     # The same-source pilot contract and every flags-OFF value are unchanged.
     assert artifact["rollback_mode"] == "same_source_flags_off" and artifact["flags"] == ALL_FLAGS_OFF
     assert artifact["shopify_table_count"] == 17 and artifact["database_heads"] == ["0111", "0113", "0124"]
+
+
+def test_prior_expectations_pin_rejects_changed_s4_definition(tmp_path):
+    path = tmp_path / k.INSTALL_EXPECTATIONS_RELATIVE_PATH
+    path.parent.mkdir(parents=True)
+    record = json.loads((ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_text(encoding="utf-8"))
+    first_table = next(iter(record["shopify_s4"]["tables"]))
+    record["shopify_s4"]["tables"][first_table] = {}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert gate.pinned_prior_expectations_hash(tmp_path) is None
 
 
 def test_first_dormant_deploy_accepts_the_exact_pinned_prior_deployment(prior_approval):

@@ -189,6 +189,10 @@ POST_INSTALL_PHASES = dict(POST_INSTALL_PHASES, S4_COMM_DORMANT={
 })
 INSTALL_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/shopify_install_schema_expectations.json"
 INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.draft.json"
+# The 0334 rollback deployment carried these exact source and expectations bytes.
+# A later release can add migration 0125 without rewriting this historical pin.
+PRIOR_INSTALL_DATABASE_PY_DIGEST = "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09"
+PRIOR_INSTALL_EXPECTATIONS_SHA256 = "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
 COMM_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/salla_comm_0125_schema_expectations.json"
 COMM_ROLLBACK_RELATIVE_PATH = "scripts/operators/salla_comm_0125_rollback.draft.json"
 ROLLBACK_MAX_AGE_HOURS = 24
@@ -653,7 +657,7 @@ def _pinned_dormant_prior(artifact: Mapping[str, Any], bindings: Mapping[str, An
             or type(prior.get("runtime_inventory_count")) is not int or prior["runtime_inventory_count"] <= 0
             or not isinstance(prior.get("schema_expectations_sha256"), str)
             or not DIGEST_RE.fullmatch(prior["schema_expectations_sha256"])
-            or prior.get("schema_expectations_sha256") != bindings.get("schema_expectations_sha256")):
+            or prior.get("schema_expectations_sha256") != bindings.get("prior_schema_expectations_sha256")):
         return None
     return prior
 

@@ -148,6 +148,29 @@ def file_sha256(path: Path) -> str:
         return hashlib.sha256(handle.read()).hexdigest()
 
 
+def pinned_prior_expectations_hash(root: Path) -> Optional[str]:
+    """Prove current S4 definitions are byte-identical to 0334 except their source digest.
+
+    The old source's expectations hash remains a historical rollback pin. The
+    current source must have its own database digest after migration 0125.
+    Reconstructing the prior bytes fails closed if any other field changes.
+    """
+    try:
+        data = (root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_bytes()
+        record = json.loads(data)
+    except (OSError, ValueError):
+        return None
+    current = record.get("database_py_digest") if isinstance(record, dict) else None
+    if not isinstance(current, str) or not k.DIGEST_RE.fullmatch(current):
+        return None
+    current_bytes = current.encode("ascii")
+    if data.count(current_bytes) != 1:
+        return None
+    prior = data.replace(current_bytes, k.PRIOR_INSTALL_DATABASE_PY_DIGEST.encode("ascii"), 1)
+    digest = hashlib.sha256(prior).hexdigest()
+    return digest if digest == k.PRIOR_INSTALL_EXPECTATIONS_SHA256 else None
+
+
 def unexpected_initializers(root: Path) -> List[str]:
     return [relative for relative in k.MUST_BE_ABSENT if (root / relative).exists() or (root / relative).is_symlink()]
 
@@ -430,6 +453,11 @@ def schema_rollback_bindings(root: Path, phase_name: str = "S4_DORMANT") -> Opti
     try:
         result = {"artifact": artifact, "artifact_sha256": file_sha256(root / artifact_path),
                   "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
+        if phase_name == "S4_DORMANT":
+            prior_hash = pinned_prior_expectations_hash(root)
+            if prior_hash is None:
+                return None
+            result["prior_schema_expectations_sha256"] = prior_hash
         if phase_name == "S4_COMM_DORMANT":
             result["communication_schema_sha256"] = file_sha256(root / k.COMM_EXPECTATIONS_RELATIVE_PATH)
         return result
