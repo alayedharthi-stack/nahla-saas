@@ -192,6 +192,8 @@ INSTALL_ROLLBACK_RELATIVE_PATH = "scripts/operators/shopify_install_rollback.dra
 # The 0334 rollback deployment carried these exact source and expectations bytes.
 # A later release can add migration 0125 without rewriting this historical pin.
 PRIOR_INSTALL_DATABASE_PY_DIGEST = "14b14130c43f0a590589ac02ed4e5533f97eeb29b7d3e7915d393c2b017dbb09"
+PRIOR_INSTALL_GENERATED_AT_UTC = "2026-10-14T04:58:45Z"
+PRIOR_INSTALL_GENERATED_FROM_SOURCE_SHA = "e3693e4283b64af5812dec8e855d5e76a4f27b11"
 PRIOR_INSTALL_EXPECTATIONS_SHA256 = "68082c651efe1f0a86de05512f701d867545b655122938967c5ddbbf8f9e8ebf"
 COMM_EXPECTATIONS_RELATIVE_PATH = "scripts/operators/salla_comm_0125_schema_expectations.json"
 COMM_ROLLBACK_RELATIVE_PATH = "scripts/operators/salla_comm_0125_rollback.draft.json"
@@ -759,12 +761,14 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
     rollback_source = evidence.get("source_sha")
     if rollback_source == release_sha:
         inventory_digest, inventory_count = runtime_digest, runtime_count
+        expected_schema_sha = bindings.get("schema_expectations_sha256")
     else:
         prior = _pinned_dormant_prior(artifact, bindings) if phase_name == "S4_DORMANT" else None
         if (prior is None or rollback_source != prior["source_sha"]
                 or evidence.get("flags") != {name: "false" for name in SHOPIFY_FLAG_ENVS}):
             return R_SCHEMA_ROLLBACK_INVALID
         inventory_digest, inventory_count = prior["runtime_inventory_digest"], prior["runtime_inventory_count"]
+        expected_schema_sha = prior["schema_expectations_sha256"]
     if (evidence.get("record_version") != 1 or evidence.get("phase") != "S4_DORMANT"
             or snapshot.get("source_sha") != rollback_source
             or evidence.get("railway_deployment_id") != snapshot.get("railway_deployment_id")
@@ -776,10 +780,11 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
             or evidence.get("runtime_inventory_count") != inventory_count
             or not _present(evidence, ("independent_review_ref",))):
         return R_SCHEMA_ROLLBACK_INVALID
-    for name in ("artifact_sha256", "schema_expectations_sha256"):
-        expected = bindings.get(name)
-        if not isinstance(expected, str) or not DIGEST_RE.fullmatch(expected) or evidence.get(name) != expected:
-            return R_SCHEMA_ROLLBACK_INVALID
+    if (evidence.get("artifact_sha256") != bindings.get("artifact_sha256")
+            or not isinstance(expected_schema_sha, str)
+            or not DIGEST_RE.fullmatch(expected_schema_sha)
+            or evidence.get("schema_expectations_sha256") != expected_schema_sha):
+        return R_SCHEMA_ROLLBACK_INVALID
     verified = parse_utc(evidence.get("verified_at_utc"))
     expires = parse_utc(evidence.get("valid_until_utc"))
     if verified is None or expires is None or verified != parse_utc(snapshot.get("verified_redeployable_at_utc")):

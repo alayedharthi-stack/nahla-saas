@@ -252,8 +252,17 @@ def test_first_dormant_deploy_accepts_the_exact_pinned_prior_deployment(prior_ap
     snapshot, rollback = record["deployment_rollback_snapshot"], record["schema_rollback"]
     assert record["release_sha"] != DEPLOYED_BASELINE == snapshot["source_sha"] == rollback["source_sha"]
     assert rollback["runtime_inventory_digest"] != record["runtime_inventory_digest"]   # the prior's own inventory
+    assert rollback["schema_expectations_sha256"] == k.PRIOR_INSTALL_EXPECTATIONS_SHA256
+    assert rollback["schema_expectations_sha256"] != kwargs["rollback_bindings"]["schema_expectations_sha256"]
     assert k.evaluate_approval(record, **kwargs)[:2] == (k.PASS, None)
     assert _verdict(root, path, record, kwargs["now"], "S4_DORMANT")["status"] == k.PASS
+
+
+def test_prior_evidence_cannot_borrow_current_sources_schema_hash(prior_approval):
+    _root, _path, record, kwargs = prior_approval
+    record = copy.deepcopy(record)
+    record["schema_rollback"]["schema_expectations_sha256"] = kwargs["rollback_bindings"]["schema_expectations_sha256"]
+    assert k.evaluate_approval(record, **kwargs)[:2] == (k.FAIL, k.R_SCHEMA_ROLLBACK_INVALID)
 
 
 @pytest.mark.parametrize("source_sha,inventory_digest", [

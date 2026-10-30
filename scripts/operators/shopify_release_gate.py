@@ -149,25 +149,38 @@ def file_sha256(path: Path) -> str:
 
 
 def pinned_prior_expectations_hash(root: Path) -> Optional[str]:
-    """Prove current S4 definitions are byte-identical to 0334 except their source digest.
+    """Reconstruct and hash the exact 0334 expectations bytes, fail closed.
 
-    The old source's expectations hash remains a historical rollback pin. The
-    current source must have its own database digest after migration 0125.
-    Reconstructing the prior bytes fails closed if any other field changes.
+    The 0125 candidate may change three metadata fields. All other bytes,
+    including S4 definitions, must still match the prior release exactly.
     """
     try:
         data = (root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_bytes()
         record = json.loads(data)
     except (OSError, ValueError):
         return None
-    current = record.get("database_py_digest") if isinstance(record, dict) else None
-    if not isinstance(current, str) or not k.DIGEST_RE.fullmatch(current):
+    if not isinstance(record, dict):
         return None
-    current_bytes = current.encode("ascii")
-    if data.count(current_bytes) != 1:
-        return None
-    prior = data.replace(current_bytes, k.PRIOR_INSTALL_DATABASE_PY_DIGEST.encode("ascii"), 1)
-    digest = hashlib.sha256(prior).hexdigest()
+    prior_fields = {
+        "database_py_digest": (k.DIGEST_RE, k.PRIOR_INSTALL_DATABASE_PY_DIGEST),
+        "generated_from_source_sha": (k.RELEASE_SHA_RE, k.PRIOR_INSTALL_GENERATED_FROM_SOURCE_SHA),
+        "generated_at_utc": (None, k.PRIOR_INSTALL_GENERATED_AT_UTC),
+    }
+    for field, (pattern, prior_value) in prior_fields.items():
+        current = record.get(field)
+        if not isinstance(current, str) or (pattern and not pattern.fullmatch(current)):
+            return None
+        if field == "generated_at_utc" and k.parse_utc(current) is None:
+            return None
+        try:
+            before = (f'"{field}": "{current}"').encode("ascii")
+            after = (f'"{field}": "{prior_value}"').encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        if data.count(before) != 1:
+            return None
+        data = data.replace(before, after, 1)
+    digest = hashlib.sha256(data).hexdigest()
     return digest if digest == k.PRIOR_INSTALL_EXPECTATIONS_SHA256 else None
 
 
