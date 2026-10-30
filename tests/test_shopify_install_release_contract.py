@@ -196,7 +196,7 @@ def test_s4_refuses_incompatible_consumed_manifest(schema_approval, field, value
 
 # ── S4_DORMANT: explicitly pinned prior dormant rollback (first deploy of a schema-preserving source) ──
 
-DEPLOYED_BASELINE = "efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6"
+DEPLOYED_BASELINE = "0334e867c408f12067410fd8e0a9f5a6355e37d8"
 ALL_FLAGS_OFF = {name: "false" for name in k.SHOPIFY_FLAG_ENVS}
 
 
@@ -228,7 +228,7 @@ def test_manifest_pins_exactly_one_full_prior_with_this_sources_s4_definitions()
     assert prior["rollback_mode"] == "pinned_prior_flags_off"
     assert prior["source_sha"] == DEPLOYED_BASELINE
     assert (prior["runtime_inventory_count"], prior["runtime_inventory_digest"]) == (
-        157, "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88")
+        157, "13e33aef1c84d035cf748c9951e3d320f490c662f68fdd3093e26554b21e013b")
     assert prior["schema_expectations_sha256"] == k.PRIOR_INSTALL_EXPECTATIONS_SHA256
     assert gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH) != prior["schema_expectations_sha256"]
     assert gate.pinned_prior_expectations_hash(ROOT) == prior["schema_expectations_sha256"]
@@ -267,6 +267,8 @@ def test_prior_evidence_cannot_borrow_current_sources_schema_hash(prior_approval
 
 @pytest.mark.parametrize("source_sha,inventory_digest", [
     # The former approved prior is no longer this candidate's one exact pin.
+    ("efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6",
+     "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88"),
     ("59216725836bdb0d104e5b8f5107369999efad63",
      "f6cc722de7c20383060ba2ff478247e729f46d28ea7793560d47b0cbec1e1c92"),
     # Neither source nor inventory can be borrowed from the other release.
