@@ -312,6 +312,7 @@ def test_pilot_still_requires_a_dormant_rollback_of_the_same_source(tmp_path):
     record["schema_rollback"]["source_sha"] = record["deployment_rollback_snapshot"]["source_sha"] = record["release_sha"]
     record["schema_rollback"]["runtime_inventory_digest"] = record["runtime_inventory_digest"]
     record["schema_rollback"]["runtime_inventory_count"] = record["runtime_inventory_count"]
+    record["schema_rollback"]["schema_expectations_sha256"] = kwargs["rollback_bindings"]["schema_expectations_sha256"]
     assert k.evaluate_approval(record, **kwargs)[:2] == (k.PASS, None)
 
 
