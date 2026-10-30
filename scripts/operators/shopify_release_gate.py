@@ -148,6 +148,42 @@ def file_sha256(path: Path) -> str:
         return hashlib.sha256(handle.read()).hexdigest()
 
 
+def pinned_prior_expectations_hash(root: Path) -> Optional[str]:
+    """Reconstruct and hash the exact 0334 expectations bytes, fail closed.
+
+    The 0125 candidate changed three metadata fields. All other bytes,
+    including S4 definitions, must still match the prior release exactly.
+    """
+    try:
+        data = (root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH).read_bytes()
+        record = json.loads(data)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    prior_fields = {
+        "database_py_digest": (k.DIGEST_RE, k.PRIOR_INSTALL_DATABASE_PY_DIGEST),
+        "generated_from_source_sha": (k.RELEASE_SHA_RE, k.PRIOR_INSTALL_GENERATED_FROM_SOURCE_SHA),
+        "generated_at_utc": (None, k.PRIOR_INSTALL_GENERATED_AT_UTC),
+    }
+    for field, (pattern, prior_value) in prior_fields.items():
+        current = record.get(field)
+        if not isinstance(current, str) or (pattern and not pattern.fullmatch(current)):
+            return None
+        if field == "generated_at_utc" and k.parse_utc(current) is None:
+            return None
+        try:
+            before = (f'"{field}": "{current}"').encode("ascii")
+            after = (f'"{field}": "{prior_value}"').encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        if data.count(before) != 1:
+            return None
+        data = data.replace(before, after, 1)
+    digest = hashlib.sha256(data).hexdigest()
+    return digest if digest == k.PRIOR_INSTALL_EXPECTATIONS_SHA256 else None
+
+
 def unexpected_initializers(root: Path) -> List[str]:
     return [relative for relative in k.MUST_BE_ABSENT if (root / relative).exists() or (root / relative).is_symlink()]
 
@@ -430,6 +466,11 @@ def schema_rollback_bindings(root: Path, phase_name: str = "S4_DORMANT") -> Opti
     try:
         result = {"artifact": artifact, "artifact_sha256": file_sha256(root / artifact_path),
                   "schema_expectations_sha256": file_sha256(root / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)}
+        if phase_name == "S4_DORMANT":
+            prior_hash = pinned_prior_expectations_hash(root)
+            if prior_hash is None:
+                return None
+            result["prior_schema_expectations_sha256"] = prior_hash
         if phase_name == "S4_COMM_DORMANT":
             result["communication_schema_sha256"] = file_sha256(root / k.COMM_EXPECTATIONS_RELATIVE_PATH)
         return result
