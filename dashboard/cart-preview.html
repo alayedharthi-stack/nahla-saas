@@ -1,0 +1,29 @@
+<!doctype html><html lang="ar" dir="rtl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>معاينة مصطنعة للسلات المتروكة</title><body style="background:#f7faf9;padding:24px"><p style="color:#6b7280">معاينة محلية — بيانات مصطنعة، لا إرسال أو اتصال بخدمات المتجر</p><div id="root"></div><script type="module">
+import React from 'react';
+import {createRoot} from 'react-dom/client';
+import {BrowserRouter} from 'react-router-dom';
+import AbandonedCarts from '/src/pages/AbandonedCarts.tsx';
+import '/src/index.css';
+const summary = {status:'in_progress',steps_sent:1,steps_failed:0,total_stages:4,last_sent_at:'2026-10-29T06:30:00Z',next_pending_at:'2026-10-29T12:00:00Z'};
+const carts = [
+{order_id:901, external_id:'DEMO-901',customer_name:'عميل تجريبي — أحذية',customer_phone:'+00000000901',status:'abandoned',total:240,created_at:'2026-10-29T05:00:00Z',recovery:summary},
+{order_id:902, external_id:'DEMO-902',customer_name:'عميل تجريبي — عطور',customer_phone:'+00000000902',status:'abandoned',total:180,created_at:'2026-10-29T04:00:00Z',recovery:{...summary,status:'failed',steps_failed:1}},
+{order_id:903, external_id:'DEMO-903',customer_name:'عميل تجريبي — ملابس',customer_phone:'+00000000903',status:'abandoned',total:325,created_at:'2026-10-29T03:00:00Z',recovery:{...summary,status:'pending',steps_sent:0,last_sent_at:null}},
+];
+window.fetch = async (url, options) => {
+ if (options?.method && options.method !== 'GET') throw Error('Preview blocks mutations');
+ let data;
+ if(String(url).endsWith('/autopilot/queues')) data={abandoned_carts:carts};
+ else if(String(url).match(/abandoned-carts\/90[123]\/recovery$/)) data={...summary,steps:[
+ {event_id:81,step_idx:1,status:'sent',delivery_status:'accepted',scheduled_at:'2026-10-29T06:30:00Z',sent_at:'2026-10-29T06:31:00Z',template_name:'demo_cart_reminder',wa_message_id:'synthetic-81'},
+ {event_id:82,step_idx:2,status:'pending',scheduled_at:'2026-10-29T12:00:00Z'},
+ {event_id:0,step_idx:3,status:'upcoming',scheduled_at:'2026-10-30T05:00:00Z'},
+ {event_id:0,step_idx:4,status:'upcoming',scheduled_at:'2026-10-31T05:00:00Z'},
+ ]};
+ if (String(url).includes('/902/recovery')) data={...data,status:'failed',steps:data.steps.map((s,i)=>i===0?{...s,status:'failed',delivery_status:'failed',failure_label:'تعذر تسليم التذكير التجريبي'}:{...s,status:'upcoming',delivery_status:undefined})};
+ if (String(url).includes('/903/recovery')) data={...data,steps:data.steps.slice(0,2).map((s,i)=>i===0?{...s,status:'unknown',delivery_status:'unknown',sent_at:null}:{...s,status:'upcoming',delivery_status:undefined})};
+ if (!data) throw Error('Preview blocks external requests');
+ return new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json'}});
+};
+createRoot(document.getElementById('root')).render(React.createElement(BrowserRouter,null,React.createElement(AbandonedCarts)));
+</script></body></html>

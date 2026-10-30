@@ -6,6 +6,7 @@ export type PageMetaSelector = (tr: Translations) => {
 }
 
 const PAGE_META: Record<string, PageMetaSelector> = {
+  '/abandoned-carts': () => ({ title: 'السلات المتروكة', subtitle: 'مراحل التذكير وتفاصيل الإرسال' }),
   '/overview':                   tr => tr.pages.overview,
   '/conversations':              tr => tr.pages.conversations,
   '/orders':                     tr => tr.pages.orders,

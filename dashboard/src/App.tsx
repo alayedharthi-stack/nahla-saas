@@ -19,6 +19,7 @@ import Promotions from './pages/Promotions'
 import Campaigns from './pages/Campaigns'
 import Templates from './pages/Templates'
 import SmartAutomations from './pages/SmartAutomations'
+import AbandonedCarts from './pages/AbandonedCarts'
 import Intelligence from './pages/Intelligence'
 import KnowledgeBase from './pages/KnowledgeBase'
 import OperationsCenterBranches from './pages/OperationsCenterBranches'
@@ -197,6 +198,7 @@ export default function App() {
             <Route path="templates"          element={<Templates />} />
             <Route path="templates/order-updates" element={<Templates orderUpdates />} />
             <Route path="templates/manual-coupon" element={<ManualCouponCampaign />} />
+            <Route path="abandoned-carts" element={<AbandonedCarts />} />
             <Route path="smart-automations"  element={<SmartAutomations />} />
             <Route path="automations"        element={<Navigate to="/smart-automations" replace />} />
             <Route path="intelligence"       element={<Intelligence />} />

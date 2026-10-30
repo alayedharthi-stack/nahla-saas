@@ -147,6 +147,7 @@ const MERCHANT_NAV_GROUPS: NavGroup[] = [
       { to: '/catalog',                icon: Package,         label: tr => tr.nav.items.whatsappCatalog  },
       { to: '/orders',                 icon: ShoppingCart,    label: tr => tr.nav.items.orders           },
       { to: '/customers',              icon: Users,           label: tr => tr.nav.items.customers        },
+      { to: '/abandoned-carts', icon: ShoppingCart, label: () => 'السلات المتروكة' },
       { to: '/smart-automations',      icon: Bot,             label: tr => tr.nav.items.autopilot,  isAI: true },
       { to: '/promotions',             icon: Gift,            label: tr => tr.nav.items.promotions,  isAI: true },
       { to: '/coupons',                icon: Tag,             label: tr => tr.nav.items.coupons,     isAI: true },

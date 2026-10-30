@@ -307,6 +307,7 @@ export default function Overview() {
 
   return (
     <div className="space-y-6">
+      <Link to="/abandoned-carts" className="block rounded-2xl border border-emerald-100 bg-white p-5 text-emerald-700 font-semibold">السلات المتروكة <span className="block mt-1 text-sm font-normal text-slate-500">تابع السلات ومراحل التذكير وتفاصيل كل إرسال</span></Link>
       {paymentSuccess && (
         <div className="flex items-center gap-3 bg-emerald-50 border-2 border-emerald-300 rounded-xl px-4 py-3">
           <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />

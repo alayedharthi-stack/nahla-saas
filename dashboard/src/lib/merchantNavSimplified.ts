@@ -6,6 +6,7 @@ export type SimplifiedNavGroupKey =
   | 'dest_inbox'
   | 'dest_products'
   | 'dest_orders'
+  | 'dest_abandoned_carts'
   | 'dest_customers'
   | 'dest_marketing'
   | 'dest_automation'
@@ -99,7 +100,7 @@ export const LEGACY_MERCHANT_NAV_PATHS: readonly string[] = [
 ] as const
 
 /**
- * Daily-use IA — ten top-level destinations in the sidebar.
+ * Daily-use IA — eleven top-level destinations in the sidebar.
  * Nested routes remain in children/sections for hub pages + active-state matching.
  */
 export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
@@ -153,6 +154,8 @@ export const SIMPLIFIED_NAV_DESTINATIONS: SimplifiedNavDestination[] = [
       { to: '/orders', icon: 'shopping-cart', label: tr => tr.nav.items.orders },
     ],
   },
+  {
+    destKey: 'dest_abandoned_carts', destLabel: () => 'السلات المتروكة', destIcon: 'shopping-cart', directLink: { to: '/abandoned-carts', icon: 'shopping-cart', label: () => 'السلات المتروكة' } },
   {
     destKey: 'dest_customers',
     destLabel: tr => tr.nav.destinations.customers,
@@ -322,5 +325,5 @@ export function isPathInSimplifiedDestination(
   return true
 }
 
-/** Sidebar shows exactly ten top-level destination links (directLink only). */
-export const SIMPLIFIED_SIDEBAR_LINK_COUNT = 10
+/** Sidebar shows eleven top-level destination links (directLink only). */
+export const SIMPLIFIED_SIDEBAR_LINK_COUNT = 11

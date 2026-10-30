@@ -1,7 +1,7 @@
 /**
  * P3.1 simplified navigation shell regression checks.
  *
- * Updated for daily-use 10-destination rail (post P3.2 correction).
+ * Updated for daily-use 11-destination rail (post P3.2 correction).
  *
  * Run: npm run check:nav-simplified-p31 (from dashboard/)
  *
@@ -88,15 +88,15 @@ const destBlockEnd = navDataSource.indexOf('export function collectSimplifiedNav
 const destBlock = navDataSource.slice(destBlockStart, destBlockEnd > destBlockStart ? destBlockEnd : undefined)
 const topLevelDestCount = (destBlock.match(/^\s+destKey:/gm) ?? []).length
 assert(
-  'simplified shell defines ten top-level destinations',
-  topLevelDestCount === 10,
+  'simplified shell defines eleven top-level destinations',
+  topLevelDestCount === 11,
   `got ${topLevelDestCount}`,
 )
 
 const directLinkCount = (destBlock.match(/directLink:/g) ?? []).length
 assert(
-  'every simplified destination has a directLink (sidebar shows ten only)',
-  directLinkCount === 10,
+  'every simplified destination has a directLink (sidebar shows eleven only)',
+  directLinkCount === 11,
   `got ${directLinkCount}`,
 )
 
@@ -113,7 +113,7 @@ assert(
 
 assert(
   'merchantNavSimplified exports sidebar link count constant',
-  navDataSource.includes('SIMPLIFIED_SIDEBAR_LINK_COUNT = 10'),
+  navDataSource.includes('SIMPLIFIED_SIDEBAR_LINK_COUNT = 11'),
 )
 
 assert(
