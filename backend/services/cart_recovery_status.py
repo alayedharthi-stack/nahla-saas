@@ -162,7 +162,7 @@ def _step_for_event(
         # No execution row = engine has not picked it up yet.
         # Either the event is in the future (reschedule) or it's due now
         # but the next 60s tick hasn't fired yet.
-        stage_status = "pending"
+        stage_status = "skipped" if _is_purchase_cancel(payload) else "pending"
 
     action = execution.action_taken if execution and isinstance(execution.action_taken, dict) else {}
 
@@ -198,6 +198,8 @@ def _step_for_event(
         "event_id":      event.id,
         "is_root":       is_root,
         "status":        stage_status,
+        # Execution success proves provider acceptance, never delivery/read.
+        "delivery_status": "accepted" if stage_status == "sent" else stage_status,
         "scheduled_at":  _isoformat_utc(event.created_at),
         "sent_at":       _isoformat_utc(execution.executed_at) if execution else None,
         "error":         (execution.error_message or None) if execution else None,
@@ -375,7 +377,7 @@ def _load_executions_for_events(
 def _get_configured_steps(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
     """Return the stage configs from the tenant's abandoned-cart automation.
 
-    Falls back to a 3-stage default when no automation is found.
+    No invented plan when the tenant has no saved automation.
     """
     from models import SmartAutomation  # noqa: PLC0415
 
@@ -391,11 +393,7 @@ def _get_configured_steps(db: Session, tenant_id: int) -> List[Dict[str, Any]]:
         steps = auto.config.get("steps") or []
         if steps:
             return list(steps)
-    return [
-        {"delay_minutes": 30, "enabled": True},
-        {"delay_minutes": 360, "enabled": True},
-        {"delay_minutes": 1425, "enabled": True},
-    ]
+    return []
 
 
 def _get_total_configured_stages(db: Session, tenant_id: int) -> int:
@@ -432,7 +430,7 @@ def summarise_for_orders(
             db, tenant_id, [e.id for e in events]
         )
         out[order_id] = _summary_from_tree(
-            events, executions, total_configured_stages=total_stages,
+            events, executions, total_configured_stages=total_stages, db=db, tenant_id=tenant_id,
         )
 
     return out
@@ -442,6 +440,7 @@ def _empty_summary() -> Dict[str, Any]:
     return {
         "status":              RECOVERY_STATUS_NO_RECOVERY,
         "steps_sent":          0,
+        "delivery_failures":   0,
         "steps_failed":        0,
         "total_stages":        0,
         "last_sent_at":        None,
@@ -461,6 +460,8 @@ def _summary_from_tree(
     executions: Dict[int, AutomationExecution],
     *,
     total_configured_stages: int = 3,
+    db: Optional[Session] = None,
+    tenant_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     root = events[0]
     root_payload = root.payload or {}
@@ -469,6 +470,10 @@ def _summary_from_tree(
         _step_for_event(ev, executions.get(ev.id), is_root=(ev.id == root.id))
         for ev in events
     ]
+
+    if db is not None and tenant_id is not None:
+        _enrich_delivery_steps(db, tenant_id, steps)
+    delivery_failures = [s for s in steps if s.get("delivery_status") == "failed"]
 
     sent = [s for s in steps if s["status"] == "sent"]
     failed = [s for s in steps if s["status"] == "failed"]
@@ -496,7 +501,7 @@ def _summary_from_tree(
         # configured stages.  When the follow-up sweeper hasn't run
         # yet (only stage 1 sent, stages 2-3 not emitted), there are
         # zero pending events — but the sequence is NOT done.
-        if max_sent_stage >= total_configured_stages:
+        if total_configured_stages > 0 and max_sent_stage >= total_configured_stages:
             status = RECOVERY_STATUS_COMPLETED
         else:
             status = RECOVERY_STATUS_IN_PROGRESS
@@ -508,6 +513,7 @@ def _summary_from_tree(
     return {
         "status":              status,
         "steps_sent":          len(sent),
+        "delivery_failures":   len(delivery_failures),
         "steps_failed":        len(failed),
         "total_stages":        total_configured_stages,
         "last_sent_at":        last_sent.get("sent_at") if last_sent else None,
@@ -515,7 +521,7 @@ def _summary_from_tree(
         "last_error":          last_step.get("error") if last_step else None,
         "last_failure_code":   last_failed.get("failure_code") if last_failed else None,
         "last_failure_label":  last_failed.get("failure_label") if last_failed else None,
-        "next_pending_at":     next_pending.get("scheduled_at") if next_pending else None,
+        "next_pending_at":     next_pending.get("scheduled_at") if next_pending and not _is_purchase_cancel(root_payload) else None,
         "converted_at":        converted_at,
         "cancel_reason":       cancel_reason,
         "recovery_event_id":   root.id,
@@ -549,6 +555,39 @@ def _format_delay(minutes: int) -> str:
     return f"بعد {h} ساعة و {m} دقيقة"
 
 
+def _enrich_delivery_steps(db: Session, tenant_id: int, steps: List[Dict[str, Any]]) -> None:
+    # Delivery receipts are separate evidence from an automation execution.
+    # Join only this tenant's exact provider IDs; never infer read/delivery
+    # from a successful provider request or from a customer phone match.
+    from models import MessageDeliveryEvent  # noqa: PLC0415
+
+    message_ids = [s["wa_message_id"] for s in steps if s.get("wa_message_id")]
+    receipts = (
+        db.query(MessageDeliveryEvent)
+        .filter(
+            MessageDeliveryEvent.tenant_id == tenant_id,
+            MessageDeliveryEvent.wamid.in_(message_ids),
+        )
+        .order_by(MessageDeliveryEvent.occurred_at.asc(), MessageDeliveryEvent.id.asc())
+        .all()
+    ) if message_ids else []
+    # Callbacks can arrive out of order; read/delivered evidence is monotonic.
+    rank = {"sent": 1, "failed": 2, "delivered": 3, "read": 4}
+    latest_receipts = {}
+    for receipt in receipts:
+        if receipt.status not in rank:
+            continue
+        previous = latest_receipts.get(receipt.wamid)
+        if previous is None or rank[receipt.status] >= rank[previous.status]:
+            latest_receipts[receipt.wamid] = receipt
+    for step in steps:
+        receipt = latest_receipts.get(step.get("wa_message_id"))
+        if receipt and receipt.status in {"sent", "delivered", "read", "failed"}:
+            step["delivery_status"] = "accepted" if receipt.status == "sent" else receipt.status
+            step["delivery_event_at"] = _isoformat_utc(receipt.occurred_at)
+            step["delivery_failure_code"] = receipt.error_code if receipt.status == "failed" else None
+
+
 def timeline_for_order(
     db: Session,
     tenant_id: int,
@@ -571,22 +610,24 @@ def timeline_for_order(
     total_stages = len(configured_steps)
     executions = _load_executions_for_events(db, tenant_id, [e.id for e in events])
     summary = _summary_from_tree(
-        events, executions, total_configured_stages=total_stages,
+        events, executions, total_configured_stages=total_stages, db=db, tenant_id=tenant_id,
     )
 
     real_steps = [
         _step_for_event(ev, executions.get(ev.id), is_root=(ev.id == events[0].id))
         for ev in events
     ]
+    if _is_purchase_cancel(events[0].payload or {}):
+        for step in real_steps:
+            if step["status"] == "pending":
+                step["status"] = "skipped"
+                step["delivery_status"] = "skipped"
+                step["skip_reason"] = summary.get("cancel_reason")
+    _enrich_delivery_steps(db, tenant_id, real_steps)
     real_steps.sort(key=lambda s: (s["step_idx"], s["event_id"]))
 
     existing_idxs = {s["step_idx"] for s in real_steps}
 
-    root_created = events[0].created_at
-    if root_created and root_created.tzinfo is None:
-        root_created = root_created.replace(tzinfo=timezone.utc)
-
-    from datetime import timedelta  # noqa: PLC0415
     for i, cfg in enumerate(configured_steps):
         stage_num = i + 1
         if stage_num in existing_idxs:
@@ -595,21 +636,22 @@ def timeline_for_order(
             continue
         delay = int(cfg.get("delay_minutes") or 0)
         scheduled = None
-        if root_created:
-            scheduled = root_created + timedelta(minutes=delay)
+        # The engine does not persist an authoritative due timestamp. Its
+        # current delay/quiet-hours guards are eligibility checks, not a
+        # send reservation; never fabricate an exact future send time.
 
         real_steps.append({
             "step_idx":      stage_num,
             "event_id":      0,
             "is_root":       False,
-            "status":        "upcoming",
+            "status":        "skipped" if _is_purchase_cancel(events[0].payload or {}) else "upcoming",
             "scheduled_at":  _isoformat_utc(scheduled),
             "sent_at":       None,
             "error":         None,
             "failure_code":  None,
             "failure_label": None,
             "meta_error":    None,
-            "skip_reason":   None,
+            "skip_reason":   summary.get("cancel_reason") if _is_purchase_cancel(events[0].payload or {}) else None,
             "wa_message_id": None,
             "channel":       None,
             "template_name": None,
