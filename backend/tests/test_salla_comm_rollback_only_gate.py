@@ -54,6 +54,10 @@ def approval():
         sha256(TEMPLATE).hexdigest(), "c" * 64, 164,
         "d" * 64, "e" * 64, NOW - timedelta(minutes=1),
         NOW + timedelta(minutes=15), True,
+        rollback_artifact_deployment_id="artifact-id",
+        rollback_artifact_source_sha="a" * 40,
+        rollback_artifact_image_digest="c" * 64,
+        rollback_artifact_predeploy_command_sha256="0" * 64,
     )
 
 

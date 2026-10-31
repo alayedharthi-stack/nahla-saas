@@ -8,14 +8,12 @@ import unittest
 from scripts.operators.salla_comm_rollback_only_contract import (
     ACTION, FLAG_NAMES, HEADS, Approval, DatabaseState, Deployment, Refused, Target,
     UnconfiguredApprovalReadPort, UnconfiguredRailwayReadPort, UnconfiguredCommandRenderPort,
-    validate_operator_predeploy, validate_predeploy, validate_result,
+    approval_payload_bytes, validate_operator_predeploy, validate_predeploy, validate_result,
 )
 
 
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
 COMMAND = b"synthetic reviewed rollback-only-0125 predeploy command"
-PAYLOAD = b"synthetic pinned owner approval payload"
-PAYLOAD_SHA = sha256(PAYLOAD).hexdigest()
 TARGET = Target("project-test", "environment-test", "service-test", "database-test")
 FLAGS = {name: "false" for name in FLAG_NAMES}
 
@@ -25,6 +23,7 @@ class Provider:
         self.items = {item.deployment_id: item for item in deployments}
         self.reads = 0
         self.current_id = deployments[0].deployment_id if deployments else None
+        self.launchable = True
 
     def deployment(self, deployment_id):
         self.reads += 1
@@ -32,6 +31,9 @@ class Provider:
 
     def current_deployment_id(self, target):
         return self.current_id
+
+    def artifact_launchable(self, deployment_id, image_digest):
+        return self.launchable and self.items[deployment_id].image_digest == image_digest
 
 
 class Approvals:
@@ -47,16 +49,20 @@ class Operator:
         self.owner_ok = True
         self.backup = "1" * 64
         self.restore = "2" * 64
+        self.restore_complete = True
 
     def owner_approved(self, reference, approval, payload):
-        if payload != PAYLOAD:
+        if payload != approval_payload_bytes(approval):
             return False
         return self.owner_ok and reference == "synthetic-owner-message"
 
-    def recovery_receipt_sha256(self, kind, target, service_id, volume_id):
+    def recovery_receipt(self, kind, target, service_id, volume_id):
         if service_id != "synthetic-backup-service" or volume_id != "synthetic-backup-volume":
             raise ValueError("wrong recovery target")
-        return self.backup if kind == "backup" else self.restore
+        from scripts.operators.salla_comm_rollback_only_contract import RecoveryReceipt
+        return RecoveryReceipt(kind, target, service_id, volume_id,
+                               self.backup if kind == "backup" else self.restore,
+                               kind != "restore" or self.restore_complete)
 
 
 class Database:
@@ -88,11 +94,21 @@ def fixture():
         communication_schema_sha256="e" * 64,
         approved_at=NOW - timedelta(minutes=1), expires_at=NOW + timedelta(minutes=15),
         approved=True,
+        rollback_artifact_deployment_id="rollback-artifact",
+        rollback_artifact_source_sha="a" * 40,
+        rollback_artifact_image_digest="c" * 64,
+        rollback_artifact_predeploy_command_sha256="0" * 64,
     )
     reference = Deployment("prior-deployment", TARGET, "9" * 40, "b" * 64,
                            "f" * 64, "SUCCESS", True)
     state = DatabaseState(HEADS, "d" * 64, "e" * 64)
-    return approval, Provider(reference), Database(state)
+    artifact = Deployment("rollback-artifact", TARGET, "a" * 40, "c" * 64,
+                          "0" * 64, "SUCCESS", False)
+    return approval, Provider(reference, artifact), Database(state)
+
+
+PAYLOAD = approval_payload_bytes(fixture()[0])
+PAYLOAD_SHA = sha256(PAYLOAD).hexdigest()
 
 
 def check(approval, provider, database, **overrides):
@@ -205,6 +221,11 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "recovery_evidence_mismatch"):
             validate_operator_predeploy(approval=approval, payload=PAYLOAD, pinned_payload_sha256=PAYLOAD_SHA,
                                         provider=provider, operator=operator, now=NOW)
+        operator.restore = "2" * 64
+        operator.restore_complete = False
+        with self.assertRaisesRegex(Refused, "recovery_evidence_mismatch"):
+            validate_operator_predeploy(approval=approval, payload=PAYLOAD, pinned_payload_sha256=PAYLOAD_SHA,
+                                        provider=provider, operator=operator, now=NOW)
 
     def test_operator_rejects_payload_pin_and_recovery_target_drift(self):
         approval, provider, _ = fixture()
@@ -213,10 +234,46 @@ class ContractTests(unittest.TestCase):
                                         pinned_payload_sha256=PAYLOAD_SHA,
                                         provider=provider, operator=Operator(), now=NOW)
         with self.assertRaisesRegex(Refused, "recovery_evidence_read_failed"):
+            changed = replace(approval, backup_service_id="wrong")
             validate_operator_predeploy(
-                approval=replace(approval, backup_service_id="wrong"),
-                payload=PAYLOAD, pinned_payload_sha256=PAYLOAD_SHA,
+                approval=changed, payload=approval_payload_bytes(changed),
+                pinned_payload_sha256=sha256(approval_payload_bytes(changed)).hexdigest(),
                 provider=provider, operator=Operator(), now=NOW)
+
+    def test_typed_approval_must_match_the_exact_pinned_payload(self):
+        approval, provider, _ = fixture()
+        for changed in (replace(approval, candidate_source_sha="f" * 40),
+                        replace(approval, rollback_artifact_image_digest="f" * 64)):
+            with self.assertRaisesRegex(Refused, "approval_payload_invalid"):
+                validate_operator_predeploy(approval=changed, payload=PAYLOAD,
+                                            pinned_payload_sha256=PAYLOAD_SHA,
+                                            provider=provider, operator=Operator(), now=NOW)
+
+    def test_rollback_artifact_is_distinct_and_provider_bound(self):
+        approval, provider, _ = fixture()
+        evidence = validate_operator_predeploy(approval=approval, payload=PAYLOAD,
+                                                pinned_payload_sha256=PAYLOAD_SHA,
+                                                provider=provider, operator=Operator(), now=NOW)
+        self.assertEqual(evidence.rollback_artifact.deployment_id, "rollback-artifact")
+        provider.launchable = False
+        with self.assertRaisesRegex(Refused, "artifact_not_launchable"):
+            validate_operator_predeploy(approval=approval, payload=PAYLOAD,
+                                        pinned_payload_sha256=PAYLOAD_SHA,
+                                        provider=provider, operator=Operator(), now=NOW)
+        provider.launchable = True
+        for field, value, token in (
+            ("source_sha", "f" * 40, "artifact_source_mismatch"),
+            ("image_digest", "f" * 64, "artifact_image_mismatch"),
+            ("predeploy_command_sha256", "f" * 64, "artifact_command_mismatch"),
+            ("target", replace(TARGET, service="wrong"), "artifact_target_mismatch"),
+        ):
+            before = provider.items["rollback-artifact"]
+            provider.items["rollback-artifact"] = replace(before, **{field: value})
+            with self.subTest(field=field), self.assertRaisesRegex(Refused, token):
+                validate_operator_predeploy(approval=approval, payload=PAYLOAD,
+                                            pinned_payload_sha256=PAYLOAD_SHA,
+                                            provider=provider, operator=Operator(), now=NOW)
+            provider.items["rollback-artifact"] = before
 
     def test_operator_requires_the_reference_to_be_serving(self):
         approval, provider, _ = fixture()
@@ -252,7 +309,7 @@ class ContractTests(unittest.TestCase):
             validate_result(provider=provider, authorized=authorized,
                             result_deployment_id="prior-deployment", now=NOW)
         for field, value, token in (
-            ("image_digest", "", "result_image_missing"),
+            ("image_digest", "", "result_image_mismatch"),
             ("predeploy_command_sha256", "f" * 64, "result_command_mismatch"),
             ("status", "FAILED", "result_unhealthy"),
         ):

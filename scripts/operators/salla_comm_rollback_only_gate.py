@@ -48,6 +48,8 @@ class PinnedApprovalReadPort:
             "record_version", "action", "target", "candidate_source_sha",
             "reference_deployment_id", "reference_source_sha", "reference_image_digest",
             "reference_predeploy_command_sha256",
+            "rollback_artifact_deployment_id", "rollback_artifact_source_sha",
+            "rollback_artifact_image_digest", "rollback_artifact_predeploy_command_sha256",
             "owner_approval_reference", "backup_service_id", "backup_volume_id",
             "backup_receipt_sha256",
             "restore_receipt_sha256",
@@ -81,6 +83,10 @@ class PinnedApprovalReadPort:
             approved_at=existing.parse_utc(record["approved_at_utc"]),
             expires_at=existing.parse_utc(record["expires_at_utc"]),
             approved=record["approved"],
+            rollback_artifact_deployment_id=record["rollback_artifact_deployment_id"],
+            rollback_artifact_source_sha=record["rollback_artifact_source_sha"],
+            rollback_artifact_image_digest=record["rollback_artifact_image_digest"],
+            rollback_artifact_predeploy_command_sha256=record["rollback_artifact_predeploy_command_sha256"],
         )
 
 

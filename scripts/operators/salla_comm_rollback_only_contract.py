@@ -7,11 +7,14 @@ that exact payload, source, flags and database. Neither side writes the DB.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
+import json
 import re
 from typing import Protocol
+
+from scripts.operators import shopify_release_gate_contract as existing
 
 
 ACTION = "rollback_only_0125"
@@ -86,6 +89,10 @@ class Approval:
     approved_at: datetime
     expires_at: datetime
     approved: bool
+    rollback_artifact_deployment_id: str = ""
+    rollback_artifact_source_sha: str = ""
+    rollback_artifact_image_digest: str = ""
+    rollback_artifact_predeploy_command_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,11 +120,25 @@ class OperatorEvidence:
     backup_receipt_sha256: str
     restore_receipt_sha256: str
     reference: Deployment
+    rollback_artifact: Deployment
+
+
+@dataclass(frozen=True)
+class RecoveryReceipt:
+    """Result of an authenticated operator read, not a self-authored hash."""
+
+    kind: str
+    target: Target
+    service_id: str
+    volume_id: str
+    sha256: str
+    completed: bool
 
 
 class RailwayReadPort(Protocol):
     def deployment(self, deployment_id: str) -> Deployment: ...
     def current_deployment_id(self, target: Target) -> str: ...
+    def artifact_launchable(self, deployment_id: str, image_digest: str) -> bool: ...
 
 
 class OperatorReadPort(Protocol):
@@ -125,8 +146,8 @@ class OperatorReadPort(Protocol):
 
     def owner_approved(self, reference: str, approval: Approval,
                        payload: bytes) -> bool: ...
-    def recovery_receipt_sha256(self, kind: str, target: Target,
-                                service_id: str, volume_id: str) -> str: ...
+    def recovery_receipt(self, kind: str, target: Target,
+                         service_id: str, volume_id: str) -> RecoveryReceipt: ...
 
 
 class ApprovalReadPort(Protocol):
@@ -148,6 +169,9 @@ class UnconfiguredRailwayReadPort:
         raise Refused("trusted_railway_read_unavailable")
 
     def current_deployment_id(self, target: Target) -> str:
+        raise Refused("trusted_railway_read_unavailable")
+
+    def artifact_launchable(self, deployment_id: str, image_digest: str) -> bool:
         raise Refused("trusted_railway_read_unavailable")
 
 
@@ -172,6 +196,61 @@ def _digest(value: str) -> bool:
 
 def _source(value: str) -> bool:
     return isinstance(value, str) and HEX40.fullmatch(value) is not None
+
+
+def approval_payload_bytes(approval: Approval) -> bytes:
+    """Canonical transport bytes; the owner and provider must still attest them."""
+    require(_utc(approval.approved_at) and _utc(approval.expires_at), "approval_time_invalid")
+    record = asdict(approval)
+    record["approved_at_utc"] = record.pop("approved_at").isoformat().replace("+00:00", "Z")
+    record["expires_at_utc"] = record.pop("expires_at").isoformat().replace("+00:00", "Z")
+    record["record_version"] = 1
+    return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def approval_matches_payload(approval: Approval, payload: bytes) -> bool:
+    """Bind the typed policy input to the exact bytes installed in Railway."""
+    if not isinstance(payload, bytes):
+        return False
+    try:
+        record = json.loads(payload)
+    except (ValueError, UnicodeError, TypeError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    expected = {
+        "record_version": 1, "action": approval.action,
+        "target": vars(approval.target),
+        "candidate_source_sha": approval.candidate_source_sha,
+        "reference_deployment_id": approval.reference_deployment_id,
+        "reference_source_sha": approval.reference_source_sha,
+        "reference_image_digest": approval.reference_image_digest,
+        "reference_predeploy_command_sha256": approval.reference_predeploy_command_sha256,
+        "rollback_artifact_deployment_id": approval.rollback_artifact_deployment_id,
+        "rollback_artifact_source_sha": approval.rollback_artifact_source_sha,
+        "rollback_artifact_image_digest": approval.rollback_artifact_image_digest,
+        "rollback_artifact_predeploy_command_sha256": approval.rollback_artifact_predeploy_command_sha256,
+        "owner_approval_reference": approval.owner_approval_reference,
+        "backup_service_id": approval.backup_service_id,
+        "backup_volume_id": approval.backup_volume_id,
+        "backup_receipt_sha256": approval.backup_receipt_sha256,
+        "restore_receipt_sha256": approval.restore_receipt_sha256,
+        "rollback_command_template_sha256": approval.rollback_command_template_sha256,
+        "inventory_digest": approval.inventory_digest,
+        "inventory_count": approval.inventory_count,
+        "shopify_schema_sha256": approval.shopify_schema_sha256,
+        "communication_schema_sha256": approval.communication_schema_sha256,
+        "approved": approval.approved,
+    }
+    if set(record) != set(expected) | {"approved_at_utc", "expires_at_utc"}:
+        return False
+    if type(record.get("inventory_count")) is not int or type(record.get("approved")) is not bool:
+        return False
+    actual_times = (existing.parse_utc(record["approved_at_utc"]),
+                    existing.parse_utc(record["expires_at_utc"]))
+    if actual_times != (approval.approved_at, approval.expires_at):
+        return False
+    return all(record[key] == value for key, value in expected.items())
 
 
 def validate_predeploy(
@@ -225,6 +304,11 @@ def validate_predeploy(
             and _digest(approval.communication_schema_sha256), "digest_invalid")
     require(bool(approval.reference_deployment_id)
             and _source(approval.reference_source_sha)
+            and bool(approval.rollback_artifact_deployment_id)
+            and _source(approval.rollback_artifact_source_sha)
+            and approval.rollback_artifact_source_sha == approval.candidate_source_sha
+            and _digest(approval.rollback_artifact_image_digest)
+            and _digest(approval.rollback_artifact_predeploy_command_sha256)
             and bool(approval.owner_approval_reference)
             and bool(approval.backup_service_id)
             and bool(approval.backup_volume_id)
@@ -261,6 +345,7 @@ def validate_operator_predeploy(*, approval: Approval, payload: bytes,
             "action_not_approved")
     require(isinstance(payload, bytes) and _digest(pinned_payload_sha256)
             and sha256(payload).hexdigest() == pinned_payload_sha256
+            and approval_matches_payload(approval, payload)
             and bool(approval.owner_approval_reference)
             and _digest(approval.backup_receipt_sha256)
             and _digest(approval.restore_receipt_sha256),
@@ -272,14 +357,19 @@ def validate_operator_predeploy(*, approval: Approval, payload: bytes,
         raise Refused("approval_provenance_read_failed") from None
     require(owner_ok is True, "approval_provenance_mismatch")
     try:
-        backup_sha = operator.recovery_receipt_sha256(
+        backup = operator.recovery_receipt(
             "backup", approval.target, approval.backup_service_id, approval.backup_volume_id)
-        restore_sha = operator.recovery_receipt_sha256(
+        restore = operator.recovery_receipt(
             "restore", approval.target, approval.backup_service_id, approval.backup_volume_id)
     except Exception:
         raise Refused("recovery_evidence_read_failed") from None
-    require(_digest(backup_sha) and backup_sha == approval.backup_receipt_sha256
-            and _digest(restore_sha) and restore_sha == approval.restore_receipt_sha256,
+    require(all(isinstance(receipt, RecoveryReceipt) and receipt.completed
+                and receipt.kind == kind and receipt.target == approval.target
+                and receipt.service_id == approval.backup_service_id
+                and receipt.volume_id == approval.backup_volume_id
+                for receipt, kind in ((backup, "backup"), (restore, "restore")))
+            and _digest(backup.sha256) and backup.sha256 == approval.backup_receipt_sha256
+            and _digest(restore.sha256) and restore.sha256 == approval.restore_receipt_sha256,
             "recovery_evidence_mismatch")
     try:
         reference = provider.deployment(approval.reference_deployment_id)
@@ -305,7 +395,30 @@ def validate_operator_predeploy(*, approval: Approval, payload: bytes,
     except Exception:
         raise Refused("trusted_railway_read_failed") from None
     require(current_id == reference.deployment_id, "reference_not_serving")
-    return OperatorEvidence(pinned_payload_sha256, backup_sha, restore_sha, reference)
+    require(approval.rollback_artifact_deployment_id != reference.deployment_id,
+            "artifact_not_distinct")
+    try:
+        artifact = provider.deployment(approval.rollback_artifact_deployment_id)
+        launchable = provider.artifact_launchable(
+            approval.rollback_artifact_deployment_id, approval.rollback_artifact_image_digest)
+    except Refused:
+        raise
+    except Exception:
+        raise Refused("trusted_railway_read_failed") from None
+    require(artifact.deployment_id == approval.rollback_artifact_deployment_id,
+            "artifact_id_mismatch")
+    require(artifact.target == approval.target, "artifact_target_mismatch")
+    require(artifact.source_sha == approval.rollback_artifact_source_sha,
+            "artifact_source_mismatch")
+    require(artifact.image_digest == approval.rollback_artifact_image_digest,
+            "artifact_image_mismatch")
+    require(artifact.predeploy_command_sha256 == approval.rollback_artifact_predeploy_command_sha256,
+            "artifact_command_mismatch")
+    require(artifact.status == "SUCCESS" and launchable is True, "artifact_not_launchable")
+    require(provider.current_deployment_id(approval.target) == reference.deployment_id,
+            "reference_changed")
+    return OperatorEvidence(pinned_payload_sha256, backup.sha256, restore.sha256,
+                            reference, artifact)
 
 
 def validate_result(*, provider: RailwayReadPort, authorized: AuthorizedRollback,
@@ -314,6 +427,8 @@ def validate_result(*, provider: RailwayReadPort, authorized: AuthorizedRollback
     approval = authorized.approval
     require(_utc(now) and approval.approved_at <= now < approval.expires_at, "approval_expired")
     require(result_deployment_id != approval.reference_deployment_id, "result_id_not_new")
+    require(result_deployment_id != approval.rollback_artifact_deployment_id,
+            "result_id_not_new")
     try:
         result = provider.deployment(result_deployment_id)
     except Refused:
@@ -323,10 +438,8 @@ def validate_result(*, provider: RailwayReadPort, authorized: AuthorizedRollback
     require(result.deployment_id == result_deployment_id, "result_id_mismatch")
     require(result.target == approval.target, "result_target_mismatch")
     require(result.source_sha == approval.candidate_source_sha, "result_source_mismatch")
-    # A newly built candidate has a different build-output digest from the
-    # prior serving deployment. The operator reads and records that new digest
-    # from Railway rather than asserting equality with the prior image.
-    require(_digest(result.image_digest), "result_image_missing")
+    require(result.image_digest == approval.rollback_artifact_image_digest,
+            "result_image_mismatch")
     require(result.predeploy_command_sha256 == authorized.execution_command_sha256,
             "result_command_mismatch")
     require(result.status == "SUCCESS" and result.healthy, "result_unhealthy")

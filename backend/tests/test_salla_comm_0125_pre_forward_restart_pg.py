@@ -17,6 +17,7 @@ import sys
 
 from sqlalchemy import create_engine, text
 
+from backend.tests import _shopify_release_gate_harness as harness
 from backend.tests import test_shopify_release_gate_pg as topology
 from backend.tests import test_salla_comm_retained_0125_rollback_pg as retained
 from backend.tests import test_salla_comm_release_gate_0125_pg as release
@@ -63,6 +64,10 @@ def _actual_terminal_command_on_isolated_pg18(db_name: str) -> None:
         "reference_source_sha": "9" * 40,
         "reference_image_digest": "b" * 64,
         "reference_predeploy_command_sha256": "c" * 64,
+        "rollback_artifact_deployment_id": "synthetic-artifact-only",
+        "rollback_artifact_source_sha": release_sha,
+        "rollback_artifact_image_digest": "d" * 64,
+        "rollback_artifact_predeploy_command_sha256": "e" * 64,
         "owner_approval_reference": "synthetic-owner-message",
         "backup_service_id": "44444444-4444-4444-8444-444444444444",
         "backup_volume_id": "55555555-5555-4555-8555-555555555555",
@@ -134,6 +139,10 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
         reference_source_sha="9" * 40,
         reference_image_digest="b" * 64,
         reference_predeploy_command_sha256="c" * 64,
+        rollback_artifact_deployment_id="synthetic-artifact-only",
+        rollback_artifact_source_sha=release_sha,
+        rollback_artifact_image_digest="d" * 64,
+        rollback_artifact_predeploy_command_sha256="e" * 64,
         owner_approval_reference="synthetic-owner-message",
         backup_service_id=backup_service,
         backup_volume_id=backup_volume,
@@ -200,7 +209,7 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
     # This result is a test fixture. The deployed result ID must be distinct
     # and independently read even in the synthetic positive policy path.
     result = terminal.Deployment(
-        "synthetic-result-only", target, release_sha, "c" * 64,
+        "synthetic-result-only", target, release_sha, "d" * 64,
         execution_hash, "SUCCESS", True,
     )
     provider.items[result.deployment_id] = result
@@ -260,6 +269,24 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
             release._isolated_healthz_smoke(db_name, tmp_path)
             _actual_terminal_command_on_isolated_pg18(db_name)
             _synthetic_positive_policy_on_real_pg18(db_name)
+
+            # Exercise both real command entrypoints on the disposable DB.
+            # These synthetic approvals prove the gates, not a Railway launch.
+            forward_root = harness.build_root(tmp_path / "forward_gate")
+            forward_approval = release._synthetic_approval(forward_root, db_name)
+            forward_rc, forward_output = harness.run_gate(
+                forward_root, "S4_COMM_DORMANT", topology._alias_url(db_name),
+                topology._target(db_name), approval=forward_approval,
+            )
+            assert forward_rc == 0 and "RESULT=PASS" in forward_output, forward_output[-1200:]
+            _actual_terminal_command_on_isolated_pg18(db_name)
+            retained._startup_database_tasks(
+                retained.ROOT, url.render_as_string(hide_password=False),
+                tmp_path / "startup_hook_after_synthetic_forward",
+            )
+            after_forward = tmp_path / "after_synthetic_forward"
+            after_forward.mkdir()
+            release._isolated_healthz_smoke(db_name, after_forward)
 
             with engine.connect() as conn:
                 assert {row[0] for row in conn.execute(text(
