@@ -1,6 +1,6 @@
 {
   "record_version": 2,
-  "status": "DRAFT_ONLY_REQUIRES_COMPATIBLE_SOURCE_PINS",
+  "status": "READY",
   "rollback_mode": "compatible_source_flags_off",
   "phase": "S4_COMM_DORMANT",
   "database_heads": [
@@ -31,7 +31,7 @@
     "runtime_inventory_count": 165,
     "shopify_expectations_sha256": "fbf403ac353f81e56ae1058ca24a4ffae56824f261edcc50bf51b5735d5c7b1d",
     "communication_expectations_sha256": "87c15ab714e5f4dccf6fa6666e80ae708392e32ad71a8d972daf827681b1e461",
-    "independent_review_ref": null
+    "independent_review_ref": "libfile_afd8427539cc81918a7c344cc0c03b2d#sha256:4f2ce2ebf53dfbdd4db5d362a20d20840ba21bace8bdb21280460a921f373f7a"
   },
   "operator_observation": {
     "receipt_library_id": "libfile_98ed7670746081918551c3c58315d1f7",
