@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -122,6 +121,9 @@ def test_post_migration_gate_failure_keeps_0125_and_retry_is_read_only(tmp_path,
                     if isinstance(node, ast.Assign) and any(
                         isinstance(target, ast.Name) and target.id == "ARGV" for target in node.targets))
         env = _environment(db, approval)
+        # The gate normally imports from the synthetic container root. This
+        # in-process fault injection must make that same root explicit.
+        monkeypatch.setattr(gate, "_OWN_FILE", root / k.GATE_RELATIVE_PATH)
         monkeypatch.setenv("DATABASE_URL", env["DATABASE_URL"])
         original_gate_main = gate.main
         monkeypatch.setattr(gate, "main", lambda *_args, **_kwargs: k.EXIT_FAIL)
