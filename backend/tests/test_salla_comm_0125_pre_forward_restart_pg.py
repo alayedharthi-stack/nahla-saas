@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import os
+from pathlib import Path
 import shlex
 import subprocess
 import sys
@@ -40,7 +41,7 @@ def _actual_terminal_command_on_isolated_pg18(
     The operator evidence here is synthetic. This proves the real container
     command and DB checks, not an authenticated owner or Railway read.
     """
-    root = retained.ROOT
+    root = Path(os.environ.get("SALLA_ROLLBACK_SOURCE_ROOT", retained.ROOT)).resolve()
     release_sha = "a" * 40
     target = terminal.Target(
         "11111111-1111-4111-8111-111111111111",
@@ -115,7 +116,7 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
     This is intentionally not a successful Railway command or provider proof.
     The separate subprocess test above verifies the real command refuses.
     """
-    root = retained.ROOT
+    root = Path(os.environ.get("SALLA_ROLLBACK_SOURCE_ROOT", retained.ROOT)).resolve()
     release_sha = "a" * 40
     target = terminal.Target(
         "11111111-1111-4111-8111-111111111111",
@@ -225,6 +226,14 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
 
 
 def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
+    rollback_root = Path(os.environ.get("SALLA_ROLLBACK_SOURCE_ROOT", retained.ROOT)).resolve()
+    if "SALLA_ROLLBACK_SOURCE_ROOT" in os.environ:
+        assert rollback_root != retained.ROOT
+        assert (rollback_root / "scripts/operators/salla_comm_rollback_only_gate.py").is_file()
+        assert not (rollback_root / "backend/core/salla_communication_whatsapp.py").exists()
+        assert (retained.ROOT / "backend/core/salla_communication_whatsapp.py").is_file()
+        assert (rollback_root / "backend/services/cart_recovery_status.py").read_bytes() == (
+            retained.ROOT / "backend/services/cart_recovery_status.py").read_bytes()
     with retained.fresh_database() as (url, db_name):
         topology._build(db_name, "0124")
         assert {row[0] for row in topology._sql(
@@ -270,7 +279,7 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
             # Exercise the real startup DB callback, with provider egress and
             # schedulers blocked by the existing synthetic startup probe.
             retained._startup_database_tasks(
-                retained.ROOT, url.render_as_string(hide_password=False),
+                rollback_root, url.render_as_string(hide_password=False),
                 tmp_path / "startup_hook_before_forward",
             )
             release._isolated_healthz_smoke(db_name, tmp_path)
@@ -278,9 +287,9 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
             _synthetic_positive_policy_on_real_pg18(db_name)
 
             # Exercise both real command entrypoints on the disposable DB.
-            # The forward root is an inventory copy of this checkout, not an
-            # independently built forward artifact. These synthetic approvals
-            # prove the gates, not a Railway launch or a production source pair.
+            # In the container-cycle workflow the rollback root is the pinned
+            # fd6 source and this checkout is the distinct forward PR head.
+            # Synthetic approvals prove gate behavior, not Railway deployment.
             assert harness.SYNTHETIC_RELEASE_SHA != "a" * 40
             forward_root = harness.build_root(tmp_path / "forward_gate")
             forward_approval = release._synthetic_approval(forward_root, db_name)
@@ -291,7 +300,7 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
             assert forward_rc == 0 and "RESULT=PASS" in forward_output, forward_output[-1200:]
             assert _actual_terminal_command_on_isolated_pg18(db_name, frozen_rollback) == frozen_rollback
             retained._startup_database_tasks(
-                retained.ROOT, url.render_as_string(hide_password=False),
+                rollback_root, url.render_as_string(hide_password=False),
                 tmp_path / "startup_hook_after_synthetic_forward",
             )
             after_forward = tmp_path / "after_synthetic_forward"
