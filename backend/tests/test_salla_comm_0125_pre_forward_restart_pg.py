@@ -32,7 +32,9 @@ from scripts.operators import salla_comm_rollback_only_source as source
 pytestmark = topology.pytestmark
 
 
-def _actual_terminal_command_on_isolated_pg18(db_name: str) -> None:
+def _actual_terminal_command_on_isolated_pg18(
+    db_name: str, frozen: tuple[bytes, bytes] | None = None,
+) -> tuple[bytes, bytes]:
     """Run actual rendered bootstrap bytes, not a mocked renderer/entrypoint.
 
     The operator evidence here is synthetic. This proves the real container
@@ -85,6 +87,10 @@ def _actual_terminal_command_on_isolated_pg18(db_name: str) -> None:
     }
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
     command = render.bind_command(template, sha256(payload).hexdigest())
+    if frozen is not None:
+        # The post-forward check must reuse the identical approved payload and
+        # command bytes, rather than minting a new five-minute approval.
+        payload, command = frozen
     argv = shlex.split(command.decode("ascii"))
     assert argv[0] == "python" and argv[1:3] == ["-I", "-c"]
     argv[0] = sys.executable
@@ -106,6 +112,7 @@ def _actual_terminal_command_on_isolated_pg18(db_name: str) -> None:
                             text=True, timeout=120, check=False)
     assert result.returncode == 0, (result.stdout, result.stderr[-1000:])
     assert "RESULT=PASS action=rollback_only_0125" in result.stdout
+    return payload, command
 
 
 def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
@@ -267,11 +274,14 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
                 tmp_path / "startup_hook_before_forward",
             )
             release._isolated_healthz_smoke(db_name, tmp_path)
-            _actual_terminal_command_on_isolated_pg18(db_name)
+            frozen_rollback = _actual_terminal_command_on_isolated_pg18(db_name)
             _synthetic_positive_policy_on_real_pg18(db_name)
 
             # Exercise both real command entrypoints on the disposable DB.
-            # These synthetic approvals prove the gates, not a Railway launch.
+            # The forward root is an inventory copy of this checkout, not an
+            # independently built forward artifact. These synthetic approvals
+            # prove the gates, not a Railway launch or a production source pair.
+            assert harness.SYNTHETIC_RELEASE_SHA != "a" * 40
             forward_root = harness.build_root(tmp_path / "forward_gate")
             forward_approval = release._synthetic_approval(forward_root, db_name)
             forward_rc, forward_output = harness.run_gate(
@@ -279,7 +289,7 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
                 topology._target(db_name), approval=forward_approval,
             )
             assert forward_rc == 0 and "RESULT=PASS" in forward_output, forward_output[-1200:]
-            _actual_terminal_command_on_isolated_pg18(db_name)
+            assert _actual_terminal_command_on_isolated_pg18(db_name, frozen_rollback) == frozen_rollback
             retained._startup_database_tasks(
                 retained.ROOT, url.render_as_string(hide_password=False),
                 tmp_path / "startup_hook_after_synthetic_forward",
