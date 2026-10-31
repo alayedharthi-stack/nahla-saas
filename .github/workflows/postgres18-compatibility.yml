@@ -2,7 +2,7 @@ name: PostgreSQL 18 compatibility
 
 on:
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027, codex/salla-production-preserve-shopify-20261018, review/salla-app-first-ci-20261027, review/cart-read-2bba-20261030]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027, codex/salla-production-preserve-shopify-20261018, review/salla-app-first-ci-20261027, review/cart-read-2bba-20261030, review/salla-comm-rollback-only-0125-20261031]
   push:
     branches: [main, master, codex/salla-production-preserve-shopify-20261018]
 
@@ -56,6 +56,7 @@ jobs:
           NAHLA_RELIABILITY_PG_ADMIN_DSN: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
           NAHLA_RELEASE_GATE_PG_HOST_ALIAS: shopify-gate-disposable
           NAHLA_ACCEPTANCE_PG_URL: postgresql://acceptance:synthetic_acceptance_only@127.0.0.1:5433/acceptance_test
+          SALLA_COMM_TEST_PG_URL: postgresql://nahla:nahla_password@127.0.0.1:5433/postgres
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -69,6 +70,11 @@ jobs:
           PY
           printf '127.0.0.1 shopify-gate-disposable\n' | sudo tee -a /etc/hosts >/dev/null
           mkdir -p "$RUNNER_TEMP/acceptance-pg18"
+          python -B -m pytest backend/tests/test_salla_communication_migration_pg.py \
+            backend/tests/test_salla_communication_pg_reservation.py \
+            backend/tests/test_salla_communication_receipt_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication.xml"
           python -B -m pytest backend/tests/test_shopify_install_release_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/rollback.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/rollback.xml"
