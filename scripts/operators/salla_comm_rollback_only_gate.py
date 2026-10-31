@@ -46,10 +46,7 @@ class PinnedApprovalReadPort:
         terminal.require(reason is None and isinstance(record, dict), "approval_payload_invalid")
         fields = {
             "record_version", "action", "target", "candidate_source_sha",
-            "reference_deployment_id", "reference_source_sha", "reference_image_digest",
-            "reference_predeploy_command_sha256",
-            "rollback_artifact_deployment_id", "rollback_artifact_source_sha",
-            "rollback_artifact_image_digest", "rollback_artifact_predeploy_command_sha256",
+            "heads_before", "heads_after",
             "owner_approval_reference", "backup_service_id", "backup_volume_id",
             "backup_receipt_sha256",
             "restore_receipt_sha256",
@@ -57,7 +54,7 @@ class PinnedApprovalReadPort:
             "shopify_schema_sha256", "communication_schema_sha256",
             "approved_at_utc", "expires_at_utc", "approved",
         }
-        terminal.require(set(record) == fields and record["record_version"] == 1,
+        terminal.require(set(record) == fields and record["record_version"] == 2,
                          "approval_shape_invalid")
         target = record["target"]
         terminal.require(isinstance(target, dict) and set(target) == {
@@ -66,10 +63,8 @@ class PinnedApprovalReadPort:
         return terminal.Approval(
             action=record["action"], target=terminal.Target(**target),
             candidate_source_sha=record["candidate_source_sha"],
-            reference_deployment_id=record["reference_deployment_id"],
-            reference_source_sha=record["reference_source_sha"],
-            reference_image_digest=record["reference_image_digest"],
-            reference_predeploy_command_sha256=record["reference_predeploy_command_sha256"],
+            heads_before=tuple(record["heads_before"]),
+            heads_after=tuple(record["heads_after"]),
             owner_approval_reference=record["owner_approval_reference"],
             backup_service_id=record["backup_service_id"],
             backup_volume_id=record["backup_volume_id"],
@@ -83,10 +78,6 @@ class PinnedApprovalReadPort:
             approved_at=existing.parse_utc(record["approved_at_utc"]),
             expires_at=existing.parse_utc(record["expires_at_utc"]),
             approved=record["approved"],
-            rollback_artifact_deployment_id=record["rollback_artifact_deployment_id"],
-            rollback_artifact_source_sha=record["rollback_artifact_source_sha"],
-            rollback_artifact_image_digest=record["rollback_artifact_image_digest"],
-            rollback_artifact_predeploy_command_sha256=record["rollback_artifact_predeploy_command_sha256"],
         )
 
 

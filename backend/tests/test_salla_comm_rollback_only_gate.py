@@ -35,7 +35,7 @@ class Database:
 
     def state_read_only(self):
         self.reads += 1
-        return terminal.DatabaseState(terminal.HEADS, "d" * 64, "e" * 64)
+        return terminal.DatabaseState(terminal.HEADS_BEFORE, "d" * 64, "e" * 64)
 
 
 class Renderer:
@@ -45,19 +45,18 @@ class Renderer:
 
 def approval():
     return terminal.Approval(
-        terminal.ACTION, TARGET, "a" * 40, "reference-id", "9" * 40,
-        "b" * 64, "f" * 64,
-        "synthetic-owner-message",
-        "44444444-4444-4444-8444-444444444444",
-        "55555555-5555-4555-8555-555555555555",
-        "1" * 64, "2" * 64,
-        sha256(TEMPLATE).hexdigest(), "c" * 64, 164,
-        "d" * 64, "e" * 64, NOW - timedelta(minutes=1),
-        NOW + timedelta(minutes=15), True,
-        rollback_artifact_deployment_id="artifact-id",
-        rollback_artifact_source_sha="a" * 40,
-        rollback_artifact_image_digest="c" * 64,
-        rollback_artifact_predeploy_command_sha256="0" * 64,
+        action=terminal.ACTION, target=TARGET, candidate_source_sha="a" * 40,
+        heads_before=tuple(sorted(terminal.HEADS_BEFORE)),
+        heads_after=tuple(sorted(terminal.HEADS_AFTER)),
+        owner_approval_reference="synthetic-owner-message",
+        backup_service_id="44444444-4444-4444-8444-444444444444",
+        backup_volume_id="55555555-5555-4555-8555-555555555555",
+        backup_receipt_sha256="1" * 64, restore_receipt_sha256="2" * 64,
+        rollback_command_template_sha256=sha256(TEMPLATE).hexdigest(),
+        inventory_digest="c" * 64, inventory_count=164,
+        shopify_schema_sha256="d" * 64, communication_schema_sha256="e" * 64,
+        approved_at=NOW - timedelta(minutes=1),
+        expires_at=NOW + timedelta(minutes=15), approved=True,
     )
 
 

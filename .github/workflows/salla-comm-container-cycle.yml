@@ -32,7 +32,7 @@ jobs:
       # Forward and rollback gates are exercised from one reviewed code tree.
       # This is a packaging and command-cycle proof, not a pair of Railway
       # deployments or an independently pinned forward release artifact.
-      TEST_SOURCE_SHA: 63d5295dc9e284cfa98c275b7199b7b9ba0d730b
+      TEST_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Fetch exact reviewed code tree without retained credentials
         run: |
@@ -72,4 +72,3 @@ jobs:
             --env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
             --entrypoint bash nahla-comm-probe:ci -lc \
             'set -euo pipefail; python -c '\''import os,sqlalchemy as sa; e=sa.create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"]); c=e.connect(); v=int(c.exec_driver_sql("SHOW server_version_num").scalar()); assert 180000 <= v < 190000; c.close(); e.dispose()'\''; python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short -p no:cacheprovider --junitxml=/tmp/communication-container-cycle.xml; python scripts/check_junit_clean.py /tmp/communication-container-cycle.xml'
-

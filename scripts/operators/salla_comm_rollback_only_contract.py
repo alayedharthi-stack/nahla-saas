@@ -1,8 +1,9 @@
 """Rollback-only policy, with separate operator and container trust boundaries.
 
-The operator verifies Railway and owner evidence through authenticated tools
-before installing a SHA-pinned approval and command. The container rechecks
-that exact payload, source, flags and database. Neither side writes the DB.
+The operator verifies Railway and owner evidence through authenticated tools.
+The container checks one SHA-pinned approval and command on both supported
+database heads. A separate operator receipt binds the prepared image before
+rollback. Neither side writes the DB.
 """
 
 from __future__ import annotations
@@ -17,7 +18,9 @@ from typing import Protocol
 
 
 ACTION = "rollback_only_0125"
-HEADS = frozenset({"0111", "0113", "0125"})
+HEADS_BEFORE = frozenset({"0111", "0113", "0124"})
+HEADS_AFTER = frozenset({"0111", "0113", "0125"})
+ALLOWED_HEADS = frozenset({HEADS_BEFORE, HEADS_AFTER})
 FLAG_NAMES = frozenset({
     "NAHLA_SHOPIFY_CONNECTION_ENABLED",
     "NAHLA_SHOPIFY_INSTALL_FIRST_ENABLED",
@@ -66,15 +69,13 @@ class Deployment:
 
 @dataclass(frozen=True)
 class Approval:
-    """Payload bound by the command pin; provenance is verified by the operator."""
+    """Pre-artifact payload bound by the command pin and owner approval."""
 
     action: str
     target: Target
     candidate_source_sha: str
-    reference_deployment_id: str
-    reference_source_sha: str
-    reference_image_digest: str
-    reference_predeploy_command_sha256: str
+    heads_before: tuple[str, ...]
+    heads_after: tuple[str, ...]
     owner_approval_reference: str
     backup_service_id: str
     backup_volume_id: str
@@ -88,10 +89,6 @@ class Approval:
     approved_at: datetime
     expires_at: datetime
     approved: bool
-    rollback_artifact_deployment_id: str = ""
-    rollback_artifact_source_sha: str = ""
-    rollback_artifact_image_digest: str = ""
-    rollback_artifact_predeploy_command_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +120,23 @@ class OperatorEvidence:
 
 
 @dataclass(frozen=True)
+class ArtifactReceipt:
+    """Trusted operator read after the rollback image passed on 0124.
+
+    A local JSON object cannot prove completed_successfully. The operator
+    must read the provider's original success and immutable image/command.
+    """
+
+    approval_payload_sha256: str
+    target: Target
+    deployment_id: str
+    source_sha: str
+    image_digest: str
+    predeploy_command_sha256: str
+    completed_successfully: bool
+
+
+@dataclass(frozen=True)
 class RecoveryReceipt:
     """Result of an authenticated operator read, not a self-authored hash."""
 
@@ -147,6 +161,8 @@ class OperatorReadPort(Protocol):
                        payload: bytes) -> bool: ...
     def recovery_receipt(self, kind: str, target: Target,
                          service_id: str, volume_id: str) -> RecoveryReceipt: ...
+    def artifact_receipt(self, approval_payload_sha256: str,
+                         target: Target) -> ArtifactReceipt: ...
 
 
 class ApprovalReadPort(Protocol):
@@ -203,7 +219,7 @@ def approval_payload_bytes(approval: Approval) -> bytes:
     record = asdict(approval)
     record["approved_at_utc"] = record.pop("approved_at").isoformat().replace("+00:00", "Z")
     record["expires_at_utc"] = record.pop("expires_at").isoformat().replace("+00:00", "Z")
-    record["record_version"] = 1
+    record["record_version"] = 2
     return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
@@ -260,18 +276,12 @@ def validate_predeploy(
     require(isinstance(execution_command, bytes) and bool(execution_command), "execution_command_missing")
     require(set(process_flags) == FLAG_NAMES
             and all(process_flags[name] == "false" for name in FLAG_NAMES), "flags_not_off")
-    require(_digest(approval.reference_image_digest)
-            and _digest(approval.reference_predeploy_command_sha256)
-            and _digest(approval.shopify_schema_sha256)
+    require(_digest(approval.shopify_schema_sha256)
             and _digest(approval.communication_schema_sha256), "digest_invalid")
-    require(bool(approval.reference_deployment_id)
-            and _source(approval.reference_source_sha)
-            and bool(approval.rollback_artifact_deployment_id)
-            and _source(approval.rollback_artifact_source_sha)
-            and approval.rollback_artifact_source_sha == approval.candidate_source_sha
-            and _digest(approval.rollback_artifact_image_digest)
-            and _digest(approval.rollback_artifact_predeploy_command_sha256)
-            and bool(approval.owner_approval_reference)
+    require(approval.heads_before == tuple(sorted(HEADS_BEFORE))
+            and approval.heads_after == tuple(sorted(HEADS_AFTER)),
+            "approved_heads_mismatch")
+    require(bool(approval.owner_approval_reference)
             and bool(approval.backup_service_id)
             and bool(approval.backup_volume_id)
             and _digest(approval.backup_receipt_sha256)
@@ -281,7 +291,7 @@ def validate_predeploy(
         state = database.state_read_only()
     except Exception:
         raise Refused("database_read_failed") from None
-    require(state.heads == HEADS, "database_heads_mismatch")
+    require(state.heads in ALLOWED_HEADS, "database_heads_mismatch")
     require(state.shopify_schema_sha256 == approval.shopify_schema_sha256, "shopify_schema_mismatch")
     require(state.communication_schema_sha256 == approval.communication_schema_sha256,
             "communication_schema_mismatch")
@@ -292,11 +302,14 @@ def validate_predeploy(
 def validate_operator_predeploy(*, approval: Approval, payload: bytes,
                                 pinned_payload_sha256: str,
                                 provider: RailwayReadPort, operator: OperatorReadPort,
-                                now: datetime) -> OperatorEvidence:
-    """Compare independent authenticated reads before installing a command.
+                                renderer: CommandRenderPort,
+                                command_template: bytes, now: datetime) -> OperatorEvidence:
+    """Compare independent authenticated reads immediately before rollback.
 
-    The operator ports must use the existing Railway and owner channels. A
+    The operator ports use the existing Railway and owner channels. A
     caller-supplied JSON object or this function alone is no attestation.
+    This readback is required because Railway rollback is not documented to
+    rerun the old predeploy command.
     """
     require(_utc(now) and _utc(approval.approved_at) and _utc(approval.expires_at)
             and approval.approved_at <= now < approval.expires_at,
@@ -305,6 +318,10 @@ def validate_operator_predeploy(*, approval: Approval, payload: bytes,
             "approval_window_too_long")
     require(approval.action == ACTION and approval.approved is True,
             "action_not_approved")
+    require(_source(approval.candidate_source_sha)
+            and _digest(approval.inventory_digest)
+            and type(approval.inventory_count) is int and approval.inventory_count > 0,
+            "source_inventory_invalid")
     require(isinstance(payload, bytes) and _digest(pinned_payload_sha256)
             and sha256(payload).hexdigest() == pinned_payload_sha256
             and approval_matches_payload(approval, payload)
@@ -333,63 +350,83 @@ def validate_operator_predeploy(*, approval: Approval, payload: bytes,
             and _digest(backup.sha256) and backup.sha256 == approval.backup_receipt_sha256
             and _digest(restore.sha256) and restore.sha256 == approval.restore_receipt_sha256,
             "recovery_evidence_mismatch")
+    require(approval.heads_before == tuple(sorted(HEADS_BEFORE))
+            and approval.heads_after == tuple(sorted(HEADS_AFTER)),
+            "approved_heads_mismatch")
+    require(sha256(command_template).hexdigest() == approval.rollback_command_template_sha256,
+            "command_template_mismatch")
     try:
-        reference = provider.deployment(approval.reference_deployment_id)
+        execution_command = renderer.render(command_template, approval)
+    except Exception:
+        raise Refused("trusted_command_render_failed") from None
+    require(isinstance(execution_command, bytes) and bool(execution_command),
+            "execution_command_missing")
+    command_sha = sha256(execution_command).hexdigest()
+    try:
+        reference_id = provider.current_deployment_id(approval.target)
+        reference = provider.deployment(reference_id)
     except Refused:
         raise
     except Exception:
         raise Refused("trusted_railway_read_failed") from None
-    require(reference.deployment_id == approval.reference_deployment_id,
-            "reference_id_mismatch")
+    require(reference.deployment_id == reference_id, "reference_id_mismatch")
     require(reference.target == approval.target, "reference_target_mismatch")
-    require(reference.source_sha == approval.reference_source_sha,
-            "reference_source_mismatch")
-    require(reference.image_digest == approval.reference_image_digest,
-            "reference_image_mismatch")
-    require(reference.predeploy_command_sha256 == approval.reference_predeploy_command_sha256,
-            "reference_command_mismatch")
+    require(_source(reference.source_sha) and _digest(reference.image_digest)
+            and _digest(reference.predeploy_command_sha256), "reference_identity_invalid")
     require(reference.status == "SUCCESS" and reference.healthy,
             "reference_unhealthy")
+    try:
+        receipt = operator.artifact_receipt(pinned_payload_sha256, approval.target)
+    except Exception:
+        raise Refused("artifact_receipt_read_failed") from None
+    require(isinstance(receipt, ArtifactReceipt)
+            and receipt.approval_payload_sha256 == pinned_payload_sha256
+            and receipt.target == approval.target
+            and receipt.completed_successfully is True
+            and bool(receipt.deployment_id)
+            and receipt.source_sha == approval.candidate_source_sha
+            and _digest(receipt.image_digest)
+            and receipt.predeploy_command_sha256 == command_sha,
+            "artifact_receipt_mismatch")
+    require(receipt.deployment_id != reference.deployment_id, "artifact_not_distinct")
+    try:
+        artifact = provider.deployment(receipt.deployment_id)
+        launchable = provider.artifact_launchable(receipt.deployment_id, receipt.image_digest)
+    except Refused:
+        raise
+    except Exception:
+        raise Refused("trusted_railway_read_failed") from None
+    require(artifact.deployment_id == receipt.deployment_id, "artifact_id_mismatch")
+    require(artifact.target == approval.target, "artifact_target_mismatch")
+    require(artifact.source_sha == receipt.source_sha,
+            "artifact_source_mismatch")
+    require(artifact.image_digest == receipt.image_digest,
+            "artifact_image_mismatch")
+    require(artifact.predeploy_command_sha256 == receipt.predeploy_command_sha256,
+            "artifact_command_mismatch")
+    require(artifact.status in {"SUCCESS", "REMOVED"} and launchable is True,
+            "artifact_not_launchable")
     try:
         current_id = provider.current_deployment_id(approval.target)
     except Refused:
         raise
     except Exception:
         raise Refused("trusted_railway_read_failed") from None
-    require(current_id == reference.deployment_id, "reference_not_serving")
-    require(approval.rollback_artifact_deployment_id != reference.deployment_id,
-            "artifact_not_distinct")
-    try:
-        artifact = provider.deployment(approval.rollback_artifact_deployment_id)
-        launchable = provider.artifact_launchable(
-            approval.rollback_artifact_deployment_id, approval.rollback_artifact_image_digest)
-    except Refused:
-        raise
-    except Exception:
-        raise Refused("trusted_railway_read_failed") from None
-    require(artifact.deployment_id == approval.rollback_artifact_deployment_id,
-            "artifact_id_mismatch")
-    require(artifact.target == approval.target, "artifact_target_mismatch")
-    require(artifact.source_sha == approval.rollback_artifact_source_sha,
-            "artifact_source_mismatch")
-    require(artifact.image_digest == approval.rollback_artifact_image_digest,
-            "artifact_image_mismatch")
-    require(artifact.predeploy_command_sha256 == approval.rollback_artifact_predeploy_command_sha256,
-            "artifact_command_mismatch")
-    require(artifact.status == "SUCCESS" and launchable is True, "artifact_not_launchable")
-    require(provider.current_deployment_id(approval.target) == reference.deployment_id,
-            "reference_changed")
+    require(current_id == reference.deployment_id, "reference_changed")
     return OperatorEvidence(pinned_payload_sha256, backup.sha256, restore.sha256,
                             reference, artifact)
 
 
 def validate_result(*, provider: RailwayReadPort, authorized: AuthorizedRollback,
-                    result_deployment_id: str, now: datetime) -> Deployment:
+                    evidence: OperatorEvidence, result_deployment_id: str,
+                    now: datetime) -> Deployment:
     """Read back the *new* deployment; never assume the reference ID survives."""
     approval = authorized.approval
     require(_utc(now) and approval.approved_at <= now < approval.expires_at, "approval_expired")
-    require(result_deployment_id != approval.reference_deployment_id, "result_id_not_new")
-    require(result_deployment_id != approval.rollback_artifact_deployment_id,
+    require(evidence.approval_payload_sha256 == sha256(approval_payload_bytes(approval)).hexdigest(),
+            "result_evidence_mismatch")
+    require(result_deployment_id != evidence.reference.deployment_id, "result_id_not_new")
+    require(result_deployment_id != evidence.rollback_artifact.deployment_id,
             "result_id_not_new")
     try:
         result = provider.deployment(result_deployment_id)
@@ -400,7 +437,7 @@ def validate_result(*, provider: RailwayReadPort, authorized: AuthorizedRollback
     require(result.deployment_id == result_deployment_id, "result_id_mismatch")
     require(result.target == approval.target, "result_target_mismatch")
     require(result.source_sha == approval.candidate_source_sha, "result_source_mismatch")
-    require(result.image_digest == approval.rollback_artifact_image_digest,
+    require(result.image_digest == evidence.rollback_artifact.image_digest,
             "result_image_mismatch")
     require(result.predeploy_command_sha256 == authorized.execution_command_sha256,
             "result_command_mismatch")

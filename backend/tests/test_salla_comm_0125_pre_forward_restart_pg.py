@@ -57,19 +57,13 @@ def _actual_terminal_command_on_isolated_pg18(
     )
     now = datetime.now(timezone.utc)
     record = {
-        "record_version": 1, "action": terminal.ACTION,
+        "record_version": 2, "action": terminal.ACTION,
         "target": {"project": target.project, "environment": target.environment,
                    "service": target.service,
                    "database_identity": target.database_identity},
         "candidate_source_sha": release_sha,
-        "reference_deployment_id": "synthetic-reference-only",
-        "reference_source_sha": "9" * 40,
-        "reference_image_digest": "b" * 64,
-        "reference_predeploy_command_sha256": "c" * 64,
-        "rollback_artifact_deployment_id": "synthetic-artifact-only",
-        "rollback_artifact_source_sha": release_sha,
-        "rollback_artifact_image_digest": "d" * 64,
-        "rollback_artifact_predeploy_command_sha256": "e" * 64,
+        "heads_before": sorted(terminal.HEADS_BEFORE),
+        "heads_after": sorted(terminal.HEADS_AFTER),
         "owner_approval_reference": "synthetic-owner-message",
         "backup_service_id": "44444444-4444-4444-8444-444444444444",
         "backup_volume_id": "55555555-5555-4555-8555-555555555555",
@@ -142,14 +136,8 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
     approval = terminal.Approval(
         action=terminal.ACTION, target=target,
         candidate_source_sha=release_sha,
-        reference_deployment_id="synthetic-reference-only",
-        reference_source_sha="9" * 40,
-        reference_image_digest="b" * 64,
-        reference_predeploy_command_sha256="c" * 64,
-        rollback_artifact_deployment_id="synthetic-artifact-only",
-        rollback_artifact_source_sha=release_sha,
-        rollback_artifact_image_digest="d" * 64,
-        rollback_artifact_predeploy_command_sha256="e" * 64,
+        heads_before=tuple(sorted(terminal.HEADS_BEFORE)),
+        heads_after=tuple(sorted(terminal.HEADS_AFTER)),
         owner_approval_reference="synthetic-owner-message",
         backup_service_id=backup_service,
         backup_volume_id=backup_volume,
@@ -219,10 +207,19 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
         "synthetic-result-only", target, release_sha, "d" * 64,
         execution_hash, "SUCCESS", True,
     )
+    artifact = terminal.Deployment(
+        "synthetic-artifact-only", target, release_sha, "d" * 64,
+        execution_hash, "REMOVED", False,
+    )
+    evidence = terminal.OperatorEvidence(
+        sha256(terminal.approval_payload_bytes(approval)).hexdigest(),
+        approval.backup_receipt_sha256, approval.restore_receipt_sha256,
+        reference, artifact,
+    )
     provider.items[result.deployment_id] = result
     provider.current_id = result.deployment_id
     assert terminal.validate_result(
-        provider=provider, authorized=authorized,
+        provider=provider, authorized=authorized, evidence=evidence,
         result_deployment_id=result.deployment_id, now=now,
     ) == result
 
@@ -233,6 +230,9 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
         assert {row[0] for row in topology._sql(
             db_name, "SELECT version_num FROM alembic_version"
         )} == {"0111", "0113", "0124"}
+        # Prepare one immutable command while the database is still on 0124.
+        # Reuse its exact approval and command bytes after migration and forward.
+        frozen_rollback = _actual_terminal_command_on_isolated_pg18(db_name)
         migrated = topology._alembic(db_name, "upgrade", "0125")
         assert migrated.returncode == 0, migrated.stderr[-1000:]
 
@@ -274,7 +274,7 @@ def test_restart_window_retains_audit_and_nonce_before_forward(tmp_path):
                 tmp_path / "startup_hook_before_forward",
             )
             release._isolated_healthz_smoke(db_name, tmp_path)
-            frozen_rollback = _actual_terminal_command_on_isolated_pg18(db_name)
+            assert _actual_terminal_command_on_isolated_pg18(db_name, frozen_rollback) == frozen_rollback
             _synthetic_positive_policy_on_real_pg18(db_name)
 
             # Exercise both real command entrypoints on the disposable DB.

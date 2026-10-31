@@ -21,10 +21,13 @@ ACTION_FILES = (
     "scripts/operators/salla_comm_rollback_only_gate.py",
     "scripts/operators/salla_comm_rollback_only_render.py",
 )
-PHASE_NAME = "S4_COMM_DORMANT"
+PHASES = (
+    ("S4_DORMANT", terminal.HEADS_BEFORE),
+    ("S4_COMM_DORMANT", terminal.HEADS_AFTER),
+)
 REQUIRED_DB_CHECKS = frozenset({
-    "connect", "lock", "server", "version_rows", "communication_schema",
-    "shopify_footprint", "retained_schema", "relation_identity", "unlock",
+    "connect", "lock", "server", "version_rows", "shopify_footprint",
+    "retained_schema", "relation_identity", "unlock",
 })
 
 
@@ -52,15 +55,16 @@ def source_preflight(root: Path, environ: Mapping[str, str], release_sha: str,
     count, digest = candidate_inventory(root)
     terminal.require(count == expected_count and digest == expected_digest,
                      "source_inventory_mismatch")
-    phase = existing.phase(PHASE_NAME)
-    terminal.require(phase is not None and phase["rows"] == terminal.HEADS,
-                     "phase_mismatch")
     terminal.require(set(existing.SHOPIFY_FLAG_ENVS + (existing.COMM_SEND_FLAG_ENV,))
                      == terminal.FLAG_NAMES, "flag_contract_mismatch")
-    graph, known = gate.check_graph(root, phase)
-    terminal.require(graph.ok and known is not None, "graph_mismatch")
-    expectations, body = gate.check_expectations(root, PHASE_NAME)
-    terminal.require(expectations.ok and body is not None, "expectations_mismatch")
+    for phase_name, heads in PHASES:
+        phase = existing.phase(phase_name)
+        terminal.require(phase is not None and phase["rows"] == heads,
+                         "phase_mismatch")
+        graph, known = gate.check_graph(root, phase)
+        terminal.require(graph.ok and known is not None, "graph_mismatch")
+        expectations, body = gate.check_expectations(root, phase_name)
+        terminal.require(expectations.ok and body is not None, "expectations_mismatch")
 
 
 class GateDatabaseReadPort:
@@ -72,24 +76,27 @@ class GateDatabaseReadPort:
         self.expected_database = expected_database
 
     def state_read_only(self) -> terminal.DatabaseState:
-        phase = existing.phase(PHASE_NAME)
-        terminal.require(phase is not None and phase["rows"] == terminal.HEADS,
-                         "phase_mismatch")
-        graph, known = gate.check_graph(self.root, phase)
-        terminal.require(graph.ok and known is not None, "graph_mismatch")
-        expectations, body = gate.check_expectations(self.root, PHASE_NAME)
-        terminal.require(expectations.ok and body is not None, "expectations_mismatch")
         parsed = existing.parse_db_target(self.expected_database)
         terminal.require(parsed is not None, "database_target_invalid")
         target_check, bound_url = gate.check_database_target(self.environ, parsed)
         terminal.require(target_check.ok and bound_url is not None, "database_target_mismatch")
-        checks = gate.run_database_checks(bound_url, phase, known, body, parsed["database"])
-        terminal.require(REQUIRED_DB_CHECKS <= {check.name for check in checks}
-                         and all(check.ok for check in checks), "database_checks_failed")
-        return terminal.DatabaseState(
-            heads=phase["rows"],
-            shopify_schema_sha256=gate.file_sha256(
-                self.root / existing.INSTALL_EXPECTATIONS_RELATIVE_PATH),
-            communication_schema_sha256=gate.file_sha256(
-                self.root / existing.COMM_EXPECTATIONS_RELATIVE_PATH),
-        )
+        for phase_name, heads in PHASES:
+            phase = existing.phase(phase_name)
+            terminal.require(phase is not None and phase["rows"] == heads,
+                             "phase_mismatch")
+            graph, known = gate.check_graph(self.root, phase)
+            terminal.require(graph.ok and known is not None, "graph_mismatch")
+            expectations, body = gate.check_expectations(self.root, phase_name)
+            terminal.require(expectations.ok and body is not None, "expectations_mismatch")
+            checks = gate.run_database_checks(bound_url, phase, known, body, parsed["database"])
+            required = REQUIRED_DB_CHECKS | ({"communication_schema"}
+                                              if heads == terminal.HEADS_AFTER else set())
+            if required <= {check.name for check in checks} and all(check.ok for check in checks):
+                return terminal.DatabaseState(
+                    heads=heads,
+                    shopify_schema_sha256=gate.file_sha256(
+                        self.root / existing.INSTALL_EXPECTATIONS_RELATIVE_PATH),
+                    communication_schema_sha256=gate.file_sha256(
+                        self.root / existing.COMM_EXPECTATIONS_RELATIVE_PATH),
+                )
+        raise terminal.Refused("database_checks_failed")
