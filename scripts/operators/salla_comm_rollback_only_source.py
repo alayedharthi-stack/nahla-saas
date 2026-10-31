@@ -14,6 +14,11 @@ from scripts.operators import shopify_release_gate_contract as existing
 from scripts.operators import salla_comm_rollback_only_contract as terminal
 
 
+# This file belongs to the later forward source, never the deployed fd6
+# rollback artifact. The rollback command cannot require a file that fd6
+# did not contain; its own import gate still refuses every unpinned import.
+ROLLBACK_EXCLUDED_FILES = frozenset({"scripts/operators/salla_comm_0125_predeploy.py"})
+
 ACTION_FILES = (
     "scripts/operators/shopify_release_gate_render.py",
     "scripts/operators/salla_comm_rollback_only_contract.py",
@@ -33,7 +38,7 @@ REQUIRED_DB_CHECKS = frozenset({
 
 def candidate_inventory(root: Path) -> tuple[int, str]:
     """Pin the old full inventory plus both new runtime modules."""
-    paths = sorted(set(gate.inventory_paths(root)) | set(ACTION_FILES))
+    paths = sorted((set(gate.inventory_paths(root)) | set(ACTION_FILES)) - ROLLBACK_EXCLUDED_FILES)
     return gate.digest_paths(root, paths)
 
 
