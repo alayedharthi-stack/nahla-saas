@@ -25,6 +25,23 @@
     "VITE_SHOPIFY_CATALOG_IMPORT_UI": "false",
     "SALLA_COMM_WHATSAPP_ENABLED": "false"
   },
-  "compatible_rollback": null,
+  "compatible_rollback": {
+    "source_sha": "fd6b89617b2beaf33d77830988e0e23bcfaf9daa",
+    "runtime_inventory_digest": "703df1078ea5c438ec2aaf38b4531f478feef02b5bbc6f95b3f84bc03a3501fa",
+    "runtime_inventory_count": 165,
+    "shopify_expectations_sha256": "fbf403ac353f81e56ae1058ca24a4ffae56824f261edcc50bf51b5735d5c7b1d",
+    "communication_expectations_sha256": "87c15ab714e5f4dccf6fa6666e80ae708392e32ad71a8d972daf827681b1e461",
+    "independent_review_ref": null
+  },
+  "operator_observation": {
+    "receipt_library_id": "libfile_98ed7670746081918551c3c58315d1f7",
+    "receipt_sha256": "92d4ca09aaa297ecadc344b75cadee9ac7d67a3b6166b1c24cec633b2424ac22",
+    "railway_deployment_id": "5dfa011d-fe2e-4cf3-a0f3-0837e9dec646",
+    "railway_snapshot_id": "ffcb7374-1c3e-4cea-a437-4fad89cb0ba0",
+    "build_output_image_digest": "6b615c20fe6154b4ee7193e214d27dd48665e02868e709ef24f268e5d3cd7e9d",
+    "predeploy_command_sha256": "19ae3ea8bb0c48b4c214d73104ace15490beed70010b0ad42d724d9aed9f5f2d",
+    "requires_fresh_authenticated_provider_recheck": true,
+    "observed_database_heads_after_deploy": null
+  },
   "approval": "none"
 }
