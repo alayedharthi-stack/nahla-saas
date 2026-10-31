@@ -2,7 +2,7 @@ name: PostgreSQL 18 compatibility
 
 on:
   pull_request:
-    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027, codex/salla-production-preserve-shopify-20261018, review/salla-app-first-ci-20261027, review/cart-read-2bba-20261030]
+    branches: [main, master, ops/tenant1-haiku-20260921-f9021b59, review/salla-acceptance-efb8-governed-20261026, review/salla-ci-proofs-20261027, codex/salla-production-preserve-shopify-20261018, review/salla-app-first-ci-20261027]
   push:
     branches: [main, master, codex/salla-production-preserve-shopify-20261018]
 
@@ -82,6 +82,12 @@ jobs:
           python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-pre-forward-restart.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-pre-forward-restart.xml"
+          python -B -m pytest backend/tests/test_salla_comm_rollback_only_contract.py \
+            backend/tests/test_salla_comm_rollback_only_gate.py \
+            backend/tests/test_salla_comm_rollback_only_render.py \
+            backend/tests/test_salla_comm_rollback_only_source.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-rollback-only-units.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-rollback-only-units.xml"
           python -B -m pytest backend/tests/test_acceptance_order_coupon_identity.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
