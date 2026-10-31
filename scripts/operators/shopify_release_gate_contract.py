@@ -7,7 +7,7 @@ path: it never upgrades, stamps, merges or edits ``alembic_version``. Every
 state it accepts is one exact, named state, and every deviation is a refusal.
 
 Trust order
-�����������
+───────────
 The owner's pre-deploy command is a **standard-library-only bootstrap**
 rendered by ``shopify_release_gate_render.py``. Before any repository module is
 imported it verifies, from literals it carries: the container root, the
@@ -19,7 +19,7 @@ SHA-256 of the external approval payload. Only then does it ``exec`` the gate,
 which re-verifies everything fail-fast and performs the database checks.
 
 Bindings (none circular)
-������������������������
+────────────────────────
 * The rendered command pins the inventory digest; the inventory includes the
   gate and this contract, and neither stores its own digest.
 * The approval record is **external** to the source (an owner-held payload
@@ -29,7 +29,7 @@ Bindings (none circular)
   never has to name itself.
 
 Phases
-������
+──────
 Normal deployment is allowed in exactly two states: S0 (the deployed
 topology before any Shopify revision) and S3 (the foundation, catalog and
 privacy revisions through 0123 applied). Source-only install-first revision
@@ -54,10 +54,10 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
-# �� Source binding ������������������������������������������������������������
+# ── Source binding ────────────────────────────────────────────────────────────
 CONTAINER_ROOT = "/app"
 # The one platform-injected variable this gate trusts for the deployed commit.
-# The looser list used by staging attestation (GIT_COMMIT_SHA, COMMIT_SHA, ?)
+# The looser list used by staging attestation (GIT_COMMIT_SHA, COMMIT_SHA, …)
 # is deliberately not accepted here: those are settable by an operator.
 RELEASE_SHA_ENV = "RAILWAY_GIT_COMMIT_SHA"
 RELEASE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -127,14 +127,14 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
 # would execute on the gate's first import.
 MUST_BE_ABSENT: Tuple[str, ...] = ("scripts/__init__.py",)
 
-# �� Library pins (the legacy guard's; identical to requirements.txt) ���������
+# ── Library pins (the legacy guard's; identical to requirements.txt) ─────────
 LIBRARY_PINS: Mapping[str, str] = {
     "alembic": "1.13.1",
     "sqlalchemy": "2.0.30",
     "psycopg2-binary": "2.9.9",
 }
 
-# �� Migration graph of the accepted source ����������������������������������
+# ── Migration graph of the accepted source ──────────────────────────────────
 EXPECTED_DOWN_REVISIONS: Mapping[str, str] = {
     "0110": "0109",
     "0111": "0109",
@@ -154,7 +154,7 @@ EXPECTED_REPOSITORY_HEADS: FrozenSet[str] = frozenset({"0092", "0111", "0114", "
 BRANCH_FORK_REVISION = "0112"
 RETAINED_ROWS: FrozenSet[str] = frozenset({"0111", "0113"})
 
-# �� States ������������������������������������������������������������������
+# ── States ──────────────────────────────────────────────────────────────────
 FOUNDATION_TABLES: Tuple[str, ...] = (
     "shopify_connections", "shopify_shop_leases", "shopify_oauth_states",
     "shopify_webhook_events", "shopify_connection_audit",
@@ -218,7 +218,7 @@ SCHEMA_CHANGING_PHASES: FrozenSet[str] = frozenset({"S3", "S4_DORMANT", "S4_PILO
 LEGACY_RELEASE_LABEL = "LEGACY_462_S0"
 LEGACY_RELEASE_SHA = "462ede1aff602cad84e9569be859cca0087b190d"
 
-# �� Platform identity of the existing target (non-secret metadata) �����������
+# ── Platform identity of the existing target (non-secret metadata) ───────────
 IDENTITY_ENVS: Mapping[str, str] = {
     "project": "RAILWAY_PROJECT_ID",
     "environment": "RAILWAY_ENVIRONMENT_ID",
@@ -244,7 +244,7 @@ LIBPQ_TARGET_ENV_VARS: Tuple[str, ...] = (
     "PGOPTIONS", "PGTARGETSESSIONATTRS", "PGPASSFILE", "PGCONNECT_TIMEOUT",
 )
 
-# �� Bounded timeouts (seconds / milliseconds; the whole run is wall-clock bounded) ��
+# ── Bounded timeouts (seconds / milliseconds; the whole run is wall-clock bounded) ──
 CONNECT_TIMEOUT_SEC = 5
 STATEMENT_TIMEOUT_MS = 15_000
 LOCK_TIMEOUT_MS = 3_000
@@ -258,7 +258,7 @@ APPLICATION_NAME = "nahla-shopify-release-gate"
 ADVISORY_LOCK_KEY_SEED = b"nahla:primary:catalog-schema:0120"
 ADVISORY_LOCK_KEY = 8182734029736770447
 
-# �� Shopify flags: every one must be unset or false during the transition ���
+# ── Shopify flags: every one must be unset or false during the transition ───
 # The two VITE_ names are the dashboard's build-time flags. They are refused
 # here if they appear in the checked (API service) environment; the API gate
 # cannot observe another service's compiled Vite configuration, which needs
@@ -284,7 +284,7 @@ CATALOG_IMPORT_FLAG = "NAHLA_SHOPIFY_CATALOG_IMPORT_ENABLED"
 CATALOG_IMPORT_SHOPS_ENV = "NAHLA_SHOPIFY_CATALOG_IMPORT_SHOPS"
 CATALOG_IMPORT_MAX_DAYS = 7
 
-# �� Retained schema protections (definitions, never names only) �������������
+# ── Retained schema protections (definitions, never names only) ─────────────
 RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
     "commerce_runtime_handover_barrier",
     "commerce_runtime_handover_workers",
@@ -293,10 +293,10 @@ RETAINED_FULL_DEFINITION_TABLES: Tuple[str, ...] = (
     "catalog_channel_retirements",
     "meta_catalog_authorizations",
 )
-# The WhatsApp OAuth nonce relation (0103): full definition ? every column
+# The WhatsApp OAuth nonce relation (0103): full definition — every column
 # with type, nullability, default, identity and generation; every constraint
 # with its definition and deferrable/deferred/validated flags; every index
-# with its shape and validity flags ? with only constraint and index *names*
+# with its shape and validity flags — with only constraint and index *names*
 # abstracted, because a database that adopted the table under the 0103
 # contract may legitimately carry different names.
 NONCE_TABLE = "whatsapp_oauth_nonces"
@@ -307,7 +307,7 @@ UNIQUE_DEFINITION_PINS: Tuple[Tuple[str, str], ...] = (
 IDENTITY_TABLES: Tuple[str, ...] = RETAINED_FULL_DEFINITION_TABLES + (NONCE_TABLE, "tenants", "users", "commerce_runtime_conversations")
 EXPECTATIONS_VERSION = 3
 
-# �� Approval record (external payload) ��������������������������������������
+# ── Approval record (external payload) ──────────────────────────────────────
 APPROVAL_RECORD_VERSION = 2
 APPROVAL_PAYLOAD_ENV = "NAHLA_SHOPIFY_RELEASE_APPROVAL_B64"
 # A backup observation older than this at approval time or at run time is
@@ -743,8 +743,8 @@ def evaluate_schema_rollback(evidence: Any, snapshot: Mapping[str, Any], binding
     this contract. This is validation only; it never creates an approval.
 
     * S4_PILOT: only the exact reviewed source of this release, with flags OFF.
-    * S4_DORMANT: that, or ? so a schema-preserving release can be deployed
-      before any deployment of it exists ? the single earlier source this
+    * S4_DORMANT: that, or — so a schema-preserving release can be deployed
+      before any deployment of it exists — the single earlier source this
       release's manifest pins (``dormant_prior_rollback``): the evidence must
       name that full SHA (the deployment snapshot too), its pinned inventory,
       this release's identical S4 definitions and every flag ``"false"``. An
@@ -896,4 +896,3 @@ def evaluate_approval(record: Any, *, phase_name: str, release_sha: str, runtime
 
 __all__ = [name for name, value in list(globals().items())
            if not name.startswith("_") and name not in {"re", "Any", "Dict", "FrozenSet", "List", "Mapping", "Optional", "Tuple"}]
-
