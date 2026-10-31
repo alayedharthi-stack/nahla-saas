@@ -60,6 +60,7 @@ def command_template(root: Path, *, release_sha: str, target: terminal.Target,
         "count": count, "digest": digest,
         "gate_sha": runner_sha, "approval_sha": APPROVAL_SHA_PLACEHOLDER,
         "argv": argv,
+        "entrypoint": RUNNER_RELATIVE_PATH,
     }
     bootstrap = prior_render.BOOTSTRAP_TEMPLATE
     terminal.require(bootstrap.count(PRIOR_RUNNER_RELATIVE_PATH) == 1,
