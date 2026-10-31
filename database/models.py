@@ -3314,6 +3314,16 @@ class WebhookGuardianLog(Base):
     tenant = relationship('Tenant')
 
 
+class SallaCommunicationFunctionNonce(Base):
+    """A verified App Function request nonce; unique across pilot deliveries."""
+
+    __tablename__ = "salla_communication_function_nonces"
+    nonce = Column(String(32), primary_key=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
 class WebhookEvent(Base):
     """
     Durable inbound-webhook queue.
@@ -3345,6 +3355,12 @@ class WebhookEvent(Base):
     raw_body           = Column(Text, nullable=True)
     parsed_payload     = Column(JSONB, nullable=True)
     signature_valid    = Column(Boolean, nullable=True)
+    # A committed pre-send marker prevents a reclaimed webhook from sending
+    # the same communication again after a crash or an ambiguous Meta result.
+    communication_send_state = Column(String(16), nullable=True)
+    communication_provider_message_id = Column(String(128), nullable=True)
+    communication_send_error_code = Column(String(64), nullable=True)
+    communication_send_attempted_at = Column(DateTime(timezone=True), nullable=True)
     status             = Column(String, nullable=False, default='received', index=True)
     attempts           = Column(Integer, nullable=False, default=0)
     last_error         = Column(Text, nullable=True)

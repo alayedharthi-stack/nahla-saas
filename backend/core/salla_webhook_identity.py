@@ -65,6 +65,31 @@ def build_salla_webhook_external_event_id(
     data = parsed_payload.get("data") or {}
     if not isinstance(data, Mapping):
         data = {}
+    if event_type == "communication.whatsapp.send":
+        # Salla's communication payload nests the order under entity, not
+        # data.id. A stable digest also deduplicates provider retries without
+        # an event ID. Deliberately include the exact content and recipient:
+        # a later distinct notice for the same order must remain deliverable.
+        entity = data.get("entity")
+        if not isinstance(entity, Mapping) or not entity.get("id"):
+            return None
+        canonical = json.dumps(
+            {
+                "event": event_type,
+                "store": str(parsed_payload.get("merchant") or parsed_payload.get("store_id") or ""),
+                "entity": {"id": str(entity["id"]), "type": str(entity.get("type") or "")},
+                "type": str(data.get("type") or ""),
+                "created_at": str(parsed_payload.get("created_at") or ""),
+                "notifiable": data.get("notifiable"),
+                "content": data.get("content"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return f"{prefix}:{event_type}:{digest}"
     entity_id = data.get("id")
     if entity_id is None:
         return None

@@ -1,8 +1,8 @@
 {
- "database_py_digest": "8e682ad8acae91e01429a0f6d686b70af8178c1b1edd08efe88c97caaccda407",
+ "database_py_digest": "696e00ba53c4c86f64c9b8cfd7b32a241a59f2eb8c244b71848898cae976f3dd",
  "expectations_version": 3,
- "generated_at_utc": "2026-10-13T22:33:17Z",
- "generated_from_source_sha": "e1f734d1c57a4f672bab2ac7df10f9e152f230b0",
+ "generated_at_utc": "2026-10-29T08:33:33Z",
+ "generated_from_source_sha": "463dc3787b0445072cacdc538bc6afe1dffcac3f",
  "generator": "scripts/operators/shopify_release_gate_render.py snapshot",
  "retained": {
   "nonce": {

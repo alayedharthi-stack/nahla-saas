@@ -74,6 +74,11 @@ async def _dispatch_salla(db: Session, event) -> None:
     if not isinstance(data, dict):
         data = {}
 
+    if event_type == "communication.whatsapp.observed":
+        # This is the ordinary subscription webhook. The App Function
+        # handoff is the only path allowed to create a customer send.
+        return
+
     app_origin = "sync_oauth" if event.provider == "salla_oauth" else "easy_mode"
 
     # ── OAuth / install / uninstall — don't need tenant to exist yet ────────
