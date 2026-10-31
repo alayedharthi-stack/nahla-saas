@@ -14,12 +14,25 @@ jobs:
   dockerfile-pg18-cycle:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       # Forward and rollback gates are exercised from one reviewed code tree.
       # This is a packaging and command-cycle proof, not a pair of Railway
       # deployments or an independently pinned forward release artifact.
       TEST_SOURCE_SHA: 63d5295dc9e284cfa98c275b7199b7b9ba0d730b
-      PG_IMAGE: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     steps:
       - name: Fetch exact reviewed code tree without retained credentials
         run: |
@@ -46,28 +59,17 @@ jobs:
       - name: Exercise 0124 to 0125 and frozen rollback command on disposable PostgreSQL 18
         run: |
           set -euo pipefail
-          docker network create --internal nahla-comm-cycle
-          trap 'docker rm -f nahla-comm-pg18 >/dev/null 2>&1 || true; docker network rm nahla-comm-cycle >/dev/null 2>&1 || true' EXIT
-          docker run --detach --name nahla-comm-pg18 --network nahla-comm-cycle \
-            --network-alias shopify-gate-disposable \
-            --env POSTGRES_USER=nahla --env POSTGRES_PASSWORD=nahla_password \
-            --env POSTGRES_DB=nahla_saas "$PG_IMAGE" >/dev/null
-          ready=0
-          for attempt in $(seq 1 30); do
-            if docker exec nahla-comm-pg18 pg_isready -U nahla -d nahla_saas >/dev/null 2>&1; then ready=1; break; fi
-            sleep 2
-          done
-          test "$ready" = 1
-          version="$(docker exec nahla-comm-pg18 psql -U nahla -d nahla_saas -tAc 'SHOW server_version_num')"
-          [[ "$version" =~ ^18[0-9]{4}$ ]]
-          docker run --rm --network nahla-comm-cycle \
+          # The existing startup probe explicitly requires loopback:5433.
+          # Use the same disposable topology as the repository PG18 workflow.
+          docker run --rm --network host \
+            --add-host shopify-gate-disposable:127.0.0.1 \
             --mount "type=bind,source=$PWD/backend/tests,target=/app/backend/tests,readonly" \
             --mount "type=bind,source=$PWD/tests,target=/app/tests,readonly" \
             --env NAHLA_RELIABILITY_REQUIRE_PG=1 \
-            --env NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@shopify-gate-disposable:5432/postgres \
+            --env NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@127.0.0.1:5433/postgres \
             --env NAHLA_RELEASE_GATE_PG_HOST_ALIAS=shopify-gate-disposable \
             --env PYTHONDONTWRITEBYTECODE=1 \
             --env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
             --entrypoint bash nahla-comm-probe:ci -lc \
-            'set -euo pipefail; python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short -p no:cacheprovider --junitxml=/tmp/communication-container-cycle.xml; python scripts/check_junit_clean.py /tmp/communication-container-cycle.xml'
+            'set -euo pipefail; python -c '\''import os,sqlalchemy as sa; e=sa.create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"]); c=e.connect(); v=int(c.exec_driver_sql("SHOW server_version_num").scalar()); assert 180000 <= v < 190000; c.close(); e.dispose()'\''; python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short -p no:cacheprovider --junitxml=/tmp/communication-container-cycle.xml; python scripts/check_junit_clean.py /tmp/communication-container-cycle.xml'
 
