@@ -5,7 +5,7 @@ name: Salla Communication container cycle (test only)
 # is published, deployed, or connected to Railway or a real store.
 on:
   pull_request:
-    branches: [review/cart-read-2bba-20261030, review/salla-comm-rollback-only-0125-20261031]
+    branches: [review/cart-read-2bba-20261030]
 
 permissions:
   contents: read
