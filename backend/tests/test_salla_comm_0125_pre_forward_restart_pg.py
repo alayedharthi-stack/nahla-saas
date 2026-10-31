@@ -116,7 +116,9 @@ def _synthetic_positive_policy_on_real_pg18(db_name: str) -> None:
     This is intentionally not a successful Railway command or provider proof.
     The separate subprocess test above verifies the real command refuses.
     """
-    root = Path(os.environ.get("SALLA_ROLLBACK_SOURCE_ROOT", retained.ROOT)).resolve()
+    # The in-process policy adapter is imported from this forward checkout.
+    # The real rollback command above runs separately from the pinned fd6 root.
+    root = retained.ROOT
     release_sha = "a" * 40
     target = terminal.Target(
         "11111111-1111-4111-8111-111111111111",
