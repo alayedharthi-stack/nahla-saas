@@ -3,12 +3,12 @@ Converted to absolute video time after a pitch-preserving speed-up."""
 import json, subprocess
 SPD = 1.06      # rubberband tempo (pitch preserved)
 V0 = 0.35       # VO starts this many seconds into the video
-OFF = 0.15   # opening take is longer: later takeA cues shift by this much
+OFF = 0.112  # opening take is longer: later takeA cues shift by this much
 A = lambda t: round(V0 + t / SPD, 3)
 B = lambda t: A(t + OFF)
 cue = {
   # S1  "يا تاجر سلة… | عملاءك يسألونك على الواتساب، ليل ونهار."
-  'pill': A(0.09) - .05, 's1h': A(1.33) - .1, 'n0': A(1.60),
+  'pill': A(0.112) - .05, 's1h': A(1.312) - .1, 'n0': A(1.582),
   # S2  "وكل رسالة تتأخر عليها… | بيعة تروح لمنافسك."
   's2': B(4.89) - .2, 's2l2': B(7.07) - .1,
   # S3  "عشان كذا جات نحلة! | ذكاء اصطناعي يرد ويبيع… | على واتساب أعمالك."
