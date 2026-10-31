@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>نحلة — لتجار سلة</title>
+<link rel="stylesheet" href="cairo/600.css">
+<link rel="stylesheet" href="cairo/700.css">
+<link rel="stylesheet" href="cairo/800.css">
+<link rel="stylesheet" href="cairo/900.css">
+<link rel="stylesheet" href="tajawal/500.css">
+<link rel="stylesheet" href="tajawal/700.css">
+<style>
+:root{
+  --amber:#f59e0b; --amber2:#fbbf24; --amber3:#fde68a;
+  --navy:#0b1220; --navy2:#0f172a; --slate:#1e293b;
+  --wa:#25D366; --wa-teal:#075E54; --wa-bubble:#d9fdd3; --wa-bg:#efeae2;
+  --salla:#7ee2c9;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1080px;height:1920px;overflow:hidden;background:var(--navy)}
+body{font-family:'Cairo',sans-serif;color:#fff;-webkit-font-smoothing:antialiased}
+#stage{position:relative;width:1080px;height:1920px;overflow:hidden;
+  background:
+    radial-gradient(1100px 800px at 50% -5%, rgba(245,158,11,.20), transparent 62%),
+    radial-gradient(900px 700px at 50% 108%, rgba(37,211,102,.10), transparent 62%),
+    linear-gradient(180deg,#0a101d 0%,#0f172a 55%,#0a101d 100%);}
+.honey{position:absolute;inset:-300px;opacity:.9;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100'%3E%3Cpath d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100' fill='none' stroke='%23f59e0b' stroke-opacity='0.07' stroke-width='1.4'/%3E%3C/svg%3E");
+  background-size:112px 200px;}
+.vignette{position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0,0,0,.45) 100%);}
+.pollen{position:absolute;width:10px;height:10px;border-radius:50%;background:var(--amber2);opacity:.0;filter:blur(1px)}
+.scene{position:absolute;inset:0}
+.amber{color:var(--amber2)}
+.center{position:absolute;left:0;right:0;text-align:center}
+
+/* ---------- S1/S2 : messages piling up ---------- */
+.pill{position:absolute;left:50%;transform:translateX(-50%);top:210px;
+  padding:14px 44px;border-radius:999px;font-weight:800;font-size:54px;white-space:nowrap;
+  background:rgba(245,158,11,.14);border:2px solid rgba(245,158,11,.55);color:var(--amber2)}
+.headline{font-weight:900;font-size:72px;line-height:1.25;letter-spacing:-.5px}
+.headline .l{display:block}
+.notifs{position:absolute;left:90px;right:90px;top:600px}
+.notif{position:absolute;left:0;right:0;height:150px;border-radius:40px;
+  background:rgba(248,250,252,.96);color:#0f172a;display:flex;align-items:center;gap:26px;padding:0 30px;
+  box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.notif .ic{flex:0 0 86px;height:86px;border-radius:24px;background:var(--wa);display:grid;place-items:center}
+.notif .ic svg{width:52px;height:52px}
+.notif .bd{flex:1;min-width:0}
+.notif .tp{display:flex;justify-content:space-between;font-size:28px;color:#64748b;font-weight:700;line-height:1.2}
+.notif .msg{font-family:'Tajawal';font-size:42px;font-weight:700;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.counter{position:absolute;left:50%;top:1500px;transform:translateX(-50%);display:flex;align-items:center;gap:20px;
+  padding:16px 40px;border-radius:999px;background:#ef4444;color:#fff;font-weight:900;font-size:50px;white-space:nowrap;
+  box-shadow:0 12px 40px rgba(239,68,68,.45)}
+.counter .num{font-family:'Cairo';min-width:84px;text-align:center;direction:ltr}
+.lost{position:absolute;left:50%;top:1500px;transform:translateX(-50%);white-space:nowrap;
+  font-weight:800;font-size:46px;color:#94a3b8;display:flex;gap:18px;align-items:center}
+
+/* ---------- S3 : reveal ---------- */
+.flash{position:absolute;left:50%;top:50%;width:300px;height:300px;margin:-150px 0 0 -150px;border-radius:50%;
+  background:radial-gradient(circle,#fde68a 0%,#fbbf24 35%,rgba(245,158,11,.0) 70%)}
+.bee-big{position:absolute;left:50%;top:430px;width:760px;margin-left:-380px}
+.bee-big img{width:100%;display:block;filter:drop-shadow(0 30px 60px rgba(245,158,11,.35))}
+.brand{position:absolute;left:0;right:0;top:880px;text-align:center;font-weight:900;font-size:230px;line-height:1;
+  color:var(--amber2);text-shadow:0 0 60px rgba(245,158,11,.45)}
+.brand-sub{position:absolute;left:0;right:0;top:1190px;text-align:center;font-weight:800;font-size:66px;line-height:1.35}
+.brand-sub .wa{color:var(--wa)}
+
+/* ---------- S4 : phone demo ---------- */
+.cap{position:absolute;left:0;right:0;top:170px;text-align:center;font-weight:900;font-size:76px;line-height:1.25}
+.phone{position:absolute;left:50%;top:400px;width:820px;height:1400px;margin-left:-410px;border-radius:90px;
+  background:#05070c;padding:22px;box-shadow:0 40px 120px rgba(0,0,0,.6),0 0 0 3px #263247 inset, 0 0 120px rgba(245,158,11,.12)}
+.screen{position:relative;width:100%;height:100%;border-radius:70px;overflow:hidden;background:var(--wa-bg);display:flex;flex-direction:column}
+.screen::before{content:'';position:absolute;inset:0;opacity:.5;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100'%3E%3Cpath d='M28 66L0 50L0 16L28 0L56 16L56 50L28 66L28 100' fill='none' stroke='%23b8a98a' stroke-opacity='0.18' stroke-width='1.2'/%3E%3C/svg%3E");
+  background-size:84px 150px}
+.sbar{position:relative;height:64px;background:var(--wa-teal);display:flex;justify-content:space-between;align-items:center;padding:6px 64px 0;
+  color:#fff;font-size:28px;font-weight:700;direction:ltr}
+.notch{position:absolute;left:50%;top:10px;width:220px;height:44px;margin-left:-110px;border-radius:30px;background:#05070c}
+.whead{position:relative;height:132px;background:var(--wa-teal);display:flex;align-items:center;gap:22px;padding:0 30px;color:#fff}
+.whead .back{font-size:46px;opacity:.9}
+.avatar{width:86px;height:86px;border-radius:50%;background:#e2e8f0;color:var(--wa-teal);display:grid;place-items:center;font-weight:900;font-size:44px}
+.whead .who{flex:1}
+.whead .nm{font-weight:800;font-size:40px;line-height:1.2}
+.whead .st{font-size:26px;opacity:.85;font-weight:600}
+.aion{display:flex;align-items:center;gap:8px;padding:8px 18px;border-radius:999px;background:rgba(251,191,36,.18);border:2px solid var(--amber2);
+  color:var(--amber3);font-size:26px;font-weight:800;white-space:nowrap}
+.chat{position:relative;flex:1;padding:30px 28px;display:flex;flex-direction:column;gap:22px}
+.day{align-self:center;background:#fff;color:#54656f;font-size:24px;font-weight:700;padding:6px 22px;border-radius:14px;box-shadow:0 1px 1px rgba(0,0,0,.08)}
+.msgw{display:flex;flex-direction:column}
+.msgw.in{align-items:flex-start}   /* RTL: right side = customer */
+.msgw.out{align-items:flex-end}    /* RTL: left side  = merchant (Nahla) */
+.tag{font-size:24px;font-weight:800;color:#b45309;margin:0 10px 6px;display:flex;align-items:center;gap:6px}
+.tag img{width:40px}
+.bubble{position:relative;max-width:610px;padding:16px 24px 12px;border-radius:26px;font-family:'Tajawal';font-weight:500;font-size:37px;line-height:1.5;color:#111b21;
+  box-shadow:0 1px 1.5px rgba(11,20,26,.13)}
+.in .bubble{background:#fff;border-top-right-radius:6px}
+.out .bubble{background:var(--wa-bubble);border-top-left-radius:6px}
+.bubble b{font-weight:700}
+.meta{display:flex;justify-content:flex-end;gap:8px;align-items:center;font-size:22px;color:#667781;margin-top:2px;direction:ltr;font-family:'Cairo';font-weight:600}
+.ticks{color:#53bdeb;font-size:24px;letter-spacing:-6px}
+.cta-btn{margin-top:12px;border-top:1.5px solid rgba(0,0,0,.08);padding-top:12px;text-align:center;color:#027eb5;font-weight:700;font-size:36px}
+.inputbar{position:relative;height:130px;display:flex;align-items:center;gap:18px;padding:0 24px 18px}
+.field{flex:1;height:92px;border-radius:46px;background:#fff;display:flex;align-items:center;padding:0 34px;font-family:'Tajawal';font-size:34px;color:#8696a0;position:relative;overflow:hidden}
+.field .ph,.field .typing{position:absolute;inset:0;display:flex;align-items:center;padding:0 34px;gap:14px}
+.field .typing{color:#b45309;font-weight:700;opacity:0}
+.field .typing img{width:46px}
+.dots{display:inline-flex;gap:8px;margin-inline-start:6px}
+.dots i{width:12px;height:12px;border-radius:50%;background:#d97706;display:block}
+.mic{width:92px;height:92px;border-radius:50%;background:#00a884;display:grid;place-items:center}
+.toast{position:absolute;left:24px;right:24px;top:80px;border-radius:36px;background:rgba(15,23,42,.97);color:#fff;padding:26px 30px;display:flex;gap:24px;align-items:center;
+  box-shadow:0 24px 60px rgba(0,0,0,.45);border:2px solid rgba(251,191,36,.55)}
+.toast .ti{flex:0 0 96px;height:96px;border-radius:28px;background:linear-gradient(135deg,#fbbf24,#f59e0b);display:grid;place-items:center;font-size:54px}
+.toast .tt{font-weight:900;font-size:40px;line-height:1.25}
+.toast .ts{font-weight:700;font-size:30px;color:#cbd5e1;line-height:1.35}
+.toast .ts .s{color:var(--salla)}
+.flybee{position:absolute;width:150px;left:0;top:0}
+
+/* ---------- S5 : no delete ---------- */
+.s5top{position:absolute;left:0;right:0;top:190px;text-align:center}
+.s5q{font-weight:800;font-size:62px;color:var(--amber2)}
+.s5a{font-weight:900;font-size:96px;line-height:1.2}
+.appicon{position:absolute;left:50%;top:520px;width:360px;height:360px;margin-left:-180px;border-radius:90px;
+  background:linear-gradient(160deg,#3be27b,#1fb855);display:grid;place-items:center;box-shadow:0 30px 80px rgba(37,211,102,.35)}
+.appicon svg{width:210px;height:210px}
+.appicon .lbl{position:absolute;bottom:-70px;left:-100px;right:-100px;text-align:center;font-weight:800;font-size:38px;color:#e2e8f0}
+.appicon .mini{position:absolute;right:-90px;top:-70px;width:230px;filter:drop-shadow(0 12px 22px rgba(0,0,0,.5))}
+.strike{position:absolute;left:0;right:0;top:990px;text-align:center}
+.strike .t{position:relative;display:inline-block;font-weight:800;font-size:52px;color:#94a3b8;padding:0 10px}
+.strike .t .line{position:absolute;right:-6px;left:-6px;top:52%;height:8px;border-radius:6px;background:#ef4444;transform-origin:right center}
+.stamp{position:absolute;left:50%;top:1130px;transform:translateX(-50%);white-space:nowrap;
+  padding:10px 60px 18px;border-radius:30px;border:6px solid var(--amber2);color:var(--amber2);font-weight:900;font-size:120px;line-height:1.15;
+  background:rgba(245,158,11,.10);box-shadow:0 0 70px rgba(245,158,11,.30)}
+.checks{position:absolute;left:150px;right:150px;top:1420px;display:flex;flex-direction:column;gap:26px}
+.chk{display:flex;align-items:center;gap:26px;font-weight:800;font-size:50px;white-space:nowrap}
+.chk .c{flex:0 0 70px;height:70px;border-radius:50%;background:var(--wa);display:grid;place-items:center}
+.chk .c svg{width:40px;height:40px}
+
+/* ---------- S6 : Salla ---------- */
+.s6h{position:absolute;left:0;right:0;top:190px;text-align:center;font-weight:900;font-size:84px;line-height:1.25}
+.s6h .s{color:var(--salla)}
+.node{position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:24px;padding:26px 46px;border-radius:40px;white-space:nowrap;font-weight:900;font-size:54px}
+.node.salla{top:470px;background:rgba(126,226,201,.12);border:3px solid var(--salla);color:#e6fff8}
+.node.wa{top:1340px;background:rgba(37,211,102,.12);border:3px solid var(--wa);color:#eafff1}
+.node .ni{font-size:64px}
+.hub{position:absolute;left:50%;top:760px;width:430px;height:430px;margin-left:-215px;border-radius:50%;
+  background:radial-gradient(circle,rgba(245,158,11,.30),rgba(245,158,11,.06) 60%,transparent 70%);display:grid;place-items:center}
+.hub img{width:340px}
+.wire{position:absolute;left:50%;width:6px;margin-left:-3px;border-radius:3px;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.25),rgba(255,255,255,.08));overflow:visible}
+.wire.w1{top:600px;height:190px}
+.wire.w2{top:1160px;height:180px}
+.dot{position:absolute;left:50%;width:22px;height:22px;margin-left:-11px;border-radius:50%;background:var(--amber2);box-shadow:0 0 22px var(--amber2)}
+.chip{position:absolute;padding:14px 34px;border-radius:999px;background:rgba(15,23,42,.9);border:2px solid rgba(251,191,36,.6);color:#fff;font-weight:800;font-size:42px;white-space:nowrap}
+.s6foot{position:absolute;left:0;right:0;top:1560px;text-align:center;font-weight:800;font-size:50px;color:#cbd5e1}
+
+/* ---------- S7 : CTA ---------- */
+.s7bee{position:absolute;left:50%;top:300px;width:560px;margin-left:-280px}
+.s7bee img{width:100%;filter:drop-shadow(0 26px 50px rgba(245,158,11,.35))}
+.s7brand{position:absolute;left:0;right:0;top:640px;text-align:center;font-weight:900;font-size:180px;line-height:1;color:var(--amber2);text-shadow:0 0 50px rgba(245,158,11,.4)}
+.s7tag{position:absolute;left:0;right:0;top:880px;text-align:center;font-weight:900;font-size:68px;line-height:1.35}
+.s7tag .g{color:var(--wa)}
+.btn{position:absolute;left:50%;top:1160px;transform:translateX(-50%);white-space:nowrap;padding:26px 80px 34px;border-radius:999px;
+  background:var(--amber);color:#0f172a;font-weight:900;font-size:66px;box-shadow:0 20px 60px rgba(245,158,11,.45)}
+.s7salla{position:absolute;left:0;right:0;top:1350px;text-align:center;font-weight:800;font-size:46px;color:#e2e8f0}
+.s7salla .s{color:var(--salla)}
+.url{position:absolute;left:0;right:0;top:1450px;text-align:center;font-family:'Cairo';font-weight:800;font-size:60px;color:var(--amber2);direction:ltr;letter-spacing:1px}
+.shine{position:absolute;inset:0;border-radius:999px;overflow:hidden}
+.shine::after{content:'';position:absolute;top:-20%;bottom:-20%;width:120px;left:-160px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.65),transparent);transform:skewX(-20deg);animation:none}
+.shine i{position:absolute;top:-20%;bottom:-20%;width:120px;left:-160px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent);transform:skewX(-20deg)}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="honey" id="honey"></div>
+  <div id="pollen"></div>
+
+  <!-- ===== S1 + S2 ===== -->
+  <section class="scene" id="s12">
+    <div class="pill" id="s1pill">تاجر سلة؟ 👋</div>
+    <div class="center headline" id="s1h" style="top:330px">
+      <span class="l">عملاؤك يسألونك على واتساب</span>
+      <span class="l amber">طول اليوم… وطول الليل</span>
+    </div>
+    <div class="center headline" id="s2h" style="top:330px">
+      <span class="l">وكل رسالة تتأخر…</span>
+      <span class="l amber">بيعة تروح لمنافسك 💸</span>
+    </div>
+    <div class="notifs" id="notifs"></div>
+    <div class="counter" id="counter"><span>💬</span><span class="num" id="cnum">0</span><span>رسالة تنتظر ردك</span></div>
+    <div class="lost" id="lost"><span>🕒</span><span>الساعة ٣ الفجر… ولا أحد يرد</span></div>
+  </section>
+
+  <!-- ===== S3 reveal ===== -->
+  <div class="flash" id="flash"></div>
+  <section class="scene" id="s3">
+    <div class="bee-big" id="beeBig"><img src="bee.png" alt=""></div>
+    <div class="brand" id="brand">نحلة</div>
+    <div class="brand-sub" id="brandSub">
+      <div id="bs1">ذكاء اصطناعي <span class="amber">يرد ويبيع</span></div>
+      <div id="bs2">على <span class="wa">واتساب أعمالك</span></div>
+    </div>
+  </section>
+
+  <!-- ===== S4 phone demo ===== -->
+  <section class="scene" id="s4">
+    <div class="cap">
+      <div id="cap1">ترد على عميلك في ثواني…</div>
+      <div id="cap2" class="amber">…وتقفل البيعة ✅</div>
+    </div>
+    <div class="phone" id="phone">
+      <div class="screen">
+        <div class="sbar"><span>9:41</span><span>●●●● 5G ▮</span><div class="notch"></div></div>
+        <div class="whead">
+          <div class="back">→</div>
+          <div class="avatar">ن</div>
+          <div class="who"><div class="nm">نورة عبدالله</div><div class="st">عميلة · متصلة الآن</div></div>
+          <div class="aion" id="aion"><img src="bee.png" style="width:40px" alt="">نحلة تعمل</div>
+        </div>
+        <div class="chat">
+          <div class="day">اليوم</div>
+          <div class="msgw in" id="m1"><div class="bubble">السلام عليكم، <b>عطر الورد 100ml</b> متوفر عندكم؟<div class="meta"><span>11:58</span></div></div></div>
+          <div class="msgw out" id="m2"><div class="tag"><img src="bee.png" alt="">رد نحلة</div><div class="bubble">وعليكم السلام 😊 إيه متوفر ✅<br>سعره <b>189 ريال</b>، وتوصيله سريع.<br>أرسل لك رابط الطلب؟<div class="meta"><span class="ticks">✓✓</span><span>11:58</span></div></div></div>
+          <div class="msgw in" id="m3"><div class="bubble">إيه أرسليه لو سمحتي 🙏<div class="meta"><span>11:59</span></div></div></div>
+          <div class="msgw out" id="m4"><div class="tag"><img src="bee.png" alt="">رد نحلة</div><div class="bubble">أبشري 🌹 تفضلي رابط الطلب:<div class="cta-btn">🛒 إتمام الطلب</div><div class="meta"><span class="ticks">✓✓</span><span>11:59</span></div></div></div>
+        </div>
+        <div class="inputbar">
+          <div class="field">
+            <div class="ph" id="ph">اكتب رسالة</div>
+            <div class="typing" id="typing"><img src="bee.png" alt="">نحلة تكتب الرد<span class="dots"><i></i><i></i><i></i></span></div>
+          </div>
+          <div class="mic"><svg viewBox="0 0 24 24" width="44" height="44" fill="#fff"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></div>
+        </div>
+        <div class="toast" id="toast">
+          <div class="ti">🛍️</div>
+          <div>
+            <div class="tt">طلب جديد #1042 🎉</div>
+            <div class="ts">عطر الورد 100ml · 189 ر.س<br>وصل لمتجرك في <span class="s">سلة</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <img class="flybee" id="flybee" src="bee.png" alt="">
+  </section>
+
+  <!-- ===== S5 no delete ===== -->
+  <section class="scene" id="s5">
+    <div class="s5top">
+      <div class="s5q" id="s5q">وواتساب أعمالك؟</div>
+      <div class="s5a" id="s5a">يبقى في جوالك 📱</div>
+    </div>
+    <div class="appicon" id="appicon">
+      <svg viewBox="0 0 64 64"><path fill="#fff" d="M32 6C17.6 6 6 16.9 6 30.3c0 7.3 3.5 13.9 9 18.4L13 58l10.4-5.4c2.7.8 5.6 1.2 8.6 1.2 14.4 0 26-10.9 26-24.3S46.4 6 32 6z"/><text x="32" y="40" text-anchor="middle" font-family="Cairo" font-weight="900" font-size="26" fill="#1fb855">B</text></svg>
+      <div class="lbl">نفس تطبيقك · نفس رقمك</div>
+      <img class="mini" id="minibee" src="bee.png" alt="">
+    </div>
+    <div class="strike" id="strike"><span class="t">تحذف التطبيق وتنقل رقمك؟<span class="line" id="sline"></span></span></div>
+    <div class="stamp" id="stamp">بلا حذف ✋</div>
+    <div class="checks">
+      <div class="chk" id="k1"><span class="c"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>تكمل شغلك من جوالك عادي</div>
+      <div class="chk" id="k2"><span class="c"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>ترد بنفسك متى ما بغيت</div>
+      <div class="chk" id="k3"><span class="c"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" stroke="#fff" stroke-width="3.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>ونحلة تبيع عنك ٢٤ ساعة</div>
+    </div>
+  </section>
+
+  <!-- ===== S6 Salla ===== -->
+  <section class="scene" id="s6">
+    <div class="s6h" id="s6h">مربوطة مباشرة<br>بمتجرك في <span class="s">سلة</span></div>
+    <div class="wire w1" id="w1"></div>
+    <div class="wire w2" id="w2"></div>
+    <div class="dot" id="d1"></div><div class="dot" id="d2"></div><div class="dot" id="d3"></div><div class="dot" id="d4"></div>
+    <div class="node salla" id="nSalla"><span class="ni">🛍️</span>متجرك في سلة</div>
+    <div class="hub" id="hub"><img src="bee.png" alt=""></div>
+    <div class="node wa" id="nWa"><span class="ni">💬</span>واتساب أعمالك</div>
+    <div class="chip" id="c1" style="top:820px;right:40px">📦 المنتجات</div>
+    <div class="chip" id="c2" style="top:820px;left:40px">🏷️ الأسعار</div>
+    <div class="chip" id="c3" style="top:1080px;right:40px">📊 المخزون</div>
+    <div class="chip" id="c4" style="top:1080px;left:40px">🧾 الطلبات</div>
+    <div class="s6foot" id="s6foot">تثبيت وربط في دقائق ⚡</div>
+  </section>
+
+  <!-- ===== S7 CTA ===== -->
+  <section class="scene" id="s7">
+    <div class="s7bee" id="s7bee"><img src="bee.png" alt=""></div>
+    <div class="s7brand" id="s7brand">نحلة</div>
+    <div class="s7tag" id="s7tag"><span class="g">واتسابك</span> يبقى معك…<br><span class="amber">ونحلة تبيع معك</span></div>
+    <div class="btn" id="btn">جرّبها مجاناً ١٤ يوم<div class="shine"><i id="shine"></i></div></div>
+    <div class="s7salla" id="s7salla">متوفرة في <span class="s">متجر تطبيقات سلة</span></div>
+    <div class="url" id="url">nahlah.ai</div>
+  </section>
+
+  <div class="vignette"></div>
+</div>
+
+<script>
+const WA_GLYPH = '<svg viewBox="0 0 64 64"><path fill="#fff" d="M32 6C17.6 6 6 16.9 6 30.3c0 7.3 3.5 13.9 9 18.4L13 58l10.4-5.4c2.7.8 5.6 1.2 8.6 1.2 14.4 0 26-10.9 26-24.3S46.4 6 32 6z"/></svg>';
+const NOTIFS = [
+  ['أحمد سالم',   'عندكم الحذاء الأبيض مقاس 42؟'],
+  ['نورة عبدالله','كم الشحن للرياض؟ 🚚'],
+  ['فهد محمد',    'أبغى أطلب الحين، كيف؟'],
+  ['سارة خالد',   'فيه كود خصم؟ 🙏'],
+  ['ريم ناصر',    'وين وصل طلبي؟'],
+];
+const nbox = document.getElementById('notifs');
+NOTIFS.forEach(([who, msg], i) => {
+  const d = document.createElement('div');
+  d.className = 'notif'; d.id = 'n' + i;
+  d.style.top = (i * 172) + 'px';
+  d.innerHTML = `<div class="ic">${WA_GLYPH}</div><div class="bd"><div class="tp"><span>${who} · واتساب أعمال</span><span>الآن</span></div><div class="msg">${msg}</div></div>`;
+  nbox.appendChild(d);
+});
+// pollen
+const pol = document.getElementById('pollen');
+for (let i = 0; i < 18; i++) {
+  const p = document.createElement('div'); p.className = 'pollen'; p.id = 'p' + i;
+  const r = (k) => { const x = Math.sin(i * 9301 + k * 49297) * 233280; return x - Math.floor(x); };
+  p.style.left = (r(1) * 1040 + 20) + 'px'; p.style.top = (r(2) * 1900) + 'px';
+  const s = 6 + r(3) * 12; p.style.width = p.style.height = s + 'px';
+  p.dataset.sp = 40 + r(4) * 80; p.dataset.ph = r(5) * 6.28; p.dataset.op = .15 + r(6) * .35;
+  pol.appendChild(p);
+}
+
+/* ---------- timeline engine (deterministic, seekable) ---------- */
+const anims = []; const hooks = [];
+const EO = 'cubic-bezier(.16,1,.3,1)';           // ease-out expo-ish
+const BACK = 'cubic-bezier(.34,1.56,.64,1)';     // overshoot
+const EI = 'cubic-bezier(.7,0,.84,0)';
+function A(sel, kf, start, dur, o = {}) {
+  const els = typeof sel === 'string' ? document.querySelectorAll(sel) : [sel];
+  els.forEach(e => {
+    const a = e.animate(kf, { duration: dur * 1000, delay: start * 1000, fill: o.fill || 'both',
+      easing: o.ease || EO, iterations: o.iter || 1, direction: o.dir || 'normal' });
+    a.pause(); anims.push(a);
+  });
+}
+const IN = (sel, t, d = .6, from = 'translateY(40px)', o = {}) =>
+  A(sel, [{ opacity: 0, transform: from }, { opacity: 1, transform: 'none' }], t, d, o);
+const OUT = (sel, t, d = .4, to = 'translateY(-30px)', o = {}) =>
+  A(sel, [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: to }], t, d, { fill: 'forwards', ease: o.ease || EI });
+const SHOW = (sel, t0, t1) => { A(sel, [{ opacity: 0 }, { opacity: 1 }], t0, .01, { fill: 'forwards' }); A(sel, [{ opacity: 1 }, { opacity: 0 }], t1, .01, { fill: 'forwards' }); };
+
+/* ===== Timing (seconds) ===== */
+const T = { s3: 7.5, s4: 11.6, s5: 20.6, s6: 26.0, s7: 30.0, end: 34.5 };
+
+// background drift + pollen
+hooks.push(t => {
+  document.getElementById('honey').style.transform = `translate(${-t * 6}px, ${-t * 14}px)`;
+  document.querySelectorAll('.pollen').forEach(p => {
+    const sp = +p.dataset.sp, ph = +p.dataset.ph;
+    const y = -((t * sp) % 1950);
+    const baseTop = parseFloat(p.style.top);
+    const wrapped = ((baseTop + y) % 1950 + 1950) % 1950;
+    p.style.transform = `translate(${Math.sin(t * .9 + ph) * 30}px, ${wrapped - baseTop}px)`;
+    p.style.opacity = (+p.dataset.op) * (t > T.s3 ? 1 : .45);
+  });
+});
+
+/* ===== S1: hook (0 – 4.0) ===== */
+A('#s1pill', [{ opacity: 0, transform: 'translateX(-50%) scale(.6)' }, { opacity: 1, transform: 'translateX(-50%) scale(1)' }], .15, .6, { ease: BACK });
+IN('#s1h .l:nth-child(1)', .45, .6);
+IN('#s1h .l:nth-child(2)', .75, .6);
+NOTIFS.forEach((_, i) => {
+  A('#n' + i, [{ opacity: 0, transform: 'translateY(-60px) scale(.85)' }, { opacity: 1, transform: 'none' }], 1.0 + i * .42, .55, { ease: BACK });
+});
+A('#counter', [{ opacity: 0, transform: 'translateX(-50%) scale(.5)' }, { opacity: 1, transform: 'translateX(-50%) scale(1)' }], 1.2, .5, { ease: BACK });
+hooks.push(t => {
+  const p = Math.min(1, Math.max(0, (t - 1.2) / 2.6));
+  document.getElementById('cnum').textContent = Math.round(1 + p * p * 98) + (p >= 1 ? '+' : '');
+});
+// counter pulse
+A('#counter', [{ transform: 'translateX(-50%) scale(1)' }, { transform: 'translateX(-50%) scale(1.06)' }, { transform: 'translateX(-50%) scale(1)' }], 1.8, .5, { iter: 4, fill: 'none' });
+
+/* ===== S2: pain (4.0 – 7.5) ===== */
+OUT('#s1h', 4.0, .35);
+OUT('#s1pill', 4.0, .35, 'translateX(-50%) translateY(-30px)');
+IN('#s2h .l:nth-child(1)', 4.3, .6);
+IN('#s2h .l:nth-child(2)', 4.75, .6);
+OUT('#counter', 4.0, .35, 'translateX(-50%) scale(.6)');
+A('#lost', [{ opacity: 0, transform: 'translateX(-50%) translateY(20px)' }, { opacity: 1, transform: 'translateX(-50%)' }], 4.6, .5, {});
+NOTIFS.forEach((_, i) => {
+  A('#n' + i, [{ filter: 'grayscale(0)', opacity: 1 }, { filter: 'grayscale(1)', opacity: .55 }], 4.2 + i * .08, .5, { fill: 'forwards' });
+  A('#n' + i, [{ transform: 'none' }, { transform: 'translateX(-1100px) rotate(-6deg)' }], 5.4 + i * .28, .7, { fill: 'forwards', ease: EI });
+});
+OUT('#s12', 7.15, .35, 'scale(.96)');
+
+/* ===== S3: reveal (7.5 – 11.6) ===== */
+A('#flash', [{ transform: 'scale(0)', opacity: 1 }, { transform: 'scale(9)', opacity: .9 }, { transform: 'scale(12)', opacity: 0 }], T.s3 - .15, .9, { ease: 'cubic-bezier(.2,.7,.3,1)' });
+A('#beeBig', [{ opacity: 0, transform: 'scale(.2) rotate(-14deg)' }, { opacity: 1, transform: 'scale(1) rotate(0)' }], T.s3 + .05, .9, { ease: BACK });
+A('#beeBig img', [{ transform: 'translateY(0)' }, { transform: 'translateY(-18px)' }], T.s3 + 1, .9, { iter: 6, dir: 'alternate', ease: 'ease-in-out', fill: 'none' });
+A('#brand', [{ opacity: 0, transform: 'translateY(60px) scale(.9)', filter: 'blur(10px)' }, { opacity: 1, transform: 'none', filter: 'blur(0)' }], T.s3 + .55, .7);
+IN('#bs1', T.s3 + 1.15, .6);
+IN('#bs2', T.s3 + 1.5, .6);
+OUT('#s3', T.s4 - .4, .4, 'scale(1.06)');
+
+/* ===== S4: phone demo (11.6 – 20.6) ===== */
+const s4 = T.s4;
+A('#phone', [{ opacity: 0, transform: 'translateY(260px) scale(.92)' }, { opacity: 1, transform: 'none' }], s4, .8);
+IN('#cap1', s4 + .15, .6);
+IN('#m1', s4 + .75, .45, 'translateY(30px) scale(.9)', { ease: BACK });
+// typing (Nahla composing)
+SHOW('#typing', s4 + 1.35, s4 + 2.35);
+SHOW('#ph', -1, s4 + 1.35);
+A('#ph', [{ opacity: 0 }, { opacity: 1 }], s4 + 2.35, .01, { fill: 'forwards' });
+document.querySelectorAll('.dots i').forEach((d, k) => A(d, [{ transform: 'translateY(0)', opacity: .4 }, { transform: 'translateY(-8px)', opacity: 1 }], k * .15, .3, { iter: 200, dir: 'alternate', ease: 'ease-in-out', fill: 'none' }));
+// flying bee into the chat at first reply
+A('#flybee', [
+  { opacity: 0, transform: 'translate(900px, 260px) rotate(20deg) scale(.6)' },
+  { opacity: 1, transform: 'translate(760px, 500px) rotate(-10deg) scale(.8)', offset: .35 },
+  { opacity: 1, transform: 'translate(520px, 760px) rotate(8deg) scale(.7)', offset: .7 },
+  { opacity: 0, transform: 'translate(300px, 860px) rotate(0) scale(.2)' }], s4 + .9, 1.5, { ease: 'ease-in-out' });
+IN('#m2', s4 + 2.35, .5, 'translateY(30px) scale(.9)', { ease: BACK });
+IN('#m3', s4 + 3.9, .45, 'translateY(30px) scale(.9)', { ease: BACK });
+SHOW('#typing', s4 + 4.4, s4 + 5.1);
+A('#ph', [{ opacity: 1 }, { opacity: 0 }], s4 + 4.4, .01, { fill: 'forwards' });
+A('#ph', [{ opacity: 0 }, { opacity: 1 }], s4 + 5.1, .01, { fill: 'forwards' });
+IN('#m4', s4 + 5.1, .5, 'translateY(30px) scale(.9)', { ease: BACK });
+IN('#cap2', s4 + 5.4, .6, 'translateY(30px) scale(.9)', { ease: BACK });
+A('#toast', [{ opacity: 0, transform: 'translateY(-220px)' }, { opacity: 1, transform: 'none' }], s4 + 6.4, .6, { ease: BACK });
+A('#toast', [{ transform: 'scale(1)' }, { transform: 'scale(1.035)' }], s4 + 7.1, .35, { iter: 4, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#aion', [{ boxShadow: '0 0 0 0 rgba(251,191,36,.6)' }, { boxShadow: '0 0 0 16px rgba(251,191,36,0)' }], s4 + .5, 1.1, { iter: 8, fill: 'none' });
+OUT('#s4', T.s5 - .4, .4, 'translateX(-120px)');
+
+/* ===== S5: no delete (20.6 – 25.6) ===== */
+const s5 = T.s5;
+IN('#s5q', s5 + .05, .5, 'translateX(80px)');
+IN('#s5a', s5 + .35, .6, 'translateY(40px) scale(.92)', { ease: BACK });
+A('#appicon', [{ opacity: 0, transform: 'scale(.3) rotate(-10deg)' }, { opacity: 1, transform: 'none' }], s5 + .55, .7, { ease: BACK });
+A('#minibee', [{ opacity: 0, transform: 'translate(260px,-260px) rotate(30deg) scale(.4)' }, { opacity: 1, transform: 'none' }], s5 + 1.15, .7, { ease: BACK });
+A('#minibee', [{ transform: 'translateY(0) rotate(0)' }, { transform: 'translateY(-10px) rotate(-4deg)' }], s5 + 1.9, .5, { iter: 8, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+IN('#strike', s5 + 1.4, .45, 'translateY(20px)');
+A('#sline', [{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }], s5 + 2.0, .35, { ease: 'cubic-bezier(.6,0,.2,1)' });
+A('#strike .t', [{ opacity: 1 }, { opacity: .55 }], s5 + 2.35, .3, { fill: 'forwards' });
+A('#stamp', [{ opacity: 0, transform: 'translateX(-50%) scale(2.4) rotate(-12deg)' }, { opacity: 1, transform: 'translateX(-50%) scale(1) rotate(-4deg)' }], s5 + 2.45, .4, { ease: 'cubic-bezier(.5,0,.75,0)' });
+A('#stamp', [{ transform: 'translateX(-50%) scale(1) rotate(-4deg)' }, { transform: 'translateX(-50%) scale(1.04) rotate(-4deg)' }], s5 + 2.9, .25, { iter: 2, dir: 'alternate', fill: 'forwards', ease: 'ease-out' });
+['#k1', '#k2', '#k3'].forEach((k, i) => IN(k, s5 + 2.95 + i * .35, .5, 'translateX(-60px)', { ease: BACK }));
+OUT('#s5', T.s6 - .4, .4, 'translateX(-120px)');
+
+/* ===== S6: Salla (25.6 – 29.6) ===== */
+const s6 = T.s6;
+IN('#s6h', s6 + .05, .6, 'translateY(40px)');
+A('#nSalla', [{ opacity: 0, transform: 'translateX(-50%) translateY(30px) scale(.9)' }, { opacity: 1, transform: 'translateX(-50%)' }], s6 + .4, .55, { ease: BACK });
+A('#hub', [{ opacity: 0, transform: 'scale(.3)' }, { opacity: 1, transform: 'scale(1)' }], s6 + .7, .7, { ease: BACK });
+A('#hub img', [{ transform: 'translateY(0)' }, { transform: 'translateY(-12px)' }], s6 + 1.4, .6, { iter: 6, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#nWa', [{ opacity: 0, transform: 'translateX(-50%) translateY(30px) scale(.9)' }, { opacity: 1, transform: 'translateX(-50%)' }], s6 + 1.0, .55, { ease: BACK });
+A('#w1', [{ opacity: 0, transform: 'scaleY(0)' }, { opacity: 1, transform: 'scaleY(1)' }], s6 + .6, .4);
+A('#w2', [{ opacity: 0, transform: 'scaleY(0)' }, { opacity: 1, transform: 'scaleY(1)' }], s6 + 1.1, .4);
+// data dots flowing  salla -> bee -> whatsapp
+[['#d1', 600, 790, 0], ['#d2', 600, 790, .5], ['#d3', 1160, 1340, .25], ['#d4', 1160, 1340, .75]].forEach(([id, y0, y1, ph]) => {
+  A(id, [{ top: y0 + 'px', opacity: 0 }, { opacity: 1, offset: .2 }, { opacity: 1, offset: .8 }, { top: y1 + 'px', opacity: 0 }], s6 + 1.2 + ph, .8, { iter: 4, ease: 'linear' });
+});
+['#c1', '#c2', '#c3', '#c4'].forEach((c, i) => IN(c, s6 + 1.3 + i * .22, .5, 'scale(.4)', { ease: BACK }));
+IN('#s6foot', s6 + 2.3, .5);
+OUT('#s6', T.s7 - .4, .4, 'scale(.95)');
+
+/* ===== S7: CTA (29.6 – 34) ===== */
+const s7 = T.s7;
+A('#s7bee', [{ opacity: 0, transform: 'translateY(-200px) scale(.4) rotate(18deg)' }, { opacity: 1, transform: 'none' }], s7 + .05, .8, { ease: BACK });
+A('#s7bee img', [{ transform: 'translateY(0)' }, { transform: 'translateY(-14px)' }], s7 + .9, .7, { iter: 8, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#s7brand', [{ opacity: 0, transform: 'scale(.8)', filter: 'blur(8px)' }, { opacity: 1, transform: 'none', filter: 'blur(0)' }], s7 + .35, .6);
+IN('#s7tag', s7 + .75, .6);
+A('#btn', [{ opacity: 0, transform: 'translateX(-50%) scale(.6)' }, { opacity: 1, transform: 'translateX(-50%) scale(1)' }], s7 + 1.3, .55, { ease: BACK });
+A('#btn', [{ transform: 'translateX(-50%) scale(1)' }, { transform: 'translateX(-50%) scale(1.045)' }], s7 + 2.0, .45, { iter: 5, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#shine', [{ left: '-160px' }, { left: '1000px' }], s7 + 2.1, .9, { iter: 2, fill: 'none', ease: 'ease-in-out' });
+IN('#s7salla', s7 + 1.7, .5);
+IN('#url', s7 + 1.95, .5);
+A('#stage', [{ opacity: 1 }, { opacity: 0 }], T.end - .25, .25, { fill: 'forwards', ease: 'linear' });
+
+/* scene visibility gates (cheap: hide scenes outside their window) */
+const gates = [['#s12', -1, T.s3], ['#s3', T.s3 - .2, T.s4], ['#s4', T.s4 - .1, T.s5], ['#s5', T.s5 - .1, T.s6], ['#s6', T.s6 - .1, T.s7], ['#s7', T.s7 - .1, 99]];
+hooks.push(t => gates.forEach(([s, a, b]) => { document.querySelector(s).style.visibility = (t >= a && t < b) ? 'visible' : 'hidden'; }));
+
+window.DURATION = T.end;
+window.seek = (t) => { anims.forEach(a => { a.currentTime = t * 1000; }); hooks.forEach(h => h(t)); };
+window.ready = document.fonts.ready.then(() => Promise.all([...document.images].map(i => i.complete ? 1 : new Promise(r => i.onload = r))));
+const q = new URLSearchParams(location.search); if (q.has('t')) window.ready.then(() => seek(+q.get('t')));
+</script>
+</body>
+</html>
