@@ -18,7 +18,7 @@ and never against the existing platform database. Subcommands:
     identity, the libpq variables to refuse, the fixed inventory files, the
     initializers that must be absent, the inventory digest and count, the gate
     module's SHA-256, the approval payload's SHA-256, the phase and the
-    database and backup targets ? verifies all of it **before importing
+    database and backup targets — verifies all of it **before importing
     anything from the repository**, then executes the verified gate bytes in
     the same process with source-only repository imports.
 
@@ -474,4 +474,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover - entry point
     sys.exit(main())
-
