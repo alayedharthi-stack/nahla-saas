@@ -23,13 +23,16 @@ class SourceBindingTests(unittest.TestCase):
         self.assertEqual(set(existing.SHOPIFY_FLAG_ENVS + (existing.COMM_SEND_FLAG_ENV,)),
                          terminal.FLAG_NAMES)
 
-    def test_new_runtime_files_are_in_full_inventory(self):
+    def test_terminal_runtime_files_are_pinned_without_forward_writer(self):
         base_paths = set(gate.inventory_paths(ROOT))
         self.assertTrue(set(source.ACTION_FILES) <= base_paths)
+        self.assertEqual(source.ROLLBACK_EXCLUDED_FILES,
+                         {"scripts/operators/salla_comm_0125_predeploy.py"})
+        self.assertTrue(source.ROLLBACK_EXCLUDED_FILES <= base_paths)
+        terminal_paths = (base_paths | set(source.ACTION_FILES)) - source.ROLLBACK_EXCLUDED_FILES
         count, digest = source.candidate_inventory(ROOT)
-        self.assertEqual((count, digest), gate.digest_paths(
-            ROOT, sorted(base_paths | set(source.ACTION_FILES))))
-        self.assertEqual(count, len(base_paths))
+        self.assertEqual((count, digest), gate.digest_paths(ROOT, sorted(terminal_paths)))
+        self.assertEqual(count, len(terminal_paths))
 
     def test_missing_action_file_refuses_inventory(self):
         with TemporaryDirectory() as directory:
