@@ -267,6 +267,12 @@ body{color:var(--ink)}
 .s7salla{top:1395px;color:var(--muted)}
 .s7salla .s{color:var(--sallaT)}
 .url{top:1485px;color:var(--green)}
+#pB b{padding-inline-start:12px;font-weight:900;color:#0f1e33}
+.hook{position:absolute;left:0;right:0;top:690px;text-align:center}
+.hook .h1{font-weight:900;font-size:96px;line-height:1.25;color:var(--ink)}
+.hook .h1 .s{color:var(--sallaT)}
+.hook .h2{display:inline-block;margin-top:40px;font-weight:900;font-size:170px;line-height:1.1;color:var(--green)}
+.hook .h2 i{font-style:normal;display:inline-block}
 </style>
 </head>
 <body>
@@ -276,7 +282,8 @@ body{color:var(--ink)}
 
   <!-- ===== S1 + S2 ===== -->
   <section class="scene" id="s12">
-    <div class="pill" id="s1pill">تجّار سلة 📢</div>
+    <div class="hook" id="hook"><div class="h1" id="hk1">إذا كنت تاجر<br>في <span class="s">سلة</span>…</div><div class="h2" id="hk2">تعال <i id="wave">👋</i></div></div>
+    <div class="pill" id="s1pill"><span>إذا كنت تاجر في سلة…</span><span id="pB"><b>تعال 👋</b></span></div>
     <div class="center headline" id="s1h" style="top:330px">
       <span class="l">عملاؤك يسألونك على واتساب</span>
       <span class="l amber">طول اليوم… وطول الليل</span>
@@ -469,7 +476,11 @@ hooks.push(t => {
 });
 
 /* ===== S1: hook ===== */
-A('#s1pill', [{ opacity: 0, transform: 'translateX(-50%) scale(.6)' }, { opacity: 1, transform: 'translateX(-50%) scale(1)' }], K.pill, .6, { ease: BACK });
+A('#hk1', [{ opacity: 0, transform: 'translateY(50px) scale(.9)' }, { opacity: 1, transform: 'none' }], K.pill, .55, { ease: BACK });
+A('#hk2', [{ opacity: 0, transform: 'scale(.2) rotate(-8deg)' }, { opacity: 1, transform: 'scale(1) rotate(0)' }], K.come, .5, { ease: BACK });
+A('#wave', [{ transform: 'rotate(0)' }, { transform: 'rotate(22deg)' }, { transform: 'rotate(-12deg)' }, { transform: 'rotate(0)' }], K.come + .35, .6, { iter: 2, fill: 'none', ease: 'ease-in-out' });
+A('#hook', [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-420px) scale(.45)' }], K.s1h - .45, .4, { fill: 'forwards', ease: EI });
+A('#s1pill', [{ opacity: 0, transform: 'translateX(-50%) scale(.6)' }, { opacity: 1, transform: 'translateX(-50%) scale(1)' }], K.s1h - .2, .5, { ease: BACK });
 IN('#s1h .l:nth-child(1)', K.s1h, .55);
 IN('#s1h .l:nth-child(2)', K.s1h + .35, .55);
 const nStep = (T.s2 - .5 - K.n0) / NOTIFS.length;
