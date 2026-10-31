@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMM_PATH = ROOT / k.COMM_EXPECTATIONS_RELATIVE_PATH
 
 
-def test_observed_rollback_artifact_is_pinned_but_forward_stays_draft():
+def test_observed_rollback_artifact_is_reviewed_but_forward_unapproved():
     manifest = json.loads((ROOT / k.COMM_ROLLBACK_RELATIVE_PATH).read_text(encoding="utf-8"))
     prior = manifest["compatible_rollback"]
     observed = manifest["operator_observation"]
@@ -28,10 +28,18 @@ def test_observed_rollback_artifact_is_pinned_but_forward_stays_draft():
     assert observed["railway_deployment_id"] == "5dfa011d-fe2e-4cf3-a0f3-0837e9dec646"
     assert observed["requires_fresh_authenticated_provider_recheck"] is True
     assert observed["observed_database_heads_after_deploy"] is None
-    assert manifest["status"] == "DRAFT_ONLY_REQUIRES_COMPATIBLE_SOURCE_PINS"
-    assert manifest["approval"] == "none" and prior["independent_review_ref"] is None
+    assert manifest["status"] == "READY"
+    assert manifest["approval"] == "none"
+    assert prior["independent_review_ref"] == (
+        "libfile_afd8427539cc81918a7c344cc0c03b2d"
+        "#sha256:4f2ce2ebf53dfbdd4db5d362a20d20840ba21bace8bdb21280460a921f373f7a"
+    )
     evidence, snapshot, bindings, args = _sample()
     bindings["artifact"]["status"] = manifest["status"]
+    bindings["artifact"]["compatible_rollback"]["independent_review_ref"] = prior["independent_review_ref"]
+    evidence["independent_review_ref"] = prior["independent_review_ref"]
+    assert k._evaluate_comm_schema_rollback(evidence, snapshot, bindings, **args) is None
+    bindings["artifact"]["compatible_rollback"]["independent_review_ref"] = None
     assert k._evaluate_comm_schema_rollback(evidence, snapshot, bindings, **args) == k.R_SCHEMA_ROLLBACK_INVALID
 
 
