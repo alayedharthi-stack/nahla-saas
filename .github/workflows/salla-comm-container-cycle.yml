@@ -1,0 +1,68 @@
+name: Salla Communication container cycle (test only)
+
+# This builds the same Dockerfile configured for the Nahla API service. The
+# image and database exist only on the standard GitHub-hosted runner; neither
+# is published, deployed, or connected to Railway or a real store.
+on:
+  pull_request:
+    branches: [review/cart-read-2bba-20261030]
+
+permissions:
+  contents: read
+
+jobs:
+  dockerfile-pg18-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Forward and rollback gates are exercised from one reviewed code tree.
+      # This is a packaging and command-cycle proof, not a pair of Railway
+      # deployments or an independently pinned forward release artifact.
+      TEST_SOURCE_SHA: 63d5295dc9e284cfa98c275b7199b7b9ba0d730b
+      PG_IMAGE: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    steps:
+      - name: Fetch exact reviewed code tree without retained credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TEST_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Build configured Dockerfile image and isolated test runner
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TEST_SOURCE_SHA"
+          docker build --file Dockerfile --tag nahla-comm-candidate:ci .
+          docker run --rm --entrypoint python nahla-comm-candidate:ci \
+            -c 'from scripts.operators import salla_comm_rollback_only_gate; print("candidate import: PASS")'
+          printf 'FROM nahla-comm-candidate:ci\nRUN python -m pip install --no-cache-dir pytest==8.3.5\n' > "$RUNNER_TEMP/Containerfile.probe"
+          docker build --file "$RUNNER_TEMP/Containerfile.probe" \
+            --tag nahla-comm-probe:ci "$RUNNER_TEMP"
+          docker image inspect nahla-comm-candidate:ci \
+            --format 'candidate_image_id={{.Id}}'
+      - name: Exercise 0124 to 0125 and frozen rollback command on disposable PostgreSQL 18
+        run: |
+          set -euo pipefail
+          docker network create --internal nahla-comm-cycle
+          trap 'docker rm -f nahla-comm-pg18 >/dev/null 2>&1 || true; docker network rm nahla-comm-cycle >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name nahla-comm-pg18 --network nahla-comm-cycle \
+            --network-alias shopify-gate-disposable \
+            --env POSTGRES_USER=nahla --env POSTGRES_PASSWORD=nahla_password \
+            --env POSTGRES_DB=nahla_saas "$PG_IMAGE" >/dev/null
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec nahla-comm-pg18 pg_isready -U nahla -d nahla_saas >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          test "$ready" = 1
+          version="$(docker exec nahla-comm-pg18 psql -U nahla -d nahla_saas -tAc 'SHOW server_version_num')"
+          [[ "$version" =~ ^18[0-9]{4}$ ]]
+          docker run --rm --network nahla-comm-cycle \
+            --mount "type=bind,source=$PWD/backend/tests,target=/app/backend/tests,readonly" \
+            --mount "type=bind,source=$PWD/tests,target=/app/tests,readonly" \
+            --env NAHLA_RELIABILITY_REQUIRE_PG=1 \
+            --env NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@shopify-gate-disposable:5432/postgres \
+            --env NAHLA_RELEASE_GATE_PG_HOST_ALIAS=shopify-gate-disposable \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --entrypoint bash nahla-comm-probe:ci -lc \
+            'set -euo pipefail; python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short -p no:cacheprovider --junitxml=/tmp/communication-container-cycle.xml; python scripts/check_junit_clean.py /tmp/communication-container-cycle.xml'
+
