@@ -79,6 +79,15 @@ jobs:
           python -B -m pytest backend/tests/test_salla_comm_retained_0125_rollback_pg.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-retained-rollback.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-retained-rollback.xml"
+          python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-pre-forward-restart.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-pre-forward-restart.xml"
+          python -B -m pytest backend/tests/test_salla_comm_rollback_only_contract.py \
+            backend/tests/test_salla_comm_rollback_only_gate.py \
+            backend/tests/test_salla_comm_rollback_only_render.py \
+            backend/tests/test_salla_comm_rollback_only_source.py -q -ra --tb=short \
+            --junitxml="$RUNNER_TEMP/acceptance-pg18/communication-rollback-only-units.xml"
+          python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/communication-rollback-only-units.xml"
           python -B -m pytest backend/tests/test_acceptance_order_coupon_identity.py -q -ra --tb=short \
             --junitxml="$RUNNER_TEMP/acceptance-pg18/acceptance.xml"
           python scripts/check_junit_clean.py "$RUNNER_TEMP/acceptance-pg18/acceptance.xml"

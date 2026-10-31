@@ -111,6 +111,13 @@ RUNTIME_EXTRA_FILES: Tuple[str, ...] = (
     "scripts/operators/shopify_install_rollback.draft.json",
     "scripts/operators/salla_comm_0125_schema_expectations.json",
     "scripts/operators/salla_comm_0125_rollback.draft.json",
+    # Candidate-only terminal rollback action: pin its complete import closure
+    # in the normal 0124 release inventory before any 0125 migration.
+    "scripts/operators/shopify_release_gate_render.py",
+    "scripts/operators/salla_comm_rollback_only_contract.py",
+    "scripts/operators/salla_comm_rollback_only_source.py",
+    "scripts/operators/salla_comm_rollback_only_render.py",
+    "scripts/operators/salla_comm_rollback_only_gate.py",
     "backend/services/shopify_catalog/config.py",
     "backend/services/shopify_privacy/config.py",
 )

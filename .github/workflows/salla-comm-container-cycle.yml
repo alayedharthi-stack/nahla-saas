@@ -1,0 +1,74 @@
+name: Salla Communication container cycle (test only)
+
+# This builds the same Dockerfile configured for the Nahla API service. The
+# image and database exist only on the standard GitHub-hosted runner; neither
+# is published, deployed, or connected to Railway or a real store.
+on:
+  pull_request:
+    branches: [review/cart-read-2bba-20261030]
+
+permissions:
+  contents: read
+
+jobs:
+  dockerfile-pg18-cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+        env:
+          POSTGRES_USER: nahla
+          POSTGRES_PASSWORD: nahla_password
+          POSTGRES_DB: nahla_saas
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nahla -d nahla_saas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Forward and rollback gates are exercised from one reviewed code tree.
+      # This is a packaging and command-cycle proof, not a pair of Railway
+      # deployments or an independently pinned forward release artifact.
+      TEST_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Fetch exact reviewed code tree without retained credentials
+        run: |
+          set -euo pipefail
+          # The repository contains a historical gitlink without a matching
+          # .gitmodules URL. Fetch the pinned public commit without submodules,
+          # as the existing release-gate proof workflow does.
+          git init .
+          git remote add origin https://github.com/alayedharthi-stack/nahla-saas.git
+          git fetch --no-tags --depth=1 origin "$TEST_SOURCE_SHA"
+          git -c submodule.recurse=false checkout --detach FETCH_HEAD
+      - name: Build configured Dockerfile image and isolated test runner
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TEST_SOURCE_SHA"
+          docker build --file Dockerfile --tag nahla-comm-candidate:ci .
+          docker run --rm --entrypoint python nahla-comm-candidate:ci \
+            -c 'from scripts.operators import salla_comm_rollback_only_gate; print("candidate import: PASS")'
+          printf 'FROM nahla-comm-candidate:ci\nRUN python -m pip install --no-cache-dir pytest==8.3.5\n' > "$RUNNER_TEMP/Containerfile.probe"
+          docker build --file "$RUNNER_TEMP/Containerfile.probe" \
+            --tag nahla-comm-probe:ci "$RUNNER_TEMP"
+          docker image inspect nahla-comm-candidate:ci \
+            --format 'candidate_image_id={{.Id}}'
+      - name: Exercise 0124 to 0125 and frozen rollback command on disposable PostgreSQL 18
+        run: |
+          set -euo pipefail
+          # The existing startup probe explicitly requires loopback:5433.
+          # Use the same disposable topology as the repository PG18 workflow.
+          docker run --rm --network host \
+            --add-host shopify-gate-disposable:127.0.0.1 \
+            --mount "type=bind,source=$PWD/backend/tests,target=/app/backend/tests,readonly" \
+            --mount "type=bind,source=$PWD/tests,target=/app/tests,readonly" \
+            --env NAHLA_RELIABILITY_REQUIRE_PG=1 \
+            --env NAHLA_RELIABILITY_PG_ADMIN_DSN=postgresql://nahla:nahla_password@127.0.0.1:5433/postgres \
+            --env NAHLA_RELEASE_GATE_PG_HOST_ALIAS=shopify-gate-disposable \
+            --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            --entrypoint bash nahla-comm-probe:ci -lc \
+            'set -euo pipefail; python -c '\''import os,sqlalchemy as sa; e=sa.create_engine(os.environ["NAHLA_RELIABILITY_PG_ADMIN_DSN"]); c=e.connect(); v=int(c.exec_driver_sql("SHOW server_version_num").scalar()); assert 180000 <= v < 190000; c.close(); e.dispose()'\''; python -B -m pytest backend/tests/test_salla_comm_0125_pre_forward_restart_pg.py -q -ra --tb=short -p no:cacheprovider --junitxml=/tmp/communication-container-cycle.xml; python scripts/check_junit_clean.py /tmp/communication-container-cycle.xml'
