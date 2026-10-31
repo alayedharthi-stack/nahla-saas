@@ -67,15 +67,15 @@ def command_template(root: Path, *, release_sha: str, target: terminal.Target,
     # Restore those two template lines only for this rollback action; keep the
     # new forward bootstrap byte-pinned separately.
     bootstrap = prior_render.BOOTSTRAP_TEMPLATE
-    entry_header = "ENTRY = {entrypoint}\\n"
-    new_tail = ('entry_path = os.path.join(R, ENTRY)\\n'
-                'if os.path.abspath(entry_path) not in verified:\\n'
-                '    fail("entrypoint_unverified")\\n'
-                'sys.argv = [entry_path] + ARGV\\n'
-                'exec(compile(verified[os.path.abspath(entry_path)], entry_path, "exec"),\\n'
+    entry_header = "ENTRY = {entrypoint}\n"
+    new_tail = ('entry_path = os.path.join(R, ENTRY)\n'
+                'if os.path.abspath(entry_path) not in verified:\n'
+                '    fail("entrypoint_unverified")\n'
+                'sys.argv = [entry_path] + ARGV\n'
+                'exec(compile(verified[os.path.abspath(entry_path)], entry_path, "exec"),\n'
                 '     {"__name__": "__main__", "__file__": entry_path})')
-    old_tail = ('sys.argv = [gate_path] + ARGV\\n'
-                'exec(compile(verified[os.path.abspath(gate_path)], gate_path, "exec"),\\n'
+    old_tail = ('sys.argv = [gate_path] + ARGV\n'
+                'exec(compile(verified[os.path.abspath(gate_path)], gate_path, "exec"),\n'
                 '     {"__name__": "__main__", "__file__": gate_path})')
     terminal.require(bootstrap.count(entry_header) == 1 and bootstrap.count(new_tail) == 1,
                      "historical_bootstrap_shape_mismatch")
