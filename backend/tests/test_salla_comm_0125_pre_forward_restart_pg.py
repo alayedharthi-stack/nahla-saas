@@ -74,8 +74,8 @@ def _actual_terminal_command_on_isolated_pg18(db_name: str) -> None:
             root / existing.INSTALL_EXPECTATIONS_RELATIVE_PATH),
         "communication_schema_sha256": gate.file_sha256(
             root / existing.COMM_EXPECTATIONS_RELATIVE_PATH),
-        "approved_at_utc": (now - timedelta(minutes=1)).isoformat(),
-        "expires_at_utc": (now + timedelta(minutes=5)).isoformat(),
+        "approved_at_utc": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        "expires_at_utc": (now + timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
         "approved": True,
     }
     payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
