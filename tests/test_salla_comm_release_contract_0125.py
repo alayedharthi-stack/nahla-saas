@@ -19,6 +19,22 @@ ROOT = Path(__file__).resolve().parents[1]
 COMM_PATH = ROOT / k.COMM_EXPECTATIONS_RELATIVE_PATH
 
 
+def test_observed_rollback_artifact_is_pinned_but_forward_stays_draft():
+    manifest = json.loads((ROOT / k.COMM_ROLLBACK_RELATIVE_PATH).read_text(encoding="utf-8"))
+    prior = manifest["compatible_rollback"]
+    observed = manifest["operator_observation"]
+    assert prior["source_sha"] == "fd6b89617b2beaf33d77830988e0e23bcfaf9daa"
+    assert prior["runtime_inventory_count"] == 165
+    assert observed["railway_deployment_id"] == "5dfa011d-fe2e-4cf3-a0f3-0837e9dec646"
+    assert observed["requires_fresh_authenticated_provider_recheck"] is True
+    assert observed["observed_database_heads_after_deploy"] is None
+    assert manifest["status"] == "DRAFT_ONLY_REQUIRES_COMPATIBLE_SOURCE_PINS"
+    assert manifest["approval"] == "none" and prior["independent_review_ref"] is None
+    evidence, snapshot, bindings, args = _sample()
+    bindings["artifact"]["status"] = manifest["status"]
+    assert k._evaluate_comm_schema_rollback(evidence, snapshot, bindings, **args) == k.R_SCHEMA_ROLLBACK_INVALID
+
+
 def _sample():
     verified = datetime(2026, 10, 29, 11, tzinfo=timezone.utc)
     approved = verified + timedelta(hours=1)
