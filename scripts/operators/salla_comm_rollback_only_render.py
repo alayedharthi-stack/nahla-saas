@@ -54,8 +54,9 @@ def command_template(root: Path, *, release_sha: str, target: terminal.Target,
             existing.IDENTITY_ENVS["service"]: target.service,
         },
         "libpq": list(existing.LIBPQ_TARGET_ENV_VARS),
-        "fixed": sorted(set(existing.LEGACY_FIXED_FILES)
-                        | set(existing.RUNTIME_EXTRA_FILES) | set(source.ACTION_FILES)),
+        "fixed": sorted((set(existing.LEGACY_FIXED_FILES)
+                         | set(existing.RUNTIME_EXTRA_FILES) | set(source.ACTION_FILES))
+                        - source.ROLLBACK_EXCLUDED_FILES),
         "absent": list(existing.MUST_BE_ABSENT),
         "count": count, "digest": digest,
         "gate_sha": runner_sha, "approval_sha": APPROVAL_SHA_PLACEHOLDER,
