@@ -185,6 +185,8 @@ def main(argv=None, environ=None, now=None) -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except SystemExit:
+        raise
     except BaseException as exc:
         gate.emit("RESULT=FAIL reason=internal_error type=" + type(exc).__name__)
         sys.exit(k.EXIT_FAIL)
