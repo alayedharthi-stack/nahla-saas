@@ -248,6 +248,11 @@ class ContractTests(unittest.TestCase):
                 validate_operator_predeploy(approval=changed, payload=PAYLOAD,
                                             pinned_payload_sha256=PAYLOAD_SHA,
                                             provider=provider, operator=Operator(), now=NOW)
+        ambiguous = PAYLOAD[:-1] + b',"approved":true}'
+        with self.assertRaisesRegex(Refused, "approval_payload_invalid"):
+            validate_operator_predeploy(approval=approval, payload=ambiguous,
+                                        pinned_payload_sha256=sha256(ambiguous).hexdigest(),
+                                        provider=provider, operator=Operator(), now=NOW)
 
     def test_rollback_artifact_is_distinct_and_provider_bound(self):
         approval, provider, _ = fixture()

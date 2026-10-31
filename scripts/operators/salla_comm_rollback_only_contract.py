@@ -14,7 +14,6 @@ import json
 import re
 from typing import Protocol
 
-from scripts.operators import shopify_release_gate_contract as existing
 
 
 ACTION = "rollback_only_0125"
@@ -210,47 +209,10 @@ def approval_payload_bytes(approval: Approval) -> bytes:
 
 def approval_matches_payload(approval: Approval, payload: bytes) -> bool:
     """Bind the typed policy input to the exact bytes installed in Railway."""
-    if not isinstance(payload, bytes):
-        return False
     try:
-        record = json.loads(payload)
-    except (ValueError, UnicodeError, TypeError):
+        return isinstance(payload, bytes) and payload == approval_payload_bytes(approval)
+    except (Refused, TypeError, ValueError):
         return False
-    if not isinstance(record, dict):
-        return False
-    expected = {
-        "record_version": 1, "action": approval.action,
-        "target": vars(approval.target),
-        "candidate_source_sha": approval.candidate_source_sha,
-        "reference_deployment_id": approval.reference_deployment_id,
-        "reference_source_sha": approval.reference_source_sha,
-        "reference_image_digest": approval.reference_image_digest,
-        "reference_predeploy_command_sha256": approval.reference_predeploy_command_sha256,
-        "rollback_artifact_deployment_id": approval.rollback_artifact_deployment_id,
-        "rollback_artifact_source_sha": approval.rollback_artifact_source_sha,
-        "rollback_artifact_image_digest": approval.rollback_artifact_image_digest,
-        "rollback_artifact_predeploy_command_sha256": approval.rollback_artifact_predeploy_command_sha256,
-        "owner_approval_reference": approval.owner_approval_reference,
-        "backup_service_id": approval.backup_service_id,
-        "backup_volume_id": approval.backup_volume_id,
-        "backup_receipt_sha256": approval.backup_receipt_sha256,
-        "restore_receipt_sha256": approval.restore_receipt_sha256,
-        "rollback_command_template_sha256": approval.rollback_command_template_sha256,
-        "inventory_digest": approval.inventory_digest,
-        "inventory_count": approval.inventory_count,
-        "shopify_schema_sha256": approval.shopify_schema_sha256,
-        "communication_schema_sha256": approval.communication_schema_sha256,
-        "approved": approval.approved,
-    }
-    if set(record) != set(expected) | {"approved_at_utc", "expires_at_utc"}:
-        return False
-    if type(record.get("inventory_count")) is not int or type(record.get("approved")) is not bool:
-        return False
-    actual_times = (existing.parse_utc(record["approved_at_utc"]),
-                    existing.parse_utc(record["expires_at_utc"]))
-    if actual_times != (approval.approved_at, approval.expires_at):
-        return False
-    return all(record[key] == value for key, value in expected.items())
 
 
 def validate_predeploy(
