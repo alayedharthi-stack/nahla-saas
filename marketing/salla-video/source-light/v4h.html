@@ -184,14 +184,14 @@ body{font-family:'Cairo',sans-serif;color:#fff;-webkit-font-smoothing:antialiase
 /* ---------- S8 : sales growth + guarantee ---------- */
 .s8h{position:absolute;left:0;right:0;top:190px;text-align:center;font-weight:900;font-size:80px;line-height:1.25;color:var(--ink)}
 .s8h .g{color:var(--green)}
-.chart{position:absolute;left:90px;right:90px;top:360px;height:520px;background:#fff;border:2px solid var(--border);border-radius:44px;
+.chart{position:absolute;left:90px;right:90px;top:410px;height:500px;background:#fff;border:2px solid var(--border);border-radius:44px;
   box-shadow:0 22px 56px rgba(15,30,51,.10);padding:36px 40px 30px;display:flex;flex-direction:column;gap:18px}
 .ch-top{display:flex;justify-content:space-between;align-items:flex-start}
 .ch-t{font-weight:900;font-size:44px;color:var(--ink);line-height:1.2}
 .ch-s{font-weight:700;font-size:30px;color:var(--muted)}
 .ch-badge{padding:10px 26px;border-radius:999px;background:var(--mint);color:var(--green);font-weight:900;font-size:34px;white-space:nowrap}
 .ch-svg{flex:1;width:100%;overflow:visible}
-.guar{position:absolute;left:90px;right:90px;top:935px;display:flex;align-items:center;gap:30px;padding:30px 40px;border-radius:40px;
+.guar{position:absolute;left:90px;right:90px;top:955px;display:flex;align-items:center;gap:30px;padding:30px 40px;border-radius:40px;
   background:var(--mint);border:2px solid rgba(20,130,73,.25)}
 .guar .gi{flex:0 0 120px;height:120px;border-radius:36px;background:#fff;display:grid;place-items:center;font-size:72px;box-shadow:0 10px 24px rgba(20,130,73,.15)}
 .guar .g1{font-weight:900;font-size:50px;color:var(--ink);line-height:1.3}
@@ -200,6 +200,9 @@ body{font-family:'Cairo',sans-serif;color:#fff;-webkit-font-smoothing:antialiase
 #s8 .btn{top:1245px}
 #s8 .s7salla{top:1440px}
 #s8 .url{top:1530px}
+.s8q{font-weight:800;font-size:58px;color:var(--green);line-height:1.3}
+.guar .g2 b.up{color:var(--ink)}
+.guar .g3{font-weight:700;font-size:30px;color:#7a8a9a;margin-top:6px}
 </style>
 <style id="light-identity">
 /* ===== Light identity (from merchant-app references): off-white canvas, Nahla green, pastel cards ===== */
@@ -361,12 +364,12 @@ html,body{width:1920px;height:1080px}
 /* S8 landscape */
 .s8h{left:1000px;right:80px;top:150px;font-size:68px}
 .chart{left:80px;right:1000px;top:170px;height:560px}
-.guar{left:1000px;right:80px;top:330px;padding:26px 34px}
+.guar{left:1000px;right:80px;top:350px;padding:26px 34px}
 .guar .g1{font-size:44px}
 .guar .g2{font-size:34px}
-#s8 .btn{left:1420px;top:610px}
-#s8 .s7salla{left:1000px;right:80px;top:800px}
-#s8 .url{left:1000px;right:80px;top:880px}
+#s8 .btn{left:1420px;top:650px}
+#s8 .s7salla{left:1000px;right:80px;top:835px}
+#s8 .url{left:1000px;right:80px;top:915px}
 </style>
 </head>
 <body>
@@ -516,7 +519,7 @@ html,body{width:1920px;height:1080px}
 
   <!-- ===== S8 sales growth + guarantee + CTA ===== -->
   <section class="scene" id="s8">
-    <div class="s8h" id="s8h">ونحلة <span class="g">تزيد مبيعاتك</span> 📈</div>
+    <div class="s8h" id="s8h"><div class="s8q" id="s8q">والنتيجة؟</div><div id="s8a">نحلة <span class="g">تزيد مبيعاتك</span> 📈</div></div>
     <div class="chart" id="chart">
       <div class="ch-top"><div><div class="ch-t">مبيعات متجرك</div><div class="ch-s">مع نحلة على واتساب</div></div><div class="ch-badge" id="chBadge">↑ في ازدياد</div></div>
       <svg class="ch-svg" viewBox="-14 -20 828 330" preserveAspectRatio="none" aria-hidden="true">
@@ -527,8 +530,8 @@ html,body{width:1920px;height:1080px}
         <circle id="chDot" cx="800" cy="40" r="13" fill="#148249" stroke="#fff" stroke-width="5"/>
       </svg>
     </div>
-    <div class="guar" id="guar"><div class="gi">🛡️</div><div><div class="g1">جرّبها ١٤ يوم مجاناً</div><div class="g2">إذا ما زادت مبيعاتك… <b style="display:inline-block">ما تخسر ولا ريال</b></div></div></div>
-    <div class="btn" id="btn">جرّبها مجاناً ١٤ يوم<div class="shine"><i id="shine"></i></div></div>
+    <div class="guar" id="guar"><div class="gi">🛡️</div><div><div class="g1">جرّبها ١٤ يوم مجاناً</div><div class="g2">يا <b class="up">تزيد مبيعاتك</b>… يا <b id="risk" style="display:inline-block">ما تخسر ولا ريال</b></div><div class="g3">بلا بطاقة ائتمانية · تلغي في أي وقت</div></div></div>
+    <div class="btn" id="btn">ثبّت نحلة مجاناً<div class="shine"><i id="shine"></i></div></div>
     <div class="s7salla" id="s7salla">من <span class="s">متجر تطبيقات سلة</span></div>
     <div class="url" id="url">nahlah.ai</div>
   </section>
@@ -731,16 +734,18 @@ IN('#url', K.salla + .4, .45);
 OUT('#s7', T.s8 - .35, .35, 'translateY(-60px) scale(.96)');
 /* ===== S8: sales growth + guarantee + CTA ===== */
 const s8 = T.s8;
-IN('#s8h', s8 + .02, .55, 'translateY(40px) scale(.94)', { ease: BACK });
-A('#chart', [{ opacity: 0, transform: 'translateY(60px) scale(.96)' }, { opacity: 1, transform: 'none' }], s8 + .2, .55);
-A('#chLine', [{ strokeDashoffset: 1000 }, { strokeDashoffset: 0 }], s8 + .45, 1.6, { ease: 'cubic-bezier(.45,0,.2,1)' });
-A('#chArea', [{ opacity: 0 }, { opacity: 1 }], s8 + .9, 1.2, { ease: 'linear' });
-A('#chDot', [{ opacity: 0, transform: 'scale(0)' }, { opacity: 1, transform: 'scale(1)' }], s8 + 2.0, .4, { ease: BACK });
-A('#chDot', [{ transform: 'scale(1)' }, { transform: 'scale(1.35)' }], s8 + 2.45, .45, { iter: 10, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
-A('#chBadge', [{ opacity: 0, transform: 'scale(.4)' }, { opacity: 1, transform: 'scale(1)' }], s8 + 1.9, .45, { ease: BACK });
+IN('#s8q', s8 + .02, .45, 'translateY(30px)');
+IN('#s8a', K.up, .55, 'translateY(40px) scale(.94)', { ease: BACK });
+A('#chart', [{ opacity: 0, transform: 'translateY(60px) scale(.96)' }, { opacity: 1, transform: 'none' }], K.up - .1, .55);
+A('#chLine', [{ strokeDashoffset: 1000 }, { strokeDashoffset: 0 }], K.up + .15, 1.6, { ease: 'cubic-bezier(.45,0,.2,1)' });
+A('#chArea', [{ opacity: 0 }, { opacity: 1 }], K.up + .6, 1.2, { ease: 'linear' });
+A('#chDot', [{ opacity: 0, transform: 'scale(0)' }, { opacity: 1, transform: 'scale(1)' }], K.up + 1.7, .4, { ease: BACK });
+A('#chDot', [{ transform: 'scale(1)' }, { transform: 'scale(1.35)' }], K.up + 2.15, .45, { iter: 10, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#chBadge', [{ opacity: 0, transform: 'scale(.4)' }, { opacity: 1, transform: 'scale(1)' }], K.up + 1.6, .45, { ease: BACK });
 A('#guar', [{ opacity: 0, transform: 'translateY(40px) scale(.95)' }, { opacity: 1, transform: 'none' }], K.guar, .55, { ease: BACK });
 A('#guar .gi', [{ transform: 'rotate(0)' }, { transform: 'rotate(-10deg) scale(1.1)' }, { transform: 'rotate(0)' }], K.guar + .5, .6, { fill: 'none' });
-A('#guar .g2 b', [{ color: '#148249', textShadow: '0 0 0 rgba(20,130,73,0)' }, { color: '#0f7a3f', textShadow: '0 0 18px rgba(20,130,73,.35)' }], K.risk, .35, { fill: 'forwards' });
+A('#guar .g2 b.up', [{ color: '#0f1e33' }, { color: '#148249' }], K.upb, .3, { fill: 'forwards' });
+A('#risk', [{ color: '#148249', textShadow: '0 0 0 rgba(20,130,73,0)' }, { color: '#0f7a3f', textShadow: '0 0 18px rgba(20,130,73,.35)' }], K.risk, .35, { fill: 'forwards' });
 A('#guar', [{ transform: 'scale(1)' }, { transform: 'scale(1.04)' }], K.risk, .3, { iter: 2, dir: 'alternate', fill: 'none', ease: 'ease-out' });
 A('#stage', [{ opacity: 1 }, { opacity: 0 }], T.end - .3, .3, { fill: 'forwards', ease: 'linear' });
 
