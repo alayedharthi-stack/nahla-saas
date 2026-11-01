@@ -180,6 +180,27 @@ body{font-family:'Cairo',sans-serif;color:#fff;-webkit-font-smoothing:antialiase
 .shine i{position:absolute;top:-20%;bottom:-20%;width:120px;left:-160px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.6),transparent);transform:skewX(-20deg)}
 </style>
 
+<style id="s8-css">
+/* ---------- S8 : sales growth + guarantee ---------- */
+.s8h{position:absolute;left:0;right:0;top:190px;text-align:center;font-weight:900;font-size:80px;line-height:1.25;color:var(--ink)}
+.s8h .g{color:var(--green)}
+.chart{position:absolute;left:90px;right:90px;top:360px;height:520px;background:#fff;border:2px solid var(--border);border-radius:44px;
+  box-shadow:0 22px 56px rgba(15,30,51,.10);padding:36px 40px 30px;display:flex;flex-direction:column;gap:18px}
+.ch-top{display:flex;justify-content:space-between;align-items:flex-start}
+.ch-t{font-weight:900;font-size:44px;color:var(--ink);line-height:1.2}
+.ch-s{font-weight:700;font-size:30px;color:var(--muted)}
+.ch-badge{padding:10px 26px;border-radius:999px;background:var(--mint);color:var(--green);font-weight:900;font-size:34px;white-space:nowrap}
+.ch-svg{flex:1;width:100%;overflow:visible}
+.guar{position:absolute;left:90px;right:90px;top:935px;display:flex;align-items:center;gap:30px;padding:30px 40px;border-radius:40px;
+  background:var(--mint);border:2px solid rgba(20,130,73,.25)}
+.guar .gi{flex:0 0 120px;height:120px;border-radius:36px;background:#fff;display:grid;place-items:center;font-size:72px;box-shadow:0 10px 24px rgba(20,130,73,.15)}
+.guar .g1{font-weight:900;font-size:50px;color:var(--ink);line-height:1.3}
+.guar .g2{font-weight:700;font-size:40px;color:var(--muted);line-height:1.4}
+.guar .g2 b{color:var(--green);font-weight:900}
+#s8 .btn{top:1245px}
+#s8 .s7salla{top:1440px}
+#s8 .url{top:1530px}
+</style>
 <style id="light-identity">
 /* ===== Light identity (from merchant-app references): off-white canvas, Nahla green, pastel cards ===== */
 :root{
@@ -423,6 +444,22 @@ body{color:var(--ink)}
     <div class="s7brand" id="s7brand">نحلة</div>
     <div class="s7tagline" id="s7tagline">محادثاتك .. مبيعاتك</div>
     <div class="s7tag" id="s7tag"><div id="t1"><span class="g">واتسابك</span> يبقى معك…</div><div id="t2" class="amber">ونحلة تبيع معك</div></div>
+  </section>
+
+  <!-- ===== S8 sales growth + guarantee + CTA ===== -->
+  <section class="scene" id="s8">
+    <div class="s8h" id="s8h">ونحلة <span class="g">تزيد مبيعاتك</span> 📈</div>
+    <div class="chart" id="chart">
+      <div class="ch-top"><div><div class="ch-t">مبيعات متجرك</div><div class="ch-s">مع نحلة على واتساب</div></div><div class="ch-badge" id="chBadge">↑ في ازدياد</div></div>
+      <svg class="ch-svg" viewBox="-14 -20 828 330" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="chFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#148249" stop-opacity=".28"/><stop offset="1" stop-color="#148249" stop-opacity="0"/></linearGradient></defs>
+        <g stroke="#e3eaf1" stroke-width="2"><line x1="0" y1="75" x2="800" y2="75"/><line x1="0" y1="150" x2="800" y2="150"/><line x1="0" y1="225" x2="800" y2="225"/></g>
+        <path id="chArea" d="M0 262 C60 258 90 238 140 240 S230 252 280 226 S370 204 420 206 S510 178 560 150 S650 128 700 96 S770 52 800 40 L800 300 L0 300 Z" fill="url(#chFill)"/>
+        <path id="chLine" d="M0 262 C60 258 90 238 140 240 S230 252 280 226 S370 204 420 206 S510 178 560 150 S650 128 700 96 S770 52 800 40" fill="none" stroke="#148249" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" pathLength="1000" stroke-dasharray="1000" stroke-dashoffset="1000"/>
+        <circle id="chDot" cx="800" cy="40" r="13" fill="#148249" stroke="#fff" stroke-width="5"/>
+      </svg>
+    </div>
+    <div class="guar" id="guar"><div class="gi">🛡️</div><div><div class="g1">جرّبها ١٤ يوم مجاناً</div><div class="g2">إذا ما زادت مبيعاتك… <b style="display:inline-block">ما تخسر ولا ريال</b></div></div></div>
     <div class="btn" id="btn">جرّبها مجاناً ١٤ يوم<div class="shine"><i id="shine"></i></div></div>
     <div class="s7salla" id="s7salla">من <span class="s">متجر تطبيقات سلة</span></div>
     <div class="url" id="url">nahlah.ai</div>
@@ -481,7 +518,7 @@ const SHOW = (sel, t0, t1) => { A(sel, [{ opacity: 0 }, { opacity: 1 }], t0, .01
 
 /* ===== Timing: every cue comes from the voiceover (timing.js -> window.K, absolute seconds) ===== */
 const K = window.K;
-const T = { s2: K.s2, s3: K.s3, s4: K.s4, sF: K.sF, s5: K.s5, s6: K.s6, s7: K.s7, end: K.end };
+const T = { s2: K.s2, s3: K.s3, s4: K.s4, sF: K.sF, s5: K.s5, s6: K.s6, s7: K.s7, s8: K.s8, end: K.end };
 
 // background drift + pollen
 hooks.push(t => {
@@ -623,10 +660,24 @@ A('#btn', [{ transform: 'translateX(-50%) scale(1)' }, { transform: 'translateX(
 A('#shine', [{ left: '-160px' }, { left: '1000px' }], K.btn + .8, .9, { iter: 3, fill: 'none', ease: 'ease-in-out' });
 IN('#s7salla', K.salla, .45);
 IN('#url', K.salla + .4, .45);
+OUT('#s7', T.s8 - .35, .35, 'translateY(-60px) scale(.96)');
+/* ===== S8: sales growth + guarantee + CTA ===== */
+const s8 = T.s8;
+IN('#s8h', s8 + .02, .55, 'translateY(40px) scale(.94)', { ease: BACK });
+A('#chart', [{ opacity: 0, transform: 'translateY(60px) scale(.96)' }, { opacity: 1, transform: 'none' }], s8 + .2, .55);
+A('#chLine', [{ strokeDashoffset: 1000 }, { strokeDashoffset: 0 }], s8 + .45, 1.6, { ease: 'cubic-bezier(.45,0,.2,1)' });
+A('#chArea', [{ opacity: 0 }, { opacity: 1 }], s8 + .9, 1.2, { ease: 'linear' });
+A('#chDot', [{ opacity: 0, transform: 'scale(0)' }, { opacity: 1, transform: 'scale(1)' }], s8 + 2.0, .4, { ease: BACK });
+A('#chDot', [{ transform: 'scale(1)' }, { transform: 'scale(1.35)' }], s8 + 2.45, .45, { iter: 10, dir: 'alternate', fill: 'none', ease: 'ease-in-out' });
+A('#chBadge', [{ opacity: 0, transform: 'scale(.4)' }, { opacity: 1, transform: 'scale(1)' }], s8 + 1.9, .45, { ease: BACK });
+A('#guar', [{ opacity: 0, transform: 'translateY(40px) scale(.95)' }, { opacity: 1, transform: 'none' }], K.guar, .55, { ease: BACK });
+A('#guar .gi', [{ transform: 'rotate(0)' }, { transform: 'rotate(-10deg) scale(1.1)' }, { transform: 'rotate(0)' }], K.guar + .5, .6, { fill: 'none' });
+A('#guar .g2 b', [{ color: '#148249', textShadow: '0 0 0 rgba(20,130,73,0)' }, { color: '#0f7a3f', textShadow: '0 0 18px rgba(20,130,73,.35)' }], K.risk, .35, { fill: 'forwards' });
+A('#guar', [{ transform: 'scale(1)' }, { transform: 'scale(1.04)' }], K.risk, .3, { iter: 2, dir: 'alternate', fill: 'none', ease: 'ease-out' });
 A('#stage', [{ opacity: 1 }, { opacity: 0 }], T.end - .3, .3, { fill: 'forwards', ease: 'linear' });
 
 /* scene visibility gates */
-const gates = [['#s12', -1, T.s3], ['#s3', T.s3 - .2, T.s4], ['#s4', T.s4 - .1, T.sF], ['#sF', T.sF - .1, T.s5], ['#s5', T.s5 - .1, T.s6], ['#s6', T.s6 - .1, T.s7], ['#s7', T.s7 - .1, 999]];
+const gates = [['#s12', -1, T.s3], ['#s3', T.s3 - .2, T.s4], ['#s4', T.s4 - .1, T.sF], ['#sF', T.sF - .1, T.s5], ['#s5', T.s5 - .1, T.s6], ['#s6', T.s6 - .1, T.s7], ['#s7', T.s7 - .1, T.s8], ['#s8', T.s8 - .1, 999]];
 hooks.push(t => gates.forEach(([s, a, b]) => { document.querySelector(s).style.visibility = (t >= a && t < b) ? 'visible' : 'hidden'; }));
 
 window.DURATION = T.end;

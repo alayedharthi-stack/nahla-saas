@@ -292,6 +292,11 @@ place(sfx, K['s7'] - .3, whoosh(0.5), 0.35)
 place(sfx, K['s7'], impact(True), 0.45)
 place(sfx, K['btn'], pop(500, 1300, 0.12), 0.35)
 place(sfx, K['btn'] + .8, sparkle(), 0.3)
+# S8: sales growth + guarantee
+place(sfx, K['s8'] - .3, whoosh(0.5), 0.35)
+place(sfx, K['s8'] + 2.0, sparkle(), 0.35)
+place(sfx, K['guar'], pop(500, 1100, 0.12), 0.35)
+place(sfx, K['risk'] + .05, thud(), 0.6)
 
 # ------------------------------------------------------------------ voice + ducking + mix
 import wave as _w
