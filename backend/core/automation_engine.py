@@ -181,6 +181,193 @@ def emit_automation_event(
     return ev
 
 
+async def send_reserved_salla_communication(
+    db: Session,
+    event: Any,
+    *,
+    tenant_id: int,
+    store_id: str,
+    integration_connection_id: int,
+) -> None:
+    """Execute one signed, synchronous Salla Function send on its own ledger.
+
+    The Function must report Meta acceptance synchronously. It is not a
+    SmartAutomation: manufacturing an AutomationExecution would inflate its
+    metrics. The engine owns the irreversible provider boundary while the
+    WebhookEvent reservation and outcome remain the authoritative audit.
+    """
+    import hashlib
+    import hmac
+    import json
+    import re
+
+    from sqlalchemy import update
+    from models import Order, WebhookEvent, WhatsAppConnection
+    from core.salla_communication_whatsapp import EVENT, _enabled_for, parse_notice
+    from core.commerce_lifecycle.canary_guard import (
+        commerce_lifecycle_dispatch_tenant_permitted,
+    )
+    from core.commerce_lifecycle.window import lifecycle_service_window_is_open
+    from services.whatsapp_platform.service import provider_send_message
+    from utils.phone_utils import normalize_to_e164
+
+    if (
+        event.provider != "salla_function"
+        or event.signature_valid is not True
+        or event.event_type != EVENT
+    ):
+        raise RuntimeError("unverified_communication_source")
+    if not event.external_event_id:
+        raise RuntimeError("communication_identity_missing")
+    if not store_id or str(event.store_id or "") != str(store_id):
+        raise RuntimeError("communication_store_mismatch")
+    if (
+        getattr(event, "tenant_id", None) is not None
+        and int(event.tenant_id) != int(tenant_id)
+    ):
+        raise RuntimeError("communication_tenant_mismatch")
+    state = str(event.communication_send_state or "")
+    if state in {"accepted", "delivered", "read"} and event.communication_provider_message_id:
+        return
+    if state in {"sending", "ambiguous", "failed", "blocked", "delivery_failed"}:
+        raise RuntimeError(f"communication_send_{state}_requires_reconciliation")
+    if state:
+        raise RuntimeError("unknown_communication_send_state")
+
+    # Use precisely the persisted bytes whose Function HMAC was verified.
+    body_digest = str(
+        (getattr(event, "raw_headers", None) or {}).get("x-nahla-comm-body-sha256") or ""
+    )
+    if (
+        not isinstance(event.raw_body, str)
+        or not hmac.compare_digest(
+            body_digest,
+            hashlib.sha256(event.raw_body.encode("utf-8")).hexdigest(),
+        )
+    ):
+        raise RuntimeError("communication_signed_body_mismatch")
+    try:
+        signed = json.loads(event.raw_body)
+        notice = parse_notice(signed)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise RuntimeError("unverified_communication_source") from exc
+    if str(signed.get("merchant") or "") != str(store_id):
+        raise RuntimeError("communication_signed_body_mismatch")
+    if not _enabled_for(tenant_id=tenant_id, store_id=store_id, recipient=notice.recipient):
+        raise RuntimeError("communication_pilot_not_enabled_for_target")
+    if commerce_lifecycle_dispatch_tenant_permitted(tenant_id):
+        raise RuntimeError("communication_lifecycle_sender_conflict")
+    order = (
+        db.query(Order)
+        .filter(
+            Order.tenant_id == tenant_id,
+            Order.source == "salla",
+            Order.integration_connection_id == integration_connection_id,
+            Order.external_id == notice.order_external_id,
+        )
+        .one_or_none()
+    )
+    if order is None:
+        raise RuntimeError("communication_order_not_verified")
+    info = order.customer_info if isinstance(order.customer_info, dict) else {}
+    order_phone = normalize_to_e164(info.get("mobile") or info.get("phone"))
+    if not order_phone or order_phone != notice.recipient:
+        raise RuntimeError("communication_order_recipient_mismatch")
+
+    conn = db.query(WhatsAppConnection).filter_by(tenant_id=tenant_id).one_or_none()
+    if (
+        conn is None or conn.status != "connected" or not conn.sending_enabled
+        or conn.provider != "meta" or not conn.phone_number_id
+    ):
+        raise RuntimeError("communication_whatsapp_connection_unavailable")
+    window_open, _ = lifecycle_service_window_is_open(db, tenant_id, notice.recipient)
+    if not window_open:
+        raise RuntimeError("communication_approved_template_required")
+
+    # Commit the claim before contacting Meta. Unknown outcomes are terminal
+    # until explicit reconciliation; no automatic retry is possible.
+    claimed = db.execute(
+        update(WebhookEvent)
+        .where(
+            WebhookEvent.id == event.id,
+            WebhookEvent.tenant_id == tenant_id,
+            WebhookEvent.provider == "salla_function",
+            WebhookEvent.event_type == EVENT,
+            WebhookEvent.store_id == store_id,
+            WebhookEvent.signature_valid.is_(True),
+            WebhookEvent.communication_send_state.is_(None),
+        )
+        .values(
+            communication_send_state="sending",
+            communication_send_attempted_at=datetime.now(timezone.utc),
+        )
+        .returning(WebhookEvent.id)
+    ).scalar_one_or_none()
+    if claimed is None:
+        db.rollback()
+        raise RuntimeError("communication_send_already_reserved")
+    db.commit()
+    db.refresh(event)
+    try:
+        response, _ = await provider_send_message(
+            db,
+            conn,
+            tenant_id=tenant_id,
+            operation="salla_communication_whatsapp",
+            phone_id=str(conn.phone_number_id),
+            payload={
+                "messaging_product": "whatsapp",
+                "to": notice.recipient,
+                "type": "text",
+                "text": {"body": notice.content, "preview_url": False},
+            },
+            blocked_path="salla_communication_whatsapp",
+        )
+    except Exception as exc:
+        db.rollback()
+        event.communication_send_state = "ambiguous"
+        event.communication_send_error_code = "provider_outcome_unknown"
+        db.add(event)
+        db.commit()
+        raise RuntimeError("communication_provider_outcome_unknown") from exc
+
+    messages = response.get("messages") if isinstance(response, dict) else None
+    message_id = (
+        str(messages[0].get("id") or "")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict)
+        else ""
+    )
+    if len(message_id) > 128:
+        # Meta may have accepted the send. Truncating its identity would make
+        # the later receipt unmatchable and could collide with another ID.
+        event.communication_send_state = "ambiguous"
+        event.communication_send_error_code = "provider_message_id_too_long"
+        db.add(event)
+        db.commit()
+        raise RuntimeError("communication_provider_message_id_too_long")
+    if message_id:
+        event.communication_send_state = "accepted"
+        event.communication_provider_message_id = message_id
+        event.communication_send_error_code = None
+        db.add(event)
+        db.commit()
+        return
+
+    error = response.get("error") if isinstance(response, dict) else None
+    if isinstance(error, dict):
+        event.communication_send_state = "failed"
+        event.communication_send_error_code = (
+            re.sub(r"[^a-z0-9_]", "_", str(error.get("code") or "provider_error").lower())[:64]
+            or "provider_error"
+        )
+    else:
+        event.communication_send_state = "ambiguous"
+        event.communication_send_error_code = "provider_response_without_message_id"
+    db.add(event)
+    db.commit()
+    raise RuntimeError("communication_provider_send_not_confirmed")
+
+
 # ── Public: main processing entry point ──────────────────────────────────────
 
 def _is_autopilot_enabled(db: Session, tenant_id: int) -> bool:

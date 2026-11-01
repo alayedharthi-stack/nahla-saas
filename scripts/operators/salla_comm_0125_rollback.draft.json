@@ -1,6 +1,6 @@
 {
   "record_version": 2,
-  "status": "DRAFT_ONLY_REQUIRES_COMPATIBLE_SOURCE_PINS",
+  "status": "DRAFT_ONLY_REQUIRES_INDEPENDENT_REVIEW_REF",
   "rollback_mode": "compatible_source_flags_off",
   "phase": "S4_COMM_DORMANT",
   "database_heads": [
@@ -25,6 +25,25 @@
     "VITE_SHOPIFY_CATALOG_IMPORT_UI": "false",
     "SALLA_COMM_WHATSAPP_ENABLED": "false"
   },
-  "compatible_rollback": null,
+  "authorized_production_head": "a36ad7e3442bf23bfd56cdab243df006d5f11e05",
+  "compatible_rollback": {
+    "source_sha": "a36ad7e3442bf23bfd56cdab243df006d5f11e05",
+    "runtime_inventory_digest": "767454526995fd5e390ad39e781f4d9cdddf239cb3bfdb9e32a367a3af0b8d0b",
+    "runtime_inventory_count": 166,
+    "shopify_expectations_sha256": "d4a588f222e9d3da95db8936830850917aed5d12aab08b55661fc3ce62bb5911",
+    "communication_expectations_sha256": "87c15ab714e5f4dccf6fa6666e80ae708392e32ad71a8d972daf827681b1e461",
+    "independent_review_ref": null
+  },
+  "operator_observation": {
+    "source_sha": "a36ad7e3442bf23bfd56cdab243df006d5f11e05",
+    "receipt_library_id": null,
+    "receipt_sha256": null,
+    "railway_deployment_id": null,
+    "railway_snapshot_id": null,
+    "build_output_image_digest": null,
+    "predeploy_command_sha256": null,
+    "requires_fresh_authenticated_provider_recheck": true,
+    "observed_database_heads_after_deploy": null
+  },
   "approval": "none"
 }

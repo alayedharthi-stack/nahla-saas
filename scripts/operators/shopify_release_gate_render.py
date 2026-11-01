@@ -81,6 +81,7 @@ DIG = {digest}
 GSHA = {gate_sha}
 ASHA = {approval_sha}
 ARGV = {argv}
+ENTRY = {entrypoint}
 
 
 def fail(reason):
@@ -200,9 +201,12 @@ class RepositoryImportGate:
 importlib.machinery.SourceFileLoader.get_code = verified_get_code
 sys.meta_path.insert(0, RepositoryImportGate())
 sys.path.insert(0, root)
-sys.argv = [gate_path] + ARGV
-exec(compile(verified[os.path.abspath(gate_path)], gate_path, "exec"),
-     {"__name__": "__main__", "__file__": gate_path})
+entry_path = os.path.join(R, ENTRY)
+if os.path.abspath(entry_path) not in verified:
+    fail("entrypoint_unverified")
+sys.argv = [entry_path] + ARGV
+exec(compile(verified[os.path.abspath(entry_path)], entry_path, "exec"),
+     {"__name__": "__main__", "__file__": entry_path})
 '''
 
 
@@ -257,10 +261,13 @@ def _check_tokens(*values: str) -> None:
 
 
 def render_source(root: Path, *, release_sha: str, phase: str, approval_sha256: str, project: str, environment: str, service: str,
-                  db: str, backup_service: str, backup_volume: str, container_root: str = k.CONTAINER_ROOT) -> str:
+                  db: str, backup_service: str, backup_volume: str, container_root: str = k.CONTAINER_ROOT,
+                  migrate_0125: bool = False) -> str:
     """The bootstrap program with every literal substituted (readable form)."""
     if k.phase(phase) is None:
         raise RenderRefusal("phase_not_deployable" if phase in k.INTERMEDIATE_STATES else "unknown_phase")
+    if migrate_0125 and phase != "S4_COMM_DORMANT":
+        raise RenderRefusal("migration_phase_mismatch")
     if not k.RELEASE_SHA_RE.match(release_sha):
         raise RenderRefusal("release_sha_malformed")
     if not k.DIGEST_RE.match(approval_sha256):
@@ -287,6 +294,7 @@ def render_source(root: Path, *, release_sha: str, phase: str, approval_sha256: 
         "libpq": list(k.LIBPQ_TARGET_ENV_VARS), "fixed": sorted(set(k.LEGACY_FIXED_FILES) | set(k.RUNTIME_EXTRA_FILES)),
         "absent": list(k.MUST_BE_ABSENT), "count": report["inventory_count"], "digest": report["inventory_digest"],
         "gate_sha": report["gate_sha256"], "approval_sha": approval_sha256, "argv": argv,
+        "entrypoint": "scripts/operators/salla_comm_0125_predeploy.py" if migrate_0125 else k.GATE_RELATIVE_PATH,
     }
     source = BOOTSTRAP_TEMPLATE
     for name, value in literals.items():
@@ -407,6 +415,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ren.add_argument("--python", default=PYTHON_IN_IMAGE)
     ren.add_argument("--container-root", default=k.CONTAINER_ROOT)
     ren.add_argument("--format", choices=("command", "source"), default="command")
+    ren.add_argument("--migrate-0125", action="store_true")
     _add_target_arguments(ren)
     snap = sub.add_parser("snapshot", add_help=False)
     snap.add_argument("--database-url", required=True)
@@ -440,7 +449,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     raise RenderRefusal("approval_" + str(verdict["reason"]))
                 kwargs = dict(release_sha=args.release_sha, phase=args.phase, approval_sha256=verdict["approval_sha256"], project=args.project,
                               environment=args.environment, service=args.service, db=args.db, backup_service=args.backup_service,
-                              backup_volume=args.backup_volume, container_root=args.container_root)
+                              backup_volume=args.backup_volume, container_root=args.container_root,
+                              migrate_0125=args.migrate_0125)
                 if args.format == "source":
                     print(render_source(Path(args.root), **kwargs))
                 else:

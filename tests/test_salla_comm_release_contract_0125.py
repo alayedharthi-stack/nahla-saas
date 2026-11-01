@@ -7,8 +7,13 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 from pathlib import Path
+import subprocess
+import tarfile
+
+import pytest
 
 from scripts.operators import shopify_release_gate_contract as k
 from scripts.operators import shopify_release_gate as gate
@@ -17,6 +22,128 @@ from backend.tests import _shopify_release_gate_harness as harness
 
 ROOT = Path(__file__).resolve().parents[1]
 COMM_PATH = ROOT / k.COMM_EXPECTATIONS_RELATIVE_PATH
+# The production head the owner authorized as this release's rollback target.
+AUTHORIZED_PRODUCTION_HEAD = "a36ad7e3442bf23bfd56cdab243df006d5f11e05"
+# Real observed case: the 6a8d7fa release head still carried the binding written
+# for the earlier a36 release (roll back to the then-deployed fd6 source).
+STALE_FD6_BINDING = {
+    "source_sha": "fd6b89617b2beaf33d77830988e0e23bcfaf9daa",
+    "runtime_inventory_digest": "703df1078ea5c438ec2aaf38b4531f478feef02b5bbc6f95b3f84bc03a3501fa",
+    "runtime_inventory_count": 165,
+}
+
+
+def _manifest():
+    return json.loads((ROOT / k.COMM_ROLLBACK_RELATIVE_PATH).read_text(encoding="utf-8"))
+
+
+def _rollback_conflicts(manifest, release_sha):
+    """Every way the rollback binding can disagree with the authorized production head."""
+    head = manifest.get("authorized_production_head")
+    prior = manifest.get("compatible_rollback") or {}
+    observed = manifest.get("operator_observation") or {}
+    problems = []
+    if not isinstance(head, str) or not k.RELEASE_SHA_RE.fullmatch(head):
+        problems.append("authorized_production_head_missing")
+    if prior.get("source_sha") != head:
+        problems.append("rollback_source_is_not_authorized_production_head")
+    if observed.get("source_sha") != head:
+        problems.append("operator_observation_is_for_another_source")
+    if head == release_sha:
+        problems.append("rollback_source_is_the_release_itself")
+    return problems
+
+
+def _release_sha():
+    result = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else "9" * 40
+
+
+def _bound_sample(manifest):
+    """The synthetic gate sample, re-bound to this manifest's exact rollback pins."""
+    evidence, snapshot, bindings, args = _sample()
+    prior = manifest["compatible_rollback"]
+    bindings["artifact"] = manifest
+    bindings["communication_schema_sha256"] = prior["communication_expectations_sha256"]
+    snapshot["source_sha"] = prior["source_sha"]
+    evidence.update(
+        source_sha=prior["source_sha"],
+        runtime_inventory_digest=prior["runtime_inventory_digest"],
+        runtime_inventory_count=prior["runtime_inventory_count"],
+        schema_expectations_sha256=prior["shopify_expectations_sha256"],
+        communication_schema_sha256=prior["communication_expectations_sha256"],
+        independent_review_ref=prior["independent_review_ref"],
+    )
+    return evidence, snapshot, bindings, args
+
+
+def test_rollback_binding_is_the_authorized_production_head_and_fails_closed_until_reviewed():
+    manifest = _manifest()
+    prior = manifest["compatible_rollback"]
+    observed = manifest["operator_observation"]
+    assert manifest["authorized_production_head"] == AUTHORIZED_PRODUCTION_HEAD
+    assert _rollback_conflicts(manifest, _release_sha()) == []
+    assert prior["runtime_inventory_count"] == 166
+    assert prior["communication_expectations_sha256"] == gate.file_sha256(COMM_PATH)
+    # Nothing observed for the a36 deployment exists in the repository yet.
+    assert all(observed[name] is None for name in observed
+               if name not in {"source_sha", "requires_fresh_authenticated_provider_recheck"})
+    assert observed["requires_fresh_authenticated_provider_recheck"] is True
+    assert manifest["approval"] == "none"
+    # No existing independent review covers a36 as this release's rollback
+    # source, so the binding stays unusable until one is recorded.
+    assert prior["independent_review_ref"] is None
+    assert manifest["status"] != "READY"
+    evidence, snapshot, bindings, args = _bound_sample(copy.deepcopy(manifest))
+    assert k._evaluate_comm_schema_rollback(evidence, snapshot, bindings, **args) == k.R_SCHEMA_ROLLBACK_INVALID
+    # Recording a review and READY is the only missing step; every pin is otherwise accepted.
+    reviewed = copy.deepcopy(manifest)
+    reviewed["status"] = "READY"
+    reviewed["compatible_rollback"]["independent_review_ref"] = "synthetic-review-of-a36-binding"
+    evidence, snapshot, bindings, args = _bound_sample(reviewed)
+    assert k._evaluate_comm_schema_rollback(evidence, snapshot, bindings, **args) is None
+
+
+@pytest.mark.parametrize("mutate,problem", [
+    (lambda m: m["compatible_rollback"].update(STALE_FD6_BINDING), "rollback_source_is_not_authorized_production_head"),
+    (lambda m: m["operator_observation"].update(source_sha=STALE_FD6_BINDING["source_sha"]),
+     "operator_observation_is_for_another_source"),
+    (lambda m: m.pop("authorized_production_head"), "authorized_production_head_missing"),
+    (lambda m: m.update(authorized_production_head=STALE_FD6_BINDING["source_sha"]),
+     "rollback_source_is_not_authorized_production_head"),
+])
+def test_rollback_source_conflicting_with_authorized_head_is_refused(mutate, problem):
+    manifest = copy.deepcopy(_manifest())
+    mutate(manifest)
+    assert problem in _rollback_conflicts(manifest, _release_sha())
+
+
+def test_release_cannot_name_itself_as_rollback():
+    manifest = _manifest()
+    assert "rollback_source_is_the_release_itself" in _rollback_conflicts(
+        manifest, manifest["authorized_production_head"])
+
+
+def _commit_available(sha):
+    return subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", sha + "^{commit}"],
+                          capture_output=True).returncode == 0
+
+
+def test_rollback_pins_are_recomputed_from_the_authorized_source_tree(tmp_path):
+    manifest = _manifest()
+    head = manifest["authorized_production_head"]
+    if not _commit_available(head):
+        pytest.skip("authorized production head is not in this (shallow) clone")
+    assert subprocess.run(["git", "-C", str(ROOT), "merge-base", "--is-ancestor", head, "HEAD"]).returncode == 0
+    paths = ["database", *k.LEGACY_FIXED_FILES, *k.RUNTIME_EXTRA_FILES, k.INSTALL_EXPECTATIONS_RELATIVE_PATH]
+    archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", head, "--", *sorted(set(paths))],
+                             capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(tmp_path, filter="data")
+    prior = manifest["compatible_rollback"]
+    assert gate.inventory(tmp_path) == (prior["runtime_inventory_count"], prior["runtime_inventory_digest"])
+    assert gate.file_sha256(tmp_path / k.INSTALL_EXPECTATIONS_RELATIVE_PATH) == prior["shopify_expectations_sha256"]
+    assert gate.file_sha256(tmp_path / k.COMM_EXPECTATIONS_RELATIVE_PATH) == prior["communication_expectations_sha256"]
 
 
 def _sample():

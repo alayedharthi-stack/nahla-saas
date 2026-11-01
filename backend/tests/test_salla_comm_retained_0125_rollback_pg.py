@@ -202,3 +202,191 @@ e.dispose()
                 }
         finally:
             engine.dispose()
+
+
+# ── a36 as the authorized rollback source: real rollback-only bytes on PG18 ──
+# The release binding names a36 as the 0125 rollback source. Render the
+# existing rollback-only command from the exact a36 tree, run its actual bytes
+# read-only on one synthetic database at 0124 and at 0125, and require refusal
+# of an expired approval, flags that are not OFF and tampered bytes, with the
+# database unchanged by every run. Identities, receipts and approvals are
+# synthetic; nothing reads Railway or production. Needs full git history.
+import base64  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+from hashlib import sha256  # noqa: E402
+import io  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import tarfile  # noqa: E402
+
+A36_ROLLBACK_SOURCE = "a36ad7e3442bf23bfd56cdab243df006d5f11e05"
+_A36_IDS = ("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333")
+_A36_BACKUP = ("44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555")
+_ROLLBACK_ONLY_MODULES = (
+    "scripts/operators/salla_comm_rollback_only_contract.py",
+    "scripts/operators/salla_comm_rollback_only_gate.py",
+    "scripts/operators/salla_comm_rollback_only_render.py",
+    "scripts/operators/salla_comm_rollback_only_source.py",
+    "scripts/operators/shopify_release_gate.py",
+    "scripts/operators/shopify_release_gate_contract.py",
+    "scripts/operators/shopify_release_gate_render.py",
+)
+
+
+def _a36_root(tmp_path: Path) -> Path:
+    """The exact a36 tree from git history, without the tracked .env file."""
+    archive = subprocess.run(
+        ["git", "-C", str(ROOT), "archive", "--format=tar", A36_ROLLBACK_SOURCE, "--", ".", ":(exclude).env"],
+        capture_output=True, check=True,
+    ).stdout
+    root = tmp_path / "a36-root"
+    root.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(root, filter="data")
+    return root
+
+
+def _a36_command(a36_root: Path, db_name: str, *, container_root: Path | None = None,
+                 approved_at: datetime | None = None, expires_at: datetime | None = None) -> tuple[bytes, bytes]:
+    from scripts.operators import shopify_release_gate as gate
+    from scripts.operators import shopify_release_gate_contract as existing
+    from scripts.operators import salla_comm_rollback_only_contract as terminal
+    from scripts.operators import salla_comm_rollback_only_render as render
+    from scripts.operators import salla_comm_rollback_only_source as source
+
+    target = terminal.Target(*_A36_IDS, topology._target(db_name))
+    count, digest = source.candidate_inventory(a36_root)
+    template = render.command_template(
+        a36_root, release_sha=A36_ROLLBACK_SOURCE, target=target,
+        backup_service=_A36_BACKUP[0], backup_volume=_A36_BACKUP[1],
+        container_root=str(container_root or a36_root),
+    )
+    now = datetime.now(timezone.utc)
+    approved_at = approved_at or now - timedelta(minutes=1)
+    expires_at = expires_at or now + timedelta(minutes=10)
+    utc = lambda value: value.isoformat().replace("+00:00", "Z")  # noqa: E731
+    record = {
+        "record_version": 2, "action": terminal.ACTION,
+        "target": {"project": target.project, "environment": target.environment,
+                   "service": target.service, "database_identity": target.database_identity},
+        "candidate_source_sha": A36_ROLLBACK_SOURCE,
+        "heads_before": sorted(terminal.HEADS_BEFORE), "heads_after": sorted(terminal.HEADS_AFTER),
+        "owner_approval_reference": "synthetic-owner-message",
+        "backup_service_id": _A36_BACKUP[0], "backup_volume_id": _A36_BACKUP[1],
+        "backup_receipt_sha256": "1" * 64, "restore_receipt_sha256": "2" * 64,
+        "rollback_command_template_sha256": sha256(template).hexdigest(),
+        "inventory_digest": digest, "inventory_count": count,
+        "shopify_schema_sha256": gate.file_sha256(a36_root / existing.INSTALL_EXPECTATIONS_RELATIVE_PATH),
+        "communication_schema_sha256": gate.file_sha256(a36_root / existing.COMM_EXPECTATIONS_RELATIVE_PATH),
+        "approved_at_utc": utc(approved_at), "expires_at_utc": utc(expires_at), "approved": True,
+    }
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    return payload, render.bind_command(template, sha256(payload).hexdigest())
+
+
+def _run_a36_command(payload: bytes, command: bytes, db_name: str, cwd: Path,
+                     env_changes: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
+    from scripts.operators import shopify_release_gate_contract as existing
+    from scripts.operators import salla_comm_rollback_only_contract as terminal
+
+    argv = shlex.split(command.decode("ascii"))
+    assert argv[0] == "python" and argv[1:3] == ["-I", "-c"]
+    argv[0] = sys.executable
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "SystemRoot", "TEMP", "TMP")
+           if key in os.environ}
+    env.update({
+        "RAILWAY_GIT_COMMIT_SHA": A36_ROLLBACK_SOURCE,
+        "RAILWAY_PROJECT_ID": _A36_IDS[0], "RAILWAY_ENVIRONMENT_ID": _A36_IDS[1],
+        "RAILWAY_SERVICE_ID": _A36_IDS[2],
+        "DATABASE_URL": topology._alias_url(db_name),
+        existing.APPROVAL_PAYLOAD_ENV: base64.b64encode(payload).decode("ascii"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    })
+    env.update({name: "false" for name in terminal.FLAG_NAMES})
+    for key, value in (env_changes or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=120, check=False)
+
+
+def _database_fingerprint(url) -> tuple:
+    """Heads, relations (incl. relfilenode), every table's rows and sequences."""
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            heads = tuple(sorted(row[0] for row in conn.execute(text("SELECT version_num FROM alembic_version"))))
+            relations = tuple(tuple(row) for row in conn.execute(text(
+                "SELECT c.relname, c.relkind, c.oid::bigint, c.relfilenode::bigint FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' ORDER BY c.relname"
+            )))
+            tables = [row[0] for row in conn.execute(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
+            ))]
+            rows = tuple(
+                (name, conn.execute(text(
+                    'SELECT md5(coalesce(string_agg(x::text, \'|\' ORDER BY x::text), \'\')) FROM "%s" x'
+                    % name.replace('"', '""')
+                )).scalar_one())
+                for name in tables
+            )
+            sequences = tuple(tuple(row) for row in conn.execute(text(
+                "SELECT sequencename, last_value FROM pg_sequences WHERE schemaname='public' ORDER BY 1"
+            )))
+    finally:
+        engine.dispose()
+    return heads, relations, rows, sequences
+
+
+def test_a36_rollback_only_bytes_are_read_only_on_0124_and_0125_and_refuse_unsafe_runs(tmp_path):
+    a36_root = _a36_root(tmp_path)
+    # The rendering code imported here is byte-identical to a36's own copy.
+    for relative in _ROLLBACK_ONLY_MODULES:
+        assert (a36_root / relative).read_bytes() == (ROOT / relative).read_bytes(), relative
+    # a36 keeps the Communication code dormant; it is not a Communication-free root.
+    assert (a36_root / "backend/core/salla_communication_whatsapp.py").is_file()
+    pass_line = "RESULT=PASS action=rollback_only_0125"
+
+    with fresh_database() as (url, db_name):
+        topology._build(db_name, "0124")
+        payload, command = _a36_command(a36_root, db_name)
+        before = _database_fingerprint(url)
+        assert before[0] == ("0111", "0113", "0124")
+        result = _run_a36_command(payload, command, db_name, a36_root)
+        assert result.returncode == 0 and pass_line in result.stdout, (result.stdout, result.stderr[-1000:])
+        assert _database_fingerprint(url) == before
+
+        migrated = topology._alembic(db_name, "upgrade", "0125")  # test setup, not the command
+        assert migrated.returncode == 0, migrated.stderr[-1000:]
+        after_migration = _database_fingerprint(url)
+        assert after_migration[0] == ("0111", "0113", "0125")
+        # The identical frozen payload and command bytes, after the forward migration.
+        result = _run_a36_command(payload, command, db_name, a36_root)
+        assert result.returncode == 0 and pass_line in result.stdout, (result.stdout, result.stderr[-1000:])
+        assert _database_fingerprint(url) == after_migration
+
+        now = datetime.now(timezone.utc)
+        expired_payload, expired_command = _a36_command(
+            a36_root, db_name, approved_at=now - timedelta(minutes=20), expires_at=now - timedelta(minutes=1))
+        tampered = tmp_path / "a36-tampered"
+        shutil.copytree(a36_root, tampered)
+        with open(tampered / "scripts/operators/salla_comm_0125_rollback.draft.json", "ab") as handle:
+            handle.write(b" ")
+        tampered_payload, tampered_command = _a36_command(a36_root, db_name, container_root=tampered)
+        refusals = {
+            "approval_expired": (expired_payload, expired_command, a36_root, None,
+                                 "RESULT=FAIL action=rollback_only_0125 reason=approval_expired"),
+            "flag_unset": (payload, command, a36_root, {"SALLA_COMM_WHATSAPP_ENABLED": None},
+                           "RESULT=FAIL action=rollback_only_0125 reason=flags_not_off"),
+            "flag_true": (payload, command, a36_root, {"NAHLA_SHOPIFY_CONNECTION_ENABLED": "true"},
+                          "RESULT=FAIL action=rollback_only_0125 reason=flags_not_off"),
+            "tampered_bytes": (tampered_payload, tampered_command, tampered, None,
+                               "BOOTSTRAP FAIL reason=inventory_digest_mismatch"),
+        }
+        for case, (case_payload, case_command, cwd, changes, expected) in refusals.items():
+            result = _run_a36_command(case_payload, case_command, db_name, cwd, changes)
+            assert result.returncode != 0 and pass_line not in result.stdout, (case, result.stdout)
+            assert expected in result.stdout, (case, result.stdout, result.stderr[-1000:])
+            assert _database_fingerprint(url) == after_migration, case
