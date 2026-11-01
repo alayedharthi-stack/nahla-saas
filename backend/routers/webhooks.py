@@ -49,6 +49,10 @@ from core.obs import EVENTS, log_event
 from core.webhook_audit import record_result as _record_signature_audit
 from core.webhook_enforcement import resolve_enforce
 from core.salla_webhook_identity import build_salla_webhook_external_event_id
+from core.salla_webhook_redaction import (
+    headers_with_body_policy,
+    sanitize_salla_webhook_body,
+)
 from core.webhook_events import (
     STATUS_FAILED,
     STATUS_RECEIVED,
@@ -239,9 +243,12 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
     Durable receiver for Salla webhooks.
 
     Responsibilities (in order):
-      1. Read raw body + verify HMAC signature.
-      2. Parse JSON (failures are still persisted with status='failed').
-      3. Persist the raw event to `webhook_events` and COMMIT.
+      1. Read raw body + verify HMAC signature over the ORIGINAL bytes.
+      2. Parse JSON (failures are still persisted with status='failed',
+         body withheld).
+      3. Persist the event to `webhook_events` and COMMIT. What is stored
+         is decided by `core.salla_webhook_redaction`: App Settings secrets
+         (e.g. `handoffSecret`) never reach raw_body / parsed_payload.
       4. Return 200 OK immediately — a 200 from this endpoint ONLY means
          "event received and durably stored", NOT "business logic ran".
 
@@ -326,6 +333,11 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         sig_accepted = False
     signature_valid = sig_accepted
 
+    # Signature (above), replay and event identity (below) use the original
+    # bytes/parse. Only what is persisted is sanitised; see the module.
+    body = sanitize_salla_webhook_body(raw_body)
+    persist_headers = headers_with_body_policy(request.headers, body)
+
     if not sig_accepted:
         # Persist the rejected event for audit, then reject so the caller
         # knows we won't process it. This is the only HTTP error we return.
@@ -339,8 +351,8 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
             persist_event(
                 db,
                 provider="salla",
-                raw_body=raw_body,
-                headers=request.headers,
+                raw_body=body.raw_body,
+                headers=persist_headers,
                 signature_valid=False,
                 initial_status=STATUS_FAILED,
                 initial_error=f"signature_invalid: {sig_reason}",
@@ -365,21 +377,17 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"status": "ignored", "reason": "replay"})
 
     # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
-    parsed_payload: dict | None = None
-    parse_error: str | None = None
-    try:
-        parsed_payload = await request.json()
-        if not isinstance(parsed_payload, dict):
-            parse_error = f"payload_not_object: {type(parsed_payload).__name__}"
-            parsed_payload = None
-    except Exception as exc:
-        parse_error = f"invalid_json: {exc}"
+    # The unsanitised parse is used in memory for routing and identity only.
+    parsed_payload: dict | None = body.original_payload
+    parse_error: str | None = body.error
+    if parse_error is not None:
+        # No raw preview: an unparseable body cannot be sanitised.
         log_event(
             EVENTS.WEBHOOK_INVALID_JSON,
             provider="salla",
             ip=client_ip,
-            err=exc,
-            raw_preview=raw_body[:200].decode("utf-8", errors="replace") if raw_body else "",
+            err=parse_error,
+            body_len=len(raw_body),
         )
 
     # ── 3. Extract event metadata for indexing ───────────────────────────────
@@ -418,9 +426,9 @@ async def salla_webhook(request: Request, db: Session = Depends(get_db)):
         ev = persist_event(
             db,
             provider="salla",
-            raw_body=raw_body,
-            headers=request.headers,
-            parsed_payload=parsed_payload,
+            raw_body=body.raw_body,
+            headers=persist_headers,
+            parsed_payload=body.parsed_payload,
             event_type=event_type,
             external_event_id=external_event_id,
             store_id=store_id,
@@ -628,6 +636,11 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
     )
     signature_valid = sig_accepted
 
+    # Signature (above), replay and event identity (below) use the original
+    # bytes/parse. Only what is persisted is sanitised.
+    body = sanitize_salla_webhook_body(raw_body)
+    persist_headers = headers_with_body_policy(request.headers, body)
+
     if not sig_accepted:
         log_event(
             EVENTS.WEBHOOK_SIGNATURE_INVALID,
@@ -639,8 +652,8 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
             persist_event(
                 db,
                 provider="salla_oauth",
-                raw_body=raw_body,
-                headers=request.headers,
+                raw_body=body.raw_body,
+                headers=persist_headers,
                 signature_valid=False,
                 initial_status=STATUS_FAILED,
                 initial_error=f"signature_invalid: {sig_reason}",
@@ -659,21 +672,17 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({"status": "ignored", "reason": "replay"})
 
     # ── 2. JSON parsing (tolerant) ───────────────────────────────────────────
-    parsed_payload: dict | None = None
-    parse_error: str | None = None
-    try:
-        parsed_payload = await request.json()
-        if not isinstance(parsed_payload, dict):
-            parse_error = f"payload_not_object: {type(parsed_payload).__name__}"
-            parsed_payload = None
-    except Exception as exc:
-        parse_error = f"invalid_json: {exc}"
+    # The unsanitised parse is used in memory for routing and identity only.
+    parsed_payload: dict | None = body.original_payload
+    parse_error: str | None = body.error
+    if parse_error is not None:
+        # No raw preview: an unparseable body cannot be sanitised.
         log_event(
             EVENTS.WEBHOOK_INVALID_JSON,
             provider="salla_oauth",
             ip=client_ip,
-            err=exc,
-            raw_preview=raw_body[:200].decode("utf-8", errors="replace") if raw_body else "",
+            err=parse_error,
+            body_len=len(raw_body),
         )
 
     # ── 3. Extract event metadata for indexing ───────────────────────────────
@@ -708,9 +717,9 @@ async def salla_oauth_webhook(request: Request, db: Session = Depends(get_db)):
         ev = persist_event(
             db,
             provider="salla_oauth",
-            raw_body=raw_body,
-            headers=request.headers,
-            parsed_payload=parsed_payload,
+            raw_body=body.raw_body,
+            headers=persist_headers,
+            parsed_payload=body.parsed_payload,
             event_type=event_type,
             external_event_id=external_event_id,
             store_id=store_id,
