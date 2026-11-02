@@ -399,9 +399,9 @@ html,body{width:1920px;height:1080px}
   <section class="scene" id="s3">
     <div class="bee-big" id="beeBig"><img src="bee.png" alt=""></div>
     <div class="brand" id="brand">نحلة</div>
-    <div class="brand-tag" id="brandTag">ذكاء اصطناعي ✨</div>
+    <div class="brand-tag" id="brandTag">محادثاتك .. مبيعاتك</div>
     <div class="brand-sub" id="brandSub">
-      <div id="bs1">نحلة <span class="amber">ترد</span>… ونحلة <span class="amber">تبيع</span></div>
+      <div id="bs1">ذكاء اصطناعي <span class="amber">يرد ويبيع</span></div>
       <div id="bs2">على <span class="wa">واتساب أعمالك</span></div>
     </div>
   </section>
@@ -410,7 +410,7 @@ html,body{width:1920px;height:1080px}
   <section class="scene" id="s4">
     <div class="cap">
       <div id="cap1">نحلة ترد على عميلك بثواني…</div>
-      <div id="cap2" class="amber">…ونحلة تقفل البيعة ✅</div>
+      <div id="cap2" class="amber">…وتقفل البيعة ✅</div>
     </div>
     <div class="phonewrap"><div class="phone" id="phone">
       <div class="screen">
@@ -452,8 +452,8 @@ html,body{width:1920px;height:1080px}
   <section class="scene" id="sF">
     <div class="fh"><div class="fq" id="fq">ومو بس ترد…</div><div class="fa" id="fa">نحلة تشتغل عنك</div></div>
     <div class="fcards">
-      <div class="fcard" id="f1"><div class="fi">🛒</div><div><div class="ft">نحلة تتابع السلات المتروكة</div><div class="fs">وتذكّر العميل يكمل طلبه</div></div></div>
-      <div class="fcard" id="f2"><div class="fi">📣</div><div><div class="ft">نحلة ترسل حملاتك وعروضك</div><div class="fs">لعملائك على واتساب</div></div></div>
+      <div class="fcard" id="f1"><div class="fi">🛒</div><div><div class="ft">تتابع السلات المتروكة</div><div class="fs">وتذكّر العميل يكمل طلبه</div></div></div>
+      <div class="fcard" id="f2"><div class="fi">📣</div><div><div class="ft">وترسل حملاتك وعروضك</div><div class="fs">لعملائك على واتساب</div></div></div>
       <div class="fcard" id="f3"><div class="fi">🕐</div><div><div class="ft">على مدار الساعة</div><div class="fs"><span dir="ltr">24/7</span> … حتى وأنت نايم 😴</div></div></div>
     </div>
   </section>
@@ -495,7 +495,7 @@ html,body{width:1920px;height:1080px}
 
   <!-- ===== S6 Salla ===== -->
   <section class="scene" id="s6">
-    <div class="s6h" id="s6h">نحلة مربوطة مباشرة<br>بمتجرك في <span class="s">سلة</span></div>
+    <div class="s6h" id="s6h">ومربوطة مباشرة<br>بمتجرك في <span class="s">سلة</span></div>
     <div class="wire w1" id="w1"></div>
     <div class="wire w2" id="w2"></div>
     <div class="dot" id="d1"></div><div class="dot" id="d2"></div><div class="dot" id="d3"></div><div class="dot" id="d4"></div>
@@ -641,7 +641,7 @@ A('#flash', [{ transform: 'scale(0)', opacity: 1 }, { transform: 'scale(9)', opa
 A('#beeBig', [{ opacity: 0, transform: 'scale(.2) rotate(-14deg)' }, { opacity: 1, transform: 'scale(1) rotate(0)' }], T.s3 + .05, .9, { ease: BACK });
 A('#beeBig img', [{ transform: 'translateY(0)' }, { transform: 'translateY(-18px)' }], T.s3 + 1, .9, { iter: 8, dir: 'alternate', ease: 'ease-in-out', fill: 'none' });
 A('#brand', [{ opacity: 0, transform: 'translateY(60px) scale(.9)', filter: 'blur(10px)' }, { opacity: 1, transform: 'none', filter: 'blur(0)' }], K.brand, .6);
-IN('#brandTag', K.ai, .5);
+IN('#brandTag', K.brand + .35, .5);
 IN('#bs1', K.bs1, .55);
 IN('#bs2', K.bs2, .55);
 OUT('#s3', T.s4 - .35, .35, 'scale(1.06)');
