@@ -118,6 +118,32 @@ def test_connect_registers_once_and_proves_the_current_generation(pg):
     assert "shpat_" not in serialized and "shprt_" not in serialized
 
 
+SESSION_POLICIES = pytest.mark.parametrize("autoflush", [False, True], ids=["production-no-autoflush", "autoflush"])
+
+
+@SESSION_POLICIES
+def test_completion_promotes_on_proof_recorded_in_its_own_transaction(pg, autoflush):
+    # The proof is written and read back in the completion's final transaction;
+    # production sessions never autoflush, so promotion must not depend on it.
+    pg.Session.configure(autoflush=autoflush)
+    fake, merchant = foundation.FakeShopify(), foundation.Merchant(pg, f"policy-ready-{int(autoflush)}")
+    summary = connect(pg, merchant, SHIRTS, fake)
+    assert summary["status"] == "active" and ready_for(pg, SHIRTS)
+    assert [p["generation"] for p in proofs(pg, SHIRTS)] == [row(pg, SHIRTS)["generation"]]
+    assert fake.count("exchange") == 1 and len(exact_subscriptions(fake, SHIRTS)) == 1
+
+
+@SESSION_POLICIES
+def test_completion_without_proof_stays_fail_closed(pg, autoflush):
+    pg.Session.configure(autoflush=autoflush)
+    fake, merchant = foundation.FakeShopify(), foundation.Merchant(pg, f"policy-unproven-{int(autoflush)}")
+    fake.create_errors = [transient()]
+    assert refused(connect, pg, merchant, PERFUME, fake) == lifecycle.C_WEBHOOK_PENDING
+    assert_held_with_grant(pg, PERFUME)
+    assert proofs(pg, PERFUME) == [] and lifecycle.WEBHOOK_FAILED in audit_actions(pg, PERFUME)
+    assert not ready_for(pg, PERFUME) and exact_subscriptions(fake, PERFUME) == []
+
+
 def test_existing_exact_subscription_is_reused_and_reconnect_never_duplicates(pg):
     fake, merchant = foundation.FakeShopify(), foundation.Merchant(pg, "shirts")
     seeded = fake.add_webhook(SHIRTS, uri=URI)

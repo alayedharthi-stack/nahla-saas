@@ -4068,6 +4068,94 @@ class SallaAdapter(BaseStoreAdapter):
                 self._mark_needs_reauth("salla_coupon_status_401")
             response.raise_for_status()
 
+    async def update_coupon_terms(
+        self,
+        coupon_id,
+        *,
+        amount=None,
+        expiry_date=None,
+    ) -> None:
+        """Update only coupon amount and/or expiry_date via a targeted PUT.
+
+        Contract: only supplied fields are sent; status/code/type/eligibility
+        and free_shipping are never included.  Confirmation (GET) is owned by
+        the caller.
+        """
+        import json
+        import re
+        from decimal import Decimal, InvalidOperation
+
+        from core.acceptance_execution_context import deny_external_egress
+
+        deny_external_egress(
+            egress_kind="salla_integration",
+            operation="put",
+            tenant_id=self._tenant_id,
+        )
+        self._require_auth("update_coupon_terms")
+
+        if not str(coupon_id).isdigit():
+            raise ValueError("invalid_coupon_id")
+
+        if amount is None and expiry_date is None:
+            raise ValueError("update_coupon_terms_requires_at_least_one_field")
+
+        # --- validate & canonicalise amount ---
+        amount_fragment: str | None = None
+        if amount is not None:
+            if not isinstance(amount, str):
+                raise ValueError("amount_must_be_decimal_string")
+            # Allow only an optional leading minus-less positive decimal:
+            # digits, optional single dot, more digits – no exponent, no hex,
+            # no leading/trailing whitespace, no empty string.
+            if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", amount):
+                raise ValueError("invalid_amount_format")
+            try:
+                d = Decimal(amount)
+            except InvalidOperation:
+                raise ValueError("invalid_amount_value")
+            if d <= 0:
+                raise ValueError("amount_must_be_positive")
+            # format(d, 'f') renders the exact decimal without scientific
+            # notation and without altering precision (no normalize).
+            amount_fragment = format(d, "f")
+
+        # --- validate expiry_date ---
+        expiry_fragment: str | None = None
+        if expiry_date is not None:
+            if not isinstance(expiry_date, str):
+                raise ValueError("expiry_date_must_be_string")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", expiry_date):
+                raise ValueError("invalid_expiry_date_format")
+            import datetime as _dt
+            try:
+                _dt.date.fromisoformat(expiry_date)
+            except ValueError:
+                raise ValueError("invalid_expiry_date_value")
+            expiry_fragment = expiry_date
+
+        # Build the final content string.  For amount we splice in the
+        # pre-validated decimal fragment directly to avoid float rounding.
+        if amount_fragment is not None and expiry_fragment is not None:
+            date_json = json.dumps(expiry_fragment)
+            content = f'{{"amount":{amount_fragment},"expiry_date":{date_json}}}'
+        elif amount_fragment is not None:
+            content = f'{{"amount":{amount_fragment}}}'
+        else:
+            content = json.dumps({"expiry_date": expiry_fragment})
+
+        await self._ensure_token_fresh()
+        headers = {**self._headers(), "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            url = f"{SALLA_API_BASE}/coupons/{coupon_id}"
+            response = await client.put(url, headers=headers, content=content)
+            if response.status_code == 401 and self._refresh_token:
+                if await self._refresh_access_token():
+                    headers = {**self._headers(), "Content-Type": "application/json"}
+                    response = await client.put(url, headers=headers, content=content)
+            if response.status_code == 401:
+                self._mark_needs_reauth("salla_coupon_terms_401")
+            response.raise_for_status()
     async def create_coupon(
         self,
         code: str,

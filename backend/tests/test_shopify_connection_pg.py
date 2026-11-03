@@ -163,7 +163,8 @@ def pg(template_db, monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     name = _fresh_db("shp", template=template_db)
     eng = create_engine(_url(name), pool_size=12, max_overflow=12, future=True)
-    factory = sessionmaker(bind=eng, expire_on_commit=False, future=True)
+    # Production session policy (database/session.py): no autoflush, expire on commit.
+    factory = sessionmaker(bind=eng, autoflush=False, expire_on_commit=True, future=True)
     try:
         yield SimpleNamespace(name=name, engine=eng, Session=factory)
     finally:
@@ -413,6 +414,15 @@ def barrier_hook():
         assert release.wait(20), "barrier not released"
 
     return hook, entered, release
+
+
+# ── Session policy ────────────────────────────────────────────────────────────
+
+def test_pg_fixture_matches_the_production_session_policy(pg):
+    from core.database import SessionLocal as production   # noqa: PLC0415 — builds an engine, never connects
+    for key, default in (("autoflush", True), ("expire_on_commit", True)):
+        assert pg.Session.kw.get(key, default) == production.kw.get(key, default), key
+    assert pg.Session.kw["autoflush"] is False and pg.Session.kw["expire_on_commit"] is True
 
 
 # ── Migration ─────────────────────────────────────────────────────────────────

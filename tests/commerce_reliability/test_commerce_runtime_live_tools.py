@@ -524,6 +524,26 @@ def test_the_order_history_reaches_the_model_counted_grouped_and_without_ids(bin
     assert set(observation.evidence_refs) == {"order:history:h1a", "order:history:h2b", "order:history:h3c"}
 
 
+def test_latest_order_timestamp_stays_on_explicit_latest_result_only(binding, monkeypatch):
+    latest = Snapshot(order_reference="A-32", status_label="pending",
+                      created_at="2026-10-25T21:16:00+00:00", evidence_ref="order:history:latest")
+    patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(
+        "ok", read_complete=True, incomplete_reasons=[], total_orders=1, total_orders_at_least=None,
+        latest_order=latest, latest_order_unavailable_reason=None,
+        ongoing=_history_group(1, [latest], {"pending": 1}),
+        finished=_history_group(0, []), unknown=_history_group(0, []),
+        evidence=[Record("order:history:latest")])))
+
+    body = run(binding, "list_customer_orders", {}).result
+    assert body["latest_order"] == {
+        "order_reference": "A-32", "status_label": "pending",
+        "created_at": "2026-10-25T21:16:00+00:00", "evidence_ref": "order:history:latest",
+    }
+    assert body["ongoing"]["orders"] == [{
+        "order_reference": "A-32", "status_label": "pending", "evidence_ref": "order:history:latest",
+    }]
+
+
 def test_an_incomplete_history_reaches_the_model_without_a_total(binding, monkeypatch):
     listed = [Snapshot(order_reference="A-31", status_label="قيد التنفيذ", evidence_ref="order:history:h1a")]
     patch_impl(monkeypatch, "orders", "list_customer_orders_impl", async_returning(result(

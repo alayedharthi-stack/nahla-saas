@@ -1040,21 +1040,25 @@ def test_the_projection_log_says_how_many_were_considered_and_what_took_them(mon
 
     handler = Capture(level=logging.INFO)
     previous_level, previously_disabled = tool.logger.level, tool.logger.disabled
+    previous_global_disable = logging.root.manager.disable
     tool.logger.addHandler(handler)
     tool.logger.setLevel(logging.INFO)
     # Alembic's ``fileConfig``, run by a migration suite earlier in the same
-    # process, disables every logger created before it. The line exists in
-    # production; this makes sure the measurement can hear it.
+    # process, disables every logger created before it. Collecting the Shopify
+    # release-gate tests also disables logging process-wide on import. Restore
+    # both controls after measuring this module's real projection log.
     tool.logger.disabled = False
     context = Context()
     facts = [coupon_fact(promotion_id=90, code="OPEN10", coupon_level="", conditions={})]
     facts += [coupon_fact(promotion_id=91 + i, code=f"SILVER{i}", coupon_level="silver") for i in range(3)]
+    logging.disable(logging.NOTSET)
     try:
         run(context, monkeypatch, truth(shareable=facts), entitlement=entitled("bronze"))
     finally:
         tool.logger.removeHandler(handler)
         tool.logger.setLevel(previous_level)
         tool.logger.disabled = previously_disabled
+        logging.disable(previous_global_disable)
     line = next(r.getMessage() for r in records if "[PROMOTION_PROJECTION]" in r.getMessage())
     assert "considered=4" in line and "kept=1" in line
     assert f"{tool.WITHHELD_LEVEL_NOT_EARNED}:3" in line

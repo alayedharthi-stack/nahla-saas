@@ -23,7 +23,7 @@ for p in (REPO_ROOT, BACKEND_DIR, DATABASE_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from database.models import Base, Coupon, Tenant  # noqa: E402
+from database.models import Base, Coupon, Integration, Tenant  # noqa: E402
 from services.coupon_salla_push import (  # noqa: E402
     FULL_API_INCOMPLETE_MSG_AR,
     apply_salla_coupon_name_fields,
@@ -60,6 +60,14 @@ def _make_db():
     return session, tenant.id
 
 
+def _bind_push(db, tenant_id, adapter):
+    integration = Integration(tenant_id=tenant_id, provider="salla", enabled=True,
+                              external_store_id="test-store", config={"store_id": "test-store"})
+    db.add(integration)
+    db.commit()
+    adapter._tenant_id, adapter._integration_id, adapter.store_id = tenant_id, integration.id, "test-store"
+
+
 def _readiness_ready(adapter):
     return {
         "full_api_ready": True,
@@ -83,6 +91,9 @@ class _FakePushAdapter:
         self._result = result or {"id": 88001, "code": "PUSHME"}
         self._error = error
         self.last_kwargs = None
+        self._tenant_id = 1
+        self._integration_id = 1
+        self.store_id = "test-store"
 
     async def create_coupon(self, **kwargs):
         self.last_kwargs = kwargs
@@ -93,6 +104,9 @@ class _FakePushAdapter:
 
     def get_last_coupon_create_error(self):
         return getattr(self, "_last_coupon_create_error", None)
+
+    async def get_coupon_by_id(self, coupon_id):
+        return self._result
 
     async def get_coupons(self):
         return []
@@ -195,6 +209,7 @@ def test_create_coupon_calls_salla_when_adapter_ready(monkeypatch):
 
     db, tenant_id = _make_db()
     adapter = _FakePushAdapter(result={"id": 555, "code": "PUSH01"})
+    _bind_push(db, tenant_id, adapter)
     monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
     monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
     monkeypatch.setattr(
@@ -235,6 +250,7 @@ def test_create_coupon_failed_push_keeps_local(monkeypatch):
 
     db, tenant_id = _make_db()
     adapter = _FakePushAdapter(error="Salla 422 invalid")
+    _bind_push(db, tenant_id, adapter)
     monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
     monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
     monkeypatch.setattr(
@@ -273,6 +289,7 @@ def test_push_salla_endpoint_pushes_manual_coupon(monkeypatch):
     db.commit()
 
     adapter = _FakePushAdapter(result={"id": 999, "code": "RETRY01"})
+    _bind_push(db, tenant_id, adapter)
     monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
     monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
     monkeypatch.setattr(
@@ -307,6 +324,7 @@ def test_push_salla_failed_retry_updates_sync_error(monkeypatch):
     db.commit()
 
     adapter = _FakePushAdapter(error="token expired")
+    _bind_push(db, tenant_id, adapter)
     monkeypatch.setattr(coupons_router, "resolve_tenant_id", lambda _r: tenant_id)
     monkeypatch.setattr(coupons_router, "get_or_create_tenant", lambda _db, _tid: None)
     monkeypatch.setattr(
@@ -493,6 +511,7 @@ def test_push_payload_includes_name_when_available():
     db.commit()
 
     adapter = _FakePushAdapter(result={"id": 123, "code": "PUSHNM", "name": push_name})
+    _bind_push(db, tenant_id, adapter)
     ok, _ = asyncio.run(push_coupon_to_salla(db, tenant_id, row, adapter=adapter))
     assert ok is True
     assert adapter.last_kwargs is not None
@@ -517,6 +536,7 @@ def test_push_payload_default_name_when_not_provided():
     db.commit()
 
     adapter = _FakePushAdapter(result={"id": 124, "code": "DEF01"})
+    _bind_push(db, tenant_id, adapter)
     asyncio.run(push_coupon_to_salla(db, tenant_id, row, adapter=adapter))
     assert adapter.last_kwargs["name"] == "كوبون DEF01"
 

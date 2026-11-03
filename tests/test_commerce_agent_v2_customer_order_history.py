@@ -230,9 +230,10 @@ def test_a_read_at_its_limit_gives_no_total_and_no_counts():
 
 
 @pytest.mark.parametrize("orders,complete", [(CUSTOMER_ORDER_HISTORY_LIMIT - 1, True),
-                                             (CUSTOMER_ORDER_HISTORY_LIMIT, False)])
-def test_completeness_at_the_limit_is_conservative(orders: int, complete: bool):
-    """A read that came back full cannot tell whether an older order exists."""
+                                             (CUSTOMER_ORDER_HISTORY_LIMIT, True),
+                                             (CUSTOMER_ORDER_HISTORY_LIMIT + 1, False)])
+def test_completeness_at_the_limit_uses_full_scoped_count(orders: int, complete: bool):
+    """The scoped timestamp scan detects whether the limit hid another order."""
     store = Store()
     for _ in range(orders):
         store.order("delivered")
@@ -656,7 +657,7 @@ def test_nothing_listed_is_an_internal_number():
     context = store.context()
     result = history(context)
     for entry in [*result.ongoing.orders, *result.finished.orders]:
-        assert set(entry.model_dump()) == {"order_reference", "status_label", "evidence_ref"}
+        assert set(entry.model_dump()) == {"order_reference", "status_label", "evidence_ref", "created_at"}
         assert re.fullmatch(r"order:history:h[0-9a-f]{12}", entry.evidence_ref)
         for internal in (str(numbered.id), str(unnumbered.id), unnumbered.external_id):
             assert internal not in entry.evidence_ref.split(":")

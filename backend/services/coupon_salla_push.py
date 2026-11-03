@@ -18,6 +18,9 @@ from sqlalchemy.orm.attributes import flag_modified
 from core.salla_order_fidelity import _riyadh_tz
 from models import Coupon
 from services.coupon_sync_visibility import extract_salla_coupon_id
+from services.coupon_identity import (
+    CouponIdentityConflict, adapter_binding, provider_id, same_code, validate_import_binding,
+)
 
 logger = logging.getLogger("nahla-backend")
 
@@ -360,6 +363,8 @@ def is_pushable_manual_coupon(coupon: Coupon) -> bool:
     meta = coupon.extra_metadata or {}
     if meta.get("active_sync_pending"):
         return False
+    if meta.get("coupon_create_unverified") or meta.get("salla_coupon_id") or meta.get("external_id"):
+        return False
     if str(meta.get("source") or "").lower() == "salla":
         return False
     return coupon.source_type in (None, "", "manual") or str(meta.get("source") or "").lower() in (
@@ -403,21 +408,42 @@ async def push_coupon_to_salla(
             "sync_error": meta.get("sync_error"),
         }
 
+    try:
+        binding = adapter_binding(adapter, tenant_id)
+        if binding is None:
+            raise CouponIdentityConflict("adapter_binding_unavailable")
+        validate_import_binding(db, binding)
+        if provider_id(coupon.extra_metadata):
+            raise CouponIdentityConflict("coupon_already_bound")
+    except CouponIdentityConflict as exc:
+        meta = apply_not_pushed_metadata(coupon, reason=str(exc))
+        db.add(coupon)
+        return False, {"sync_status": meta["sync_status"], "sync_error": meta["sync_error"]}
+
     kwargs = _coupon_push_kwargs(coupon)
     synced_at = datetime.now(timezone.utc)
+
+    # A provider create may succeed even if its response is lost. Persist an
+    # intent first so a retry cannot create another provider coupon by code.
+    pending_meta = dict(coupon.extra_metadata or {})
+    pending_meta.update(coupon_create_unverified=True, sync_status="pending", salla_synced=False)
+    coupon.extra_metadata = pending_meta
+    flag_modified(coupon, "extra_metadata")
+    db.add(coupon)
+    db.commit()
 
     try:
         salla_raw = await adapter.create_coupon(**kwargs)
     except Exception as exc:
-        logger.warning("tenant=%s push coupon %s failed: %s", tenant_id, coupon.code, exc)
+        logger.warning("coupon_create_unverified error_class=%s", type(exc).__name__)
         apply_nahla_push_metadata(
             coupon,
             success=False,
             synced_at=synced_at,
-            sync_error=str(exc)[:500],
+            sync_error=type(exc).__name__,
         )
         db.add(coupon)
-        return False, {"sync_status": "failed", "sync_error": str(exc)[:500]}
+        return False, {"sync_status": "failed", "sync_error": type(exc).__name__}
 
     if not salla_raw:
         err = _extract_create_error(adapter)
@@ -430,13 +456,34 @@ async def push_coupon_to_salla(
         db.add(coupon)
         return False, {"sync_status": "failed", "sync_error": err}
 
+    created_id = extract_salla_coupon_id(salla_raw if isinstance(salla_raw, dict) else {})
+    if created_id:
+        pending_meta = dict(coupon.extra_metadata or {})
+        pending_meta["salla_coupon_id"] = created_id
+        pending_meta["external_id"] = created_id
+        coupon.extra_metadata = pending_meta
+        flag_modified(coupon, "extra_metadata")
+    try:
+        if not created_id or not str(created_id).isdigit():
+            raise CouponIdentityConflict("provider_identity_unavailable")
+        confirmed = await adapter.get_coupon_by_id(str(created_id))
+        if str(confirmed.get("id") or "") != str(created_id) or not same_code(confirmed.get("code"), coupon.code):
+            raise CouponIdentityConflict("provider_coupon_identity_mismatch")
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, CouponIdentityConflict) else type(exc).__name__
+        apply_nahla_push_metadata(coupon, success=False, synced_at=synced_at, sync_error=reason)
+        db.add(coupon)
+        return False, {"sync_status": "failed", "sync_error": reason}
+
     meta = apply_nahla_push_metadata(
         coupon,
         success=True,
         synced_at=synced_at,
-        salla_raw=salla_raw if isinstance(salla_raw, dict) else None,
+        salla_raw=confirmed,
         push_name=kwargs.get("name"),
     )
+    meta["salla_identity"] = dict(binding)
+    meta.pop("coupon_create_unverified", None)
     if not meta.get("starts_at"):
         meta["starts_at"] = synced_at.isoformat()
         coupon.extra_metadata = meta

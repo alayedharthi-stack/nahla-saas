@@ -8,6 +8,7 @@ import logging
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm.attributes import flag_modified
+from services.coupon_identity import assert_dispatch_identity, same_code, CouponIdentityConflict
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,8 @@ async def reconcile_imported_state(raw, existing, observed_at, adapter):
 
 def queue_active_change(coupon, integration, active):
     meta = dict(coupon.extra_metadata or {})
+    if meta.get("terms_sync_pending"):
+        raise CouponIdentityConflict("coupon_change_already_pending")
     pending = meta.get("active_sync_pending") or {}
     if pending.get("desired") == active and pending.get("integration_id") == integration.id:
         return
@@ -140,14 +143,16 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
                 or getattr(adapter, "_integration_id", None) != integration.id
                 or str(getattr(adapter, "store_id", "")) != str(cfg.get("store_id") or store_id)):
             raise ValueError("adapter_tenant_mismatch")
+        binding = {"tenant_id": tenant_id, "integration_id": integration.id, "store_id": store_id}
+        assert_dispatch_identity(db, row, binding, provider_id, row.code)
         raw = await adapter.get_coupon_by_id(provider_id)
-        if str(raw.get("id")) != provider_id or raw.get("code") != row.code:
+        if str(raw.get("id")) != provider_id or not same_code(raw.get("code"), row.code):
             raise ValueError("provider_coupon_identity_mismatch")
         desired = pending["desired"]
         if normalized_active(raw) is not desired:
             await adapter.set_coupon_active(provider_id, desired)
             raw = await adapter.get_coupon_by_id(provider_id)
-        if (str(raw.get("id")) != provider_id or raw.get("code") != row.code
+        if (str(raw.get("id")) != provider_id or not same_code(raw.get("code"), row.code)
                 or normalized_active(raw) is not desired):
             raise ValueError("provider_state_unconfirmed")
         now = utcnow()
@@ -166,7 +171,7 @@ async def dispatch_active_change(db, tenant_id, coupon_id, integration, adapter)
         reasons = {"integration_binding_unavailable", "adapter_tenant_mismatch",
                    "provider_coupon_identity_mismatch", "provider_state_unconfirmed"}
         meta.update(active_sync_pending=pending, sync_status="failed", salla_synced=False,
-                    sync_error=str(exc) if isinstance(exc, ValueError) and str(exc) in reasons else type(exc).__name__)
+                    sync_error=str(exc) if isinstance(exc, CouponIdentityConflict) or (isinstance(exc, ValueError) and str(exc) in reasons) else type(exc).__name__)
     row.extra_metadata = meta
     flag_modified(row, "extra_metadata")
     db.commit()

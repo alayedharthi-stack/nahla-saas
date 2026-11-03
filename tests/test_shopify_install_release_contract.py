@@ -195,7 +195,7 @@ def test_s4_refuses_incompatible_consumed_manifest(schema_approval, field, value
 
 # ── S4_DORMANT: explicitly pinned prior dormant rollback (first deploy of a schema-preserving source) ──
 
-DEPLOYED_BASELINE = "a4e96891bda691b1ee0f7cb105c5810e727c39bd"
+DEPLOYED_BASELINE = "efb8f7a7d7c2fabe876f71cfff17bdaa8a87ccd6"
 ALL_FLAGS_OFF = {name: "false" for name in k.SHOPIFY_FLAG_ENVS}
 
 
@@ -227,14 +227,14 @@ def test_manifest_pins_exactly_one_full_prior_with_this_sources_s4_definitions()
     assert prior["rollback_mode"] == "pinned_prior_flags_off"
     assert prior["source_sha"] == DEPLOYED_BASELINE
     assert (prior["runtime_inventory_count"], prior["runtime_inventory_digest"]) == (
-        157, "6f8d254235e23b6a8ae0473747e6b645ad0492001f6d0c14abae68a4375fa2cf")
+        157, "3587ca55f6a451b93984a361f5e761cd28b3443c81ceb226888d0fa61a5c0f88")
     assert prior["schema_expectations_sha256"] == gate.file_sha256(ROOT / k.INSTALL_EXPECTATIONS_RELATIVE_PATH)
     # The same-source pilot contract and every flags-OFF value are unchanged.
     assert artifact["rollback_mode"] == "same_source_flags_off" and artifact["flags"] == ALL_FLAGS_OFF
     assert artifact["shopify_table_count"] == 17 and artifact["database_heads"] == ["0111", "0113", "0124"]
 
 
-def test_first_dormant_deploy_accepts_the_exact_a4_dormant_deployment(prior_approval):
+def test_first_dormant_deploy_accepts_the_exact_pinned_prior_deployment(prior_approval):
     root, path, record, kwargs = prior_approval
     snapshot, rollback = record["deployment_rollback_snapshot"], record["schema_rollback"]
     assert record["release_sha"] != DEPLOYED_BASELINE == snapshot["source_sha"] == rollback["source_sha"]
@@ -255,7 +255,7 @@ def test_first_dormant_deploy_accepts_the_exact_a4_dormant_deployment(prior_appr
     ("272c9b5494c30391440fe7546d17522fc0181b73",
      "f8c16b9898e43afe0c219a6415d07983da375938f7187bf663b53d5997798438"),
 ])
-def test_a4_prior_pin_refuses_former_or_mixed_release_bundles(prior_approval, source_sha, inventory_digest):
+def test_prior_pin_refuses_former_or_mixed_release_bundles(prior_approval, source_sha, inventory_digest):
     root, _path, record, kwargs = prior_approval
     record = copy.deepcopy(record)
     record["deployment_rollback_snapshot"]["source_sha"] = source_sha
@@ -267,7 +267,7 @@ def test_a4_prior_pin_refuses_former_or_mixed_release_bundles(prior_approval, so
 
 
 @pytest.mark.parametrize("flag", sorted(k.SHOPIFY_FLAG_ENVS))
-def test_a4_prior_requires_every_rollback_flag_off(prior_approval, flag):
+def test_prior_requires_every_rollback_flag_off(prior_approval, flag):
     _root, _path, record, kwargs = prior_approval
     record = copy.deepcopy(record)
     record["schema_rollback"]["flags"][flag] = "true"

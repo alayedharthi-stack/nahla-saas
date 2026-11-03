@@ -4,6 +4,7 @@ on:
     branches: [codex/shopify-install-first-20261013]
   pull_request:
     paths:
+      - .github/workflows/shopify-install-first-proof.yml
       - backend/services/shopify_connection/install*.py
       - backend/services/shopify_connection/lifecycle.py
       - backend/services/shopify_connection/oauth.py
@@ -20,7 +21,6 @@ on:
       - backend/tests/test_shopify_catalog_import*.py
       - tests/test_shopify_catalog_import.py
       - tests/test_shopify_install_release_contract.py
-      - .github/workflows/shopify-install-first-proof.yml
 permissions:
   contents: read
 jobs:
@@ -31,10 +31,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [16, 18]
+        include:
+          - pg: '16'
+            image: docker.io/library/postgres@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          - pg: '18'
+            image: docker.io/library/postgres@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
     services:
       postgres:
-        image: docker.io/library/postgres:${{ matrix.pg }}
+        image: ${{ matrix.image }}
         env:
           POSTGRES_USER: proof
           POSTGRES_PASSWORD: synthetic-proof-only

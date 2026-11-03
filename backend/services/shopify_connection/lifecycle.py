@@ -791,6 +791,9 @@ async def complete_authorization(
     same_generation = conn is not None and int(conn.generation) == generation
     if held_still and same_generation:
         _record_webhook_outcome(db, conn, proof, failure, target)
+        # Production sessions disable autoflush. Make this transaction's proof
+        # visible to the readiness query before promoting.
+        db.flush()
         ready = proof is not None and _promote_if_held(db, conn, request_version=request_version, now=current)
     _drop_lease(db, shop, lease)
     db.commit()
