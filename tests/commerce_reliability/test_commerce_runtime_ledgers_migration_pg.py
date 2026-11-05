@@ -75,7 +75,7 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0108) ->
     assert _ledger_trigger_relations(engine) == sorted(lm.APPEND_ONLY_TABLES)
 
 
-@pytest.mark.parametrize("label, drift_sql, expected_fragment", [
+_DRIFT_CASES = [
     ("missing_key_uniqueness",
      f"ALTER TABLE {lm.EFFECTS_TABLE} DROP CONSTRAINT uq_commerce_runtime_effects_key",
      "constraint uq_commerce_runtime_effects_key absent"),
@@ -106,7 +106,11 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0108) ->
     ("check_named_like_not_null",
      f"ALTER TABLE {lm.EFFECTS_TABLE} ADD CONSTRAINT synthetic_not_null CHECK (status <> 'unknown')",
      "unexpected constraint synthetic_not_null"),
-])
+]
+
+
+@pytest.mark.parametrize("label, drift_sql, expected_fragment", _DRIFT_CASES,
+                         ids=[case[0] for case in _DRIFT_CASES])
 def test_incompatible_precreated_schema_is_refused_and_not_stamped(database_at_0108, label, drift_sql,
                                                                     expected_fragment) -> None:
     dsn, engine = database_at_0108

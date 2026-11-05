@@ -386,10 +386,15 @@ async def _prove_and_ready(db, *, flow_id, shop, lease, held, stored, access_tok
     ready = False
     if held_still and conn is not None and int(conn.generation) == generation:
         lc._record_webhook_outcome(db, conn, proof, failure, target)
+        # Production sessions disable autoflush. Make this transaction's proof
+        # visible to the readiness query before promoting or issuing a handoff.
+        db.flush()
         ready = proof is not None and lc._promote_if_held(db, conn, request_version=request_version, now=now)
     current = None
     if (ready and flow is not None and flow.phase == "exchanging_offline" and flow.expires_at > now
             and flow.owner_expires_at is not None and flow.owner_expires_at > now):
+        # _current refreshes locked rows; preserve the promotion before that read.
+        db.flush()
         try:
             current, _, _ = _current(db, flow, lock=True)  # owner, user and tenant still valid
         except InstallRejected:
