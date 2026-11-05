@@ -83,7 +83,7 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0107) ->
     assert _trigger_state(engine) == (1, "O", m.TERMINAL_IMMUTABLE_FUNCTION)
 
 
-@pytest.mark.parametrize("label, drift_sql, expected_fragment", [
+_DRIFT_CASES = [
     ("missing_admission_uniqueness",
      f"ALTER TABLE {m.TURNS_TABLE} DROP CONSTRAINT uq_commerce_runtime_turns_admission",
      "constraint uq_commerce_runtime_turns_admission absent"),
@@ -111,7 +111,11 @@ def test_fresh_and_compatible_precreation_pass_the_verifier(database_at_0107) ->
     ("check_named_like_not_null",
      f"ALTER TABLE {m.CONVERSATIONS_TABLE} ADD CONSTRAINT synthetic_not_null CHECK (next_sequence < 100)",
      "unexpected constraint synthetic_not_null"),
-])
+]
+
+
+@pytest.mark.parametrize("label, drift_sql, expected_fragment", _DRIFT_CASES,
+                         ids=[case[0] for case in _DRIFT_CASES])
 def test_incompatible_precreated_schema_is_refused_and_not_stamped(database_at_0107, label, drift_sql,
                                                                    expected_fragment) -> None:
     dsn, engine = database_at_0107
